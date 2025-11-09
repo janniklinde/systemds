@@ -152,6 +152,7 @@ public abstract class OOCInstruction extends Instruction {
 		return joinOOC(qIn1, qIn2, qOut, mapper, on, on);
 	}
 
+	@SuppressWarnings("unchecked")
 	protected <T, R, P> CompletableFuture<Void> joinOOC(OOCStream<T> qIn1, OOCStream<T> qIn2, OOCStream<R> qOut, BiFunction<T, T, R> mapper, Function<T, P> onLeft, Function<T, P> onRight) {
 		addInStream(qIn1, qIn2);
 		addOutStream(qOut);
@@ -211,6 +212,7 @@ public abstract class OOCInstruction extends Instruction {
 		final Object globalLock = new Object();
 
 		int i = 0;
+		@SuppressWarnings("unused")
 		final int streamId = nextStreamId.getAndIncrement();
 		//System.out.println("New stream: (id " + streamId + ", size " + queues.size() + ", initiator '" + this.getClass().getSimpleName() + "')");
 

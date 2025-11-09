@@ -19,7 +19,6 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
-import org.apache.sysds.hops.UnaryOp;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.InstructionUtils;

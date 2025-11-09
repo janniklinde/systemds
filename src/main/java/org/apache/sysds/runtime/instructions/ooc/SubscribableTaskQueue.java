@@ -49,7 +49,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	}
 
 	@Override
-	public void closeInput() {
+	public synchronized void closeInput() {
 		super.closeInput();
 
 		if(_subscriber != null) {
@@ -91,7 +91,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	}
 
 	@Override
-	public void propagateFailure(DMLRuntimeException re) {
+	public synchronized void propagateFailure(DMLRuntimeException re) {
 		super.propagateFailure(re);
 
 		if(_subscriber != null)
