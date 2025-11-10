@@ -108,10 +108,6 @@ public class CSVReaderTest extends AutomatedTestBase {
 
 			runTest(true, false, null, -1);
 
-			//check Central Moment OOC
-			//Assert.assertTrue("OOC wasn't used for CentralMoment",
-			//	heavyHittersContainsString(Instruction.OOC_INST_PREFIX + Opcodes.CM));
-
 			//compare results
 
 			// rerun without ooc flag

@@ -2,11 +2,13 @@ package org.apache.sysds.runtime.instructions.ooc;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 
-import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.sysds.common.Opcodes;
@@ -78,76 +80,94 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 			final FileSystem fs = IOUtilFunctions.getFileSystem(path, job);
 			MatrixReader.checkValidInputFile(fs, path);
 
+			final List<Path> files = collectInputFiles(fs, path);
+
+			if(files.isEmpty()) {
+				qOut.closeInput();
+				return;
+			}
+
 			if (props.getDelim().length() != 1)
-				throw new DMLRuntimeException("Can only read CSVs with single char delimiters");
+				throw new DMLRuntimeException("Out-of-core CSV reader only supports single char delimiters");
 
-			try(FSDataInputStream rawIn = fs.open(path); BufferedSeekableInput in = new BufferedSeekableInput(rawIn)) {
-				final int delim = props.getDelim().charAt(0);
-				final ColumnInfo columnInfo = detectColumnInfo(in, delim, props.hasHeader());
-				final int ncols = columnInfo.ncols;
+			final int delim = props.getDelim().charAt(0);
+			int ncols = -1;
+			int segLenMax = -1;
+			int segLen = -1;
+			final boolean fill = props.isFill();
+			final double fillValue = props.getFillValue();
+			final Set<String> naStrings = props.getNAStrings();
 
-				if(ncols <= 0) {
-					qOut.closeInput();
-					return;
-				}
+			final List<RowSegmentStart> segStartList = new ArrayList<>();
+			MatrixBlock[] firstBlocks = null;
+			DenseBlock[] firstDense = null;
+			int rowsInBand = 0;
+			int brow = 0;
+			boolean headerPending = props.hasHeader();
+			int fileIdx = 0;
 
-				in.seek(columnInfo.dataStart);
-
-				final int segLenMax = Math.min(MAX_BLOCKS_IN_CACHE * blen, ncols);
-				final int segLen = Math.min(segLenMax, ncols);
-				final boolean fill = props.isFill();
-				final double fillValue = props.getFillValue();
-				final Set<String> naStrings = props.getNAStrings();
-
-				final List<Long> segStartList = new ArrayList<>();
-				MatrixBlock[] firstBlocks = null;
-				DenseBlock[] firstDense = null;
-				int rowsInBand = 0;
-				int brow = 0;
-
-				// First pass to determine total number of rows while emitting first MAX_BLOCKS_IN_CACHE column blocks per row
-				while(true) {
-					int next = peek(in);
-					if(next == -1)
-						break;
-
-					if(rowsInBand == 0) {
-						firstBlocks = allocateBlocks(blen, 0, segLen, ncols);
-						firstDense = extractDense(firstBlocks);
+			// First pass to determine total number of rows while emitting first MAX_BLOCKS_IN_CACHE column blocks per row
+			for(Path file : files) {
+				try(FSDataInputStream rawIn = fs.open(file); BufferedSeekableInput in = new BufferedSeekableInput(rawIn)) {
+					if (ncols == -1) {
+						// Init ncol info
+						ncols = detectNumColumns(in, delim, props.hasHeader());
+						segLenMax = Math.min(MAX_BLOCKS_IN_CACHE * blen, ncols);
+						segLen = Math.min(segLenMax, ncols);
+						in.seek(0); // Reset stream
 					}
 
-					final long nextSegPos = fillFirstSegmentRow(in, firstDense, rowsInBand, segLen, ncols, delim, fill,
-						fillValue, naStrings);
-					segStartList.add(nextSegPos);
+					if(headerPending) {
+						skipRestOfLineFast(in);
+						headerPending = false;
+					}
 
-					rowsInBand++;
-					if(rowsInBand == blen) {
-						emitBlocks(qOut, firstBlocks, rowsInBand, brow, 0);
-						rowsInBand = 0;
-						firstBlocks = null;
-						firstDense = null;
-						brow++;
+					while(true) {
+						int next = peek(in);
+						if(next == -1)
+							break;
+
+						if(rowsInBand == 0) {
+							firstBlocks = allocateBlocks(blen, 0, segLen, ncols);
+							firstDense = extractDense(firstBlocks);
+						}
+
+						final long nextSegPos = fillFirstSegmentRow(in, firstDense, rowsInBand, segLen, ncols, delim, fill,
+							fillValue, naStrings);
+						segStartList.add(new RowSegmentStart(fileIdx, nextSegPos));
+
+						rowsInBand++;
+						if(rowsInBand == blen) {
+							emitBlocks(qOut, firstBlocks, rowsInBand, brow, 0);
+							rowsInBand = 0;
+							firstBlocks = null;
+							firstDense = null;
+							brow++;
+						}
 					}
 				}
+				fileIdx++;
+			}
 
-				if(rowsInBand > 0)
-					emitBlocks(qOut, firstBlocks, rowsInBand, brow, 0);
+			if(rowsInBand > 0)
+				emitBlocks(qOut, firstBlocks, rowsInBand, brow, 0);
 
-				final long[] segStarts = toArray(segStartList);
-				final int nrows = segStarts.length;
+			final RowSegmentStart[] segStarts = segStartList.toArray(RowSegmentStart[]::new);
+			final int nrows = segStarts.length;
+			if(nrows == 0) {
+				qOut.closeInput();
+				return;
+			}
 
-				if(nrows == 0) {
-					qOut.closeInput();
-					return;
-				}
+			final int nBrow = (nrows + blen - 1) / blen;
+			// process segments c0 ≥ segLen
+			for(int c0 = segLen; c0 < ncols; c0 += segLen) {
+				final int seg = Math.min(segLen, ncols - c0);
+				final int firstBlockCol = c0 / blen;
 
-				final int nBrow = (nrows + blen - 1) / blen;
-
-				// Process segments c0 ≥ segLen
-				for(int c0 = segLen; c0 < ncols; c0 += segLen) {
-					final int seg = Math.min(segLen, ncols - c0);
-					final int firstBlockCol = c0 / blen;
-
+				BufferedSeekableInput activeIn = null;
+				int activeFileIdx = -1;
+				try {
 					for(int rb = 0; rb < nBrow; rb++) {
 						final int r0 = rb * blen;
 						final int rows = Math.min(blen, nrows - r0);
@@ -155,44 +175,50 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 						final DenseBlock[] dense = extractDense(blocks);
 
 						for(int i = 0; i < rows; i++) {
-							in.seek(segStarts[r0 + i]);
-							int col = c0;
-							int read = 0;
+							final RowSegmentStart start = segStarts[r0 + i];
+							if(start.fileIdx != activeFileIdx) {
+								if(activeIn != null)
+									activeIn.close();
+								activeIn = new BufferedSeekableInput(fs.open(files.get(start.fileIdx)));
+								activeFileIdx = start.fileIdx;
+							}
+							activeIn.seek(start.offset);
 
-							while(read < seg) {
-								final Token token = parseToken(in, delim, fill, fillValue, naStrings);
+							int col = c0;
+							for(int read = 0; read < seg; read++) {
+								final Token token = parseToken(activeIn, delim, fill, fillValue, naStrings);
 								final int bci = (col / blen) - firstBlockCol;
 								final int within = col % blen;
 								dense[bci].set(i, within, token.value);
 								if(token.term == delim)
-									in.read();
-								read++;
+									activeIn.read();
 								col++;
 							}
-
-							segStarts[r0 + i] = in.getPos();
-							skipRestOfLineFast(in);
+							start.offset = activeIn.getPos();
+							skipRestOfLineFast(activeIn);
 						}
 
 						emitBlocks(qOut, blocks, rows, rb, firstBlockCol);
 					}
 				}
-
-				qOut.closeInput();
+				finally {
+					if(activeIn != null)
+						activeIn.close();
+				}
 			}
+
+			qOut.closeInput();
 		}
 		catch(IOException ex) {
 			throw new DMLRuntimeException(ex);
 		}
 	}
 
-	private static ColumnInfo detectColumnInfo(SeekableInput in, int delim, boolean hasHeader)
-		throws IOException {
+	private static int detectNumColumns(SeekableInput in, int delim, boolean hasHeader) throws IOException {
 		in.seek(0);
 		if(hasHeader)
 			skipRestOfLineFast(in);
 
-		final long dataStart = in.getPos();
 		int ch;
 		int ncols = 0;
 		boolean seenToken = false;
@@ -221,8 +247,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		if(ch == -1 && (seenToken || ncols > 0))
 			ncols++;
 
-		in.seek(dataStart);
-		return new ColumnInfo(ncols, dataStart);
+		return ncols;
 	}
 
 	private long fillFirstSegmentRow(SeekableInput in, DenseBlock[] denseBlocks, int rowOffset, int segLen, int ncols,
@@ -277,6 +302,8 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		final DenseBlock[] dense = new DenseBlock[blocks.length];
 		for(int i = 0; i < blocks.length; i++) {
 			final DenseBlock db = blocks[i].getDenseBlock();
+			if(db == null)
+				throw new DMLRuntimeException("Failed to allocate dense block");
 			dense[i] = db;
 		}
 		return dense;
@@ -294,6 +321,17 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 			final MatrixIndexes idx = new MatrixIndexes(brow + 1, firstBlockCol + bci + 1);
 			qOut.enqueue(new IndexedMatrixValue(idx, block));
 		}
+	}
+
+	private static List<Path> collectInputFiles(FileSystem fs, Path path) throws IOException {
+		if(!fs.getFileStatus(path).isDirectory())
+			return Collections.singletonList(path);
+
+		final List<Path> files = new ArrayList<>();
+		for(FileStatus stat : fs.listStatus(path, IOUtilFunctions.hiddenFileFilter))
+			files.add(stat.getPath());
+		Collections.sort(files);
+		return files;
 	}
 
 	private static Token parseToken(SeekableInput in, int delim, boolean fill, double fillValue, Set<String> naStrings)
@@ -354,13 +392,6 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		return false;
 	}
 
-	private static long[] toArray(List<Long> offsets) {
-		final long[] ret = new long[offsets.size()];
-		for(int i = 0; i < offsets.size(); i++)
-			ret[i] = offsets.get(i);
-		return ret;
-	}
-
 	private static int peek(SeekableInput in) throws IOException {
 		final long pos = in.getPos();
 		final int ch = in.read();
@@ -378,6 +409,16 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 
 		@Override
 		void close() throws IOException;
+	}
+
+	private static final class RowSegmentStart {
+		private final int fileIdx;
+		private long offset;
+
+		private RowSegmentStart(int fileIdx, long offset) {
+			this.fileIdx = fileIdx;
+			this.offset = offset;
+		}
 	}
 
 	private static final class BufferedSeekableInput implements SeekableInput {
@@ -436,16 +477,6 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		@Override
 		public void close() throws IOException {
 			in.close();
-		}
-	}
-
-	private static final class ColumnInfo {
-		private final int ncols;
-		private final long dataStart;
-
-		private ColumnInfo(int ncols, long dataStart) {
-			this.ncols = ncols;
-			this.dataStart = dataStart;
 		}
 	}
 
