@@ -73,6 +73,11 @@ public class CSVReaderTest extends AutomatedTestBase {
 	}
 
 	@Test
+	public void testCSVReaderDenseUltraWide() {
+		runCSVReaderTest(false, 50, 200000);
+	}
+
+	@Test
 	public void testCSVReaderDenseLarge() {
 		runCSVReaderTest(false, 500, 50000);
 	}

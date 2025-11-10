@@ -106,46 +106,51 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 			boolean headerPending = props.hasHeader();
 			int fileIdx = 0;
 
+			List<BufferedSeekableInput> inStreams = new ArrayList<>();
+
 			// First pass to determine total number of rows while emitting first MAX_BLOCKS_IN_CACHE column blocks per row
 			for(Path file : files) {
-				try(FSDataInputStream rawIn = fs.open(file); BufferedSeekableInput in = new BufferedSeekableInput(rawIn)) {
-					if (ncols == -1) {
-						// Init ncol info
-						ncols = detectNumColumns(in, delim, props.hasHeader());
-						segLenMax = Math.min(MAX_BLOCKS_IN_CACHE * blen, ncols);
-						segLen = Math.min(segLenMax, ncols);
-						in.seek(0); // Reset stream
+				FSDataInputStream inRaw = fs.open(file);
+				BufferedSeekableInput in = new BufferedSeekableInput(inRaw);
+				inStreams.add(in);
+
+				if (ncols == -1) {
+					// Init ncol info
+					ncols = detectNumColumns(in, delim, props.hasHeader());
+					segLenMax = Math.min(MAX_BLOCKS_IN_CACHE * blen, ncols);
+					segLen = Math.min(segLenMax, ncols);
+					in.seek(0); // Reset stream
+				}
+
+				if(headerPending) {
+					skipRestOfLineFast(in);
+					headerPending = false;
+				}
+
+				while(true) {
+					int next = peek(in);
+					if(next == -1)
+						break;
+
+					if(rowsInBand == 0) {
+						firstBlocks = allocateBlocks(blen, 0, segLen, ncols);
+						firstDense = extractDense(firstBlocks);
 					}
 
-					if(headerPending) {
-						skipRestOfLineFast(in);
-						headerPending = false;
-					}
+					final long nextSegPos = fillFirstSegmentRow(in, firstDense, rowsInBand, segLen, ncols, delim, fill,
+						fillValue, naStrings);
+					segStartList.add(new RowSegmentStart(fileIdx, nextSegPos));
+					rowsInBand++;
 
-					while(true) {
-						int next = peek(in);
-						if(next == -1)
-							break;
-
-						if(rowsInBand == 0) {
-							firstBlocks = allocateBlocks(blen, 0, segLen, ncols);
-							firstDense = extractDense(firstBlocks);
-						}
-
-						final long nextSegPos = fillFirstSegmentRow(in, firstDense, rowsInBand, segLen, ncols, delim, fill,
-							fillValue, naStrings);
-						segStartList.add(new RowSegmentStart(fileIdx, nextSegPos));
-
-						rowsInBand++;
-						if(rowsInBand == blen) {
-							emitBlocks(qOut, firstBlocks, rowsInBand, brow, 0);
-							rowsInBand = 0;
-							firstBlocks = null;
-							firstDense = null;
-							brow++;
-						}
+					if(rowsInBand == blen) {
+						emitBlocks(qOut, firstBlocks, rowsInBand, brow, 0);
+						rowsInBand = 0;
+						firstBlocks = null;
+						firstDense = null;
+						brow++;
 					}
 				}
+
 				fileIdx++;
 			}
 
@@ -154,7 +159,11 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 
 			final RowSegmentStart[] segStarts = segStartList.toArray(RowSegmentStart[]::new);
 			final int nrows = segStarts.length;
+
 			if(nrows == 0) {
+				for (BufferedSeekableInput in : inStreams)
+					in.close();
+
 				qOut.closeInput();
 				return;
 			}
@@ -167,45 +176,43 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 
 				BufferedSeekableInput activeIn = null;
 				int activeFileIdx = -1;
-				try {
-					for(int rb = 0; rb < nBrow; rb++) {
-						final int r0 = rb * blen;
-						final int rows = Math.min(blen, nrows - r0);
-						final MatrixBlock[] blocks = allocateBlocks(rows, firstBlockCol, seg, ncols);
-						final DenseBlock[] dense = extractDense(blocks);
 
-						for(int i = 0; i < rows; i++) {
-							final RowSegmentStart start = segStarts[r0 + i];
-							if(start.fileIdx != activeFileIdx) {
-								if(activeIn != null)
-									activeIn.close();
-								activeIn = new BufferedSeekableInput(fs.open(files.get(start.fileIdx)));
-								activeFileIdx = start.fileIdx;
-							}
-							activeIn.seek(start.offset);
+				for(int rb = 0; rb < nBrow; rb++) {
+					final int r0 = rb * blen;
+					final int rows = Math.min(blen, nrows - r0);
+					final MatrixBlock[] blocks = allocateBlocks(rows, firstBlockCol, seg, ncols);
+					final DenseBlock[] dense = extractDense(blocks);
 
-							int col = c0;
-							for(int read = 0; read < seg; read++) {
-								final Token token = parseToken(activeIn, delim, fill, fillValue, naStrings);
-								final int bci = (col / blen) - firstBlockCol;
-								final int within = col % blen;
-								dense[bci].set(i, within, token.value);
-								if(token.term == delim)
-									activeIn.read();
-								col++;
-							}
-							start.offset = activeIn.getPos();
-							skipRestOfLineFast(activeIn);
+					for(int i = 0; i < rows; i++) {
+						final RowSegmentStart start = segStarts[r0 + i];
+
+						if(start.fileIdx != activeFileIdx) {
+							activeIn = inStreams.get(start.fileIdx);
+							activeFileIdx = start.fileIdx;
 						}
 
-						emitBlocks(qOut, blocks, rows, rb, firstBlockCol);
+						activeIn.seek(start.offset);
+
+						int col = c0;
+						for(int read = 0; read < seg; read++) {
+							final Token token = parseToken(activeIn, delim, fill, fillValue, naStrings);
+							final int bci = (col / blen) - firstBlockCol;
+							final int within = col % blen;
+							dense[bci].set(i, within, token.value);
+							if(token.term == delim)
+								activeIn.read();
+							col++;
+						}
+						start.offset = activeIn.getPos();
+						skipRestOfLineFast(activeIn);
 					}
-				}
-				finally {
-					if(activeIn != null)
-						activeIn.close();
+
+					emitBlocks(qOut, blocks, rows, rb, firstBlockCol);
 				}
 			}
+
+			for (BufferedSeekableInput in : inStreams)
+				in.close();
 
 			qOut.closeInput();
 		}
@@ -214,7 +221,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		}
 	}
 
-	private static int detectNumColumns(SeekableInput in, int delim, boolean hasHeader) throws IOException {
+	private static int detectNumColumns(BufferedSeekableInput in, int delim, boolean hasHeader) throws IOException {
 		in.seek(0);
 		if(hasHeader)
 			skipRestOfLineFast(in);
@@ -250,7 +257,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		return ncols;
 	}
 
-	private long fillFirstSegmentRow(SeekableInput in, DenseBlock[] denseBlocks, int rowOffset, int segLen, int ncols,
+	private long fillFirstSegmentRow(BufferedSeekableInput in, DenseBlock[] denseBlocks, int rowOffset, int segLen, int ncols,
 		int delim, boolean fill, double fillValue, Set<String> naStrings) throws IOException {
 		int col = 0;
 		long nextSegPos = -1;
@@ -334,7 +341,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		return files;
 	}
 
-	private static Token parseToken(SeekableInput in, int delim, boolean fill, double fillValue, Set<String> naStrings)
+	private static Token parseToken(BufferedSeekableInput in, int delim, boolean fill, double fillValue, Set<String> naStrings)
 		throws IOException {
 		int ch;
 		do {
@@ -370,7 +377,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		return new Token(value, ch);
 	}
 
-	private static void skipRestOfLineFast(SeekableInput in) throws IOException {
+	private static void skipRestOfLineFast(BufferedSeekableInput in) throws IOException {
 		int ch;
 		while((ch = in.read()) != -1) {
 			if(ch == '\n')
@@ -382,7 +389,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		}
 	}
 
-	private static boolean consumeLF(SeekableInput in) throws IOException {
+	private static boolean consumeLF(BufferedSeekableInput in) throws IOException {
 		final long pos = in.getPos();
 		final int next = in.read();
 		if(next == '\n')
@@ -392,23 +399,12 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		return false;
 	}
 
-	private static int peek(SeekableInput in) throws IOException {
+	private static int peek(BufferedSeekableInput in) throws IOException {
 		final long pos = in.getPos();
 		final int ch = in.read();
 		if(ch != -1)
 			in.seek(pos);
 		return ch;
-	}
-
-	private interface SeekableInput extends AutoCloseable {
-		int read() throws IOException;
-
-		void seek(long pos) throws IOException;
-
-		long getPos();
-
-		@Override
-		void close() throws IOException;
 	}
 
 	private static final class RowSegmentStart {
@@ -421,7 +417,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		}
 	}
 
-	private static final class BufferedSeekableInput implements SeekableInput {
+	private static final class BufferedSeekableInput {
 		private static final int BUF_SIZE = 64 * 1024;
 
 		private final FSDataInputStream in;
@@ -434,7 +430,6 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 			this.in = in;
 		}
 
-		@Override
 		public int read() throws IOException {
 			if(bufPos >= bufLen) {
 				if(!fill())
@@ -455,7 +450,6 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 			return true;
 		}
 
-		@Override
 		public void seek(long pos) throws IOException {
 			final long bufEnd = bufStart + bufLen;
 			if(pos >= bufStart && pos < bufEnd) {
@@ -469,12 +463,10 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 			}
 		}
 
-		@Override
 		public long getPos() {
 			return bufStart + bufPos;
 		}
 
-		@Override
 		public void close() throws IOException {
 			in.close();
 		}
