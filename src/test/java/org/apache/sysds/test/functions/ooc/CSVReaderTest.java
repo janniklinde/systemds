@@ -19,26 +19,19 @@
 
 package org.apache.sysds.test.functions.ooc;
 
-import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.common.Types;
-import org.apache.sysds.runtime.instructions.Instruction;
-import org.apache.sysds.runtime.io.MatrixReader;
-import org.apache.sysds.runtime.io.MatrixReaderFactory;
 import org.apache.sysds.runtime.io.MatrixWriter;
 import org.apache.sysds.runtime.io.MatrixWriterFactory;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
-import org.apache.sysds.runtime.matrix.data.MatrixValue;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.util.DataConverter;
 import org.apache.sysds.runtime.util.HDFSTool;
 import org.apache.sysds.test.AutomatedTestBase;
 import org.apache.sysds.test.TestConfiguration;
 import org.apache.sysds.test.TestUtils;
-import org.junit.Assert;
 import org.junit.Test;
 
 import java.io.IOException;
-import java.util.HashMap;
 
 public class CSVReaderTest extends AutomatedTestBase {
 	private final static String TEST_NAME1 = "CSVReader";
@@ -48,8 +41,6 @@ public class CSVReaderTest extends AutomatedTestBase {
 	private static final String INPUT_NAME = "X";
 	private static final String OUTPUT_NAME = "res";
 
-	private final static int rows = 1871;
-	private final static int cols = 1100;
 	private final static int maxVal = 7;
 	private final static double sparsity1 = 0.65;
 	private final static double sparsity2 = 0.05;
@@ -78,7 +69,17 @@ public class CSVReaderTest extends AutomatedTestBase {
 
 	@Test
 	public void testCSVReaderSparseWide() {
-		runCSVReaderTest(true, 50, 12100);
+		runCSVReaderTest(true, 500, 50000);
+	}
+
+	@Test
+	public void testCSVReaderDenseLarge() {
+		runCSVReaderTest(false, 500, 50000);
+	}
+
+	@Test
+	public void testCSVReaderSparseLarge() {
+		runCSVReaderTest(true, 500, 50000);
 	}
 
 	private void runCSVReaderTest(boolean sparse, int rows, int cols) {

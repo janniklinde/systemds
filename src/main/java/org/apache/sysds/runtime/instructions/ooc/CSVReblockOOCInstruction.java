@@ -78,15 +78,19 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 			final FileSystem fs = IOUtilFunctions.getFileSystem(path, job);
 			MatrixReader.checkValidInputFile(fs, path);
 
+			if (props.getDelim().length() != 1)
+				throw new DMLRuntimeException("Can only read CSVs with single char delimiters");
+
 			try(FSDataInputStream rawIn = fs.open(path); BufferedSeekableInput in = new BufferedSeekableInput(rawIn)) {
-				final int delim = getDelimiter(props);
-				final boolean hasCRLF = true;
-				final ColumnInfo columnInfo = detectColumnInfo(in, delim, hasCRLF, props.hasHeader());
+				final int delim = props.getDelim().charAt(0);
+				final ColumnInfo columnInfo = detectColumnInfo(in, delim, props.hasHeader());
 				final int ncols = columnInfo.ncols;
+
 				if(ncols <= 0) {
 					qOut.closeInput();
 					return;
 				}
+
 				in.seek(columnInfo.dataStart);
 
 				final int segLenMax = Math.min(MAX_BLOCKS_IN_CACHE * blen, ncols);
@@ -101,7 +105,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 				int rowsInBand = 0;
 				int brow = 0;
 
-				// pseudocode: fused prescan + seg0 fill
+				// First pass to determine total number of rows while emitting first MAX_BLOCKS_IN_CACHE column blocks per row
 				while(true) {
 					int next = peek(in);
 					if(next == -1)
@@ -113,7 +117,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 					}
 
 					final long nextSegPos = fillFirstSegmentRow(in, firstDense, rowsInBand, segLen, ncols, delim, fill,
-						fillValue, naStrings, hasCRLF);
+						fillValue, naStrings);
 					segStartList.add(nextSegPos);
 
 					rowsInBand++;
@@ -126,20 +130,20 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 					}
 				}
 
-				if(rowsInBand > 0 && firstBlocks != null) {
+				if(rowsInBand > 0)
 					emitBlocks(qOut, firstBlocks, rowsInBand, brow, 0);
-					brow++;
-				}
 
 				final long[] segStarts = toArray(segStartList);
 				final int nrows = segStarts.length;
+
 				if(nrows == 0) {
 					qOut.closeInput();
 					return;
 				}
 
 				final int nBrow = (nrows + blen - 1) / blen;
-				// pseudocode: process segments c0 ≥ segLen
+
+				// Process segments c0 ≥ segLen
 				for(int c0 = segLen; c0 < ncols; c0 += segLen) {
 					final int seg = Math.min(segLen, ncols - c0);
 					final int firstBlockCol = c0 / blen;
@@ -154,6 +158,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 							in.seek(segStarts[r0 + i]);
 							int col = c0;
 							int read = 0;
+
 							while(read < seg) {
 								final Token token = parseToken(in, delim, fill, fillValue, naStrings);
 								final int bci = (col / blen) - firstBlockCol;
@@ -164,8 +169,9 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 								read++;
 								col++;
 							}
+
 							segStarts[r0 + i] = in.getPos();
-							skipRestOfLineFast(in, hasCRLF);
+							skipRestOfLineFast(in);
 						}
 
 						emitBlocks(qOut, blocks, rows, rb, firstBlockCol);
@@ -180,16 +186,11 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		}
 	}
 
-	private static int getDelimiter(FileFormatPropertiesCSV props) {
-		final String delim = props.getDelim();
-		return (delim == null || delim.isEmpty()) ? ',' : delim.charAt(0);
-	}
-
-	private static ColumnInfo detectColumnInfo(SeekableInput in, int delim, boolean hasCRLF, boolean hasHeader)
+	private static ColumnInfo detectColumnInfo(SeekableInput in, int delim, boolean hasHeader)
 		throws IOException {
 		in.seek(0);
 		if(hasHeader)
-			skipRestOfLineFast(in, hasCRLF);
+			skipRestOfLineFast(in);
 
 		final long dataStart = in.getPos();
 		int ch;
@@ -206,7 +207,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 				break;
 			}
 			else if(ch == '\r') {
-				if(hasCRLF && consumeLF(in))
+				if(consumeLF(in))
 					ch = '\n';
 				if(seenToken || ncols > 0)
 					ncols++;
@@ -225,7 +226,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 	}
 
 	private long fillFirstSegmentRow(SeekableInput in, DenseBlock[] denseBlocks, int rowOffset, int segLen, int ncols,
-		int delim, boolean fill, double fillValue, Set<String> naStrings, boolean hasCRLF) throws IOException {
+		int delim, boolean fill, double fillValue, Set<String> naStrings) throws IOException {
 		int col = 0;
 		long nextSegPos = -1;
 
@@ -250,7 +251,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		if(nextSegPos < 0)
 			nextSegPos = in.getPos();
 
-		skipRestOfLineFast(in, hasCRLF);
+		skipRestOfLineFast(in);
 		return nextSegPos;
 	}
 
@@ -276,8 +277,6 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		final DenseBlock[] dense = new DenseBlock[blocks.length];
 		for(int i = 0; i < blocks.length; i++) {
 			final DenseBlock db = blocks[i].getDenseBlock();
-			if(db == null)
-				throw new DMLRuntimeException("Failed to allocate dense block");
 			dense[i] = db;
 		}
 		return dense;
@@ -330,18 +329,16 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 			value = UtilFunctions.parseToDouble(buf.toString(), naStrings);
 		}
 
-		final int term = (ch == -1) ? -1 : ch;
-		return new Token(value, term);
+		return new Token(value, ch);
 	}
 
-	private static void skipRestOfLineFast(SeekableInput in, boolean hasCRLF) throws IOException {
+	private static void skipRestOfLineFast(SeekableInput in) throws IOException {
 		int ch;
 		while((ch = in.read()) != -1) {
 			if(ch == '\n')
 				return;
 			if(ch == '\r') {
-				if(hasCRLF)
-					consumeLF(in);
+				consumeLF(in);
 				return;
 			}
 		}
