@@ -68,7 +68,7 @@ public class CSVReaderTest extends AutomatedTestBase {
 
 	@Test
 	public void testCSVReaderSparse() {
-		runCSVReaderTest(false);
+		runCSVReaderTest(true);
 	}
 
 	private void runCSVReaderTest(boolean sparse) {
@@ -109,8 +109,8 @@ public class CSVReaderTest extends AutomatedTestBase {
 			runTest(true, false, null, -1);
 
 			// compare matrices
-			MatrixBlock ret1 = DataConverter.readMatrixFromHDFS(output(OUTPUT_NAME), Types.FileFormat.BINARY, 1, 1, 1000);
-			MatrixBlock ret2 = DataConverter.readMatrixFromHDFS(output(OUTPUT_NAME + "_target"), Types.FileFormat.BINARY, 1, 1, 1000);
+			MatrixBlock ret1 = DataConverter.readMatrixFromHDFS(output(OUTPUT_NAME), Types.FileFormat.BINARY, rows, cols, 1000);
+			MatrixBlock ret2 = DataConverter.readMatrixFromHDFS(output(OUTPUT_NAME + "_target"), Types.FileFormat.BINARY, rows, cols, 1000);
 			TestUtils.compareMatrices(ret1, ret2, eps);
 		}
 		catch(IOException e) {
