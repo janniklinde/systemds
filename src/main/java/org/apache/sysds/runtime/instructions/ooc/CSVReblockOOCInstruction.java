@@ -78,7 +78,8 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 			final FileSystem fs = IOUtilFunctions.getFileSystem(path, job);
 			MatrixReader.checkValidInputFile(fs, path);
 
-			try(FSDataInputStream in = fs.open(path)) {
+			try(FSDataInputStream rawIn = fs.open(path);
+				BufferedSeekableInput in = new BufferedSeekableInput(rawIn)) {
 				final int delim = getDelimiter(props);
 				final boolean hasCRLF = true;
 				// pseudocode: PRESCAN
@@ -177,7 +178,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		return (delim == null || delim.isEmpty()) ? ',' : delim.charAt(0);
 	}
 
-	private static PrescanResult prescan(FSDataInputStream in, int delim, boolean hasCRLF) throws IOException {
+	private static PrescanResult prescan(SeekableInput in, int delim, boolean hasCRLF) throws IOException {
 		in.seek(0);
 		final List<Long> starts = new ArrayList<>();
 		starts.add(0L);
@@ -234,7 +235,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		return new PrescanResult(toArray(starts), ncols);
 	}
 
-	private static boolean consumeLF(FSDataInputStream in) throws IOException {
+	private static boolean consumeLF(SeekableInput in) throws IOException {
 		final long pos = in.getPos();
 		final int next = in.read();
 		if(next == '\n')
@@ -251,7 +252,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		return ret;
 	}
 
-	private static double parseNextDouble(FSDataInputStream in, int delim, boolean fill,
+	private static double parseNextDouble(SeekableInput in, int delim, boolean fill,
 		double fillValue, Set<String> naStrings) throws IOException {
 		int ch;
 		do {
@@ -282,7 +283,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		return UtilFunctions.parseToDouble(buf.toString(), naStrings);
 	}
 
-	private static void skipToEOL(FSDataInputStream in, boolean hasCRLF) throws IOException {
+	private static void skipToEOL(SeekableInput in, boolean hasCRLF) throws IOException {
 		int ch;
 		while((ch = in.read()) != -1) {
 			if(ch == '\n')
@@ -295,7 +296,7 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		}
 	}
 
-	private static int peek(FSDataInputStream in) throws IOException {
+	private static int peek(SeekableInput in) throws IOException {
 		final long pos = in.getPos();
 		final int ch = in.read();
 		if(ch != -1)
@@ -310,6 +311,73 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		private PrescanResult(long[] starts, int cols) {
 			lineStarts = starts;
 			ncols = cols;
+		}
+	}
+
+	private interface SeekableInput extends AutoCloseable {
+		int read() throws IOException;
+		void seek(long pos) throws IOException;
+		long getPos();
+		@Override
+		void close() throws IOException;
+	}
+
+	private static final class BufferedSeekableInput implements SeekableInput {
+		private static final int BUF_SIZE = 64 * 1024;
+
+		private final FSDataInputStream in;
+		private final byte[] buf = new byte[BUF_SIZE];
+		private long bufStart = 0;
+		private int bufLen = 0;
+		private int bufPos = 0;
+
+		private BufferedSeekableInput(FSDataInputStream in) {
+			this.in = in;
+		}
+
+		@Override
+		public int read() throws IOException {
+			if(bufPos >= bufLen) {
+				if(!fill())
+					return -1;
+			}
+			return buf[bufPos++] & 0xFF;
+		}
+
+		private boolean fill() throws IOException {
+			bufStart = in.getPos();
+			bufLen = in.read(buf, 0, BUF_SIZE);
+			if(bufLen <= 0) {
+				bufLen = 0;
+				bufPos = 0;
+				return false;
+			}
+			bufPos = 0;
+			return true;
+		}
+
+		@Override
+		public void seek(long pos) throws IOException {
+			final long bufEnd = bufStart + bufLen;
+			if(pos >= bufStart && pos < bufEnd) {
+				bufPos = (int) (pos - bufStart);
+			}
+			else {
+				in.seek(pos);
+				bufStart = pos;
+				bufLen = 0;
+				bufPos = 0;
+			}
+		}
+
+		@Override
+		public long getPos() {
+			return bufStart + bufPos;
+		}
+
+		@Override
+		public void close() throws IOException {
+			in.close();
 		}
 	}
 }
