@@ -69,8 +69,8 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		mout.setStreamHandle(q);
 	}
 
-	private void readCSVBlock(OOCStream<IndexedMatrixValue> qOut, MatrixObject min,
-		DataCharacteristics mcOut, FileFormatPropertiesCSV props) {
+	private void readCSVBlock(OOCStream<IndexedMatrixValue> qOut, MatrixObject min, DataCharacteristics mcOut,
+		FileFormatPropertiesCSV props) {
 		final Path path = new Path(min.getFileName());
 		final JobConf job = new JobConf(ConfigurationManager.getCachedJobConf());
 
@@ -78,93 +78,100 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 			final FileSystem fs = IOUtilFunctions.getFileSystem(path, job);
 			MatrixReader.checkValidInputFile(fs, path);
 
-			try(FSDataInputStream rawIn = fs.open(path);
-				BufferedSeekableInput in = new BufferedSeekableInput(rawIn)) {
+			try(FSDataInputStream rawIn = fs.open(path); BufferedSeekableInput in = new BufferedSeekableInput(rawIn)) {
 				final int delim = getDelimiter(props);
 				final boolean hasCRLF = true;
-				// pseudocode: PRESCAN
-				final PrescanResult scan = prescan(in, delim, hasCRLF);
-				final long[] lineStarts = scan.lineStarts;
-				final int headerOffset = props.hasHeader() ? 1 : 0;
-				final int nrows = lineStarts.length - headerOffset;
-				final int ncols = scan.ncols;
-				if(nrows <= 0 || ncols <= 0) {
+				final ColumnInfo columnInfo = detectColumnInfo(in, delim, hasCRLF, props.hasHeader());
+				final int ncols = columnInfo.ncols;
+				if(ncols <= 0) {
+					qOut.closeInput();
+					return;
+				}
+				in.seek(columnInfo.dataStart);
+
+				final int segLenMax = Math.min(MAX_BLOCKS_IN_CACHE * blen, ncols);
+				final int segLen = Math.min(segLenMax, ncols);
+				final boolean fill = props.isFill();
+				final double fillValue = props.getFillValue();
+				final Set<String> naStrings = props.getNAStrings();
+
+				final List<Long> segStartList = new ArrayList<>();
+				MatrixBlock[] firstBlocks = null;
+				DenseBlock[] firstDense = null;
+				int rowsInBand = 0;
+				int brow = 0;
+
+				// pseudocode: fused prescan + seg0 fill
+				while(true) {
+					int next = peek(in);
+					if(next == -1)
+						break;
+
+					if(rowsInBand == 0) {
+						firstBlocks = allocateBlocks(blen, 0, segLen, ncols);
+						firstDense = extractDense(firstBlocks);
+					}
+
+					final long nextSegPos = fillFirstSegmentRow(in, firstDense, rowsInBand, segLen, ncols, delim, fill,
+						fillValue, naStrings, hasCRLF);
+					segStartList.add(nextSegPos);
+
+					rowsInBand++;
+					if(rowsInBand == blen) {
+						emitBlocks(qOut, firstBlocks, rowsInBand, brow, 0);
+						rowsInBand = 0;
+						firstBlocks = null;
+						firstDense = null;
+						brow++;
+					}
+				}
+
+				if(rowsInBand > 0 && firstBlocks != null) {
+					emitBlocks(qOut, firstBlocks, rowsInBand, brow, 0);
+					brow++;
+				}
+
+				final long[] segStarts = toArray(segStartList);
+				final int nrows = segStarts.length;
+				if(nrows == 0) {
 					qOut.closeInput();
 					return;
 				}
 
-				final int segColsMax = Math.min(MAX_BLOCKS_IN_CACHE * blen, ncols);
-				final boolean fill = props.isFill();
-				final double fillValue = props.getFillValue();
-				final Set<String> naStrings = props.getNAStrings();
 				final int nBrow = (nrows + blen - 1) / blen;
+				// pseudocode: process segments c0 ≥ segLen
+				for(int c0 = segLen; c0 < ncols; c0 += segLen) {
+					final int seg = Math.min(segLen, ncols - c0);
+					final int firstBlockCol = c0 / blen;
 
-				// pseudocode: sweep rows by bands
-				for(int brow = 0; brow < nBrow; brow++) {
-					final int r0 = brow * blen;
-					final int rowsInBand = Math.min(blen, nrows - r0);
-					final long[] rowPos = new long[rowsInBand];
-					for(int i = 0; i < rowsInBand; i++)
-						rowPos[i] = lineStarts[headerOffset + r0 + i];
+					for(int rb = 0; rb < nBrow; rb++) {
+						final int r0 = rb * blen;
+						final int rows = Math.min(blen, nrows - r0);
+						final MatrixBlock[] blocks = allocateBlocks(rows, firstBlockCol, seg, ncols);
+						final DenseBlock[] dense = extractDense(blocks);
 
-					// pseudocode: sweep columns in segments of ≤ K blocks
-					for(int c0 = 0; c0 < ncols; c0 += segColsMax) {
-						final int segLen = Math.min(segColsMax, ncols - c0);
-						final int firstBlockCol = c0 / blen;
-						final int lastBlockCol = (c0 + segLen - 1) / blen;
-						final int numBlocks = lastBlockCol - firstBlockCol + 1;
-
-						final MatrixBlock[] blocks = new MatrixBlock[numBlocks];
-						final DenseBlock[] denseBlocks = new DenseBlock[numBlocks];
-						final int[] blockColStarts = new int[numBlocks];
-						for(int bci = 0; bci < numBlocks; bci++) {
-							final int bcol = firstBlockCol + bci;
-							final int cStart = bcol * blen;
-							final int cEnd = Math.min(ncols, cStart + blen);
-							blockColStarts[bci] = cStart;
-							final MatrixBlock block = new MatrixBlock(rowsInBand, cEnd - cStart, false);
-							block.allocateDenseBlock();
-							final DenseBlock dense = block.getDenseBlock();
-							if(dense == null)
-								throw new DMLRuntimeException("Failed to allocate dense block");
-							blocks[bci] = block;
-							denseBlocks[bci] = dense;
-						}
-
-						// pseudocode: fill rows for this segment
-						for(int r = 0; r < rowsInBand; r++) {
-							in.seek(rowPos[r]);
-							int readCount = 0;
-							int colIdx = c0;
-							while(readCount < segLen) {
-								final double v = parseNextDouble(in, delim, fill, fillValue, naStrings);
-								final int bci = (colIdx / blen) - firstBlockCol;
-								final int within = colIdx - blockColStarts[bci];
-								denseBlocks[bci].set(r, within, v);
-
-								final int ch = peek(in);
-								if(ch == delim)
+						for(int i = 0; i < rows; i++) {
+							in.seek(segStarts[r0 + i]);
+							int col = c0;
+							int read = 0;
+							while(read < seg) {
+								final Token token = parseToken(in, delim, fill, fillValue, naStrings);
+								final int bci = (col / blen) - firstBlockCol;
+								final int within = col % blen;
+								dense[bci].set(i, within, token.value);
+								if(token.term == delim)
 									in.read();
-
-								readCount++;
-								colIdx++;
+								read++;
+								col++;
 							}
-							rowPos[r] = in.getPos();
-							// pseudocode: SKIP_TO_EOL
-							skipToEOL(in, hasCRLF);
+							segStarts[r0 + i] = in.getPos();
+							skipRestOfLineFast(in, hasCRLF);
 						}
 
-						// pseudocode: emit ready blocks
-						for(int bci = 0; bci < numBlocks; bci++) {
-							final MatrixBlock block = blocks[bci];
-							block.recomputeNonZeros();
-							block.examSparsity();
-							final MatrixIndexes idx = new MatrixIndexes(brow + 1,
-								firstBlockCol + bci + 1);
-							qOut.enqueue(new IndexedMatrixValue(idx, block));
-						}
+						emitBlocks(qOut, blocks, rows, rb, firstBlockCol);
 					}
 				}
+
 				qOut.closeInput();
 			}
 		}
@@ -178,82 +185,120 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		return (delim == null || delim.isEmpty()) ? ',' : delim.charAt(0);
 	}
 
-	private static PrescanResult prescan(SeekableInput in, int delim, boolean hasCRLF) throws IOException {
+	private static ColumnInfo detectColumnInfo(SeekableInput in, int delim, boolean hasCRLF, boolean hasHeader)
+		throws IOException {
 		in.seek(0);
-		final List<Long> starts = new ArrayList<>();
-		starts.add(0L);
-		long pos = 0;
-		int ncols = 0;
-		boolean countingFirst = true;
-		boolean seenToken = false;
+		if(hasHeader)
+			skipRestOfLineFast(in, hasCRLF);
 
+		final long dataStart = in.getPos();
 		int ch;
+		int ncols = 0;
+		boolean seenToken = false;
 		while((ch = in.read()) != -1) {
-			pos++;
-			if(countingFirst) {
-				if(ch == delim) {
+			if(ch == delim) {
+				ncols++;
+				seenToken = false;
+			}
+			else if(ch == '\n') {
+				if(seenToken || ncols > 0)
 					ncols++;
-					seenToken = false;
-				}
-				else if(ch == '\n') {
-					if(seenToken || ncols > 0)
-						ncols++;
-					countingFirst = false;
-					starts.add(pos);
-					seenToken = false;
-				}
-				else if(ch == '\r') {
-					if(hasCRLF && consumeLF(in))
-						pos++;
-					if(seenToken || ncols > 0)
-						ncols++;
-					countingFirst = false;
-					starts.add(pos);
-					seenToken = false;
-				}
-				else {
-					seenToken = true;
-				}
+				break;
+			}
+			else if(ch == '\r') {
+				if(hasCRLF && consumeLF(in))
+					ch = '\n';
+				if(seenToken || ncols > 0)
+					ncols++;
+				break;
 			}
 			else {
-				if(ch == '\n') {
-					starts.add(pos);
-				}
-				else if(ch == '\r') {
-					if(hasCRLF && consumeLF(in))
-						pos++;
-					starts.add(pos);
-				}
+				seenToken = true;
 			}
 		}
 
-		if(countingFirst && (seenToken || ncols > 0))
+		if(ch == -1 && (seenToken || ncols > 0))
 			ncols++;
-		if(!starts.isEmpty() && starts.get(starts.size() - 1) == pos)
-			starts.remove(starts.size() - 1);
 
-		return new PrescanResult(toArray(starts), ncols);
+		in.seek(dataStart);
+		return new ColumnInfo(ncols, dataStart);
 	}
 
-	private static boolean consumeLF(SeekableInput in) throws IOException {
-		final long pos = in.getPos();
-		final int next = in.read();
-		if(next == '\n')
-			return true;
-		if(next != -1)
-			in.seek(pos);
-		return false;
+	private long fillFirstSegmentRow(SeekableInput in, DenseBlock[] denseBlocks, int rowOffset, int segLen, int ncols,
+		int delim, boolean fill, double fillValue, Set<String> naStrings, boolean hasCRLF) throws IOException {
+		int col = 0;
+		long nextSegPos = -1;
+
+		while(col < segLen) {
+			final Token token = parseToken(in, delim, fill, fillValue, naStrings);
+			final int bci = col / blen;
+			final int within = col % blen;
+			denseBlocks[bci].set(rowOffset, within, token.value);
+			col++;
+
+			if(token.term == delim) {
+				in.read();
+				if(col == segLen)
+					nextSegPos = in.getPos();
+				continue;
+			}
+
+			nextSegPos = in.getPos();
+			break;
+		}
+
+		if(nextSegPos < 0)
+			nextSegPos = in.getPos();
+
+		skipRestOfLineFast(in, hasCRLF);
+		return nextSegPos;
 	}
 
-	private static long[] toArray(List<Long> offsets) {
-		final long[] ret = new long[offsets.size()];
-		for(int i = 0; i < offsets.size(); i++)
-			ret[i] = offsets.get(i);
-		return ret;
+	private MatrixBlock[] allocateBlocks(int rows, int firstBlockCol, int segLen, int ncols) {
+		final int c0 = firstBlockCol * blen;
+		final int lastBlockCol = (c0 + segLen - 1) / blen;
+		final int numBlocks = lastBlockCol - firstBlockCol + 1;
+		final MatrixBlock[] blocks = new MatrixBlock[numBlocks];
+
+		for(int bci = 0; bci < numBlocks; bci++) {
+			final int bcol = firstBlockCol + bci;
+			final int cStart = bcol * blen;
+			final int cEnd = Math.min(ncols, cStart + blen);
+			final MatrixBlock block = new MatrixBlock(rows, cEnd - cStart, false);
+			block.allocateDenseBlock();
+			blocks[bci] = block;
+		}
+
+		return blocks;
 	}
 
-	private static double parseNextDouble(SeekableInput in, int delim, boolean fill,
-		double fillValue, Set<String> naStrings) throws IOException {
+	private DenseBlock[] extractDense(MatrixBlock[] blocks) {
+		final DenseBlock[] dense = new DenseBlock[blocks.length];
+		for(int i = 0; i < blocks.length; i++) {
+			final DenseBlock db = blocks[i].getDenseBlock();
+			if(db == null)
+				throw new DMLRuntimeException("Failed to allocate dense block");
+			dense[i] = db;
+		}
+		return dense;
+	}
+
+	private void emitBlocks(OOCStream<IndexedMatrixValue> qOut, MatrixBlock[] blocks, int rowsInBand, int brow,
+		int firstBlockCol) {
+		for(int bci = 0; bci < blocks.length; bci++) {
+			MatrixBlock block = blocks[bci];
+			if(block.getNumRows() != rowsInBand) {
+				block = block.slice(0, rowsInBand - 1, 0, block.getNumColumns() - 1);
+			}
+			block.recomputeNonZeros();
+			block.examSparsity();
+			final MatrixIndexes idx = new MatrixIndexes(brow + 1, firstBlockCol + bci + 1);
+			qOut.enqueue(new IndexedMatrixValue(idx, block));
+		}
+	}
+
+	private static Token parseToken(SeekableInput in, int delim, boolean fill, double fillValue, Set<String> naStrings)
+		throws IOException {
 		int ch;
 		do {
 			ch = in.read();
@@ -274,16 +319,22 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		while(len > 0 && (buf.charAt(len - 1) == ' ' || buf.charAt(len - 1) == '\t'))
 			buf.setLength(--len);
 
+		final double value;
 		if(len == 0) {
 			if(fill)
-				return fillValue;
-			throw new DMLRuntimeException("Empty value in CSV input");
+				value = fillValue;
+			else
+				throw new DMLRuntimeException("Empty value in CSV input");
+		}
+		else {
+			value = UtilFunctions.parseToDouble(buf.toString(), naStrings);
 		}
 
-		return UtilFunctions.parseToDouble(buf.toString(), naStrings);
+		final int term = (ch == -1) ? -1 : ch;
+		return new Token(value, term);
 	}
 
-	private static void skipToEOL(SeekableInput in, boolean hasCRLF) throws IOException {
+	private static void skipRestOfLineFast(SeekableInput in, boolean hasCRLF) throws IOException {
 		int ch;
 		while((ch = in.read()) != -1) {
 			if(ch == '\n')
@@ -296,6 +347,23 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		}
 	}
 
+	private static boolean consumeLF(SeekableInput in) throws IOException {
+		final long pos = in.getPos();
+		final int next = in.read();
+		if(next == '\n')
+			return true;
+		if(next != -1)
+			in.seek(pos);
+		return false;
+	}
+
+	private static long[] toArray(List<Long> offsets) {
+		final long[] ret = new long[offsets.size()];
+		for(int i = 0; i < offsets.size(); i++)
+			ret[i] = offsets.get(i);
+		return ret;
+	}
+
 	private static int peek(SeekableInput in) throws IOException {
 		final long pos = in.getPos();
 		final int ch = in.read();
@@ -304,20 +372,13 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		return ch;
 	}
 
-	private static final class PrescanResult {
-		private final long[] lineStarts;
-		private final int ncols;
-
-		private PrescanResult(long[] starts, int cols) {
-			lineStarts = starts;
-			ncols = cols;
-		}
-	}
-
 	private interface SeekableInput extends AutoCloseable {
 		int read() throws IOException;
+
 		void seek(long pos) throws IOException;
+
 		long getPos();
+
 		@Override
 		void close() throws IOException;
 	}
@@ -378,6 +439,26 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		@Override
 		public void close() throws IOException {
 			in.close();
+		}
+	}
+
+	private static final class ColumnInfo {
+		private final int ncols;
+		private final long dataStart;
+
+		private ColumnInfo(int ncols, long dataStart) {
+			this.ncols = ncols;
+			this.dataStart = dataStart;
+		}
+	}
+
+	private static final class Token {
+		private final double value;
+		private final int term;
+
+		private Token(double value, int term) {
+			this.value = value;
+			this.term = term;
 		}
 	}
 }

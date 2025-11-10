@@ -62,16 +62,26 @@ public class CSVReaderTest extends AutomatedTestBase {
 	}
 
 	@Test
-	public void testCSVReaderDense() {
-		runCSVReaderTest(false);
+	public void testCSVReaderDense1() {
+		runCSVReaderTest(false, 1800, 1100);
 	}
 
 	@Test
-	public void testCSVReaderSparse() {
-		runCSVReaderTest(true);
+	public void testCSVReaderSparse1() {
+		runCSVReaderTest(true, 1800, 1100);
 	}
 
-	private void runCSVReaderTest(boolean sparse) {
+	@Test
+	public void testCSVReaderDenseWide() {
+		runCSVReaderTest(false, 50, 12100);
+	}
+
+	@Test
+	public void testCSVReaderSparseWide() {
+		runCSVReaderTest(true, 50, 12100);
+	}
+
+	private void runCSVReaderTest(boolean sparse, int rows, int cols) {
 		Types.ExecMode platformOld = setExecMode(Types.ExecMode.SINGLE_NODE);
 
 		try {
