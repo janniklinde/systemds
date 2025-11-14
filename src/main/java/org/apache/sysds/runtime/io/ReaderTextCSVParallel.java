@@ -53,8 +53,6 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.util.CommonThreadPool;
 import org.apache.sysds.runtime.util.UtilFunctions;
-import scala.Tuple2;
-import scala.Tuple3;
 
 /**
  * Parallel version of ReaderTextCSV.java. To summarize, we do two passes in order to compute row offsets and the actual
@@ -453,8 +451,7 @@ public class ReaderTextCSVParallel extends MatrixReader {
 
 		@Override
 		public void set(int col, double value) {
-			if(value != 0)
-				_row.append(col, value);
+			_row.append(col, value);
 		}
 	}
 
