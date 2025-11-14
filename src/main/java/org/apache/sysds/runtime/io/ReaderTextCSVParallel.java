@@ -513,11 +513,9 @@ public class ReaderTextCSVParallel extends MatrixReader {
 				MatrixBlock block = _state.getOrCreateBlock(bcol);
 				int localCol = col % _bLen;
 				if(_sparseBlocks) {
-					synchronized(block) {
-						SparseBlock sb = block.getSparseBlock();
-						sb.allocate(_rowInBlock);
-						sb.get(_rowInBlock).append(localCol, value);
-					}
+					SparseBlock sb = block.getSparseBlock();
+					sb.allocate(_rowInBlock);
+					sb.get(_rowInBlock).append(localCol, value);
 				}
 				else {
 					DenseBlock db = block.getDenseBlock();
