@@ -29,7 +29,10 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.mapred.FileInputFormat;
+import org.apache.hadoop.mapred.InputSplit;
 import org.apache.hadoop.mapred.JobConf;
+import org.apache.hadoop.mapred.TextInputFormat;
 import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.conf.ConfigurationManager;
 import org.apache.sysds.runtime.DMLRuntimeException;
@@ -48,6 +51,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.util.UtilFunctions;
+import scala.Tuple3;
 
 public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 	private static final int MAX_BLOCKS_IN_CACHE = 40;
@@ -90,9 +94,34 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 
 		try {
 			final FileSystem fs = IOUtilFunctions.getFileSystem(path, job);
+
+			FileInputFormat.addInputPath(job, path);
+			TextInputFormat informat = new TextInputFormat();
+			informat.configure(job);
+
 			MatrixReader.checkValidInputFile(fs, path);
 
+			InputSplit[] splits = informat.getSplits(job, 5); // TODO
+			splits = IOUtilFunctions.sortInputSplits(splits);
+
 			final List<Path> files = collectInputFiles(fs, path);
+			/*OOCStream<Tuple3<Integer, Integer, Integer>> offsetStreams = createWritableStream();
+			submitOOCTask(() -> {
+				// Initial read to schedule actual readers
+				int lineCtr = 0;
+				long millis = System.currentTimeMillis();
+				try(MultiFileBufferedSeekableInput in = new MultiFileBufferedSeekableInput(fs, files)) {
+					while (skipRestOfLineFast(in)) {
+						lineCtr++;
+					}
+				}
+				catch (IOException e) {
+					throw new DMLRuntimeException(e);
+				}
+				long delta =  System.currentTimeMillis() - millis;
+				System.out.println("Lines: " + lineCtr);
+				System.out.println("Millis: " + delta);
+			}, qOut);*/
 
 			if(files.size() == 1) {
 				submitOOCTask(() -> {
@@ -392,16 +421,17 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		return new Token(value, ch);
 	}
 
-	private static void skipRestOfLineFast(SeekableInput in) throws IOException {
+	private static boolean skipRestOfLineFast(SeekableInput in) throws IOException {
 		int ch;
 		while((ch = in.read()) != -1) {
 			if(ch == '\n')
-				return;
+				return true;
 			if(ch == '\r') {
 				consumeLF(in);
-				return;
+				return true;
 			}
 		}
+		return false;
 	}
 
 	private static boolean consumeLF(SeekableInput in) throws IOException {

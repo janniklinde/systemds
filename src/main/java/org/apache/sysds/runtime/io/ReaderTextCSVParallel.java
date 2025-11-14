@@ -43,10 +43,14 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.data.DenseBlock;
 import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.data.SparseRow;
+import org.apache.sysds.runtime.instructions.ooc.OOCStream;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.io.IOUtilFunctions.CountRowsTask;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.util.CommonThreadPool;
 import org.apache.sysds.runtime.util.UtilFunctions;
+import scala.Tuple2;
+import scala.Tuple3;
 
 /**
  * Parallel version of ReaderTextCSV.java. To summarize, we do two passes in order to compute row offsets and the actual
@@ -104,6 +108,45 @@ public class ReaderTextCSVParallel extends MatrixReader {
 		// - nnz explicitly maintained in parallel for the individual splits
 		ret.examSparsity();
 		
+		// sanity check for parallel row count (since determined internally)
+		if(rlen >= 0 && rlen != ret.getNumRows())
+			throw new DMLRuntimeException("Read matrix inconsistent with given meta data: " + "expected nrow=" + rlen
+				+ ", real nrow=" + ret.getNumRows());
+
+		return ret;
+	}
+
+	public MatrixBlock readMatrixAsStream(OOCStream<IndexedMatrixValue> outStream, String fname, long rlen, long clen, int blen, long estnnz) throws IOException, DMLRuntimeException {
+		_bLen = blen;
+
+		// prepare file access
+		_job = new JobConf(ConfigurationManager.getCachedJobConf());
+
+		Path path = new Path(fname);
+		FileSystem fs = IOUtilFunctions.getFileSystem(path, _job);
+
+		FileInputFormat.addInputPath(_job, path);
+		TextInputFormat informat = new TextInputFormat();
+		informat.configure(_job);
+
+		InputSplit[] splits = informat.getSplits(_job, _numThreads);
+		splits = IOUtilFunctions.sortInputSplits(splits);
+
+		// check existence and non-empty file
+		checkValidInputFile(fs, path);
+
+		// allocate output matrix block
+		// First Read Pass (count rows/cols, determine offsets, allocate matrix block)
+		long estnnz2 = computeCSVSize(splits, path, rlen, clen, estnnz, CommonThreadPool.get(_numThreads));
+
+		// Second Read Pass (read, parse strings, append to matrix block)
+		readCSVMatrixFromHDFS(splits, path, ret);
+
+		// post-processing (representation-specific, change of sparse/dense block representation)
+		// - no sorting required for CSV because it is read in sorted order per row
+		// - nnz explicitly maintained in parallel for the individual splits
+		ret.examSparsity();
+
 		// sanity check for parallel row count (since determined internally)
 		if(rlen >= 0 && rlen != ret.getNumRows())
 			throw new DMLRuntimeException("Read matrix inconsistent with given meta data: " + "expected nrow=" + rlen
@@ -172,10 +215,29 @@ public class ReaderTextCSVParallel extends MatrixReader {
 			Future<MatrixBlock> ret = (rlen<0 || clen<0 || estnnz<0) ? null :
 				pool.submit(() -> createOutputMatrixBlock(rlen, clen, blen, estnnz, true, true));
 			
+			long estnnz2 = computeCSVSize(splits, path, rlen, clen, estnnz, pool);
+			return (ret!=null) ? UtilFunctions.getSafe(ret) :
+				createOutputMatrixBlock(_rLen, _cLen, blen, estnnz2, true, true);
+		}
+		catch(Exception e) {
+			throw new IOException("Thread pool Error " + e.getMessage(), e);
+		}
+		finally{
+			pool.shutdown();
+		}
+	}
+
+	private long computeCSVSize(InputSplit[] splits,
+		Path path, long rlen, long clen, long estnnz, ExecutorService pool) throws IOException {
+		_rLen = 0;
+		_cLen = 0;
+
+		// count rows in parallel per split
+		try {
 			FileInputFormat.addInputPath(_job, path);
 			TextInputFormat informat = new TextInputFormat();
 			informat.configure(_job);
-			
+
 			// count number of entities in the first non-header row
 			LongWritable key = new LongWritable();
 			Text oneLine = new Text();
@@ -196,7 +258,7 @@ public class ReaderTextCSVParallel extends MatrixReader {
 				tasks.add(new CountRowsTask(split, informat, _job, hasHeader));
 				hasHeader = false;
 			}
-			
+
 			// collect row counts for offset computation
 			// early error notify in case not all tasks successful
 			_offsets = new SplitOffsetInfos(tasks.size());
@@ -208,7 +270,7 @@ public class ReaderTextCSVParallel extends MatrixReader {
 				_rLen = _rLen + lnrow;
 				i++;
 			}
-		
+
 
 			// robustness for wrong dimensions which are already compiled into the plan
 			if((rlen != -1 && _rLen != rlen) || (clen != -1 && _cLen != clen)) {
@@ -229,8 +291,7 @@ public class ReaderTextCSVParallel extends MatrixReader {
 			// allocate target matrix block based on given size;
 			// need to allocate sparse as well since lock-free insert into target
 			long estnnz2 = (estnnz < 0) ? (long) _rLen * _cLen : estnnz;
-			return (ret!=null) ? UtilFunctions.getSafe(ret) :
-				createOutputMatrixBlock(_rLen, _cLen, blen, estnnz2, true, true);
+			return estnnz2;
 		}
 		catch(Exception e) {
 			throw new IOException("Thread pool Error " + e.getMessage(), e);
