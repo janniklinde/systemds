@@ -66,7 +66,7 @@ public class PCATest extends AutomatedTestBase {
 
 			String HOME = SCRIPT_DIR + TEST_DIR;
 			fullDMLScriptName = HOME + TEST_NAME1 + ".dml";
-			programArgs = new String[] {"-explain", "-stats", "-ooc", "-args", input(INPUT_NAME_1), Integer.toString(k), output(OUTPUT_NAME_1), output(OUTPUT_NAME_2)};
+			programArgs = new String[] {"-explain", "hops", "-stats", "-ooc", "-args", input(INPUT_NAME_1), Integer.toString(k), output(OUTPUT_NAME_1), output(OUTPUT_NAME_2)};
 
 			// 1. Generate the data in-memory as MatrixBlock objects
 			double[][] X_data = getRandomMatrix(rows, cols, 0, maxVal, 1, 7);

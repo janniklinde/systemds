@@ -22,9 +22,14 @@ package org.apache.sysds.hops.rewrite;
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.common.Types;
 import org.apache.sysds.common.Types.OpOpData;
+import org.apache.sysds.hops.DataGenOp;
 import org.apache.sysds.hops.DataOp;
 import org.apache.sysds.hops.Hop;
 import org.apache.sysds.hops.ReorgOp;
+import org.apache.sysds.parser.StatementBlock;
+import org.apache.sysds.parser.WhileStatement;
+import org.apache.sysds.parser.WhileStatementBlock;
+import scala.Tuple2;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -49,15 +54,20 @@ import java.util.Set;
  * 2. <b>Apply Rewrites (Modification):</b> Iterate over the collected candidate and put
  * {@code TeeOp}, and safely rewire the graph.
  */
-public class RewriteInjectOOCTee extends HopRewriteRule {
+public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 
 	public static boolean APPLY_ONLY_XtX_PATTERN = false;
+
+	private static final Map<String, Integer> _transientVars = new HashMap<>();
+	private static final Map<String, List<Hop>> _transientHops = new HashMap<>();
+	private static final Set<String> teeTransientVars = new HashSet<>();
 	
 	private static final Set<Long> rewrittenHops = new HashSet<>();
 	private static final Map<Long, Hop> handledHop = new HashMap<>();
 
 	// Maintain a list of candidates to rewrite in the second pass
 	private final List<Hop> rewriteCandidates = new ArrayList<>();
+	private boolean forceTee = false;
 
 	/**
 	 * Handle a generic (last-level) hop DAG with multiple roots.
@@ -66,7 +76,7 @@ public class RewriteInjectOOCTee extends HopRewriteRule {
 	 * @param state program rewrite status
 	 * @return list of high-level operators
 	 */
-	@Override
+	/*@Override
 	public ArrayList<Hop> rewriteHopDAGs(ArrayList<Hop> roots, ProgramRewriteStatus state) {
 		if (roots == null) {
 			return null;
@@ -87,7 +97,7 @@ public class RewriteInjectOOCTee extends HopRewriteRule {
 		}
 
 		return roots;
-	}
+	}*/
 
 	/**
 	 * Handle a predicate hop DAG with exactly one root.
@@ -96,7 +106,7 @@ public class RewriteInjectOOCTee extends HopRewriteRule {
 	 * @param state program rewrite status
 	 * @return high-level operator
 	 */
-	@Override
+	/*@Override
 	public Hop rewriteHopDAG(Hop root, ProgramRewriteStatus state) {
 		if (root == null) {
 			return null;
@@ -115,7 +125,7 @@ public class RewriteInjectOOCTee extends HopRewriteRule {
 		}
 
 		return root;
-	}
+	}*/
 
 	/**
 	 * First pass: Find candidates for rewrite without modifying the graph.
@@ -135,6 +145,47 @@ public class RewriteInjectOOCTee extends HopRewriteRule {
 		// Recursively traverse the graph (depth-first)
 		for (Hop input : hop.getInput()) {
 			findRewriteCandidates(input);
+		}
+
+		boolean isRewriteCandidate = DMLScript.USE_OOC
+			&& hop.getDataType().isMatrix()
+			&& !HopRewriteUtils.isData(hop, OpOpData.TEE)
+			&& hop.getParent().size() > 1
+			&& (!APPLY_ONLY_XtX_PATTERN || isSelfTranposePattern(hop));
+
+		if (hop instanceof DataOp) {
+			System.out.println("DataGen: " + hop);
+		}
+
+		if (HopRewriteUtils.isData(hop, OpOpData.PERSISTENTREAD) || HopRewriteUtils.isData(hop, OpOpData.TRANSIENTWRITE)) {
+			System.out.println("Found TWrite: " + hop.getName());
+			_transientHops.compute(hop.getName(), (key, hops) -> {
+				if (hops == null)
+					return new ArrayList<>(List.of(hop));
+				hops.add(hop);
+				return hops;
+			});
+			return;
+		}
+
+		if (HopRewriteUtils.isData(hop, OpOpData.TRANSIENTREAD)) {
+			if (teeTransientVars.contains(hop.getName()))
+				return;
+
+			System.out.println("Found TRead: " + hop);
+
+			_transientVars.compute(hop.getName(), (key, ctr) -> {
+				int incr = (isRewriteCandidate || forceTee) ? 2 : 1;
+
+				int ret = ctr == null ? 0 : ctr;
+				ret += incr;
+
+				if (ret > 1)
+					teeTransientVars.add(hop.getName());
+
+				return ret;
+			});
+			return; // We do not tee transient reads but rather inject before TWrite or PRead as caching stream
 		}
 
 		// Check if this hop is a candidate for OOC Tee injection
@@ -159,6 +210,11 @@ public class RewriteInjectOOCTee extends HopRewriteRule {
 		if (handledHop.containsKey(sharedInput.getHopID())) {
 			return;
 		}
+
+		/*if (sharedInput instanceof DataOp && ((DataOp) sharedInput).getOp() == OpOpData.TRANSIENTREAD) {
+			System.out.println("DataOp: " + sharedInput.getName() + ", " + ((DataOp) sharedInput).getInput());
+			return;
+		}*/
 
 		// Take a defensive copy of consumers before modifying the graph
 		ArrayList<Hop> consumers = new ArrayList<>(sharedInput.getParent());
@@ -195,5 +251,60 @@ public class RewriteInjectOOCTee extends HopRewriteRule {
 			}
 		}
 		return hasTransposeConsumer &&  hasMatrixMultiplyConsumer;
+	}
+
+	@Override
+	public boolean createsSplitDag() {
+		return false;
+	}
+
+	@Override
+	public List<StatementBlock> rewriteStatementBlock(StatementBlock sb, ProgramRewriteStatus state) {
+		rewriteSB(sb, state);
+
+		for (String tVar : teeTransientVars) {
+			for (Hop affectedHops : _transientHops.get(tVar)) {
+				applyTopDownTeeRewrite(affectedHops);
+			}
+		}
+
+		System.out.println("TeeTransientVars: " + teeTransientVars);
+
+		return List.of(sb);
+	}
+
+	@Override
+	public List<StatementBlock> rewriteStatementBlocks(List<StatementBlock> sbs, ProgramRewriteStatus state) {
+		for (StatementBlock sb : sbs)
+			rewriteSB(sb, state);
+
+		for (String tVar : teeTransientVars) {
+			System.out.println("Accessing: " + tVar);
+			for (Hop affectedHops : _transientHops.get(tVar)) {
+				applyTopDownTeeRewrite(affectedHops);
+			}
+		}
+
+		System.out.println("TeeTransientVars: " + teeTransientVars);
+
+		return sbs;
+	}
+
+	private void rewriteSB(StatementBlock sb, ProgramRewriteStatus state) {
+		System.out.println("Hops: " + sb.getClass().getName());
+		System.out.println(sb);
+
+		rewriteCandidates.clear();
+
+		if (sb.getHops() != null) {
+			for(Hop hop : sb.getHops()) {
+				hop.resetVisitStatus();
+				findRewriteCandidates(hop);
+			}
+		}
+
+		for (Hop candidate : rewriteCandidates) {
+			applyTopDownTeeRewrite(candidate);
+		}
 	}
 }
