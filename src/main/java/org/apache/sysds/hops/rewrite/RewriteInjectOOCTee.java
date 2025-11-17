@@ -263,9 +263,18 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 		rewriteSB(sb, state);
 
 		for (String tVar : teeTransientVars) {
-			for (Hop affectedHops : _transientHops.get(tVar)) {
+			System.out.println("Accessing: " + tVar);
+			List<Hop> tHops = _transientHops.get(tVar);
+			if (tHops == null) {
+				System.out.println("Deferring...");
+				continue;
+			}
+
+			for (Hop affectedHops : tHops) {
 				applyTopDownTeeRewrite(affectedHops);
 			}
+
+			tHops.clear();
 		}
 
 		System.out.println("TeeTransientVars: " + teeTransientVars);
@@ -280,6 +289,11 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 
 		for (String tVar : teeTransientVars) {
 			System.out.println("Accessing: " + tVar);
+			if (_transientHops.get(tVar) == null) {
+				System.out.println("Deferring...");
+				continue;
+			}
+
 			for (Hop affectedHops : _transientHops.get(tVar)) {
 				applyTopDownTeeRewrite(affectedHops);
 			}
