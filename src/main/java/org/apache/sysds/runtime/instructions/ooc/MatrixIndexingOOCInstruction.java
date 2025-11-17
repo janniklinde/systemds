@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.util.IndexRange;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -140,11 +141,13 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 			}
 
 			final BlockAligner<IndexedBlockMeta> aligner = new BlockAligner<>(ix, blocksize);
+			final ConcurrentHashMap<MatrixIndexes, Integer> consumptionCounts = new ConcurrentHashMap<>();
 
 			// We may need to construct our own intermediate stream to properly manage the cached items
 			boolean hasIntermediateStream = !qIn.hasStreamCache();
 			final CachingStream cachedStream = hasIntermediateStream ? new CachingStream(new SubscribableTaskQueue<>()) : qOut.getStreamCache();
 			cachedStream.activateIndexing();
+			cachedStream.incrSubscriberCount(1); // We may require re-consumption of blocks (up to 4 times)
 
 			CompletableFuture<Void> future = filterOOC(qIn.getReadStream(), tmp -> {
 				if (hasIntermediateStream) {
@@ -180,7 +183,7 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 							if(ibm == null)
 								continue;
 
-							IndexedMatrixValue mv = cachedStream.findCached(ibm.idx);
+							IndexedMatrixValue mv = cachedStream.peekCached(ibm.idx);
 							MatrixBlock srcBlock = (MatrixBlock) mv.getValue();
 
 							if(target == null)
@@ -205,6 +208,19 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 
 							MatrixBlock sliced = srcBlock.slice(sliceRowStart, sliceRowEnd, sliceColStart, sliceColEnd);
 							sliced.putInto(target, targetRowOffset, targetColOffset, true);
+							final int maxConsumptions = aligner.getNumConsumptions(ibm.idx);
+
+							Integer con = consumptionCounts.compute(ibm.idx, (k, v) -> {
+								if (v == null)
+									v = 0;
+								v = v+1;
+								if (v == maxConsumptions)
+									return null;
+								return v;
+							});
+
+							if (con == null)
+								cachedStream.incrProcessingCount(cachedStream.findCachedIndex(ibm.idx), 1);
 						}
 					}
 
@@ -228,8 +244,15 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 			}, () -> {
 				aligner.close();
 				qOut.closeInput();
+			}, tmp -> {
+				// If elements are not processed in an existing caching stream, we increment the process counter to allow block deletion
+				if (!hasIntermediateStream)
+					cachedStream.incrProcessingCount(cachedStream.findCachedIndex(tmp.getIndexes()), 1);
 			});
 			futureRef.set(future);
+
+			if (hasIntermediateStream)
+				cachedStream.scheduleDeletion(); // We can immediately delete blocks after consumption
 		}
 		//left indexing
 		else if(opcode.equalsIgnoreCase(Opcodes.LEFT_INDEX.toString())) {

@@ -84,7 +84,7 @@ import java.util.concurrent.locks.ReentrantLock;
 public class OOCEvictionManager {
 
 	// Configuration: OOC buffer limit as percentage of heap
-	private static final double OOC_BUFFER_PERCENTAGE = 0.15 * 0.01 * 2; // 15% of heap
+	private static final double OOC_BUFFER_PERCENTAGE = 0.15; // 15% of heap
 
 	private static final double PARTITION_EVICTION_SIZE = 64 * 1024 * 1024; // 64 MB
 
@@ -170,6 +170,39 @@ public class OOCEvictionManager {
 		LocalFileUtils.createLocalFileIfNotExist(_spillDir);
 	}
 
+	public static void reset() {
+		if (!_cache.isEmpty()) {
+			System.err.println("There are dangling elements in the OOC Eviction cache: " + _cache.size());
+		}
+		_size.set(0);
+		_cache.clear();
+		_spillLocations.clear();
+		_partitions.clear();
+		_partitionCounter.set(0);
+		_streamPartitions.clear();
+	}
+
+	/**
+	 * Removes a block from the cache without setting its data to null.
+	 */
+	public static void softDelete(long streamId, int blockId) {
+		BlockEntry e;
+		synchronized (_cacheLock) {
+			e = _cache.remove(streamId + "_" + blockId);
+		}
+
+		if (e != null) {
+			e.lock.lock();
+			try {
+				if (e.state == BlockState.HOT)
+					_size.addAndGet(-e.size);
+			} finally {
+				e.lock.unlock();
+			}
+			System.out.println("Removed block " + streamId + "_" + blockId + " from cache (idx: " + (e.value != null ? e.value.getIndexes() : "?") + ")");
+		}
+	}
+
 	/**
 	 * Store a block in the OOC cache (serialize once)
 	 */
@@ -210,7 +243,7 @@ public class OOCEvictionManager {
 
 		synchronized (_cacheLock) {
 			imv = _cache.get(key);
-			System.err.println( "value of imv: " + imv);
+			//System.err.println( "value of imv: " + imv);
 			if (imv != null && _policy == RPolicy.LRU) {
 				_cache.remove(key);
 				_cache.put(key, imv); //add last semantic

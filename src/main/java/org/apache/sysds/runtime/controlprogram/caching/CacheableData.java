@@ -49,6 +49,7 @@ import org.apache.sysds.runtime.instructions.cp.Data;
 import org.apache.sysds.runtime.instructions.fed.InitFEDInstruction;
 import org.apache.sysds.runtime.instructions.gpu.context.GPUContext;
 import org.apache.sysds.runtime.instructions.gpu.context.GPUObject;
+import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
@@ -474,9 +475,9 @@ public abstract class CacheableData<T extends CacheBlock<?>> extends Data
 	public OOCStream<IndexedMatrixValue> getStreamHandle() {
 		if( !hasStreamHandle() ) {
 			final SubscribableTaskQueue<IndexedMatrixValue> _mStream = new SubscribableTaskQueue<>();
-			_streamHandle = _mStream;
 			DataCharacteristics dc = getDataCharacteristics();
 			MatrixBlock src = (MatrixBlock)acquireReadAndRelease();
+			_streamHandle = _mStream;
 			LongStream.range(0, dc.getNumBlocks())
 				.mapToObj(i -> UtilFunctions.createIndexedMatrixBlock(src, dc, i))
 				.forEach( blk -> {
@@ -489,7 +490,14 @@ public abstract class CacheableData<T extends CacheBlock<?>> extends Data
 			_mStream.closeInput();
 		}
 		
-		return _streamHandle.getReadStream();
+		OOCStream<IndexedMatrixValue> stream = _streamHandle.getReadStream();
+		if (!stream.hasStreamCache())
+			_streamHandle = null; // To ensure read once
+		return stream;
+	}
+
+	public OOCStreamable<IndexedMatrixValue> getStreamable() {
+		return _streamHandle;
 	}
 	
 	/**
@@ -499,7 +507,7 @@ public abstract class CacheableData<T extends CacheBlock<?>> extends Data
 	 * @return true if existing, false otherwise
 	 */
 	public boolean hasStreamHandle() {
-		return _streamHandle != null && !_streamHandle.isProcessed();
+		return _streamHandle != null;
 	} 
 
 	@SuppressWarnings({ "rawtypes", "unchecked" })
