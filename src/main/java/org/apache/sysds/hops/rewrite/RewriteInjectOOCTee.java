@@ -306,7 +306,6 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 
 	private void rewriteSB(StatementBlock sb, ProgramRewriteStatus state) {
 		System.out.println("Hops: " + sb.getClass().getName());
-		System.out.println(sb);
 
 		rewriteCandidates.clear();
 
