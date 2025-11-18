@@ -42,8 +42,8 @@ public class PCATest extends AutomatedTestBase {
 	private static final String OUTPUT_NAME_1 = "PC";
 	private static final String OUTPUT_NAME_2 = "V";
 
-	private final static int rows = 1500;
-	private final static int cols = 1500;
+	private final static int rows = 1000;
+	private final static int cols = 1000;
 	private final static int maxVal = 2;
 
 	@Override

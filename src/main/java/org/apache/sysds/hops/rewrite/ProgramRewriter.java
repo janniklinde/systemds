@@ -93,6 +93,7 @@ public class ProgramRewriter{
 			if( OptimizerUtils.ALLOW_QUANTIZE_COMPRESS_REWRITE )
 				_dagRuleSet.add( new RewriteQuantizationFusedCompression()  	 );
 
+			_sbRuleSet.add(      new RewriteInjectOOCTee()                       );
 			//add statement block rewrite rules
 			if( OptimizerUtils.ALLOW_BRANCH_REMOVAL )
 				_sbRuleSet.add(  new RewriteRemoveUnnecessaryBranches()          ); //dependency: constant folding
@@ -151,7 +152,6 @@ public class ProgramRewriter{
 			_dagRuleSet.add( new RewriteConstantFolding()                    ); //dependency: cse
 		_sbRuleSet.add(  new RewriteRemoveEmptyBasicBlocks()                 );
 		_sbRuleSet.add(  new RewriteRemoveEmptyForLoops()                    );
-		_sbRuleSet.add(      new RewriteInjectOOCTee()                       );
 	}
 	
 	/**

@@ -153,11 +153,7 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 			&& hop.getParent().size() > 1
 			&& (!APPLY_ONLY_XtX_PATTERN || isSelfTranposePattern(hop));
 
-		if (hop instanceof DataOp) {
-			System.out.println("DataGen: " + hop);
-		}
-
-		if (HopRewriteUtils.isData(hop, OpOpData.PERSISTENTREAD) || HopRewriteUtils.isData(hop, OpOpData.TRANSIENTWRITE)) {
+		/*if (HopRewriteUtils.isData(hop, OpOpData.PERSISTENTREAD) || HopRewriteUtils.isData(hop, OpOpData.TRANSIENTWRITE)) {
 			System.out.println("Found TWrite: " + hop.getName());
 			_transientHops.compute(hop.getName(), (key, hops) -> {
 				if (hops == null)
@@ -166,7 +162,7 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 				return hops;
 			});
 			return;
-		}
+		}*/
 
 		if (HopRewriteUtils.isData(hop, OpOpData.TRANSIENTREAD)) {
 			if (teeTransientVars.contains(hop.getName()))
@@ -185,6 +181,14 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 
 				return ret;
 			});
+
+			_transientHops.compute(hop.getName(), (key, hops) -> {
+				if (hops == null)
+					return new ArrayList<>(List.of(hop));
+				hops.add(hop);
+				return hops;
+			});
+
 			return; // We do not tee transient reads but rather inject before TWrite or PRead as caching stream
 		}
 
@@ -225,6 +229,11 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 			sharedInput.getDim1(), sharedInput.getDim2(), sharedInput.getNnz(), sharedInput.getBlocksize());
 		HopRewriteUtils.addChildReference(teeOp, sharedInput);
 
+		if (sharedInput instanceof DataGenOp) {
+			System.out.println("SharedInput: " + sharedInput);
+			System.out.println("Lop: " + sharedInput.getText());
+		}
+
 		// Rewire the graph: replace original connections with TeeOp outputs
 		for (Hop consumer : consumers) {
 			HopRewriteUtils.replaceChildReference(consumer, sharedInput, teeOp);
@@ -263,12 +272,10 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 		rewriteSB(sb, state);
 
 		for (String tVar : teeTransientVars) {
-			System.out.println("Accessing: " + tVar);
 			List<Hop> tHops = _transientHops.get(tVar);
-			if (tHops == null) {
-				System.out.println("Deferring...");
+
+			if (tHops == null)
 				continue;
-			}
 
 			for (Hop affectedHops : tHops) {
 				applyTopDownTeeRewrite(affectedHops); // TODO after PRead -> tee -> TWrite must follow
@@ -288,13 +295,12 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 			rewriteSB(sb, state);
 
 		for (String tVar : teeTransientVars) {
-			System.out.println("Accessing: " + tVar);
-			if (_transientHops.get(tVar) == null) {
-				System.out.println("Deferring...");
-				continue;
-			}
+			List<Hop> tHops = _transientHops.get(tVar);
 
-			for (Hop affectedHops : _transientHops.get(tVar)) {
+			if (tHops == null)
+				continue;
+
+			for (Hop affectedHops : tHops) {
 				applyTopDownTeeRewrite(affectedHops);
 			}
 		}
