@@ -164,9 +164,9 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 			return;
 		}*/
 
-		if (HopRewriteUtils.isData(hop, OpOpData.TRANSIENTREAD)) {
-			if (teeTransientVars.contains(hop.getName()))
-				return;
+		if (HopRewriteUtils.isData(hop, OpOpData.TRANSIENTREAD) && hop.getDataType().isMatrix()) {
+			//if (teeTransientVars.contains(hop.getName()))
+			//	return;
 
 			System.out.println("Found TRead: " + hop);
 
