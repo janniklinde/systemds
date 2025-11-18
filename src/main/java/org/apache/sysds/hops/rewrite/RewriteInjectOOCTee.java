@@ -271,7 +271,7 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 			}
 
 			for (Hop affectedHops : tHops) {
-				applyTopDownTeeRewrite(affectedHops);
+				applyTopDownTeeRewrite(affectedHops); // TODO after PRead -> tee -> TWrite must follow
 			}
 
 			tHops.clear();
