@@ -25,7 +25,13 @@ import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 
+import java.util.Collections;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
 public class TeeOOCInstruction extends ComputationOOCInstruction {
+
+	private static ConcurrentHashMap<String, CachingStream> createdCachingStreams = new ConcurrentHashMap<>();
 
 	protected TeeOOCInstruction(OOCType type, CPOperand in1, CPOperand out, String opcode, String istr) {
 		super(type, null, in1, out, opcode, istr);
@@ -45,9 +51,12 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 		MatrixObject min = ec.getMatrixObject(input1);
 		OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
 
+		System.out.println("Avail " + input1.getName() + ": "  + createdCachingStreams.containsKey(input1.getName()));
+		CachingStream handle = createdCachingStreams.compute(input1.getName(), (k, v) -> v == null ? new CachingStream(qIn) : v);
+
 		//get output and create new resettable stream
 		MatrixObject mo = ec.getMatrixObject(output);
-		mo.setStreamHandle(new CachingStream(qIn));
+		mo.setStreamHandle(handle);
 		mo.setMetaData(min.getMetaData());
 	}
 }

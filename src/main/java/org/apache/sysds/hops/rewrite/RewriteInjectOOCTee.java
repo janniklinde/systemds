@@ -224,15 +224,10 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 		ArrayList<Hop> consumers = new ArrayList<>(sharedInput.getParent());
 
 		// Create the new TeeOp with the original hop as input
-		DataOp teeOp = new DataOp("tee_out_" + sharedInput.getName(), 
+		DataOp teeOp = new DataOp("tee_out_" + sharedInput.getName(),
 			sharedInput.getDataType(), sharedInput.getValueType(), Types.OpOpData.TEE, null,
 			sharedInput.getDim1(), sharedInput.getDim2(), sharedInput.getNnz(), sharedInput.getBlocksize());
 		HopRewriteUtils.addChildReference(teeOp, sharedInput);
-
-		if (sharedInput instanceof DataGenOp) {
-			System.out.println("SharedInput: " + sharedInput);
-			System.out.println("Lop: " + sharedInput.getText());
-		}
 
 		// Rewire the graph: replace original connections with TeeOp outputs
 		for (Hop consumer : consumers) {

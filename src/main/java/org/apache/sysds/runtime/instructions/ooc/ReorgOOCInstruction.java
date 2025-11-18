@@ -61,7 +61,7 @@ public class ReorgOOCInstruction extends ComputationOOCInstruction {
 		String opcode = parts[0];
 
 		if (opcode.equalsIgnoreCase(Opcodes.TRANSPOSE.toString())) {
-			InstructionUtils.checkNumFields(str, 2);
+			InstructionUtils.checkNumFields(str, 2, 3);
 			in.split(parts[1]);
 			out.split(parts[2]);
 
