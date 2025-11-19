@@ -491,8 +491,6 @@ public class DataOp extends Hop {
 	public void refreshSizeInformation() {
 		if( _op == OpOpData.PERSISTENTWRITE || _op == OpOpData.TRANSIENTWRITE || _op == OpOpData.TEE ) {
 			Hop input1 = getInput().get(0);
-			if (_op == OpOpData.TEE)
-				System.out.println("Refresh TEE " + input1.getDim1() + ", " + input1.getDim2() + ", " + input1.getBlocksize());
 			setDim1(input1.getDim1());
 			setDim2(input1.getDim2());
 			setBlocksize(input1.getBlocksize());
