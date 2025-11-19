@@ -71,6 +71,8 @@ import org.apache.sysds.runtime.controlprogram.federated.monitoring.FederatedMon
 import org.apache.sysds.runtime.controlprogram.federated.monitoring.models.CoordinatorModel;
 import org.apache.sysds.runtime.controlprogram.parfor.util.IDHandler;
 import org.apache.sysds.runtime.instructions.gpu.context.GPUContextPool;
+import org.apache.sysds.runtime.instructions.ooc.OOCEvictionManager;
+import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.io.IOUtilFunctions;
 import org.apache.sysds.runtime.lineage.LineageCacheConfig;
 import org.apache.sysds.runtime.lineage.LineageCacheConfig.LineageCachePolicy;
@@ -438,6 +440,9 @@ public class DMLScript
 	private static void execute(String dmlScriptStr, String fnameOptConfig, Map<String,String> argVals, String[] allArgs)
 		throws IOException
 	{
+		TeeOOCInstruction.reset();
+		OOCEvictionManager.reset();
+
 		// print basic time, environment info, and process id
 		printStartExecInfo(dmlScriptStr);
 
