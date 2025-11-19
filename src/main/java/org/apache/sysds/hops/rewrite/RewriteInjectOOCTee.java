@@ -22,14 +22,10 @@ package org.apache.sysds.hops.rewrite;
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.common.Types;
 import org.apache.sysds.common.Types.OpOpData;
-import org.apache.sysds.hops.DataGenOp;
 import org.apache.sysds.hops.DataOp;
 import org.apache.sysds.hops.Hop;
 import org.apache.sysds.hops.ReorgOp;
 import org.apache.sysds.parser.StatementBlock;
-import org.apache.sysds.parser.WhileStatement;
-import org.apache.sysds.parser.WhileStatementBlock;
-import scala.Tuple2;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -70,64 +66,6 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 	private boolean forceTee = false;
 
 	/**
-	 * Handle a generic (last-level) hop DAG with multiple roots.
-	 *
-	 * @param roots high-level operator roots
-	 * @param state program rewrite status
-	 * @return list of high-level operators
-	 */
-	/*@Override
-	public ArrayList<Hop> rewriteHopDAGs(ArrayList<Hop> roots, ProgramRewriteStatus state) {
-		if (roots == null) {
-			return null;
-		}
-
-		// Clear candidates for this pass
-		rewriteCandidates.clear();
-
-		// PASS 1: Identify candidates without modifying the graph
-		for (Hop root : roots) {
-			root.resetVisitStatus();
-			findRewriteCandidates(root);
-		}
-
-		// PASS 2: Apply rewrites to identified candidates
-		for (Hop candidate : rewriteCandidates) {
-			applyTopDownTeeRewrite(candidate);
-		}
-
-		return roots;
-	}*/
-
-	/**
-	 * Handle a predicate hop DAG with exactly one root.
-	 *
-	 * @param root  high-level operator root
-	 * @param state program rewrite status
-	 * @return high-level operator
-	 */
-	/*@Override
-	public Hop rewriteHopDAG(Hop root, ProgramRewriteStatus state) {
-		if (root == null) {
-			return null;
-		}
-
-		// Clear candidates for this pass
-		rewriteCandidates.clear();
-
-		// PASS 1: Identify candidates without modifying the graph
-		root.resetVisitStatus();
-		findRewriteCandidates(root);
-
-		// PASS 2: Apply rewrites to identified candidates
-		for (Hop candidate : rewriteCandidates) {
-			applyTopDownTeeRewrite(candidate);
-		}
-
-		return root;
-	}*/
-
-	/**
 	 * First pass: Find candidates for rewrite without modifying the graph.
 	 * This method traverses the graph and identifies nodes that need to be
 	 * rewritten based on the transpose-matrix multiply pattern.
@@ -153,23 +91,7 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 			&& hop.getParent().size() > 1
 			&& (!APPLY_ONLY_XtX_PATTERN || isSelfTranposePattern(hop));
 
-		/*if (HopRewriteUtils.isData(hop, OpOpData.PERSISTENTREAD) || HopRewriteUtils.isData(hop, OpOpData.TRANSIENTWRITE)) {
-			System.out.println("Found TWrite: " + hop.getName());
-			_transientHops.compute(hop.getName(), (key, hops) -> {
-				if (hops == null)
-					return new ArrayList<>(List.of(hop));
-				hops.add(hop);
-				return hops;
-			});
-			return;
-		}*/
-
 		if (HopRewriteUtils.isData(hop, OpOpData.TRANSIENTREAD) && hop.getDataType().isMatrix()) {
-			//if (teeTransientVars.contains(hop.getName()))
-			//	return;
-
-			System.out.println("Found TRead: " + hop);
-
 			_transientVars.compute(hop.getName(), (key, ctr) -> {
 				int incr = (isRewriteCandidate || forceTee) ? 2 : 1;
 
@@ -276,13 +198,11 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 				continue;
 
 			for (Hop affectedHops : tHops) {
-				applyTopDownTeeRewrite(affectedHops); // TODO after PRead -> tee -> TWrite must follow
+				applyTopDownTeeRewrite(affectedHops);
 			}
 
 			tHops.clear();
 		}
-
-		System.out.println("TeeTransientVars: " + teeTransientVars);
 
 		return List.of(sb);
 	}
@@ -306,14 +226,10 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 			}
 		}
 
-		System.out.println("TeeTransientVars: " + teeTransientVars);
-
 		return sbs;
 	}
 
 	private void rewriteSB(StatementBlock sb, ProgramRewriteStatus state) {
-		System.out.println("Hops: " + sb.getClass().getName());
-
 		rewriteCandidates.clear();
 
 		if (sb.getHops() != null) {
