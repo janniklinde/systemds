@@ -54,11 +54,11 @@ public class PCATest extends AutomatedTestBase {
 	}
 
 	@Test
-	public void testReplaceDense() {
-		runReplaceTest(16);
+	public void testPCA() {
+		runPCATest(16);
 	}
 
-	private void runReplaceTest(int k) {
+	private void runPCATest(int k) {
 		Types.ExecMode platformOld = setExecMode(Types.ExecMode.SINGLE_NODE);
 
 		try {
