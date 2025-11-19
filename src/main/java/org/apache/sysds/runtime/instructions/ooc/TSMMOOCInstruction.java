@@ -77,14 +77,17 @@ public class TSMMOOCInstruction extends ComputationOOCInstruction {
 		}
 		
 		int dim = _type.isLeft() ? nCols : nRows;
-		MatrixBlock resultBlock = new MatrixBlock(dim, dim, false);
+		MatrixBlock resultBlock = null;//= new MatrixBlock(dim, dim, false);
 		try {
 			IndexedMatrixValue tmp = null;
 			// aggregate partial tsmm outputs into result as inputs stream in
 			while((tmp = qIn.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
 				MatrixBlock partialResult = ((MatrixBlock) tmp.getValue())
 					.transposeSelfMatrixMultOperations(new MatrixBlock(), _type);
-				resultBlock.binaryOperationsInPlace(plus, partialResult);
+				if (resultBlock == null)
+					resultBlock = partialResult;
+				else
+					resultBlock.binaryOperationsInPlace(plus, partialResult);
 			}
 		}
 		catch(Exception ex) {
