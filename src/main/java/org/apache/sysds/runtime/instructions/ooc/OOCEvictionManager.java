@@ -84,7 +84,7 @@ import java.util.concurrent.locks.ReentrantLock;
 public class OOCEvictionManager {
 
 	// Configuration: OOC buffer limit as percentage of heap
-	private static final double OOC_BUFFER_PERCENTAGE = 0.15 * 0.01 * 2; // 15% of heap
+	private static final double OOC_BUFFER_PERCENTAGE = 0.15 * 2; // 15% of heap
 
 	private static final double PARTITION_EVICTION_SIZE = 64 * 1024 * 1024; // 64 MB
 
@@ -170,6 +170,15 @@ public class OOCEvictionManager {
 		LocalFileUtils.createLocalFileIfNotExist(_spillDir);
 	}
 
+	public static void reset() {
+		_size.set(0);
+		_cache.clear();
+		_spillLocations.clear();
+		_partitions.clear();
+		_partitionCounter.set(0);
+		_streamPartitions.clear();
+	}
+
 	/**
 	 * Store a block in the OOC cache (serialize once)
 	 */
@@ -210,7 +219,7 @@ public class OOCEvictionManager {
 
 		synchronized (_cacheLock) {
 			imv = _cache.get(key);
-			System.err.println( "value of imv: " + imv);
+			//System.err.println( "value of imv: " + imv);
 			if (imv != null && _policy == RPolicy.LRU) {
 				_cache.remove(key);
 				_cache.put(key, imv); //add last semantic
@@ -252,7 +261,7 @@ public class OOCEvictionManager {
 	private static void evict() {
 		long currentSize = _size.get();
 		if (_size.get() <= _limit) { // only trigger eviction, if filled.
-			System.err.println("Evicting condition: " + _size.get() + "/" + _limit);
+			//System.err.println("Evicting condition: " + _size.get() + "/" + _limit);
 			return;
 		}
 

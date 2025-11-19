@@ -33,6 +33,10 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 
 	private static ConcurrentHashMap<String, CachingStream> createdCachingStreams = new ConcurrentHashMap<>();
 
+	public static void reset() {
+		createdCachingStreams.clear();
+	}
+
 	protected TeeOOCInstruction(OOCType type, CPOperand in1, CPOperand out, String opcode, String istr) {
 		super(type, null, in1, out, opcode, istr);
 	}
