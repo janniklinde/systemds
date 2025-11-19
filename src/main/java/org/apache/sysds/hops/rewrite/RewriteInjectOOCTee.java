@@ -264,6 +264,9 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 
 	@Override
 	public List<StatementBlock> rewriteStatementBlock(StatementBlock sb, ProgramRewriteStatus state) {
+		if (!DMLScript.USE_OOC)
+			return List.of(sb);
+
 		rewriteSB(sb, state);
 
 		for (String tVar : teeTransientVars) {
@@ -286,6 +289,9 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 
 	@Override
 	public List<StatementBlock> rewriteStatementBlocks(List<StatementBlock> sbs, ProgramRewriteStatus state) {
+		if (!DMLScript.USE_OOC)
+			return sbs;
+
 		for (StatementBlock sb : sbs)
 			rewriteSB(sb, state);
 
