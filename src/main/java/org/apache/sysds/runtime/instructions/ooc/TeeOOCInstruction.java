@@ -51,8 +51,7 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 		MatrixObject min = ec.getMatrixObject(input1);
 		OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
 
-		System.out.println("Avail " + input1.getName() + ": "  + createdCachingStreams.containsKey(input1.getName()));
-		CachingStream handle = createdCachingStreams.compute(input1.getName(), (k, v) -> v == null ? new CachingStream(qIn) : v);
+		CachingStream handle = qIn.hasStreamCache() ? qIn.getStreamCache() : createdCachingStreams.compute(input1.getName(), (k, v) -> v == null ? new CachingStream(qIn) : v);
 
 		//get output and create new resettable stream
 		MatrixObject mo = ec.getMatrixObject(output);
