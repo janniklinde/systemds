@@ -137,10 +137,11 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 			return;
 		}
 
-		/*if (sharedInput instanceof DataOp && ((DataOp) sharedInput).getOp() == OpOpData.TRANSIENTREAD) {
-			System.out.println("DataOp: " + sharedInput.getName() + ", " + ((DataOp) sharedInput).getInput());
-			return;
-		}*/
+		int consumerCount = sharedInput.getParent().size();
+		if (LOG.isDebugEnabled()) {
+			LOG.debug("Inject tee for hop " + sharedInput.getHopID() + " ("
+				+ sharedInput.getName() + "), consumers=" + consumerCount);
+		}
 
 		// Take a defensive copy of consumers before modifying the graph
 		ArrayList<Hop> consumers = new ArrayList<>(sharedInput.getParent());
@@ -159,6 +160,11 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 		// Record that we've handled this hop
 		handledHop.put(sharedInput.getHopID(), teeOp);
 		rewrittenHops.add(sharedInput.getHopID());
+
+		if (LOG.isDebugEnabled()) {
+			LOG.debug("Created tee hop " + teeOp.getHopID() + " -> "
+				+ teeOp.getName());
+		}
 	}
 
 	@SuppressWarnings("unused")
@@ -204,6 +210,8 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 			tHops.clear();
 		}
 
+		removeRedundantTeeChains(sb);
+
 		return List.of(sb);
 	}
 
@@ -226,6 +234,9 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 			}
 		}
 
+		for (StatementBlock sb : sbs)
+			removeRedundantTeeChains(sb);
+
 		return sbs;
 	}
 
@@ -242,5 +253,39 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 		for (Hop candidate : rewriteCandidates) {
 			applyTopDownTeeRewrite(candidate);
 		}
+	}
+
+	private void removeRedundantTeeChains(StatementBlock sb) {
+		if (sb == null || sb.getHops() == null)
+			return;
+
+		Hop.resetVisitStatus(sb.getHops());
+		for (Hop hop : sb.getHops())
+			removeRedundantTeeChains(hop);
+		Hop.resetVisitStatus(sb.getHops());
+	}
+
+	private void removeRedundantTeeChains(Hop hop) {
+		if (hop.isVisited())
+			return;
+
+		ArrayList<Hop> inputs = new ArrayList<>(hop.getInput());
+		for (Hop in : inputs)
+			removeRedundantTeeChains(in);
+
+		if (HopRewriteUtils.isData(hop, OpOpData.TEE) && hop.getInput().size() == 1) {
+			Hop teeInput = hop.getInput().get(0);
+			if (HopRewriteUtils.isData(teeInput, OpOpData.TEE)) {
+				if (LOG.isDebugEnabled()) {
+					LOG.debug("Remove redundant tee hop " + hop.getHopID()
+						+ " (" + hop.getName() + ") -> " + teeInput.getHopID()
+						+ " (" + teeInput.getName() + ")");
+				}
+				HopRewriteUtils.rewireAllParentChildReferences(hop, teeInput);
+				HopRewriteUtils.removeAllChildReferences(hop);
+			}
+		}
+
+		hop.setVisited();
 	}
 }
