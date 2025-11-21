@@ -162,6 +162,12 @@ public abstract class OOCInstruction extends Instruction {
 		leftCache.activateIndexing();
 		rightCache.activateIndexing();
 
+		if (!explicitLeftCaching)
+			leftCache.incrSubscriberCount(1); // Prevent early block deletion as we may read elements twice
+
+		if (!explicitRightCaching)
+			rightCache.incrSubscriberCount(1);
+
 		Map<P, List<MatrixIndexes>> availableLeftInput = new ConcurrentHashMap<>();
 		Map<P, BroadcastedElement> availableBroadcastInput = new ConcurrentHashMap<>();
 
@@ -183,11 +189,22 @@ public abstract class OOCInstruction extends Instruction {
 						return v;
 					});
 				} else {
+					if (!explicitLeftCaching)
+						leftCache.incrProcessingCount(leftCache.findCachedIndex(tmp.getIndexes()), 1); // Correct for incremented subscriber count to allow block deletion
+
+					b.value = rightCache.peekCached(b.idx);
+
 					// Directly emit
 					qOut.enqueue(mapper.apply(tmp, b));
 
-					if (b.canRelease())
+					b.value = null;
+
+					if (b.canRelease()) {
 						availableBroadcastInput.remove(key);
+
+						if (!explicitRightCaching)
+							rightCache.incrProcessingCount(rightCache.findCachedIndex(b.idx), 1); // Correct for incremented subscriber count to allow block deletion
+					}
 				}
 			} else { // broadcast stream
 				if (explicitRightCaching)
@@ -200,16 +217,26 @@ public abstract class OOCInstruction extends Instruction {
 
 				if (queued != null) {
 					for(MatrixIndexes idx : queued) {
-						b.value = rightCache.findCached(b.idx);
+						b.value = rightCache.peekCached(b.idx); // Only peek to prevent block deletion
 						qOut.enqueue(mapper.apply(leftCache.findCached(idx), b));
 						b.value = null;
 					}
 				}
 
-				if (b.canRelease())
+				if (b.canRelease()) {
 					availableBroadcastInput.remove(key);
+
+					if (!explicitRightCaching)
+						rightCache.incrProcessingCount(rightCache.findCachedIndex(tmp.getIndexes()), 1); // Correct for incremented subscriber count to allow block deletion
+				}
 			}
-		}, qOut::closeInput);
+		}, () -> {
+			availableBroadcastInput.forEach((k, v) -> {
+				rightCache.incrProcessingCount(rightCache.findCachedIndex(v.idx), 1);
+			});
+			availableBroadcastInput.clear();
+			qOut.closeInput();
+		});
 
 		if (explicitLeftCaching)
 			leftCache.scheduleDeletion();
@@ -272,6 +299,9 @@ public abstract class OOCInstruction extends Instruction {
 		leftCache.activateIndexing();
 		rightCache.activateIndexing();
 
+		leftCache.incrSubscriberCount(1);
+		rightCache.incrSubscriberCount(1);
+
 		final OOCJoin<P, MatrixIndexes> join = new OOCJoin<>((idx, left, right) -> {
 			T leftObj = (T) leftCache.findCached(left);
 			T rightObj = (T) rightCache.findCached(right);
@@ -289,11 +319,10 @@ public abstract class OOCInstruction extends Instruction {
 			future.complete(null);
 		});
 
-		// TODO Proper deletion scheduling
-		/*if (explicitLeftCaching)
+		if (explicitLeftCaching)
 			leftCache.scheduleDeletion();
 		if (explicitRightCaching)
-			rightCache.scheduleDeletion();*/
+			rightCache.scheduleDeletion();
 
 		return future;
 	}

@@ -30,6 +30,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreama
 	public PlaybackStream(CachingStream streamCache) {
 		this._streamCache = streamCache;
 		this._streamIdx = 0;
+		streamCache.incrSubscriberCount(1);
 	}
 
 	@Override
@@ -75,7 +76,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreama
 
 	@Override
 	public void setSubscriber(Runnable subscriber) {
-		_streamCache.setSubscriber(subscriber);
+		_streamCache.setSubscriber(subscriber, false);
 	}
 
 	@Override

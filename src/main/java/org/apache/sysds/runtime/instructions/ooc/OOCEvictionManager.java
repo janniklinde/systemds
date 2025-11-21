@@ -84,7 +84,7 @@ import java.util.concurrent.locks.ReentrantLock;
 public class OOCEvictionManager {
 
 	// Configuration: OOC buffer limit as percentage of heap
-	private static final double OOC_BUFFER_PERCENTAGE = 0.15 * 2; // 15% of heap
+	private static final double OOC_BUFFER_PERCENTAGE = 0.15; // 15% of heap
 
 	private static final double PARTITION_EVICTION_SIZE = 64 * 1024 * 1024; // 64 MB
 
@@ -180,6 +180,27 @@ public class OOCEvictionManager {
 	}
 
 	/**
+	 * Removes a block from the cache without setting its data to null.
+	 */
+	public static void softDelete(long streamId, int blockId) {
+		BlockEntry e;
+		synchronized (_cacheLock) {
+			e = _cache.remove(streamId + "_" + blockId);
+		}
+
+		if (e != null) {
+			e.lock.lock();
+			try {
+				if (e.state == BlockState.HOT)
+					_size.addAndGet(-e.size);
+			} finally {
+				e.lock.unlock();
+			}
+			System.out.println("Soft-deleted cached block " + streamId + "_" + blockId);
+		}
+	}
+
+	/**
 	 * Store a block in the OOC cache (serialize once)
 	 */
 	public static void put(long streamId, int blockId, IndexedMatrixValue value) {
@@ -261,7 +282,7 @@ public class OOCEvictionManager {
 	private static void evict() {
 		long currentSize = _size.get();
 		if (_size.get() <= _limit) { // only trigger eviction, if filled.
-			//System.err.println("Evicting condition: " + _size.get() + "/" + _limit);
+			System.err.println("Evicting condition: " + _size.get() + "/" + _limit);
 			return;
 		}
 

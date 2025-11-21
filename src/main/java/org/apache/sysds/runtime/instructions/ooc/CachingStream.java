@@ -57,7 +57,8 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	private DMLRuntimeException _failure;
 
 	private boolean deletable = false;
-	private int maxConsumptionCount = Integer.MAX_VALUE;
+	private int maxConsumptionCount = 0;
+	private int cachePins = 0;
 
 	public CachingStream(OOCStream<IndexedMatrixValue> source) {
 		this(source, _streamSeq.getNextID());
@@ -124,21 +125,33 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	public synchronized void scheduleDeletion() {
 		deletable = true;
 		// TODO go through old blocks
-		if (_cacheInProgress && _subscribers == null)
+		if (_cacheInProgress && maxConsumptionCount == 0)
 			throw new DMLRuntimeException("Cannot have a caching stream with no listeners");
-		maxConsumptionCount = _subscribers == null ? 0 : _subscribers.length; // TODO what if subscribers are null?
 		for (int i = 0; i < _consumptionCounts.size(); i++) {
-			if (_consumptionCounts.getInt(i) >= maxConsumptionCount)
-				deleteBlock(i);
+			tryDeleteBlock(i);
 		}
+	}
+
+	/**
+	 * Removes all blocks from the cache. Use carefully if you know that there are no additional references
+	 */
+	public synchronized void forceDelete() {
+
 	}
 
 	public String toString() {
 		return "CachingStream@" + hashCode();
 	}
 
-	private void deleteBlock(int i) {
-		System.out.println("Could evict block of stream " + _streamId + ": " + i);
+	private synchronized void tryDeleteBlock(int i) {
+		if (cachePins > 0)
+			return; // Block deletion is prevented
+
+		int count = _consumptionCounts.getInt(i);
+		if (count > maxConsumptionCount)
+			throw new DMLRuntimeException("Cannot have more than " + maxConsumptionCount + " consumptions.");
+		if (count == maxConsumptionCount)
+			OOCEvictionManager.softDelete(_streamId, i);
 	}
 
 	public synchronized IndexedMatrixValue get(int idx) throws InterruptedException {
@@ -152,10 +165,14 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 					_index.putIfAbsent(out.getIndexes(), idx);
 
 				int newCount = _consumptionCounts.getInt(idx)+1;
+
+				if (newCount > maxConsumptionCount)
+					throw new DMLRuntimeException("Consumer overflow! Expected: " + maxConsumptionCount);
+
 				_consumptionCounts.set(idx, newCount);
 
-				if (deletable && newCount >= maxConsumptionCount)
-					deleteBlock(idx);
+				if (deletable)
+					tryDeleteBlock(idx);
 
 				return out;
 			} else if (!_cacheInProgress)
@@ -165,14 +182,30 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		}
 	}
 
+	public synchronized int findCachedIndex(MatrixIndexes idx) {
+		return _index.get(idx);
+	}
+
 	public synchronized IndexedMatrixValue findCached(MatrixIndexes idx) {
 		int mIdx = _index.get(idx);
-		int newCount =  _consumptionCounts.getInt(mIdx)+1;
+		int newCount = _consumptionCounts.getInt(mIdx)+1;
+		if (newCount > maxConsumptionCount)
+			throw new DMLRuntimeException("Consumer overflow in " + _streamId + "_" + mIdx + ". Expected: " + maxConsumptionCount);
 		_consumptionCounts.set(mIdx, newCount);
 
-		if (deletable && newCount >= maxConsumptionCount)
-			deleteBlock(mIdx);
+		IndexedMatrixValue imv = OOCEvictionManager.get(_streamId, mIdx);
 
+		if (deletable)
+			tryDeleteBlock(mIdx);
+
+		return imv;
+	}
+
+	/**
+	 * Finds a cached item without counting it as a consumption.
+	 */
+	public synchronized IndexedMatrixValue peekCached(MatrixIndexes idx) {
+		int mIdx = _index.get(idx);
 		return OOCEvictionManager.get(_streamId, mIdx);
 	}
 
@@ -198,12 +231,18 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	@Override
 	public void setSubscriber(Runnable subscriber) {
+		setSubscriber(subscriber, true);
+	}
+
+	public void setSubscriber(Runnable subscriber, boolean incrConsumers) {
 		if (deletable)
 			throw new DMLRuntimeException("Cannot register a new subscriber on a stream that has been flagged for deletion");
 
 		int mNumBlocks;
 		synchronized (this) {
 			mNumBlocks = _numBlocks;
+			if (incrConsumers)
+				maxConsumptionCount++;
 			if (_cacheInProgress) {
 				int newLen = _subscribers == null ? 1 : _subscribers.length + 1;
 				Runnable[] newSubscribers = new Runnable[newLen];
@@ -221,5 +260,42 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 		if (!_cacheInProgress)
 			subscriber.run(); // To fetch the NO_MORE_TASK element
+	}
+
+	/**
+	 * Artificially increase subscriber count.
+	 * Only use if certain blocks are accessed more than once.
+	 */
+	public synchronized void incrSubscriberCount(int count) {
+		maxConsumptionCount += count;
+	}
+
+	/**
+	 * Artificially increase the processing count of a block.
+	 */
+	public synchronized void incrProcessingCount(int i, int count) {
+		_consumptionCounts.set(i, _consumptionCounts.getInt(i)+count);
+
+		if (deletable)
+			tryDeleteBlock(i);
+	}
+
+	/**
+	 * Force pins blocks in the cache to not be subject to block deletion.
+	 */
+	public synchronized void pinStream() {
+		cachePins++;
+	}
+
+	/**
+	 * Unpins the stream, allowing blocks to be deleted from cache.
+	 */
+	public synchronized void unpinStream() {
+		cachePins--;
+
+		if (cachePins == 0) {
+			for (int i = 0; i < _consumptionCounts.size(); i++)
+				tryDeleteBlock(i);
+		}
 	}
 }
