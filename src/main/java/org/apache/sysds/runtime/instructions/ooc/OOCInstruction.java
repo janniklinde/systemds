@@ -165,7 +165,7 @@ public abstract class OOCInstruction extends Instruction {
 		Map<P, List<MatrixIndexes>> availableLeftInput = new ConcurrentHashMap<>();
 		Map<P, BroadcastedElement> availableBroadcastInput = new ConcurrentHashMap<>();
 
-		return submitOOCTasks(List.of(qIn, broadcast), (i, tmp) -> {
+		CompletableFuture<Void> future = submitOOCTasks(List.of(qIn, broadcast), (i, tmp) -> {
 			P key = on.apply(tmp);
 
 			if (i == 0) { // qIn stream
@@ -210,6 +210,13 @@ public abstract class OOCInstruction extends Instruction {
 					availableBroadcastInput.remove(key);
 			}
 		}, qOut::closeInput);
+
+		if (explicitLeftCaching)
+			leftCache.scheduleDeletion();
+		if (explicitRightCaching)
+			rightCache.scheduleDeletion();
+
+		return future;
 	}
 
 	protected static class BroadcastedElement {
@@ -256,9 +263,12 @@ public abstract class OOCInstruction extends Instruction {
 
 		final CompletableFuture<Void> future = new CompletableFuture<>();
 
+		boolean explicitLeftCaching = !qIn1.hasStreamCache();
+		boolean explicitRightCaching = !qIn2.hasStreamCache();
+
 		// We need to construct our own stream to properly manage the cached items in the hash join
-		CachingStream leftCache = qIn1.hasStreamCache() ? qIn1.getStreamCache() : new CachingStream((SubscribableTaskQueue<IndexedMatrixValue>)qIn1); // We have to assume this generic type for now
-		CachingStream rightCache = qIn2.hasStreamCache() ? qIn2.getStreamCache() : new CachingStream((SubscribableTaskQueue<IndexedMatrixValue>)qIn2); // We have to assume this generic type for now
+		CachingStream leftCache = explicitLeftCaching ? new CachingStream((OOCStream<IndexedMatrixValue>) qIn1) : qIn1.getStreamCache();
+		CachingStream rightCache = explicitRightCaching ? new CachingStream((OOCStream<IndexedMatrixValue>) qIn2) : qIn2.getStreamCache();
 		leftCache.activateIndexing();
 		rightCache.activateIndexing();
 
@@ -278,6 +288,12 @@ public abstract class OOCInstruction extends Instruction {
 			qOut.closeInput();
 			future.complete(null);
 		});
+
+		// TODO Proper deletion scheduling
+		/*if (explicitLeftCaching)
+			leftCache.scheduleDeletion();
+		if (explicitRightCaching)
+			rightCache.scheduleDeletion();*/
 
 		return future;
 	}

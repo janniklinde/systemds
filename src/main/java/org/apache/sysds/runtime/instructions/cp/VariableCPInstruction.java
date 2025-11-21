@@ -46,6 +46,8 @@ import org.apache.sysds.runtime.data.TensorBlock;
 import org.apache.sysds.runtime.frame.data.FrameBlock;
 import org.apache.sysds.runtime.instructions.Instruction;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
+import org.apache.sysds.runtime.instructions.ooc.CachingStream;
+import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.io.FileFormatProperties;
 import org.apache.sysds.runtime.io.FileFormatPropertiesCSV;
 import org.apache.sysds.runtime.io.FileFormatPropertiesHDF5;
@@ -1025,6 +1027,9 @@ public class VariableCPInstruction extends CPInstruction implements LineageTrace
 
 		if ( dd == null )
 			throw new DMLRuntimeException("Unexpected error: could not find a data object for variable name:" + getInput1().getName() + ", while processing instruction " +this.toString());
+
+		if (DMLScript.USE_OOC && dd instanceof MatrixObject && ((MatrixObject)dd).getStreamable() instanceof CachingStream)
+			TeeOOCInstruction.registerCachingStreamConsumer((CachingStream)((MatrixObject)dd).getStreamable(), getInput2().getName());
 
 		// remove existing variable bound to target name
 		Data input2_data = ec.removeVariable(getInput2().getName());

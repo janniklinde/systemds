@@ -50,6 +50,7 @@ import org.apache.sysds.runtime.instructions.cp.ScalarObjectFactory;
 import org.apache.sysds.runtime.instructions.gpu.context.CSRPointer;
 import org.apache.sysds.runtime.instructions.gpu.context.GPUContext;
 import org.apache.sysds.runtime.instructions.gpu.context.GPUObject;
+import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.lineage.Lineage;
 import org.apache.sysds.runtime.lineage.LineageCacheConfig;
 import org.apache.sysds.runtime.lineage.LineageDebugger;
@@ -237,7 +238,10 @@ public class ExecutionContext {
 	}
 
 	public Data removeVariable(String name) {
-		return _variables.remove(name);
+		Data removed = _variables.remove(name);
+		if (DMLScript.USE_OOC && removed instanceof MatrixObject)
+			TeeOOCInstruction.flagForDeletion(((MatrixObject) removed).getStreamable(), name);
+		return removed;
 	}
 
 	public void setMetaData(String fname, MetaData md) {

@@ -491,6 +491,10 @@ public abstract class CacheableData<T extends CacheBlock<?>> extends Data
 		
 		return _streamHandle.getReadStream();
 	}
+
+	public OOCStreamable<IndexedMatrixValue> getStreamable() {
+		return _streamHandle;
+	}
 	
 	/**
 	 * Probes if stream handle is existing, because <code>getStreamHandle</code>
