@@ -139,7 +139,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	}
 
 	public String toString() {
-		return "CachingStream@" + hashCode();
+		return "CachingStream@" + _streamId;
 	}
 
 	private synchronized void tryDeleteBlock(int i) {

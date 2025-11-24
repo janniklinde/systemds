@@ -196,7 +196,7 @@ public class OOCEvictionManager {
 			} finally {
 				e.lock.unlock();
 			}
-			System.out.println("Soft-deleted cached block " + streamId + "_" + blockId);
+			System.out.println("Removed block " + streamId + "_" + blockId + " from cache (idx: " + (e.value != null ? e.value.getIndexes() : "?") + ")");
 		}
 	}
 
