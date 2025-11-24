@@ -130,11 +130,15 @@ public abstract class OOCInstruction extends Instruction {
 		return new SubscribableTaskQueue<>();
 	}
 
-	protected <T, R> CompletableFuture<Void> filterOOC(OOCStream<T> qIn, Consumer<T> processor, Function<T, Boolean> predicate, Runnable finalizer) {
+	protected <T> CompletableFuture<Void> filterOOC(OOCStream<T> qIn, Consumer<T> processor, Function<T, Boolean> predicate, Runnable finalizer) {
+		return filterOOC(qIn, processor, predicate, finalizer, null);
+	}
+
+	protected <T> CompletableFuture<Void> filterOOC(OOCStream<T> qIn, Consumer<T> processor, Function<T, Boolean> predicate, Runnable finalizer, Consumer<T> onNotProcessed) {
 		if (_inQueues == null || _outQueues == null)
 			throw new NotImplementedException("filterOOC requires manual specification of all input and output streams for error propagation");
 
-		return submitOOCTasks(qIn, processor, finalizer, predicate);
+		return submitOOCTasks(qIn, processor, finalizer, predicate, onNotProcessed != null ? (i, tmp) -> onNotProcessed.accept(tmp) : null);
 	}
 
 	protected <T, R> CompletableFuture<Void> mapOOC(OOCStream<T> qIn, OOCStream<R> qOut, Function<T, R> mapper) {
@@ -328,15 +332,19 @@ public abstract class OOCInstruction extends Instruction {
 	}
 
 	protected <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues, BiConsumer<Integer, T> consumer, Runnable finalizer) {
+		return submitOOCTasks(queues, consumer, finalizer, null);
+	}
+
+	protected <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues, BiConsumer<Integer, T> consumer, Runnable finalizer, BiConsumer<Integer, T> onNotProcessed) {
 		List<CompletableFuture<Void>> futures = new ArrayList<>(queues.size());
 
 		for (int i = 0; i < queues.size(); i++)
 			futures.add(new CompletableFuture<>());
 
-		return submitOOCTasks(queues, consumer, finalizer, futures, null);
+		return submitOOCTasks(queues, consumer, finalizer, futures, null, onNotProcessed);
 	}
 
-	protected <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues, BiConsumer<Integer, T> consumer, Runnable finalizer, List<CompletableFuture<Void>> futures, BiFunction<Integer, T, Boolean> predicate) {
+	protected <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues, BiConsumer<Integer, T> consumer, Runnable finalizer, List<CompletableFuture<Void>> futures, BiFunction<Integer, T, Boolean> predicate, BiConsumer<Integer, T> onNotProcessed) {
 		addInStream(queues.toArray(OOCStream[]::new));
 		ExecutorService pool = CommonThreadPool.get();
 
@@ -370,14 +378,26 @@ public abstract class OOCInstruction extends Instruction {
 			queue.setSubscriber(oocTask(() -> {
 				final T item = queue.dequeue();
 
-				if (predicate != null && item != null && !predicate.apply(k, item)) // Can get closed due to cancellation
+				if (predicate != null && item != null && !predicate.apply(k, item)) { // Can get closed due to cancellation
+					if (onNotProcessed != null)
+						onNotProcessed.accept(k, item);
 					return;
+				}
+
+				boolean done = false;
 
 				synchronized (globalLock) {
-					if (localFuture.isDone())
-						return;
+					if (localFuture.isDone()) {
+						done = true;
+					} else {
+						globalTaskCtr.incrementAndGet();
+					}
+				}
 
-					globalTaskCtr.incrementAndGet();
+				if (done) {
+					if (onNotProcessed != null)
+						onNotProcessed.accept(k, item);
+					return;
 				}
 
 				localTaskCtr.incrementAndGet();
@@ -449,8 +469,8 @@ public abstract class OOCInstruction extends Instruction {
 		return submitOOCTasks(List.of(queue), (i, tmp) -> consumer.accept(tmp), finalizer);
 	}
 
-	protected <T> CompletableFuture<Void> submitOOCTasks(OOCStream<T> queue, Consumer<T> consumer, Runnable finalizer, Function<T, Boolean> predicate) {
-		return submitOOCTasks(List.of(queue), (i, tmp) -> consumer.accept(tmp), finalizer, List.of(new CompletableFuture<Void>()), (i, tmp) -> predicate.apply(tmp));
+	protected <T> CompletableFuture<Void> submitOOCTasks(OOCStream<T> queue, Consumer<T> consumer, Runnable finalizer, Function<T, Boolean> predicate, BiConsumer<Integer, T> onNotProcessed) {
+		return submitOOCTasks(List.of(queue), (i, tmp) -> consumer.accept(tmp), finalizer, List.of(new CompletableFuture<Void>()), (i, tmp) -> predicate.apply(tmp), onNotProcessed);
 	}
 
 	protected CompletableFuture<Void> submitOOCTask(Runnable r, OOCStream<?>... queues) {

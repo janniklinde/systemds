@@ -124,7 +124,6 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	public synchronized void scheduleDeletion() {
 		deletable = true;
-		// TODO go through old blocks
 		if (_cacheInProgress && maxConsumptionCount == 0)
 			throw new DMLRuntimeException("Cannot have a caching stream with no listeners");
 		for (int i = 0; i < _consumptionCounts.size(); i++) {

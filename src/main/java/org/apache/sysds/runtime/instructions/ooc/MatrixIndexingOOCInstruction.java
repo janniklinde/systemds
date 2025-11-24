@@ -149,6 +149,7 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 			boolean hasIntermediateStream = !qIn.hasStreamCache();
 			final CachingStream cachedStream = hasIntermediateStream ? new CachingStream(new SubscribableTaskQueue<>()) : qOut.getStreamCache();
 			cachedStream.activateIndexing();
+			cachedStream.incrSubscriberCount(1); // We may require double consumption of blocks
 
 			CompletableFuture<Void> future = filterOOC(qIn.getReadStream(), tmp -> {
 				if (hasIntermediateStream) {
@@ -232,8 +233,15 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 			}, () -> {
 				aligner.close();
 				qOut.closeInput();
+			}, tmp -> {
+				// If elements are not processed in an existing caching stream, we increment the process counter to allow block deletion
+				if (!hasIntermediateStream)
+					cachedStream.incrProcessingCount(cachedStream.findCachedIndex(tmp.getIndexes()), 1);
 			});
 			futureRef.set(future);
+
+			if (hasIntermediateStream)
+				cachedStream.scheduleDeletion(); // We can immediately delete blocks after consumption
 		}
 		//left indexing
 		else if(opcode.equalsIgnoreCase(Opcodes.LEFT_INDEX.toString())) {
