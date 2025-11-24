@@ -115,6 +115,34 @@ public abstract class IndexingOOCInstruction extends UnaryOOCInstruction {
 			return (indexRange.rowStart % _blocksize) == 0 && (indexRange.colStart % _blocksize) == 0;
 		}
 
+		public int getNumConsumptions(MatrixIndexes index) {
+			long blockRow = index.getRowIndex() - 1;
+			long blockCol = index.getColumnIndex() - 1;
+
+			if(!blockRange.isWithin(blockRow, blockCol))
+				return 0;
+
+			long blockRowStart = blockRow * _blocksize;
+			long blockRowEnd = blockRowStart + _blocksize - 1;
+			long blockColStart = blockCol * _blocksize;
+			long blockColEnd = blockColStart + _blocksize - 1;
+
+			long overlapRowStart = Math.max(indexRange.rowStart, blockRowStart);
+			long overlapRowEnd = Math.min(indexRange.rowEnd, blockRowEnd);
+			long overlapColStart = Math.max(indexRange.colStart, blockColStart);
+			long overlapColEnd = Math.min(indexRange.colEnd, blockColEnd);
+
+			if(overlapRowStart > overlapRowEnd || overlapColStart > overlapColEnd)
+				return 0;
+
+			int outRowStart = (int) ((overlapRowStart - indexRange.rowStart) / _blocksize);
+			int outRowEnd = (int) ((overlapRowEnd - indexRange.rowStart) / _blocksize);
+			int outColStart = (int) ((overlapColStart - indexRange.colStart) / _blocksize);
+			int outColEnd = (int) ((overlapColEnd - indexRange.colStart) / _blocksize);
+
+			return (outRowEnd - outRowStart + 1) * (outColEnd - outColStart + 1);
+		}
+
 		public boolean putNext(MatrixIndexes index, T data, BiConsumer<MatrixIndexes, Sector<T>> emitter) {
 			long blockRow = index.getRowIndex() - 1;
 			long blockCol = index.getColumnIndex() - 1;
