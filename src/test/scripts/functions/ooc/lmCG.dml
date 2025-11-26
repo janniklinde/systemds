@@ -22,5 +22,5 @@
 X = read($1)
 y = read($2)
 C = lmCG(X = X, y = y, reg = 1e-12)
-write(C, $3)
+write(C, $3, format="binary")
 
