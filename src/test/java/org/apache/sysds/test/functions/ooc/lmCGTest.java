@@ -57,22 +57,22 @@ public class lmCGTest extends AutomatedTestBase {
 	}
 
 	@Test
-	public void testContainsDense() {
+	public void testlmCGDense() {
 		boolean allow_opfusion = OptimizerUtils.ALLOW_OPERATOR_FUSION;
 		OptimizerUtils.ALLOW_OPERATOR_FUSION = false; // some fused ops are not implemented yet
-		runContainsTest(false);
+		runLmCGTest(false);
 		OptimizerUtils.ALLOW_OPERATOR_FUSION = allow_opfusion;
 	}
 
 	@Test
-	public void testContainsSparse() {
+	public void testLmCGSparse() {
 		boolean allow_opfusion = OptimizerUtils.ALLOW_OPERATOR_FUSION;
 		OptimizerUtils.ALLOW_OPERATOR_FUSION = false; // some fused ops are not implemented yet
-		runContainsTest(true);
+		runLmCGTest(true);
 		OptimizerUtils.ALLOW_OPERATOR_FUSION = allow_opfusion;
 	}
 
-	private void runContainsTest(boolean sparse) {
+	private void runLmCGTest(boolean sparse) {
 		Types.ExecMode platformOld = setExecMode(Types.ExecMode.SINGLE_NODE);
 
 		try {
@@ -80,7 +80,7 @@ public class lmCGTest extends AutomatedTestBase {
 
 			String HOME = SCRIPT_DIR + TEST_DIR;
 			fullDMLScriptName = HOME + TEST_NAME1 + ".dml";
-			programArgs = new String[] {"-explain", "-stats", "-ooc", "-args", input(INPUT_NAME_1), input(INPUT_NAME_2), output(OUTPUT_NAME)};
+			programArgs = new String[] {"-explain", /*"hops",*/ "-stats", "-ooc", "-args", input(INPUT_NAME_1), input(INPUT_NAME_2), output(OUTPUT_NAME)};
 
 			// 1. Generate the data in-memory as MatrixBlock objects
 			double[][] X_data = getRandomMatrix(rows, cols, 0, maxVal, sparse ? sparsity2 : sparsity1, 7);
@@ -117,9 +117,9 @@ public class lmCGTest extends AutomatedTestBase {
 
 			// compare matrices
 			MatrixBlock ret1 = DataConverter.readMatrixFromHDFS(output(OUTPUT_NAME),
-				Types.FileFormat.BINARY, 1, 1, 1000);
+				Types.FileFormat.BINARY, cols, 1, 1000);
 			MatrixBlock ret2 = DataConverter.readMatrixFromHDFS(output(OUTPUT_NAME + "_target"),
-				Types.FileFormat.BINARY, 1, 1, 1000);
+				Types.FileFormat.BINARY, cols, 1, 1000);
 			TestUtils.compareMatrices(ret1, ret2, eps);
 		}
 		catch(IOException e) {

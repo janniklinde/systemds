@@ -23,6 +23,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.sysds.common.InstructionType;
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.instructions.ooc.AggregateTernaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.AggregateUnaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.BinaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CSVReblockOOCInstruction;
@@ -64,6 +65,8 @@ public class OOCInstructionParser extends InstructionParser {
 				return CSVReblockOOCInstruction.parseInstruction(str);
 			case AggregateUnary:
 				return AggregateUnaryOOCInstruction.parseInstruction(str);
+			case AggregateTernary:
+				return AggregateTernaryOOCInstruction.parseInstruction(str);
 			case Unary:
 				return UnaryOOCInstruction.parseInstruction(str);
 			case Binary:
