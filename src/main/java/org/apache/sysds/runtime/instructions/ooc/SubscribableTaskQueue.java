@@ -38,6 +38,10 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 
 	@Override
 	public void enqueue(T t) {
+		// Disallow enqueues after logical close
+		if (_closed.get() || _closedInput)
+			throw new DMLRuntimeException("Cannot enqueue on a closed SubscribableTaskQueue");
+
 		// Fast path: subscriber already installed -> no monitor
 		Consumer<QueueCallback<T>> s = _subscriber.get();
 		if(s != null && !_closed.get()) {
@@ -70,15 +74,15 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 
 	@Override
 	public void closeInput() {
+		// Mark logically closed first to block racing enqueues
+		_closed.set(true);
+
 		// First close the underlying queue in its own synchronized semantics
 		synchronized(this) {
 			if(_closedInput)
 				return;
 			super.closeInput();
 		}
-
-		// Mark logically closed for the subscribers
-		_closed.set(true);
 
 		Consumer<QueueCallback<T>> s = _subscriber.get();
 		if(s == null) // No subscriber yet: NO_MORE_TASKS will be signalled on dequeue() path
@@ -129,8 +133,9 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		_inFlight.addAndGet(backlogSize);
 		for(T t : l) {
 			s.accept(new QueueCallback<>(t, _failure));
-			onDeliveryFinished(s);
 		}
+		_inFlight.addAndGet(-backlogSize);
+		trySendTerminal(s);
 	}
 
 	private void onDeliveryFinished(Consumer<QueueCallback<T>> s) {

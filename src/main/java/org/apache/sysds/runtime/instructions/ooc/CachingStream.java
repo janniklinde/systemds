@@ -72,11 +72,10 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 				final IndexedMatrixValue task = tmp.get();
 				int blk;
 
-				if(task != null && !_cacheInProgress)
-					throw new DMLRuntimeException("Stream is closed");
-
 				synchronized (this) {
 					if(task != LocalTaskQueue.NO_MORE_TASKS) {
+						if (!_cacheInProgress)
+							throw new DMLRuntimeException("Stream is closed");
 						OOCEvictionManager.put(_streamId, _numBlocks, task);
 						if (_index != null)
 							_index.put(task.getIndexes(), _numBlocks);
