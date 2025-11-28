@@ -25,47 +25,83 @@ import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import java.util.LinkedList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCStream<T> {
 
-	private final AtomicReference<Consumer<QueueCallback<T>>> _subscriber = new AtomicReference<>();
-
-	private final AtomicInteger _inFlight = new AtomicInteger(0);
+	private Consumer<QueueCallback<T>> _subscriber = null;
+	private final AtomicInteger _availableCtr = new AtomicInteger(1);
 	private final AtomicBoolean _closed = new AtomicBoolean(false);
-	private final AtomicBoolean _terminalSent = new AtomicBoolean(false);
+	private final String _watchdogId;
+
+	public SubscribableTaskQueue() {
+		_watchdogId = "STQ-" + hashCode();
+		// Capture a short context to help identify origin
+		String ctx = null;
+		try {
+			StackTraceElement[] st = new Exception().getStackTrace();
+			// Skip the first few frames (constructor, createWritableStream, etc.)
+			StringBuilder sb = new StringBuilder();
+			int limit = Math.min(st.length, 6);
+			for (int i = 1; i < limit; i++) {
+				sb.append(st[i].getClassName()).append(".").append(st[i].getMethodName())
+					.append(":").append(st[i].getLineNumber());
+				if (i < limit - 1)
+					sb.append(" <- ");
+			}
+			ctx = sb.toString();
+		}
+		catch (Exception ignored) {
+			// best-effort
+		}
+		TemporaryWatchdog.registerOpen(_watchdogId, "SubscribableTaskQueue@" + hashCode(), ctx);
+	}
 
 	@Override
 	public void enqueue(T t) {
-		// Disallow enqueues after logical close
-		if (_closed.get() || _closedInput)
-			throw new DMLRuntimeException("Cannot enqueue on a closed SubscribableTaskQueue");
+		if (t == NO_MORE_TASKS)
+			throw new DMLRuntimeException("Cannot enqueue NO_MORE_TASKS item");
 
-		// Fast path: subscriber already installed -> no monitor
-		Consumer<QueueCallback<T>> s = _subscriber.get();
-		if(s != null && !_closed.get()) {
-			// Count this task as in-flight
-			_inFlight.incrementAndGet();
+		int cnt = _availableCtr.incrementAndGet();
+
+		if (cnt <= 1) // Then the queue was already closed and we disallow further enqueues
+			throw new DMLRuntimeException("Cannot enqueue into closed SubscribableTaskQueue");
+
+		Consumer<QueueCallback<T>> s = _subscriber;
+
+		if (s != null) {
 			s.accept(new QueueCallback<>(t, _failure));
-			onDeliveryFinished(s);
+			onDeliveryFinished();
 			return;
 		}
 
-		// No subscriber or we raced with close/subscriber change:
-		// use the underlying queue (this is the only place we pay monitors).
-		try {
-			super.enqueueTask(t);
+		synchronized (this) {
+			if (_subscriber == null) {
+				// Re-check that subscriber is really null to avoid race conditions
+				try {
+					super.enqueueTask(t);
+				}
+				catch(InterruptedException e) {
+					throw new DMLRuntimeException(e);
+				}
+				return;
+			} else {
+				// Otherwise do not insert and re-schedule subscriber invokation
+				s = _subscriber;
+			}
 		}
-		catch(InterruptedException e) {
-			throw new DMLRuntimeException(e);
-		}
+
+		// Last case if due to race a subscriber has been set
+		s.accept(new QueueCallback<>(t, _failure));
+		onDeliveryFinished();
 	}
 
 	@Override
 	public T dequeue() {
 		try {
-			return super.dequeueTask();
+			T deq = super.dequeueTask();
+			onDeliveryFinished();
+			return deq;
 		}
 		catch(InterruptedException e) {
 			throw new DMLRuntimeException(e);
@@ -74,25 +110,11 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 
 	@Override
 	public void closeInput() {
-		// Mark logically closed first to block racing enqueues
-		_closed.set(true);
-
-		// First close the underlying queue in its own synchronized semantics
-		synchronized(this) {
-			if(_closedInput)
-				return;
+		if (_closed.compareAndSet(false, true)) {
+			System.out.println("Closing --> " + hashCode());
 			super.closeInput();
+			onDeliveryFinished();
 		}
-
-		Consumer<QueueCallback<T>> s = _subscriber.get();
-		if(s == null) // No subscriber yet: NO_MORE_TASKS will be signalled on dequeue() path
-			return;
-
-		// Drain backlog (tasks queued before subscriber or before closeInput)
-		drainBacklogToSubscriber(s);
-
-		// If nothing in-flight anymore, send terminal
-		trySendTerminal(s);
 	}
 
 	@Override
@@ -100,67 +122,48 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		if(subscriber == null)
 			throw new IllegalArgumentException("Cannot set subscriber to null");
 
-		// Install subscriber once
-		if(!_subscriber.compareAndSet(null, subscriber))
-			throw new DMLRuntimeException("Cannot set multiple subscribers");
+		LinkedList<T> data;
 
-		// Fail fast if queue already failed
 		synchronized(this) {
+			if(_subscriber != null)
+				throw new DMLRuntimeException("Cannot set multiple subscribers");
+			_subscriber = subscriber;
 			if(_failure != null)
 				throw _failure;
-		}
-
-		// Drain everything currently in LocalTaskQueue._data
-		drainBacklogToSubscriber(subscriber);
-
-		// If already closed and nothing else in-flight, send NO_MORE_TASKS
-		trySendTerminal(subscriber);
-	}
-
-	private void drainBacklogToSubscriber(Consumer<QueueCallback<T>> s) {
-		LinkedList<T> l;
-		synchronized(this) {
-			// Steal the current list; LocalTaskQueue should be fine with us
-			// replacing _data atomically under its lock
-			l = _data;
+			data = _data;
 			_data = new LinkedList<>();
 		}
 
-		int backlogSize = l.size();
-		if(backlogSize == 0)
-			return;
-
-		_inFlight.addAndGet(backlogSize);
-		for(T t : l) {
-			s.accept(new QueueCallback<>(t, _failure));
+		for (T t : data) {
+			subscriber.accept(new QueueCallback<>(t, _failure));
+			onDeliveryFinished();
 		}
-		_inFlight.addAndGet(-backlogSize);
-		trySendTerminal(s);
-	}
 
-	private void onDeliveryFinished(Consumer<QueueCallback<T>> s) {
-		int remaining = _inFlight.decrementAndGet();
-		if(remaining == 0 && _closed.get() && s != null) {
-			trySendTerminal(s);
+		synchronized(this) {
+			// Re-check if queue hasn't seen other items in the meantime
 		}
 	}
 
-	private void trySendTerminal(Consumer<QueueCallback<T>> s) {
-		if(s == null || !_closed.get() || _inFlight.get() != 0)
-			return;
+	private void onDeliveryFinished() {
+		int ctr = _availableCtr.decrementAndGet();
 
-		if(_terminalSent.compareAndSet(false, true)) {
-			s.accept(new QueueCallback<>((T) LocalTaskQueue.NO_MORE_TASKS, _failure));
+		if (ctr == 0) {
+			Consumer<QueueCallback<T>> s = _subscriber;
+			if (s != null)
+				s.accept(new QueueCallback<>((T) LocalTaskQueue.NO_MORE_TASKS, _failure));
+
+			TemporaryWatchdog.registerClose(_watchdogId);
+		} else {
+			System.out.println("Close rejected --> " + hashCode());
 		}
 	}
 
 	@Override
-	public void propagateFailure(DMLRuntimeException re) {
+	public synchronized void propagateFailure(DMLRuntimeException re) {
 		super.propagateFailure(re);
-		Consumer<QueueCallback<T>> s = _subscriber.get();
-		if(s != null) {
+		Consumer<QueueCallback<T>> s = _subscriber;
+		if(s != null)
 			s.accept(new QueueCallback<>(null, re));
-		}
 	}
 
 	@Override

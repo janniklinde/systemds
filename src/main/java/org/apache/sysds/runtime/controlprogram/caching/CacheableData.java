@@ -472,7 +472,7 @@ public abstract class CacheableData<T extends CacheBlock<?>> extends Data
 		return  _bcHandle != null && _bcHandle.hasBackReference();
 	}
 	
-	public OOCStream<IndexedMatrixValue> getStreamHandle() {
+	public synchronized OOCStream<IndexedMatrixValue> getStreamHandle() {
 		if( !hasStreamHandle() ) {
 			final SubscribableTaskQueue<IndexedMatrixValue> _mStream = new SubscribableTaskQueue<>();
 			DataCharacteristics dc = getDataCharacteristics();
