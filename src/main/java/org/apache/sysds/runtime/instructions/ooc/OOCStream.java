@@ -41,7 +41,9 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 
 	/**
 	 * Registers a new subscriber that consumes the stream.
-	 * While there is no guarantee for any specific order, the closing item LocalTaskQueue.NO_MORE_TASKS is always invoked last.
+	 * While there is no guarantee for any specific order, the closing item LocalTaskQueue.NO_MORE_TASKS
+	 * is guaranteed to be invoked after every other item has finished processing. Thus, the NO_MORE_TASKS
+	 * callback can be used to free dependent resources and close output streams.
 	 */
 	void setSubscriber(Consumer<QueueCallback<T>> subscriber);
 

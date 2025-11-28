@@ -29,32 +29,31 @@ import java.util.function.Consumer;
 
 public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCStream<T> {
 
-	private Consumer<QueueCallback<T>> _subscriber = null;
 	private final AtomicInteger _availableCtr = new AtomicInteger(1);
 	private final AtomicBoolean _closed = new AtomicBoolean(false);
-	private final String _watchdogId;
+	private volatile Consumer<QueueCallback<T>> _subscriber = null;
+	private String _watchdogId;
 
 	public SubscribableTaskQueue() {
-		_watchdogId = "STQ-" + hashCode();
-		// Capture a short context to help identify origin
-		String ctx = null;
-		try {
-			StackTraceElement[] st = new Exception().getStackTrace();
-			// Skip the first few frames (constructor, createWritableStream, etc.)
-			StringBuilder sb = new StringBuilder();
-			int limit = Math.min(st.length, 6);
-			for (int i = 1; i < limit; i++) {
-				sb.append(st[i].getClassName()).append(".").append(st[i].getMethodName())
-					.append(":").append(st[i].getLineNumber());
-				if (i < limit - 1)
-					sb.append(" <- ");
-			}
-			ctx = sb.toString();
+		if (OOCWatchdog.WATCH) {
+			_watchdogId = "STQ-" + hashCode();
+			// Capture a short context to help identify origin
+			OOCWatchdog.registerOpen(_watchdogId, "SubscribableTaskQueue@" + hashCode(), getCtxMsg(), this);
 		}
-		catch (Exception ignored) {
-			// best-effort
+	}
+
+	private String getCtxMsg() {
+		StackTraceElement[] st = new Exception().getStackTrace();
+		// Skip the first few frames (constructor, createWritableStream, etc.)
+		StringBuilder sb = new StringBuilder();
+		int limit = Math.min(st.length, 7);
+		for(int i = 2; i < limit; i++) {
+			sb.append(st[i].getClassName()).append(".").append(st[i].getMethodName()).append(":")
+				.append(st[i].getLineNumber());
+			if(i < limit - 1)
+				sb.append(" <- ");
 		}
-		TemporaryWatchdog.registerOpen(_watchdogId, "SubscribableTaskQueue@" + hashCode(), ctx);
+		return sb.toString();
 	}
 
 	@Override
@@ -64,8 +63,10 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 
 		int cnt = _availableCtr.incrementAndGet();
 
-		if (cnt <= 1) // Then the queue was already closed and we disallow further enqueues
+		if (cnt <= 1) { // Then the queue was already closed and we disallow further enqueues
+			_availableCtr.decrementAndGet(); // Undo increment
 			throw new DMLRuntimeException("Cannot enqueue into closed SubscribableTaskQueue");
+		}
 
 		Consumer<QueueCallback<T>> s = _subscriber;
 
@@ -76,8 +77,8 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		}
 
 		synchronized (this) {
+			// Re-check that subscriber is really null to avoid race conditions
 			if (_subscriber == null) {
-				// Re-check that subscriber is really null to avoid race conditions
 				try {
 					super.enqueueTask(t);
 				}
@@ -85,10 +86,9 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 					throw new DMLRuntimeException(e);
 				}
 				return;
-			} else {
-				// Otherwise do not insert and re-schedule subscriber invokation
-				s = _subscriber;
 			}
+			// Otherwise do not insert and re-schedule subscriber invocation
+			s = _subscriber;
 		}
 
 		// Last case if due to race a subscriber has been set
@@ -97,10 +97,18 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	}
 
 	@Override
+	public void enqueueTask(T t) {
+		enqueue(t);
+	}
+
+	@Override
 	public T dequeue() {
 		try {
+			if (OOCWatchdog.WATCH)
+				OOCWatchdog.addEvent(_watchdogId, "dequeue -- " + getCtxMsg());
 			T deq = super.dequeueTask();
-			onDeliveryFinished();
+			if (deq != NO_MORE_TASKS)
+				onDeliveryFinished();
 			return deq;
 		}
 		catch(InterruptedException e) {
@@ -109,11 +117,17 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	}
 
 	@Override
+	public T dequeueTask() {
+		return dequeue();
+	}
+
+	@Override
 	public void closeInput() {
 		if (_closed.compareAndSet(false, true)) {
-			System.out.println("Closing --> " + hashCode());
 			super.closeInput();
 			onDeliveryFinished();
+		} else {
+			throw new IllegalStateException("Multiple close input calls");
 		}
 	}
 
@@ -138,10 +152,6 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 			subscriber.accept(new QueueCallback<>(t, _failure));
 			onDeliveryFinished();
 		}
-
-		synchronized(this) {
-			// Re-check if queue hasn't seen other items in the meantime
-		}
 	}
 
 	private void onDeliveryFinished() {
@@ -152,9 +162,8 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 			if (s != null)
 				s.accept(new QueueCallback<>((T) LocalTaskQueue.NO_MORE_TASKS, _failure));
 
-			TemporaryWatchdog.registerClose(_watchdogId);
-		} else {
-			System.out.println("Close rejected --> " + hashCode());
+			if (OOCWatchdog.WATCH)
+				OOCWatchdog.registerClose(_watchdogId);
 		}
 	}
 
@@ -189,5 +198,13 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	@Override
 	public CachingStream getStreamCache() {
 		return null;
+	}
+
+	/**
+	 * Perform a sanity check
+	 */
+	public synchronized boolean checkStateValidity() {
+		return !_data.isEmpty();
+		//return !_closed.get() || _availableCtr.get() == 0 || !_data.isEmpty();
 	}
 }

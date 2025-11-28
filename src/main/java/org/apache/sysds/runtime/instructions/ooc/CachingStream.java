@@ -71,6 +71,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 			try {
 				final IndexedMatrixValue task = tmp.get();
 				int blk;
+				Runnable[] mSubscribers;
 
 				synchronized (this) {
 					if(task != LocalTaskQueue.NO_MORE_TASKS) {
@@ -89,10 +90,9 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 						notifyAll();
 						blk = -1;
 					}
+
+					mSubscribers = _subscribers;
 				}
-
-
-				Runnable[] mSubscribers = _subscribers;
 
 				if(mSubscribers != null) {
 					for(Runnable mSubscriber : mSubscribers)
@@ -228,11 +228,13 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 			throw new DMLRuntimeException("Cannot register a new subscriber on " + this + " because has been flagged for deletion");
 
 		int mNumBlocks;
+		boolean cacheInProgress;
 		synchronized (this) {
 			mNumBlocks = _numBlocks;
+			cacheInProgress = _cacheInProgress;
 			if (incrConsumers)
 				maxConsumptionCount++;
-			if (_cacheInProgress) {
+			if (cacheInProgress) {
 				int newLen = _subscribers == null ? 1 : _subscribers.length + 1;
 				Runnable[] newSubscribers = new Runnable[newLen];
 
@@ -247,7 +249,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		for (int i = 0; i < mNumBlocks; i++)
 			subscriber.run();
 
-		if (!_cacheInProgress)
+		if (!cacheInProgress)
 			subscriber.run(); // To fetch the NO_MORE_TASK element
 	}
 

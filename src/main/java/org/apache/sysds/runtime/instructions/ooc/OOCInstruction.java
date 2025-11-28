@@ -34,6 +34,7 @@ import org.apache.sysds.runtime.util.CommonThreadPool;
 import org.apache.sysds.runtime.util.OOCJoin;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -288,6 +289,67 @@ public abstract class OOCInstruction extends Instruction {
 		return joinOOC(qIn1, qIn2, qOut, mapper, on, on);
 	}
 
+	protected <T, R, P> CompletableFuture<Void> joinOOC(List<OOCStream<T>> qIn, OOCStream<R> qOut, Function<List<T>, R> mapper, List<Function<T, P>> on) {
+		if (qIn == null || on == null || qIn.size() != on.size())
+			throw new DMLRuntimeException("joinOOC(list) requires the same number of streams and key functions.");
+
+		addInStream(qIn.toArray(OOCStream[]::new));
+		addOutStream(qOut);
+
+		final int n = qIn.size();
+
+		CachingStream[] caches = new CachingStream[n];
+		boolean[] explicitCaching = new boolean[n];
+
+		for (int i = 0; i < n; i++) {
+			OOCStream<T> s = qIn.get(i);
+			explicitCaching[i] = !s.hasStreamCache();
+			caches[i] = explicitCaching[i] ? new CachingStream((OOCStream<IndexedMatrixValue>) s) : s.getStreamCache();
+			caches[i].activateIndexing();
+			// One additional consumption for the materialization when emitting
+			caches[i].incrSubscriberCount(1);
+		}
+
+		Map<P, MatrixIndexes[]> seen = new ConcurrentHashMap<>();
+
+		CompletableFuture<Void> future = submitOOCTasks(
+			Arrays.stream(caches).map(CachingStream::getReadStream).collect(java.util.stream.Collectors.toList()),
+			(i, tmp) -> {
+				Function<T, P> keyFn = on.get(i);
+				P key = keyFn.apply((T)tmp);
+				MatrixIndexes idx = ((IndexedMatrixValue) tmp).getIndexes();
+
+				MatrixIndexes[] arr = seen.computeIfAbsent(key, k -> new MatrixIndexes[n]);
+				boolean ready;
+				synchronized (arr) {
+					arr[i] = idx;
+					ready = true;
+					for (MatrixIndexes ix : arr) {
+						if (ix == null) {
+							ready = false;
+							break;
+						}
+					}
+				}
+
+				if (!ready || !seen.remove(key, arr))
+					return;
+
+				List<T> values = new java.util.ArrayList<>(n);
+				for (int j = 0; j < n; j++)
+					values.add((T) caches[j].findCached(arr[j]));
+
+				qOut.enqueue(mapper.apply(values));
+			}, qOut::closeInput);
+
+		for (int i = 0; i < n; i++) {
+			if (explicitCaching[i])
+				caches[i].scheduleDeletion();
+		}
+
+		return future;
+	}
+
 	@SuppressWarnings("unchecked")
 	protected <T, R, P> CompletableFuture<Void> joinOOC(OOCStream<T> qIn1, OOCStream<T> qIn2, OOCStream<R> qOut, BiFunction<T, T, R> mapper, Function<T, P> onLeft, Function<T, P> onRight) {
 		addInStream(qIn1, qIn2);
@@ -350,19 +412,14 @@ public abstract class OOCInstruction extends Instruction {
 		ExecutorService pool = CommonThreadPool.get();
 
 		final List<AtomicInteger> activeTaskCtrs = new ArrayList<>(queues.size());
-		final List<AtomicBoolean> streamsClosed = new ArrayList<>(queues.size());
 
-		for (int i = 0; i < queues.size(); i++) {
-			activeTaskCtrs.add(new AtomicInteger(0));
-			streamsClosed.add(new AtomicBoolean(false));
-		}
+		for (int i = 0; i < queues.size(); i++)
+			activeTaskCtrs.add(new AtomicInteger(1));
 
-		final AtomicInteger globalTaskCtr = new AtomicInteger(0);
 		final CompletableFuture<Void> globalFuture = CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new));
 		if (_outQueues == null)
 			_outQueues = Collections.emptySet();
 		final Runnable oocFinalizer = oocTask(finalizer, null, Stream.concat(_outQueues.stream(), _inQueues.stream()).toArray(OOCStream[]::new));
-		final Object globalLock = new Object();
 
 		int i = 0;
 		@SuppressWarnings("unused")
@@ -372,97 +429,69 @@ public abstract class OOCInstruction extends Instruction {
 		for (OOCStream<T> queue : queues) {
 			final int k = i;
 			final AtomicInteger localTaskCtr =  activeTaskCtrs.get(k);
-			final AtomicBoolean localStreamClosed = streamsClosed.get(k);
 			final CompletableFuture<Void> localFuture = futures.get(k);
+			final AtomicBoolean closeRaceWatchdog = new AtomicBoolean(false);
 
 			//System.out.println("Substream (k " + k + ", id " + streamId + ", type '" + queue.getClass().getSimpleName() + "', stream_id " + queue.hashCode() + ")");
 			queue.setSubscriber(oocTask(callback -> {
 				final T item = callback.get();
 
-				if (predicate != null && item != null && !predicate.apply(k, item)) { // Can get closed due to cancellation
-					if (onNotProcessed != null)
-						onNotProcessed.accept(k, item);
-					return;
-				}
+				if(item == null) {
+					if(!closeRaceWatchdog.compareAndSet(false, true))
+						throw new DMLRuntimeException("Race condition observed: NO_MORE_TASKS callback has been triggered more than once");
 
-				boolean done = false;
-
-				synchronized (globalLock) {
-					if (localFuture.isDone()) {
-						done = true;
-					} else {
-						globalTaskCtr.incrementAndGet();
+					if(localTaskCtr.decrementAndGet() == 0) {
+						// Then we can run the finalization procedure already
+						localFuture.complete(null);
 					}
+					return;
 				}
 
-				if (done) {
-					if (onNotProcessed != null)
+				if(predicate != null && !predicate.apply(k, item)) { // Can get closed due to cancellation
+					if(onNotProcessed != null)
 						onNotProcessed.accept(k, item);
 					return;
 				}
 
-				localTaskCtr.incrementAndGet();
+				if(localFuture.isDone()) {
+					if(onNotProcessed != null)
+						onNotProcessed.accept(k, item);
+					return;
+				}
+				else {
+					localTaskCtr.incrementAndGet();
+				}
 
 				pool.submit(oocTask(() -> {
-					if(item != null) {
-						//System.out.println("Accept" + ((IndexedMatrixValue)item).getIndexes() + " (k " + k + ", id " + streamId + ")");
-						consumer.accept(k, item);
-					}
-					else {
-						//System.out.println("Close substream (k " + k + ", id " + streamId + ")");
-						localStreamClosed.set(true);
-					}
+					// TODO For caching streams, we have no guarantee that item is still in memory -> NullPointer possible
+					consumer.accept(k, item);
 
-					boolean runFinalizer = false;
-
-					synchronized (globalLock) {
-						int localTasks = localTaskCtr.decrementAndGet();
-						boolean finalizeStream = localTasks == 0 && localStreamClosed.get();
-
-						int globalTasks = globalTaskCtr.get() - 1;
-
-						if (finalizeStream || (globalFuture.isDone() && localTasks == 0)) {
-							localFuture.complete(null);
-
-							if (globalFuture.isDone() && globalTasks == 0)
-								runFinalizer = true;
-						}
-
-						globalTaskCtr.decrementAndGet();
-					}
-
-					if (runFinalizer)
-						oocFinalizer.run();
+					if(localTaskCtr.decrementAndGet() == 0)
+						localFuture.complete(null);
 				}, localFuture, Stream.concat(_outQueues.stream(), _inQueues.stream()).toArray(OOCStream[]::new)));
+
+				if(closeRaceWatchdog.get()) // Sanity check
+					throw new DMLRuntimeException("Race condition observed");
 			}, null,  Stream.concat(_outQueues.stream(), _inQueues.stream()).toArray(OOCStream[]::new)));
 
 			i++;
 		}
 
-		pool.shutdown();
-
 		globalFuture.whenComplete((res, e) -> {
-			if (globalFuture.isCancelled() || globalFuture.isCompletedExceptionally())
+			if (globalFuture.isCancelled() || globalFuture.isCompletedExceptionally()) {
 				futures.forEach(f -> {
-					if (!f.isDone()) {
-						if (globalFuture.isCancelled() || globalFuture.isCompletedExceptionally())
+					if(!f.isDone()) {
+						if(globalFuture.isCancelled() || globalFuture.isCompletedExceptionally())
 							f.cancel(true);
 						else
 							f.complete(null);
 					}
 				});
-
-			boolean runFinalizer;
-
-			synchronized (globalLock) {
-				runFinalizer = globalTaskCtr.get() == 0;
 			}
 
-			if (runFinalizer)
-				oocFinalizer.run();
-
-			//System.out.println("Shutdown (id " + streamId + ")");
+			oocFinalizer.run();
 		});
+
 		return globalFuture;
 	}
 

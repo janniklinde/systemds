@@ -125,11 +125,12 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 					long outBlockCol = blockCol - firstBlockCol + 1;
 					qOut.enqueue(new IndexedMatrixValue(new MatrixIndexes(outBlockRow, outBlockCol), outBlock));
 
-					if(producedBlocks.incrementAndGet() >= totalBlocks) {
+					// TODO early cancellation might still prevent cache deletion and cause invalid queue states
+					/*if(producedBlocks.incrementAndGet() >= totalBlocks) {
 						CompletableFuture<Void> f = futureRef.get();
 						if(f != null)
 							f.cancel(true);
-					}
+					}*/
 				}, tmp -> {
 					long blockRow = tmp.getIndexes().getRowIndex() - 1;
 					long blockCol = tmp.getIndexes().getColumnIndex() - 1;
@@ -227,14 +228,15 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 					qOut.enqueue(new IndexedMatrixValue(idx, target));
 				});
 
-				if(completed) {
+				// TODO early cancellation might still prevent cache deletion and cause invalid queue states
+				/*if(completed) {
 					// All blocks have been processed; we can cancel the future
 					// Currently, this does not affect processing (predicates prevent task submission anyway).
 					// However, a cancelled future may allow early file read aborts once implemented.
 					CompletableFuture<Void> f = futureRef.get();
 					if(f != null)
 						f.cancel(true);
-				}
+				}*/
 			}, tmp -> {
 				// Pre-filter incoming blocks to avoid unnecessary task submission
 				long blockRow = tmp.getIndexes().getRowIndex() - 1;
