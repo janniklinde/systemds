@@ -289,6 +289,67 @@ public abstract class OOCInstruction extends Instruction {
 		return joinOOC(qIn1, qIn2, qOut, mapper, on, on);
 	}
 
+	protected <T, R, P> CompletableFuture<Void> joinOOC(List<OOCStream<T>> qIn, OOCStream<R> qOut, Function<List<T>, R> mapper, List<Function<T, P>> on) {
+		if (qIn == null || on == null || qIn.size() != on.size())
+			throw new DMLRuntimeException("joinOOC(list) requires the same number of streams and key functions.");
+
+		addInStream(qIn.toArray(OOCStream[]::new));
+		addOutStream(qOut);
+
+		final int n = qIn.size();
+
+		CachingStream[] caches = new CachingStream[n];
+		boolean[] explicitCaching = new boolean[n];
+
+		for (int i = 0; i < n; i++) {
+			OOCStream<T> s = qIn.get(i);
+			explicitCaching[i] = !s.hasStreamCache();
+			caches[i] = explicitCaching[i] ? new CachingStream((OOCStream<IndexedMatrixValue>) s) : s.getStreamCache();
+			caches[i].activateIndexing();
+			// One additional consumption for the materialization when emitting
+			caches[i].incrSubscriberCount(1);
+		}
+
+		Map<P, MatrixIndexes[]> seen = new ConcurrentHashMap<>();
+
+		CompletableFuture<Void> future = submitOOCTasks(
+			Arrays.stream(caches).map(CachingStream::getReadStream).collect(java.util.stream.Collectors.toList()),
+			(i, tmp) -> {
+				Function<T, P> keyFn = on.get(i);
+				P key = keyFn.apply((T)tmp);
+				MatrixIndexes idx = ((IndexedMatrixValue) tmp).getIndexes();
+
+				MatrixIndexes[] arr = seen.computeIfAbsent(key, k -> new MatrixIndexes[n]);
+				boolean ready;
+				synchronized (arr) {
+					arr[i] = idx;
+					ready = true;
+					for (MatrixIndexes ix : arr) {
+						if (ix == null) {
+							ready = false;
+							break;
+						}
+					}
+				}
+
+				if (!ready || !seen.remove(key, arr))
+					return;
+
+				List<T> values = new java.util.ArrayList<>(n);
+				for (int j = 0; j < n; j++)
+					values.add((T) caches[j].findCached(arr[j]));
+
+				qOut.enqueue(mapper.apply(values));
+			}, qOut::closeInput);
+
+		for (int i = 0; i < n; i++) {
+			if (explicitCaching[i])
+				caches[i].scheduleDeletion();
+		}
+
+		return future;
+	}
+
 	@SuppressWarnings("unchecked")
 	protected <T, R, P> CompletableFuture<Void> joinOOC(OOCStream<T> qIn1, OOCStream<T> qIn2, OOCStream<R> qOut, BiFunction<T, T, R> mapper, Function<T, P> onLeft, Function<T, P> onRight) {
 		addInStream(qIn1, qIn2);
