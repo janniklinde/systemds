@@ -32,6 +32,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.util.CommonThreadPool;
 import org.apache.sysds.runtime.util.OOCJoin;
+import scala.Tuple3;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -177,7 +178,11 @@ public abstract class OOCInstruction extends Instruction {
 		Map<P, List<MatrixIndexes>> availableLeftInput = new ConcurrentHashMap<>();
 		Map<P, BroadcastedElement> availableBroadcastInput = new ConcurrentHashMap<>();
 
-		CompletableFuture<Void> future = submitOOCTasks(List.of(qIn, broadcast), (i, tmp) -> {
+		OOCStream<Tuple3<P, OOCStream.QueueCallback<IndexedMatrixValue>, BroadcastedElement>> broadcastingQueue = createWritableStream();
+		AtomicInteger waitCtr = new AtomicInteger(1);
+		CompletableFuture<Void> fut1 = new CompletableFuture<>();
+
+		submitOOCTasks(List.of(qIn, broadcast), (i, tmp) -> {
 			P key = on.apply(tmp);
 
 			if (i == 0) { // qIn stream
@@ -223,20 +228,40 @@ public abstract class OOCInstruction extends Instruction {
 
 				if (queued != null) {
 					for(MatrixIndexes idx : queued) {
-						b.value = rightCache.peekCached(b.idx); // Only peek to prevent block deletion
-						qOut.enqueue(mapper.apply(leftCache.findCached(idx), b));
-						b.value = null;
+						waitCtr.incrementAndGet();
+						leftCache.findCachedAsync(idx, callback -> broadcastingQueue.enqueue(new Tuple3<>(key, callback, b)));
 					}
-				}
-
-				if (b.canRelease()) {
-					availableBroadcastInput.remove(key);
-
-					if (!explicitRightCaching)
-						rightCache.incrProcessingCount(rightCache.findCachedIndex(tmp.getIndexes()), 1); // Correct for incremented subscriber count to allow block deletion
 				}
 			}
 		}, () -> {
+			fut1.complete(null);
+			if (waitCtr.decrementAndGet() == 0)
+				broadcastingQueue.closeInput();
+		});
+
+		CompletableFuture<Void> fut2 = new CompletableFuture<>();
+		submitOOCTasks(List.of(broadcastingQueue), (i, tpl) -> {
+			tpl._3().value = rightCache.peekCached(tpl._3().idx);
+			qOut.enqueue(mapper.apply(tpl._2().get(), tpl._3()));
+
+			if (tpl._3().canRelease()) {
+				availableBroadcastInput.remove(tpl._1());
+
+				if (!explicitRightCaching)
+					rightCache.incrProcessingCount(rightCache.findCachedIndex(tpl._3().value.getIndexes()), 1); // Correct for incremented subscriber count to allow block deletion
+			}
+
+			if (waitCtr.decrementAndGet() == 0)
+				broadcastingQueue.closeInput();
+		}, () -> fut2.complete(null));
+
+		if (explicitLeftCaching)
+			leftCache.scheduleDeletion();
+		if (explicitRightCaching)
+			rightCache.scheduleDeletion();
+
+		CompletableFuture<Void> fut = CompletableFuture.allOf(fut1, fut2);
+		fut.whenComplete((res, t) -> {
 			availableBroadcastInput.forEach((k, v) -> {
 				rightCache.incrProcessingCount(rightCache.findCachedIndex(v.idx), 1);
 			});
@@ -244,12 +269,7 @@ public abstract class OOCInstruction extends Instruction {
 			qOut.closeInput();
 		});
 
-		if (explicitLeftCaching)
-			leftCache.scheduleDeletion();
-		if (explicitRightCaching)
-			rightCache.scheduleDeletion();
-
-		return future;
+		return fut;
 	}
 
 	protected static class BroadcastedElement {

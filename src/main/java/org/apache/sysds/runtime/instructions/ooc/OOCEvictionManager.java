@@ -19,6 +19,8 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
+import org.apache.commons.lang3.mutable.MutableBoolean;
+import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.io.IOUtilFunctions;
@@ -26,6 +28,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.util.FastBufferedDataOutputStream;
 import org.apache.sysds.runtime.util.LocalFileUtils;
+import org.apache.sysds.utils.Statistics;
 
 import java.io.DataInputStream;
 import java.io.File;
@@ -36,14 +39,22 @@ import java.nio.channels.Channels;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
 /**
  * Eviction Manager for the Out-Of-Core stream cache
@@ -84,12 +95,14 @@ import java.util.concurrent.locks.ReentrantLock;
 public class OOCEvictionManager {
 
 	// Configuration: OOC buffer limit as percentage of heap
-	private static final double OOC_BUFFER_PERCENTAGE = 0.15; // 15% of heap
+	private static final double OOC_BUFFER_PERCENTAGE = 0.01; // 15% of heap
+	private static final double OOC_BUFFER_PERCENTAGE_HARD = 0.05;
 
 	private static final double PARTITION_EVICTION_SIZE = 64 * 1024 * 1024; // 64 MB
 
 	// Memory limit for ByteBuffers
-	private static long _limit;
+	private static long _limit; // When spilling will be triggered
+	private static long _hardLimit; // When cache puts become blocking
 	private static final AtomicLong _size = new AtomicLong(0);
 
 	// Cache structures: map key -> MatrixBlock and eviction deque (head=oldest block)
@@ -102,6 +115,25 @@ public class OOCEvictionManager {
 
 	// Track which partitions belong to which stream (for cleanup)
 	private static final ConcurrentHashMap<Long, Set<String>> _streamPartitions = new ConcurrentHashMap<>();
+
+	// For read scheduling
+	private static final int _queueCapacity = 100000;
+	private static ThreadPoolExecutor _readExec = new ThreadPoolExecutor(
+		10,
+		10,
+		0L,
+		TimeUnit.MILLISECONDS,
+		new ArrayBlockingQueue<>(_queueCapacity),
+		new ThreadPoolExecutor.CallerRunsPolicy());
+	private static ConcurrentHashMap<String, LinkedList<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>>> _readRequests = new ConcurrentHashMap<>();
+	private static ThreadPoolExecutor _writeExec = new ThreadPoolExecutor(
+		1,
+		1,
+		0L,
+		TimeUnit.MILLISECONDS,
+		new ArrayBlockingQueue<>(_queueCapacity),
+		new ThreadPoolExecutor.CallerRunsPolicy());
+	private static final AtomicReference<CompletableFuture<Void>> _writerState = new AtomicReference<>();
 
 
 	// Cache level lock
@@ -165,12 +197,17 @@ public class OOCEvictionManager {
 
 	static {
 		_limit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE); // e.g., 20% of heap
+		_hardLimit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE_HARD);
 		_size.set(0);
 		_spillDir = LocalFileUtils.getUniqueWorkingDir("ooc_stream");
 		LocalFileUtils.createLocalFileIfNotExist(_spillDir);
 	}
 
 	public static void reset() {
+		if (DMLScript.STATISTICS) {
+			System.out.println(Statistics.displayOOCEvictionStats());
+			Statistics.resetOOCEvictionStats();
+		}
 		TeeOOCInstruction.reset();
 		if (!_cache.isEmpty()) {
 			System.err.println("There are dangling elements in the OOC Eviction cache: " + _cache.size());
@@ -181,6 +218,9 @@ public class OOCEvictionManager {
 		_partitions.clear();
 		_partitionCounter.set(0);
 		_streamPartitions.clear();
+		_readExec.getQueue().clear();
+		_readRequests.clear();
+		// TODO delete spill dir
 	}
 
 	/**
@@ -200,7 +240,7 @@ public class OOCEvictionManager {
 			} finally {
 				e.lock.unlock();
 			}
-			System.out.println("Removed block " + streamId + "_" + blockId + " from cache (idx: " + (e.value != null ? e.value.getIndexes() : "?") + ")");
+			//System.out.println("Removed block " + streamId + "_" + blockId + " from cache (idx: " + (e.value != null ? e.value.getIndexes() : "?") + ")");
 		}
 	}
 
@@ -208,6 +248,25 @@ public class OOCEvictionManager {
 	 * Store a block in the OOC cache (serialize once)
 	 */
 	public static void put(long streamId, int blockId, IndexedMatrixValue value) {
+		while (_size.get() > _hardLimit) {
+			System.err.println("Hard limit reached: " + _size.get());
+			invokeWriterIfNecessary();
+			CompletableFuture<Void> fut = _writerState.get();
+
+			if (fut != null) {
+				try {
+					fut.get();
+				}
+				catch(InterruptedException | ExecutionException e) {
+					throw new RuntimeException(e);
+				}
+			}
+		}
+
+		if (DMLScript.STATISTICS) {
+			Statistics.incrementOOCEvictionPut();
+		}
+
 		MatrixBlock mb = (MatrixBlock) value.getValue();
 		long size = estimateSerializedSize(mb);
 		String key = streamId + "_" + blockId;
@@ -232,28 +291,77 @@ public class OOCEvictionManager {
 
 		_size.addAndGet(size);
 		//make room if needed
-		evict();
+
+		invokeWriterIfNecessary();
+	}
+
+	private static void invokeWriterIfNecessary() {
+		if (_size.get() > _limit && _writerState.compareAndSet(null, new CompletableFuture<>())) {
+			_writeExec.execute(() -> {
+				System.err.println("Evicting from cache...");
+				evict();
+				CompletableFuture<Void> fut = _writerState.getAndSet(null);
+				if (fut != null)
+					fut.complete(null);
+			});
+		}
+	}
+
+	public static void requestBlock(long streamId, int blockId, Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> consumer) {
+		IndexedMatrixValue val = tryGet(streamId, blockId);
+
+		if (val != null) {
+			consumer.accept(new OOCStream.QueueCallback<>(val, null));
+			return;
+		}
+
+		final String key = streamId + "_" + blockId;
+		final MutableBoolean alreadyQueued = new MutableBoolean(true);
+
+		_readRequests.compute(key, (k, v) -> {
+			if (v == null) {
+				v = new LinkedList<>();
+				alreadyQueued.setValue(false);
+			}
+			v.add(consumer);
+			return v;
+		});
+
+		if (!alreadyQueued.getValue()) {
+			_readExec.submit(() -> {
+				IndexedMatrixValue mVal = loadFromDisk(streamId, blockId);
+				LinkedList<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> callbacks = _readRequests.remove(key);
+				OOCStream.QueueCallback<IndexedMatrixValue> v = new OOCStream.QueueCallback<>(mVal, null);
+
+				for(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> callback : callbacks)
+					callback.accept(v);
+			});
+		}
 	}
 
 	/**
-	 * Get a block from the OOC cache (deserialize on read)
+	 * Get a block if it is hot (available in memory). Otherwise return null.
 	 */
-	public static IndexedMatrixValue get(long streamId, int blockId) {
+	public static IndexedMatrixValue tryGet(long streamId, int blockId) {
 		String key = streamId + "_" + blockId;
 		BlockEntry imv;
 
+		if (DMLScript.STATISTICS) {
+			Statistics.incrementOOCEvictionGet();
+		}
+
 		synchronized (_cacheLock) {
 			imv = _cache.get(key);
-			System.err.println( "value of imv: " + imv);
+			//System.err.println( "value of imv: " + imv);
 			if (imv != null && _policy == RPolicy.LRU) {
 				_cache.remove(key);
 				_cache.put(key, imv); //add last semantic
 			}
 		}
 
-		if (imv == null) {
-			throw new DMLRuntimeException("Block not found in cache: " + key);
-		}
+		if (imv == null)
+			return null; // Block not available
+
 		// use lock and check state
 		imv.lock.lock();
 		try {
@@ -262,7 +370,6 @@ public class OOCEvictionManager {
 				try {
 					imv.stateUpdate.await();
 				} catch (InterruptedException e) {
-
 					throw new DMLRuntimeException(e);
 				}
 			}
@@ -276,6 +383,18 @@ public class OOCEvictionManager {
 			imv.lock.unlock();
 		}
 
+		return null;
+	}
+
+	/**
+	 * Get a block from the OOC cache (deserialize on read)
+	 */
+	public static IndexedMatrixValue get(long streamId, int blockId) {
+		IndexedMatrixValue val = tryGet(streamId, blockId);
+
+		if (val != null)
+			return val;
+
 		// restore, since the block is COLD
 		return loadFromDisk(streamId, blockId);
 	}
@@ -286,7 +405,7 @@ public class OOCEvictionManager {
 	private static void evict() {
 		long currentSize = _size.get();
 		if (_size.get() <= _limit) { // only trigger eviction, if filled.
-			System.err.println("Evicting condition: " + _size.get() + "/" + _limit);
+			//System.err.println("Evicting condition: " + _size.get() + "/" + _limit);
 			return;
 		}
 
@@ -337,6 +456,8 @@ public class OOCEvictionManager {
 			spillDirFile.mkdirs();
 		}
 
+		long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
+
 		// 2. create the partition file metadata
 		partitionFile partFile = new partitionFile(filename, 0);
 		_partitions.put(partitionId, partFile);
@@ -360,7 +481,7 @@ public class OOCEvictionManager {
 				// 2. write indexes and block
 				entry.value.getIndexes().write(dos); // write Indexes
 				entry.value.getValue().write(dos);
-				System.out.println("written, partition id: " + _partitions.get(partitionId) + ", offset: " + offset);
+				//System.out.println("written, partition id: " + _partitions.get(partitionId) + ", offset: " + offset);
 
 				// 3. create the spillLocation
 				spillLocation sloc = new spillLocation(partitionId, offset);
@@ -384,6 +505,11 @@ public class OOCEvictionManager {
 				synchronized (_cacheLock) {
 					_cache.put(tmp.getKey(), entry); // add last semantic
 				}
+
+				if (DMLScript.STATISTICS) {
+					Statistics.incrementOOCEvictionWrite();
+					Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
+				}
 			}
 		}
 		catch(IOException ex) {
@@ -403,8 +529,24 @@ public class OOCEvictionManager {
 	 * Load block from spill file
 	 */
 	private static IndexedMatrixValue loadFromDisk(long streamId, int blockId) {
+		while (_size.get() > _hardLimit) {
+			System.err.println("Hard limit reached: " + _size.get());
+			invokeWriterIfNecessary();
+			CompletableFuture<Void> fut = _writerState.get();
+
+			if (fut != null) {
+				try {
+					fut.get();
+				}
+				catch(InterruptedException | ExecutionException e) {
+					throw new RuntimeException(e);
+				}
+			}
+		}
+
 		String key = streamId + "_" + blockId;
 
+		long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
 		// 1. find the blocks address (spill location)
 		spillLocation sloc = _spillLocations.get(key);
 		if (sloc == null) {
@@ -417,6 +559,7 @@ public class OOCEvictionManager {
 		}
 
 		String filename = partFile.filePath;
+		//System.out.println("Reading from disk (" + Thread.currentThread().getId() + "): " + filename);
 
 		// Create an empty object to read data into.
 		MatrixIndexes ix = new  MatrixIndexes();
@@ -462,6 +605,11 @@ public class OOCEvictionManager {
 //			evict(); // when we add the block, we shall check for limit.
 		} finally {
 			imvCacheEntry.lock.unlock();
+		}
+
+		if (DMLScript.STATISTICS) {
+			Statistics.incrementOOCLoadFromDisk();
+			Statistics.accumulateOOCLoadFromDiskTime(System.nanoTime() - ioStart);
 		}
 
 		return imvCacheEntry.value;

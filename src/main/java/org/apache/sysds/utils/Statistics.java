@@ -65,6 +65,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.DoubleAdder;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 
@@ -222,6 +223,15 @@ public class Statistics
 
 	public static boolean allowWorkerStatistics = true;
 
+	// Out-of-core eviction metrics
+	private static final LongAdder oocGetCalls = new LongAdder();
+	private static final LongAdder oocPutCalls = new LongAdder();
+	private static final LongAdder oocLoadFromDiskCalls = new LongAdder();
+	private static final LongAdder oocLoadFromDiskTimeNanos = new LongAdder();
+	private static final LongAdder oocEvictionWriteCalls = new LongAdder();
+	private static final LongAdder oocEvictionWriteTimeNanos = new LongAdder();
+	private static final AtomicLong oocStatsStartTime = new AtomicLong(System.nanoTime());
+
 	public static long getNoOfExecutedSPInst() {
 		return numExecutedSPInst.longValue();
 	}
@@ -338,6 +348,59 @@ public class Statistics
 	public static long getRunTime() {
 		return execEndTime - execStartTime;
 	}
+
+	public static void resetOOCEvictionStats() {
+		oocGetCalls.reset();
+		oocPutCalls.reset();
+		oocLoadFromDiskCalls.reset();
+		oocLoadFromDiskTimeNanos.reset();
+		oocEvictionWriteCalls.reset();
+		oocEvictionWriteTimeNanos.reset();
+		oocStatsStartTime.set(System.nanoTime());
+	}
+
+	public static void incrementOOCEvictionGet() {
+		oocGetCalls.increment();
+	}
+
+	public static void incrementOOCEvictionPut() {
+		oocPutCalls.increment();
+	}
+
+	public static void incrementOOCLoadFromDisk() {
+		oocLoadFromDiskCalls.increment();
+	}
+
+	public static void incrementOOCEvictionWrite() {
+		oocEvictionWriteCalls.increment();
+	}
+
+	public static void accumulateOOCLoadFromDiskTime(long nanos) {
+		oocLoadFromDiskTimeNanos.add(nanos);
+	}
+
+	public static void accumulateOOCEvictionWriteTime(long nanos) {
+		oocEvictionWriteTimeNanos.add(nanos);
+	}
+
+	public static String displayOOCEvictionStats() {
+		long elapsedNanos = Math.max(1, System.nanoTime() - oocStatsStartTime.get());
+		double elapsedSeconds = elapsedNanos / 1e9;
+		double getThroughput = oocGetCalls.longValue() / elapsedSeconds;
+		double putThroughput = oocPutCalls.longValue() / elapsedSeconds;
+
+		StringBuilder sb = new StringBuilder();
+		sb.append("OOC eviction stats (since last reset):\n");
+		sb.append(String.format(Locale.US, "  get calls:\t\t%d (%.2f/sec)\n",
+			oocGetCalls.longValue(), getThroughput));
+		sb.append(String.format(Locale.US, "  put calls:\t\t%d (%.2f/sec)\n",
+			oocPutCalls.longValue(), putThroughput));
+		sb.append(String.format(Locale.US, "  loadFromDisk:\t\t%d (time %.3f sec)\n",
+			oocLoadFromDiskCalls.longValue(), oocLoadFromDiskTimeNanos.longValue() / 1e9));
+		sb.append(String.format(Locale.US, "  evict writes:\t\t%d (time %.3f sec)\n",
+			oocEvictionWriteCalls.longValue(), oocEvictionWriteTimeNanos.longValue() / 1e9));
+		return sb.toString();
+	}
 	
 	public static void reset()
 	{
@@ -358,6 +421,7 @@ public class Statistics
 		
 		CacheStatistics.reset();
 		LineageCacheStatistics.reset();
+		resetOOCEvictionStats();
 		
 		resetJITCompileTime();
 		resetJVMgcTime();

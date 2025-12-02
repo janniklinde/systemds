@@ -30,13 +30,11 @@ import java.util.function.Consumer;
 public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreamable<IndexedMatrixValue> {
 	private final CachingStream _streamCache;
 	private final AtomicInteger _streamIdx;
-	private final AtomicInteger _taskCtr;
 	private final AtomicBoolean _subscriberSet;
 
 	public PlaybackStream(CachingStream streamCache) {
 		this._streamCache = streamCache;
 		this._streamIdx = new AtomicInteger(0);
-		this._taskCtr = new AtomicInteger(1);
 		this._subscriberSet = new AtomicBoolean(false);
 		streamCache.incrSubscriberCount(1);
 	}
@@ -101,31 +99,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreama
 		if (!_subscriberSet.compareAndSet(false, true))
 			throw new IllegalArgumentException("Subscriber cannot be set multiple times");
 
-		/**
-		 * To guarantee that NO_MORE_TASKS is invoked after all subscriber calls
-		 * finished, we keep track of running tasks using a task counter.
-		 */
-		_streamCache.setSubscriber(() -> {
-			try {
-				_taskCtr.incrementAndGet();
-
-				IndexedMatrixValue val;
-
-				try {
-					val = _streamCache.get(_streamIdx.getAndIncrement());
-				} catch (InterruptedException e) {
-					throw new DMLRuntimeException(e);
-				}
-
-				if (val != null)
-					subscriber.accept(new QueueCallback<>(val, null));
-
-				if (_taskCtr.addAndGet(val == null ? -2 : -1) == 0)
-					subscriber.accept(new QueueCallback<>(null, null));
-			} catch (DMLRuntimeException e) {
-				subscriber.accept(new QueueCallback<>(null, e));
-			}
-		}, false);
+		_streamCache.setSubscriber(subscriber, false);
 	}
 
 	@Override
