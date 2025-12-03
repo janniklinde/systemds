@@ -24,7 +24,8 @@ public final class OOCWatchdog {
 	private static final long SCAN_INTERVAL_MS = TimeUnit.SECONDS.toMillis(10);
 
 	static {
-		EXEC.scheduleAtFixedRate(OOCWatchdog::scan, SCAN_INTERVAL_MS, SCAN_INTERVAL_MS, TimeUnit.MILLISECONDS);
+		if (WATCH)
+			EXEC.scheduleAtFixedRate(OOCWatchdog::scan, SCAN_INTERVAL_MS, SCAN_INTERVAL_MS, TimeUnit.MILLISECONDS);
 	}
 
 	private OOCWatchdog() {

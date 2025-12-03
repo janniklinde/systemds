@@ -95,8 +95,8 @@ import java.util.function.Consumer;
 public class OOCEvictionManager {
 
 	// Configuration: OOC buffer limit as percentage of heap
-	private static final double OOC_BUFFER_PERCENTAGE = 0.01; // 15% of heap
-	private static final double OOC_BUFFER_PERCENTAGE_HARD = 0.05;
+	private static final double OOC_BUFFER_PERCENTAGE = 0.12; // 15% of heap
+	private static final double OOC_BUFFER_PERCENTAGE_HARD = 0.15;
 
 	private static final double PARTITION_EVICTION_SIZE = 64 * 1024 * 1024; // 64 MB
 
@@ -127,8 +127,8 @@ public class OOCEvictionManager {
 		new ThreadPoolExecutor.CallerRunsPolicy());
 	private static ConcurrentHashMap<String, LinkedList<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>>> _readRequests = new ConcurrentHashMap<>();
 	private static ThreadPoolExecutor _writeExec = new ThreadPoolExecutor(
-		1,
-		1,
+		10,
+		10,
 		0L,
 		TimeUnit.MILLISECONDS,
 		new ArrayBlockingQueue<>(_queueCapacity),
@@ -218,9 +218,45 @@ public class OOCEvictionManager {
 		_partitions.clear();
 		_partitionCounter.set(0);
 		_streamPartitions.clear();
-		_readExec.getQueue().clear();
 		_readRequests.clear();
+
+		if (_readExec != null) {
+			_readExec.getQueue().clear();
+			_readExec.shutdownNow();
+			_readExec = null;
+		}
+		if (_writeExec != null) {
+			_writeExec.getQueue().clear();
+			_writeExec.shutdownNow();
+			_writeExec = null;
+		}
 		// TODO delete spill dir
+	}
+
+	public static ThreadPoolExecutor getWriteExec() {
+		if (_writeExec == null) {
+			_writeExec = new ThreadPoolExecutor(
+				10,
+				10,
+				0L,
+				TimeUnit.MILLISECONDS,
+				new ArrayBlockingQueue<>(_queueCapacity),
+				new ThreadPoolExecutor.CallerRunsPolicy());
+		}
+		return _writeExec;
+	}
+
+	public static ThreadPoolExecutor getReadExec() {
+		if (_readExec == null) {
+			_readExec = new ThreadPoolExecutor(
+				10,
+				10,
+				0L,
+				TimeUnit.MILLISECONDS,
+				new ArrayBlockingQueue<>(_queueCapacity),
+				new ThreadPoolExecutor.CallerRunsPolicy());
+		}
+		return _readExec;
 	}
 
 	/**
@@ -296,13 +332,26 @@ public class OOCEvictionManager {
 	}
 
 	private static void invokeWriterIfNecessary() {
-		if (_size.get() > _limit && _writerState.compareAndSet(null, new CompletableFuture<>())) {
-			_writeExec.execute(() -> {
-				System.err.println("Evicting from cache...");
-				evict();
-				CompletableFuture<Void> fut = _writerState.getAndSet(null);
-				if (fut != null)
-					fut.complete(null);
+		long size = _size.get();
+		if (size > _limit && _writerState.compareAndSet(null, new CompletableFuture<>())) {
+			List<CompletableFuture<Void>> futs = new  ArrayList<>();
+			ThreadPoolExecutor exec = getWriteExec();
+			int k = Math.min((int)((size - _limit) / 5000000L), exec.getMaximumPoolSize());
+			System.err.println("Evicting from cache with " + k + " workers...");
+			for (int i = 0; i < k; i++) {
+				CompletableFuture<Void> mFut = new  CompletableFuture<>();
+				futs.add(mFut);
+				exec.submit(() -> {
+					evict();
+					mFut.complete(null);
+				});
+			}
+
+			CompletableFuture<Object> fut = CompletableFuture.anyOf(futs.toArray(CompletableFuture[]::new));
+			fut.whenComplete((v, e) -> {
+				CompletableFuture<Void> wFut = _writerState.getAndSet(null);
+				if(wFut != null)
+					wFut.complete(null);
 			});
 		}
 	}
@@ -328,10 +377,13 @@ public class OOCEvictionManager {
 		});
 
 		if (!alreadyQueued.getValue()) {
-			_readExec.submit(() -> {
+			getReadExec().submit(() -> {
 				IndexedMatrixValue mVal = loadFromDisk(streamId, blockId);
 				LinkedList<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> callbacks = _readRequests.remove(key);
 				OOCStream.QueueCallback<IndexedMatrixValue> v = new OOCStream.QueueCallback<>(mVal, null);
+
+				if (callbacks.size() > 1)
+					System.out.println("COULD REUSE: " + callbacks.size());
 
 				for(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> callback : callbacks)
 					callback.accept(v);
