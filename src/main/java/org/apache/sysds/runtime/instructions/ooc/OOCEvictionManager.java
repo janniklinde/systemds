@@ -46,12 +46,11 @@ import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
@@ -133,7 +132,10 @@ public class OOCEvictionManager {
 		TimeUnit.MILLISECONDS,
 		new ArrayBlockingQueue<>(_queueCapacity),
 		new ThreadPoolExecutor.CallerRunsPolicy());
-	private static final AtomicReference<CompletableFuture<Void>> _writerState = new AtomicReference<>();
+	private static final AtomicBoolean _evictionScheduled = new AtomicBoolean(false);
+	private static final AtomicInteger _activeWriters = new AtomicInteger(0);
+	private static final ReentrantLock _memLock = new ReentrantLock();
+	private static final Condition _belowHardLimit = _memLock.newCondition();
 
 
 	// Cache level lock
@@ -284,20 +286,7 @@ public class OOCEvictionManager {
 	 * Store a block in the OOC cache (serialize once)
 	 */
 	public static void put(long streamId, int blockId, IndexedMatrixValue value) {
-		while (_size.get() > _hardLimit) {
-			System.err.println("Hard limit reached: " + _size.get());
-			invokeWriterIfNecessary();
-			CompletableFuture<Void> fut = _writerState.get();
-
-			if (fut != null) {
-				try {
-					fut.get();
-				}
-				catch(InterruptedException | ExecutionException e) {
-					throw new RuntimeException(e);
-				}
-			}
-		}
+		awaitBelowHardLimit();
 
 		if (DMLScript.STATISTICS) {
 			Statistics.incrementOOCEvictionPut();
@@ -333,26 +322,36 @@ public class OOCEvictionManager {
 
 	private static void invokeWriterIfNecessary() {
 		long size = _size.get();
-		if (size > _limit && _writerState.compareAndSet(null, new CompletableFuture<>())) {
-			List<CompletableFuture<Void>> futs = new  ArrayList<>();
+		if (size > _limit && _evictionScheduled.compareAndSet(false, true)) {
 			ThreadPoolExecutor exec = getWriteExec();
-			int k = Math.min((int)((size - _limit) / 5000000L), exec.getMaximumPoolSize());
-			System.err.println("Evicting from cache with " + k + " workers...");
-			for (int i = 0; i < k; i++) {
-				CompletableFuture<Void> mFut = new  CompletableFuture<>();
-				futs.add(mFut);
-				exec.submit(() -> {
-					evict();
-					mFut.complete(null);
-				});
-			}
+			long headroom = Math.max(1, _hardLimit - _limit);
+			double pressure = Math.min(1.0, Math.max(0.0, (double)(size - _limit) / headroom));
+			int workers = Math.max(1, (int)Math.ceil(pressure * exec.getMaximumPoolSize()));
 
-			CompletableFuture<Object> fut = CompletableFuture.anyOf(futs.toArray(CompletableFuture[]::new));
-			fut.whenComplete((v, e) -> {
-				CompletableFuture<Void> wFut = _writerState.getAndSet(null);
-				if(wFut != null)
-					wFut.complete(null);
-			});
+			System.err.println("Evicting from cache with " + workers + " workers...");
+			_activeWriters.addAndGet(workers);
+			for (int i = 0; i < workers; i++) {
+				try {
+					exec.submit(() -> {
+						try {
+							evict();
+						}
+						finally {
+							int remain = _activeWriters.decrementAndGet();
+							if (remain == 0) {
+								signalWriterIdle();
+							}
+						}
+					});
+				}
+				catch (RuntimeException ex) {
+					// If submission fails, undo accounting and try to continue.
+					int remain = _activeWriters.decrementAndGet();
+					if (remain == 0)
+						signalWriterIdle();
+					throw ex;
+				}
+			}
 		}
 	}
 
@@ -560,13 +559,14 @@ public class OOCEvictionManager {
 
 				if (DMLScript.STATISTICS) {
 					Statistics.incrementOOCEvictionWrite();
-					Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
 				}
 			}
 		}
 		catch(IOException ex) {
 			throw new DMLRuntimeException(ex);
 		} finally {
+			if (DMLScript.STATISTICS)
+				Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
 			IOUtilFunctions.closeSilently(dos);
 			IOUtilFunctions.closeSilently(fos);
 		}
@@ -574,6 +574,13 @@ public class OOCEvictionManager {
 		// --- 3. ACCOUNTING PHASE ---
 		if (totalFreedSize > 0) { // note the size, without evicted blocks
 			_size.addAndGet(-totalFreedSize);
+			_memLock.lock();
+			try {
+				if (_size.get() < _hardLimit)
+					_belowHardLimit.signalAll();
+			} finally {
+				_memLock.unlock();
+			}
 		}
 	}
 
@@ -581,20 +588,7 @@ public class OOCEvictionManager {
 	 * Load block from spill file
 	 */
 	private static IndexedMatrixValue loadFromDisk(long streamId, int blockId) {
-		while (_size.get() > _hardLimit) {
-			System.err.println("Hard limit reached: " + _size.get());
-			invokeWriterIfNecessary();
-			CompletableFuture<Void> fut = _writerState.get();
-
-			if (fut != null) {
-				try {
-					fut.get();
-				}
-				catch(InterruptedException | ExecutionException e) {
-					throw new RuntimeException(e);
-				}
-			}
-		}
+		awaitBelowHardLimit();
 
 		String key = streamId + "_" + blockId;
 
@@ -659,6 +653,8 @@ public class OOCEvictionManager {
 			imvCacheEntry.lock.unlock();
 		}
 
+		invokeWriterIfNecessary();
+
 		if (DMLScript.STATISTICS) {
 			Statistics.incrementOOCLoadFromDisk();
 			Statistics.accumulateOOCLoadFromDiskTime(System.nanoTime() - ioStart);
@@ -669,6 +665,35 @@ public class OOCEvictionManager {
 
 	private static long estimateSerializedSize(MatrixBlock mb) {
 		return mb.getExactSerializedSize();
+	}
+
+	private static void signalWriterIdle() {
+		_evictionScheduled.set(false);
+		_memLock.lock();
+		try {
+			_belowHardLimit.signalAll();
+		} finally {
+			_memLock.unlock();
+		}
+	}
+
+	private static void awaitBelowHardLimit() {
+		while (_size.get() >= _hardLimit) {
+			System.err.println("Hard limit reached: " + _size.get());
+			invokeWriterIfNecessary();
+
+			_memLock.lock();
+			try {
+				if (_size.get() < _hardLimit)
+					break;
+				_belowHardLimit.await();
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				throw new DMLRuntimeException(e);
+			} finally {
+				_memLock.unlock();
+			}
+		}
 	}
 	
 	@SuppressWarnings("unused")
