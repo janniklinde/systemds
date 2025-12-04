@@ -95,15 +95,17 @@ import java.util.function.Consumer;
 public class OOCEvictionManager {
 
 	// Configuration: OOC buffer limit as percentage of heap
-	private static final double OOC_BUFFER_PERCENTAGE = 0.12; // 15% of heap
+	private static final double OOC_BUFFER_PERCENTAGE = 0.10; // 15% of heap
 	private static final double OOC_BUFFER_PERCENTAGE_HARD = 0.15;
 
 	private static final double PARTITION_EVICTION_SIZE = 64 * 1024 * 1024; // 64 MB
 
 	// Memory limit for ByteBuffers
 	private static long _limit; // When spilling will be triggered
-	private static long _hardLimit; // When cache puts become blocking
+	private static long _hardLimit; // When cache puts and disk loads become blocking
 	private static final AtomicLong _size = new AtomicLong(0);
+	private static final int MAX_BATCH_BLOCKS = 100;
+	private static final int MIN_BATCH_BLOCKS = 10;
 
 	// Cache structures: map key -> MatrixBlock and eviction deque (head=oldest block)
 	private static LinkedHashMap<String, BlockEntry> _cache = new LinkedHashMap<>();
@@ -133,7 +135,14 @@ public class OOCEvictionManager {
 		TimeUnit.MILLISECONDS,
 		new ArrayBlockingQueue<>(_queueCapacity),
 		new ThreadPoolExecutor.CallerRunsPolicy());
-	private static final AtomicBoolean _evictionScheduled = new AtomicBoolean(false);
+	private static ThreadPoolExecutor _prepExec = new ThreadPoolExecutor(
+		1,
+		1,
+		0L,
+		TimeUnit.MILLISECONDS,
+		new ArrayBlockingQueue<>(1),
+		new ThreadPoolExecutor.DiscardPolicy());
+	private static final AtomicBoolean _prepRunning = new AtomicBoolean(false);
 	private static final AtomicInteger _activeWriters = new AtomicInteger(0);
 	private static final ReentrantLock _memLock = new ReentrantLock();
 	private static final Condition _belowHardLimit = _memLock.newCondition();
@@ -233,6 +242,11 @@ public class OOCEvictionManager {
 			_writeExec.shutdownNow();
 			_writeExec = null;
 		}
+		if (_prepExec != null) {
+			_prepExec.getQueue().clear();
+			_prepExec.shutdownNow();
+			_prepExec = null;
+		}
 		// TODO delete spill dir
 	}
 
@@ -247,6 +261,18 @@ public class OOCEvictionManager {
 				new ThreadPoolExecutor.CallerRunsPolicy());
 		}
 		return _writeExec;
+	}
+	public static ThreadPoolExecutor getPrepExec() {
+		if (_prepExec == null) {
+			_prepExec = new ThreadPoolExecutor(
+				1,
+				1,
+				0L,
+				TimeUnit.MILLISECONDS,
+				new ArrayBlockingQueue<>(1),
+				new ThreadPoolExecutor.DiscardPolicy());
+		}
+		return _prepExec;
 	}
 
 	public static ThreadPoolExecutor getReadExec() {
@@ -274,8 +300,10 @@ public class OOCEvictionManager {
 		if (e != null) {
 			e.lock.lock();
 			try {
-				if (e.state == BlockState.HOT)
+				if (e.state == BlockState.HOT) {
 					_size.addAndGet(-e.size);
+					signalIfBelowHardLimit();
+				}
 			} finally {
 				e.lock.unlock();
 			}
@@ -309,6 +337,7 @@ public class OOCEvictionManager {
 			try {
 				if (old.state == BlockState.HOT) {
 					_size.addAndGet(-old.size); // read and update size in atomic operation
+					signalIfBelowHardLimit();
 				}
 			} finally {
 				old.lock.unlock();
@@ -322,36 +351,106 @@ public class OOCEvictionManager {
 	}
 
 	private static void invokeWriterIfNecessary() {
-		long size = _size.get();
-		if (size > _limit && _evictionScheduled.compareAndSet(false, true)) {
-			ThreadPoolExecutor exec = getWriteExec();
-			long headroom = Math.max(1, _hardLimit - _limit);
-			double pressure = Math.min(1.0, Math.max(0.0, (double)(size - _limit) / headroom));
-			int workers = Math.max(1, (int)Math.ceil(pressure * exec.getMaximumPoolSize()));
+		if (_size.get() > _limit) {
+			startEvictionPreparation();
+		}
+	}
 
-			System.err.println("Evicting from cache with " + workers + " workers...");
-			_activeWriters.addAndGet(workers);
-			for (int i = 0; i < workers; i++) {
+	private static void startEvictionPreparation() {
+		if (_prepRunning.compareAndSet(false, true)) {
+			getPrepExec().submit(() -> {
 				try {
-					exec.submit(() -> {
-						try {
-							evict();
-						}
-						finally {
-							int remain = _activeWriters.decrementAndGet();
-							if (remain == 0) {
-								signalWriterIdle();
-							}
-						}
-					});
+					runEvictionPreparation();
 				}
-				catch (RuntimeException ex) {
-					// If submission fails, undo accounting and try to continue.
-					int remain = _activeWriters.decrementAndGet();
-					if (remain == 0)
-						signalWriterIdle();
-					throw ex;
+				finally {
+					_prepRunning.set(false);
 				}
+			});
+		}
+	}
+
+	private static void runEvictionPreparation() {
+		while (_size.get() > _limit) {
+			List<Map.Entry<String, BlockEntry>> batch = collectEvictionBatch();
+			if (batch.isEmpty()) {
+				break;
+			}
+
+			boolean shouldLaunch = batch.size() >= MIN_BATCH_BLOCKS || _size.get() >= _hardLimit;
+			if (!shouldLaunch) {
+				// Return entries to HOT to avoid leaving them in transient state.
+				revertToHot(batch);
+				break;
+			}
+
+			submitEvictionBatch(batch);
+		}
+	}
+
+	private static List<Map.Entry<String, BlockEntry>> collectEvictionBatch() {
+		//sanityCheckSize();
+		long size = _size.get();
+		long targetFreedSize = Math.max(size - _limit, (long) PARTITION_EVICTION_SIZE);
+		List<Map.Entry<String, BlockEntry>> candidates = new ArrayList<>(MAX_BATCH_BLOCKS);
+		long totalPlanned = 0;
+		int lockBusy = 0;
+
+		synchronized (_cacheLock) {
+			Iterator<Map.Entry<String, BlockEntry>> iter = _cache.entrySet().iterator();
+
+			while (iter.hasNext() && candidates.size() < MAX_BATCH_BLOCKS && totalPlanned < targetFreedSize) {
+				Map.Entry<String, BlockEntry> e = iter.next();
+				BlockEntry entry = e.getValue();
+
+				if (entry.lock.tryLock()) {
+					try {
+						if (entry.state == BlockState.HOT) {
+							entry.state = BlockState.EVICTING;
+							candidates.add(e);
+							totalPlanned += entry.size;
+						}
+					} finally {
+						entry.lock.unlock();
+					}
+				}
+				else {
+					lockBusy++;
+				}
+			}
+		}
+
+		if (candidates.isEmpty()) {
+			System.err.println("Eviction prep found no HOT candidates; size=" + size
+				+ " limit=" + _limit + " hardLimit=" + _hardLimit
+				+ " lockBusy=" + lockBusy);
+		}
+		return candidates;
+	}
+
+	private static void submitEvictionBatch(List<Map.Entry<String, BlockEntry>> batch) {
+		_activeWriters.incrementAndGet();
+		getWriteExec().submit(() -> {
+			try {
+				evict(batch);
+			}
+			finally {
+				if (_activeWriters.decrementAndGet() == 0)
+					signalWriterIdle();
+			}
+		});
+	}
+
+	private static void revertToHot(List<Map.Entry<String, BlockEntry>> batch) {
+		for (Map.Entry<String, BlockEntry> e : batch) {
+			BlockEntry be = e.getValue();
+			be.lock.lock();
+			try {
+				if (be.state == BlockState.EVICTING) {
+					be.state = BlockState.HOT;
+					be.stateUpdate.signalAll();
+				}
+			} finally {
+				be.lock.unlock();
 			}
 		}
 	}
@@ -454,49 +553,14 @@ public class OOCEvictionManager {
 	/**
 	 * Evict ByteBuffers to disk
 	 */
-	private static void evict() {
-		long currentSize = _size.get();
-		if (_size.get() <= _limit) { // only trigger eviction, if filled.
-			//System.err.println("Evicting condition: " + _size.get() + "/" + _limit);
+	private static void evict(List<Map.Entry<String, BlockEntry>> candidates) {
+		if (candidates == null || candidates.isEmpty())
 			return;
-		}
 
-		// --- 1. COLLECTION PHASE ---
+		long currentSize = _size.get();
 		long totalFreedSize = 0;
-		// list of eviction candidates
-		List<Map.Entry<String,BlockEntry>> candidates = new  ArrayList<>();
-		long targetFreedSize = Math.max(currentSize - _limit, (long) PARTITION_EVICTION_SIZE);
 
-		synchronized (_cacheLock) {
-
-			//move iterator to first entry
-			Iterator<Map.Entry<String, BlockEntry>> iter = _cache.entrySet().iterator();
-
-			while (iter.hasNext() && totalFreedSize < targetFreedSize) {
-				Map.Entry<String, BlockEntry> e = iter.next();
-				BlockEntry entry = e.getValue();
-
-				if (entry.lock.tryLock()) {
-					try {
-						if (entry.state == BlockState.HOT) {
-							entry.state = BlockState.EVICTING;
-							candidates.add(e);
-							totalFreedSize += entry.size;
-
-							//remove current iterator entry
-//							iter.remove();
-						}
-					} finally {
-						entry.lock.unlock();
-					}
-				} // if tryLock() fails, it means a thread is loading/reading this block. we shall skip it.
-			}
-
-		}
-
-		if (candidates.isEmpty()) { return; } // no eviction candidates found
-
-		// --- 2. WRITE PHASE ---
+		// --- 1. WRITE PHASE ---
 		// write to partition file
 		// 1. generate a new ID for the present "partition" (file)
 		int partitionId = _partitionCounter.getAndIncrement();
@@ -526,45 +590,68 @@ public class OOCEvictionManager {
 				final String key = tmp.getKey();
 				BlockEntry entry = tmp.getValue();
 				boolean alreadySpilled = _spillLocations.containsKey(key);
+				boolean wrote = false;
 
-				if (!alreadySpilled) {
-					// 1. get the current file position. this is the offset.
-					// flush any buffered data to the file
-					dos.flush();
-					long offset = fos.getChannel().position();
-
-					// 2. write indexes and block
-					entry.value.getIndexes().write(dos); // write Indexes
-					entry.value.getValue().write(dos);
-					//System.out.println("written, partition id: " + _partitions.get(partitionId) + ", offset: " + offset);
-
-					// 3. create the spillLocation
-					spillLocation sloc = new spillLocation(partitionId, offset);
-					_spillLocations.put(key, sloc);
-
-					// 4. track file for cleanup
-					_streamPartitions
-									.computeIfAbsent(entry.streamId, k -> ConcurrentHashMap.newKeySet())
-									.add(filename);
-				}
-
-				// 5. change state to COLD
-				entry.lock.lock();
 				try {
-					entry.value = null; // only release ref, don't mutate object
-					entry.state = BlockState.COLD; // set state to cold, since writing to disk
-					entry.stateUpdate.signalAll(); // wake up any "get()" threads
-				} finally {
-					entry.lock.unlock();
-				}
+					if (!alreadySpilled) {
+						// 1. get the current file position. this is the offset.
+						// flush any buffered data to the file
+						dos.flush();
+						long offset = fos.getChannel().position();
 
-				synchronized (_cacheLock) {
-					_cache.put(key, entry); // add last semantic
-				}
+						// 2. write indexes and block
+						entry.value.getIndexes().write(dos); // write Indexes
+						entry.value.getValue().write(dos);
+						wrote = true;
+						//System.out.println("written, partition id: " + _partitions.get(partitionId) + ", offset: " + offset);
 
-				if (DMLScript.STATISTICS) {
-					if (!alreadySpilled)
-						Statistics.incrementOOCEvictionWrite();
+						// 3. create the spillLocation
+						spillLocation sloc = new spillLocation(partitionId, offset);
+						_spillLocations.put(key, sloc);
+
+						// 4. track file for cleanup
+						_streamPartitions
+										.computeIfAbsent(entry.streamId, k -> ConcurrentHashMap.newKeySet())
+										.add(filename);
+					}
+
+					// 5. change state to COLD
+					entry.lock.lock();
+					long entrySize = entry.size;
+					try {
+						entry.value = null; // only release ref, don't mutate object
+						entry.state = BlockState.COLD; // set state to cold, since writing to disk
+						entry.stateUpdate.signalAll(); // wake up any "get()" threads
+					} finally {
+						entry.lock.unlock();
+					}
+
+					synchronized (_cacheLock) {
+						_cache.put(key, entry); // add last semantic
+					}
+
+					if (DMLScript.STATISTICS) {
+						if (wrote)
+							Statistics.incrementOOCEvictionWrite();
+					}
+
+					long newSize = _size.addAndGet(-entrySize);
+					totalFreedSize += entrySize;
+					if (newSize < _hardLimit)
+						signalIfBelowHardLimit();
+				}
+				catch (Throwable t) {
+					// Recovery: return to HOT so we don't leave stranded EVICTING entries.
+					entry.lock.lock();
+					try {
+						if (entry.state == BlockState.EVICTING) {
+							entry.state = BlockState.HOT;
+							entry.stateUpdate.signalAll();
+						}
+					} finally {
+						entry.lock.unlock();
+					}
+					throw t;
 				}
 			}
 		}
@@ -575,18 +662,15 @@ public class OOCEvictionManager {
 				Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
 			IOUtilFunctions.closeSilently(dos);
 			IOUtilFunctions.closeSilently(fos);
+			// Make sure waiters re-check even if no progress.
+			signalIfBelowHardLimit();
 		}
 
 		// --- 3. ACCOUNTING PHASE ---
-		if (totalFreedSize > 0) { // note the size, without evicted blocks
-			_size.addAndGet(-totalFreedSize);
-			_memLock.lock();
-			try {
-				if (_size.get() < _hardLimit)
-					_belowHardLimit.signalAll();
-			} finally {
-				_memLock.unlock();
-			}
+		if (DMLScript.STATISTICS) {
+			System.err.println("Eviction batch summary: candidates=" + candidates.size()
+				+ " freedBytes=" + totalFreedSize
+				+ " sizeBefore=" + currentSize + " sizeAfter=" + _size.get());
 		}
 	}
 
@@ -678,25 +762,55 @@ public class OOCEvictionManager {
 	}
 
 	private static void signalWriterIdle() {
-		_evictionScheduled.set(false);
+		signalIfBelowHardLimit();
+	}
+
+	private static void signalIfBelowHardLimit() {
 		_memLock.lock();
 		try {
-			_belowHardLimit.signalAll();
+			if (_size.get() < _hardLimit)
+				_belowHardLimit.signalAll();
 		} finally {
 			_memLock.unlock();
 		}
 	}
 
+	private static void sanityCheckSize() {
+		long accounted = _size.get();
+		long recomputed = 0;
+
+		synchronized (_cacheLock) {
+			for (Map.Entry<String, BlockEntry> e : _cache.entrySet()) {
+				BlockEntry be = e.getValue();
+				// Count only blocks that should occupy memory
+				if (be.state == BlockState.HOT || be.state == BlockState.EVICTING)
+					recomputed += be.size;
+			}
+		}
+
+		long diff = Math.abs(accounted - recomputed);
+		// Log significant drift to help diagnose stuck hard-limit states.
+		if (diff > (5 * 1024 * 1024)) { // 5MB tolerance
+			System.err.println("Sanity check: accounted size=" + accounted
+				+ " recomputed=" + recomputed + " diff=" + diff
+				+ " limit=" + _limit + " hardLimit=" + _hardLimit);
+		}
+	}
+
 	private static void awaitBelowHardLimit() {
-		while (_size.get() >= _hardLimit) {
+		for (;;) {
+			if (_size.get() < _hardLimit)
+				return;
+
 			System.err.println("Hard limit reached: " + _size.get());
 			invokeWriterIfNecessary();
 
 			_memLock.lock();
 			try {
-				if (_size.get() < _hardLimit)
-					break;
-				_belowHardLimit.await();
+				while (_size.get() >= _hardLimit) {
+					_belowHardLimit.await();
+				}
+				return;
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
 				throw new DMLRuntimeException(e);
