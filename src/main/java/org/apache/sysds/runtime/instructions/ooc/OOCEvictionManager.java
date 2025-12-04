@@ -522,26 +522,30 @@ public class OOCEvictionManager {
 
 			// loop over the list of blocks we collected
 			for (Map.Entry<String,BlockEntry> tmp : candidates) {
+				final String key = tmp.getKey();
 				BlockEntry entry = tmp.getValue();
+				boolean alreadySpilled = _spillLocations.containsKey(key);
 
-				// 1. get the current file position. this is the offset.
-				// flush any buffered data to the file
-				dos.flush();
-				long offset = fos.getChannel().position();
+				if (!alreadySpilled) {
+					// 1. get the current file position. this is the offset.
+					// flush any buffered data to the file
+					dos.flush();
+					long offset = fos.getChannel().position();
 
-				// 2. write indexes and block
-				entry.value.getIndexes().write(dos); // write Indexes
-				entry.value.getValue().write(dos);
-				//System.out.println("written, partition id: " + _partitions.get(partitionId) + ", offset: " + offset);
+					// 2. write indexes and block
+					entry.value.getIndexes().write(dos); // write Indexes
+					entry.value.getValue().write(dos);
+					//System.out.println("written, partition id: " + _partitions.get(partitionId) + ", offset: " + offset);
 
-				// 3. create the spillLocation
-				spillLocation sloc = new spillLocation(partitionId, offset);
-				_spillLocations.put(tmp.getKey(), sloc);
+					// 3. create the spillLocation
+					spillLocation sloc = new spillLocation(partitionId, offset);
+					_spillLocations.put(key, sloc);
 
-				// 4. track file for cleanup
-				_streamPartitions
-								.computeIfAbsent(entry.streamId, k -> ConcurrentHashMap.newKeySet())
-								.add(filename);
+					// 4. track file for cleanup
+					_streamPartitions
+									.computeIfAbsent(entry.streamId, k -> ConcurrentHashMap.newKeySet())
+									.add(filename);
+				}
 
 				// 5. change state to COLD
 				entry.lock.lock();
@@ -554,11 +558,12 @@ public class OOCEvictionManager {
 				}
 
 				synchronized (_cacheLock) {
-					_cache.put(tmp.getKey(), entry); // add last semantic
+					_cache.put(key, entry); // add last semantic
 				}
 
 				if (DMLScript.STATISTICS) {
-					Statistics.incrementOOCEvictionWrite();
+					if (!alreadySpilled)
+						Statistics.incrementOOCEvictionWrite();
 				}
 			}
 		}
@@ -592,7 +597,7 @@ public class OOCEvictionManager {
 
 		String key = streamId + "_" + blockId;
 
-		long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
+		long ioDuration = 0;
 		// 1. find the blocks address (spill location)
 		spillLocation sloc = _spillLocations.get(key);
 		if (sloc == null) {
@@ -616,8 +621,11 @@ public class OOCEvictionManager {
 
 			try {
 				DataInputStream dis = new DataInputStream(Channels.newInputStream(raf.getChannel()));
+				long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
 				ix.readFields(dis); // 1. Read Indexes
 				mb.readFields(dis); // 2. Read Block
+				if (DMLScript.STATISTICS)
+					ioDuration = System.nanoTime() - ioStart;
 			} catch (IOException ex) {
 				throw new DMLRuntimeException("Failed to load block " + key + " from " + filename, ex);
 			}
@@ -657,7 +665,7 @@ public class OOCEvictionManager {
 
 		if (DMLScript.STATISTICS) {
 			Statistics.incrementOOCLoadFromDisk();
-			Statistics.accumulateOOCLoadFromDiskTime(System.nanoTime() - ioStart);
+			Statistics.accumulateOOCLoadFromDiskTime(ioDuration);
 		}
 
 		return imvCacheEntry.value;
