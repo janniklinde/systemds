@@ -119,16 +119,16 @@ public class OOCEvictionManager {
 	// For read scheduling
 	private static final int _queueCapacity = 100000;
 	private static ThreadPoolExecutor _readExec = new ThreadPoolExecutor(
-		10,
-		10,
+		8,
+		8,
 		0L,
 		TimeUnit.MILLISECONDS,
 		new ArrayBlockingQueue<>(_queueCapacity),
 		new ThreadPoolExecutor.CallerRunsPolicy());
 	private static ConcurrentHashMap<String, LinkedList<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>>> _readRequests = new ConcurrentHashMap<>();
 	private static ThreadPoolExecutor _writeExec = new ThreadPoolExecutor(
-		10,
-		10,
+		5,
+		5,
 		0L,
 		TimeUnit.MILLISECONDS,
 		new ArrayBlockingQueue<>(_queueCapacity),
