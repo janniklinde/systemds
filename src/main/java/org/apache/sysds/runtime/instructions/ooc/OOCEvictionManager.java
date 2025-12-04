@@ -30,6 +30,7 @@ import org.apache.sysds.runtime.util.FastBufferedDataOutputStream;
 import org.apache.sysds.runtime.util.LocalFileUtils;
 import org.apache.sysds.utils.Statistics;
 
+import java.io.BufferedInputStream;
 import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -620,7 +621,8 @@ public class OOCEvictionManager {
 			raf.seek(sloc.offset);
 
 			try {
-				DataInputStream dis = new DataInputStream(Channels.newInputStream(raf.getChannel()));
+				DataInputStream dis = new DataInputStream(
+					new BufferedInputStream(Channels.newInputStream(raf.getChannel())));
 				long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
 				ix.readFields(dis); // 1. Read Indexes
 				mb.readFields(dis); // 2. Read Block
