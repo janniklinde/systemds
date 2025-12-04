@@ -88,17 +88,12 @@ public class MatrixVectorBinaryOOCInstruction extends ComputationOOCInstruction 
 		BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
 		ec.getMatrixObject(output).setStreamHandle(qOut);
 
-		final OOCStream<IndexedMatrixValue> parallelFetchingQueue = qIn.hasStreamCache() ? createWritableStream() : qIn;
-
-		if (qIn.hasStreamCache()) {
-			// Warmup cache
-			submitOOCTasks(qIn, parallelFetchingQueue::enqueue, parallelFetchingQueue::closeInput);
-		}
+		qIn.warmup();
 
 		submitOOCTask(() -> {
 				IndexedMatrixValue tmp = null;
 				try {
-					while((tmp = parallelFetchingQueue.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
+					while((tmp = qIn.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
 						MatrixBlock matrixBlock = (MatrixBlock) tmp.getValue();
 						long rowIndex = tmp.getIndexes().getRowIndex();
 						long colIndex = tmp.getIndexes().getColumnIndex();

@@ -89,17 +89,12 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 			ec.getMatrixObject(output).setStreamHandle(qOut);
 
-			final OOCStream<IndexedMatrixValue> parallelFetchingQueue = q.hasStreamCache() ? createWritableStream() : q;
-
-			if (q.hasStreamCache()) {
-				// Then do a parallel fetch to load blocks into memory
-				submitOOCTasks(q, parallelFetchingQueue::enqueue, parallelFetchingQueue::closeInput);
-			}
+			q.warmup();
 
 			submitOOCTask(() -> {
 					IndexedMatrixValue tmp = null;
 					try {
-						while((tmp = parallelFetchingQueue.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
+						while((tmp = q.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
 							long idx  = aggun.isRowAggregate() ?
 								tmp.getIndexes().getRowIndex() : tmp.getIndexes().getColumnIndex();
 							MatrixBlock ret = aggTracker.get(idx);
@@ -156,7 +151,7 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 					catch(Exception ex) {
 						throw new DMLRuntimeException(ex);
 					}
-			}, parallelFetchingQueue, qOut);
+			}, q, qOut);
 		}
 		// full aggregation
 		else {

@@ -31,6 +31,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreama
 	private final CachingStream _streamCache;
 	private final AtomicInteger _streamIdx;
 	private final AtomicBoolean _subscriberSet;
+	private QueueCallback<IndexedMatrixValue> _lastDequeue;
 
 	public PlaybackStream(CachingStream streamCache) {
 		this._streamCache = streamCache;
@@ -68,12 +69,15 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreama
 	}
 
 	@Override
-	public IndexedMatrixValue dequeue() {
+	public synchronized IndexedMatrixValue dequeue() {
 		if (_subscriberSet.get())
 			throw new IllegalStateException("Cannot dequeue from a playback stream if a subscriber has been set");
 
 		try {
-			return _streamCache.get(_streamIdx.getAndIncrement());
+			if (_lastDequeue != null)
+				_lastDequeue.close();
+			_lastDequeue = _streamCache.get(_streamIdx.getAndIncrement());
+			return _lastDequeue.get();
 		} catch (InterruptedException e) {
 			throw new DMLRuntimeException(e);
 		}
@@ -115,5 +119,10 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreama
 	@Override
 	public CachingStream getStreamCache() {
 		return _streamCache;
+	}
+
+	@Override
+	public void warmup() {
+		// TODO
 	}
 }

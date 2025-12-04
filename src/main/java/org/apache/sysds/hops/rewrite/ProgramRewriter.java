@@ -69,7 +69,8 @@ public class ProgramRewriter{
 		
 		//initialize StatementBlock rewrite ruleSet (with fixed rewrite order)
 		_sbRuleSet = new ArrayList<>();
-		
+
+		OptimizerUtils.ALLOW_OPERATOR_FUSION = false;
 		
 		//STATIC REWRITES (which do not rely on size information)
 		if( staticRewrites )

@@ -28,6 +28,8 @@ import shaded.parquet.it.unimi.dsi.fastutil.ints.IntArrayList;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -69,7 +71,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		_source = source;
 		_streamId = streamId;
 		source.setSubscriber(tmp -> {
-			try {
+			try (tmp) {
 				final IndexedMatrixValue task = tmp.get();
 				int blk;
 				Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>[] mSubscribers;
@@ -100,11 +102,11 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 						for (int i = 0; i < mSubscribers.length; i++) {
 							mSubscribers[i].accept(tmp);
 							if (onConsumed(blk, i))
-								mSubscribers[i].accept(new OOCStream.QueueCallback<>(null, _failure));
+								mSubscribers[i].accept(OOCStream.eos(_failure));
 						}
 					}
 					else {
-						OOCStream.QueueCallback<IndexedMatrixValue> cb = new OOCStream.QueueCallback<>(null, _failure);
+						OOCStream.QueueCallback<IndexedMatrixValue> cb = OOCStream.eos(_failure);
 						for (int i = 0; i < mSubscribers.length; i++) {
 							if (onNoMoreTasks(i))
 								mSubscribers[i].accept(cb);
@@ -119,7 +121,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 				}
 
 				Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>[] mSubscribers = _subscribers;
-				OOCStream.QueueCallback<IndexedMatrixValue> err = new OOCStream.QueueCallback<>(null, _failure);
+				OOCStream.QueueCallback<IndexedMatrixValue> err = OOCStream.eos( _failure);
 				if(mSubscribers != null) {
 					for(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> mSubscriber : mSubscribers) {
 						try {
@@ -177,15 +179,15 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		return !_cacheInProgress && newConsumerCount == _numBlocks + 1;
 	}
 
-	public synchronized IndexedMatrixValue get(int idx) throws InterruptedException {
+	public synchronized OOCStream.QueueCallback<IndexedMatrixValue> get(int idx) throws InterruptedException {
 		while (true) {
 			if (_failure != null)
 				throw _failure;
 			else if (idx < _numBlocks) {
-				IndexedMatrixValue out = OOCEvictionManager.get(_streamId, idx);
+				OOCStream.QueueCallback<IndexedMatrixValue> out = OOCEvictionManager.getAndPin(_streamId, idx);
 
 				if (_index != null) // Ensure index is up to date
-					_index.putIfAbsent(out.getIndexes(), idx);
+					_index.putIfAbsent(out.get().getIndexes(), idx);
 
 				int newCount = _consumptionCounts.getInt(idx)+1;
 				if (newCount > maxConsumptionCount)
@@ -197,7 +199,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 				return out;
 			} else if (!_cacheInProgress)
-				return (IndexedMatrixValue)LocalTaskQueue.NO_MORE_TASKS;
+				return new OOCStream.SimpleQueueCallback<>(null, null);
 
 			wait();
 		}
@@ -207,7 +209,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		return _index.get(idx);
 	}
 
-	public synchronized IndexedMatrixValue findCached(MatrixIndexes idx) {
+	public synchronized OOCStream.QueueCallback<IndexedMatrixValue> findCached(MatrixIndexes idx) {
 		int mIdx = _index.get(idx);
 		int newCount = _consumptionCounts.getInt(mIdx)+1;
 		if (newCount > maxConsumptionCount)
@@ -215,7 +217,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 		_consumptionCounts.set(mIdx, newCount);
 
-		IndexedMatrixValue imv = OOCEvictionManager.get(_streamId, mIdx);
+		OOCStream.QueueCallback<IndexedMatrixValue> imv = OOCEvictionManager.getAndPin(_streamId, mIdx);
 
 		if (deletable)
 			tryDeleteBlock(mIdx);
@@ -232,18 +234,20 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 				throw new DMLRuntimeException("Consumer overflow in " + _streamId + "_" + mIdx + ". Expected: " + maxConsumptionCount);
 		}
 		OOCEvictionManager.requestBlock(_streamId, mIdx, cb -> {
-			synchronized(CachingStream.this) {
-				int newCount = _consumptionCounts.getInt(mIdx)+1;
-				if (newCount > maxConsumptionCount)
-					_failure = new DMLRuntimeException("Consumer overflow in " + _streamId + "_" + mIdx + ". Expected: " + maxConsumptionCount);
-				else
-					_consumptionCounts.set(mIdx, newCount);
-			}
+			try (cb) {
+				synchronized(CachingStream.this) {
+					int newCount = _consumptionCounts.getInt(mIdx) + 1;
+					if(newCount > maxConsumptionCount) {
+						_failure = new DMLRuntimeException(
+							"Consumer overflow in " + _streamId + "_" + mIdx + ". Expected: " + maxConsumptionCount);
+						cb.fail(_failure);
+					}
+					else
+						_consumptionCounts.set(mIdx, newCount);
+				}
 
-			if (_failure != null)
-				callback.accept(new OOCStream.QueueCallback<>(null, _failure));
-			else
 				callback.accept(cb);
+			}
 		});
 	}
 
@@ -261,9 +265,9 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	/**
 	 * Finds a cached item without counting it as a consumption.
 	 */
-	public synchronized IndexedMatrixValue peekCached(MatrixIndexes idx) {
+	public synchronized OOCStream.QueueCallback<IndexedMatrixValue> peekCached(MatrixIndexes idx) {
 		int mIdx = _index.get(idx);
-		return OOCEvictionManager.get(_streamId, mIdx);
+		return OOCEvictionManager.getAndPin(_streamId, mIdx);
 	}
 
 	public synchronized void activateIndexing() {
@@ -325,12 +329,12 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 				subscriber.accept(tmp);
 
 				if (onConsumed(idx, consumerIdx))
-					subscriber.accept(new OOCStream.QueueCallback<>(null, _failure)); // NO_MORE_TASKS
+					subscriber.accept(OOCStream.eos(_failure)); // NO_MORE_TASKS
 			});
 		}
 
 		if (!cacheInProgress && onNoMoreTasks(consumerIdx))
-			subscriber.accept(new OOCStream.QueueCallback<>(null, _failure)); // NO_MORE_TASKS
+			subscriber.accept(OOCStream.eos(_failure)); // NO_MORE_TASKS
 	}
 
 	/**

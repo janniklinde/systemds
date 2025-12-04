@@ -55,7 +55,7 @@ public class PCATest extends AutomatedTestBase {
 	}
 
 	@Test
-	public void testPCA() {
+	public void testPCA() { // codex resume 019ae502-3eaa-7e40-8e54-e0077dfbb6e6
 		boolean allow_opfusion = OptimizerUtils.ALLOW_OPERATOR_FUSION;
 		OptimizerUtils.ALLOW_OPERATOR_FUSION = false; // some fused ops are not implemented yet
 		runPCATest(16);
@@ -70,7 +70,7 @@ public class PCATest extends AutomatedTestBase {
 
 			String HOME = SCRIPT_DIR + TEST_DIR;
 			fullDMLScriptName = HOME + TEST_NAME1 + ".dml";
-			programArgs = new String[] {"-explain", "hops", "-stats", "-ooc", "-args", input(INPUT_NAME_1), Integer.toString(k), output(OUTPUT_NAME_1), output(OUTPUT_NAME_2)};
+			programArgs = new String[] {"-explain", /*"hops",*/ "-stats", "-ooc", "-args", input(INPUT_NAME_1), Integer.toString(k), output(OUTPUT_NAME_1), output(OUTPUT_NAME_2)};
 
 			// 1. Generate the data in-memory as MatrixBlock objects
 			double[][] X_data = getRandomMatrix(rows, cols, 0, maxVal, 1, 7);

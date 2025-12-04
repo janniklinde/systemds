@@ -54,6 +54,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -95,16 +96,19 @@ import java.util.function.Consumer;
 public class OOCEvictionManager {
 
 	// Configuration: OOC buffer limit as percentage of heap
-	private static final double OOC_BUFFER_PERCENTAGE = 0.10; // 15% of heap
-	private static final double OOC_BUFFER_PERCENTAGE_HARD = 0.15;
+	private static final double OOC_BUFFER_PERCENTAGE = 0.010; // 15% of heap
+	private static final double OOC_BUFFER_PERCENTAGE_IN_MEMORY = 0.014; // keep blocks resident until this threshold
+	private static final double OOC_BUFFER_PERCENTAGE_HARD = 0.015;
 
 	private static final double PARTITION_EVICTION_SIZE = 64 * 1024 * 1024; // 64 MB
 
 	// Memory limit for ByteBuffers
 	private static long _limit; // When spilling will be triggered
+	private static long _inMemoryLimit; // Up to this limit, keep spilled blocks resident
 	private static long _hardLimit; // When cache puts and disk loads become blocking
-	private static final AtomicLong _size = new AtomicLong(0);
-	private static final int MAX_BATCH_BLOCKS = 100;
+	private static final AtomicLong _residentSize = new AtomicLong(0); // HOT + WARM
+	private static final AtomicLong _unspilledSize = new AtomicLong(0); // HOT without spill location
+	private static final int MAX_BATCH_BLOCKS = 150;
 	private static final int MIN_BATCH_BLOCKS = 10;
 
 	// Cache structures: map key -> MatrixBlock and eviction deque (head=oldest block)
@@ -161,6 +165,7 @@ public class OOCEvictionManager {
 
 	private enum BlockState {
 		HOT, // In-memory
+		WARM, // Spilled to disk but still resident in memory
 		EVICTING, // Being written to disk (transition state)
 		COLD // On disk
 	}
@@ -192,6 +197,7 @@ public class OOCEvictionManager {
 	private static class BlockEntry {
 		private final ReentrantLock lock = new ReentrantLock();
 		private final Condition stateUpdate = lock.newCondition();
+		private int pins = 0;
 
 		private BlockState state = BlockState.HOT;
 		private IndexedMatrixValue value;
@@ -209,8 +215,10 @@ public class OOCEvictionManager {
 
 	static {
 		_limit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE); // e.g., 20% of heap
+		_inMemoryLimit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE_IN_MEMORY);
 		_hardLimit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE_HARD);
-		_size.set(0);
+		_residentSize.set(0);
+		_unspilledSize.set(0);
 		_spillDir = LocalFileUtils.getUniqueWorkingDir("ooc_stream");
 		LocalFileUtils.createLocalFileIfNotExist(_spillDir);
 	}
@@ -224,7 +232,8 @@ public class OOCEvictionManager {
 		if (!_cache.isEmpty()) {
 			System.err.println("There are dangling elements in the OOC Eviction cache: " + _cache.size());
 		}
-		_size.set(0);
+		_residentSize.set(0);
+		_unspilledSize.set(0);
 		_cache.clear();
 		_spillLocations.clear();
 		_partitions.clear();
@@ -301,7 +310,9 @@ public class OOCEvictionManager {
 			e.lock.lock();
 			try {
 				if (e.state == BlockState.HOT) {
-					_size.addAndGet(-e.size);
+					_residentSize.addAndGet(-e.size);
+					if (!_spillLocations.containsKey(streamId + "_" + blockId))
+						_unspilledSize.addAndGet(-e.size);
 					signalIfBelowHardLimit();
 				}
 			} finally {
@@ -336,7 +347,9 @@ public class OOCEvictionManager {
 			old.lock.lock();
 			try {
 				if (old.state == BlockState.HOT) {
-					_size.addAndGet(-old.size); // read and update size in atomic operation
+					_residentSize.addAndGet(-old.size); // read and update size in atomic operation
+					if (!_spillLocations.containsKey(key))
+						_unspilledSize.addAndGet(-old.size);
 					signalIfBelowHardLimit();
 				}
 			} finally {
@@ -344,14 +357,15 @@ public class OOCEvictionManager {
 			}
 		}
 
-		_size.addAndGet(size);
+		_residentSize.addAndGet(size);
+		_unspilledSize.addAndGet(size);
 		//make room if needed
 
 		invokeWriterIfNecessary();
 	}
 
 	private static void invokeWriterIfNecessary() {
-		if (_size.get() > _limit) {
+		if ((_residentSize.get() > _inMemoryLimit) || (_unspilledSize.get() > _limit)) {
 			startEvictionPreparation();
 		}
 	}
@@ -370,13 +384,13 @@ public class OOCEvictionManager {
 	}
 
 	private static void runEvictionPreparation() {
-		while (_size.get() > _limit) {
+		while (_residentSize.get() > _inMemoryLimit || _unspilledSize.get() > _limit) {
 			List<Map.Entry<String, BlockEntry>> batch = collectEvictionBatch();
 			if (batch.isEmpty()) {
 				break;
 			}
 
-			boolean shouldLaunch = batch.size() >= MIN_BATCH_BLOCKS || _size.get() >= _hardLimit;
+			boolean shouldLaunch = batch.size() >= MIN_BATCH_BLOCKS || _residentSize.get() >= _hardLimit;
 			if (!shouldLaunch) {
 				// Return entries to HOT to avoid leaving them in transient state.
 				revertToHot(batch);
@@ -388,12 +402,14 @@ public class OOCEvictionManager {
 	}
 
 	private static List<Map.Entry<String, BlockEntry>> collectEvictionBatch() {
-		//sanityCheckSize();
-		long size = _size.get();
-		long targetFreedSize = Math.max(size - _limit, (long) PARTITION_EVICTION_SIZE);
+		long size = _residentSize.get();
+		boolean highPressure = size > _inMemoryLimit;
+		boolean needSpill = _unspilledSize.get() > _limit;
+		long targetFreedSize = Math.max(_unspilledSize.get() - _limit, (long) PARTITION_EVICTION_SIZE);
 		List<Map.Entry<String, BlockEntry>> candidates = new ArrayList<>(MAX_BATCH_BLOCKS);
 		long totalPlanned = 0;
 		int lockBusy = 0;
+		int drops = 0;
 
 		synchronized (_cacheLock) {
 			Iterator<Map.Entry<String, BlockEntry>> iter = _cache.entrySet().iterator();
@@ -401,10 +417,22 @@ public class OOCEvictionManager {
 			while (iter.hasNext() && candidates.size() < MAX_BATCH_BLOCKS && totalPlanned < targetFreedSize) {
 				Map.Entry<String, BlockEntry> e = iter.next();
 				BlockEntry entry = e.getValue();
+				String key = e.getKey();
 
 				if (entry.lock.tryLock()) {
 					try {
-						if (entry.state == BlockState.HOT) {
+						boolean spilled = _spillLocations.containsKey(key);
+						if (highPressure && spilled && entry.value != null && entry.pins == 0) {
+							// Drop from memory immediately (no write).
+							entry.value = null;
+							if (entry.state != BlockState.COLD)
+								entry.state = BlockState.COLD;
+							long newSize = _residentSize.addAndGet(-entry.size);
+							drops++;
+							if (newSize < _hardLimit)
+								signalIfBelowHardLimit();
+						}
+						else if (needSpill && entry.state == BlockState.HOT && entry.pins == 0) {
 							entry.state = BlockState.EVICTING;
 							candidates.add(e);
 							totalPlanned += entry.size;
@@ -422,7 +450,8 @@ public class OOCEvictionManager {
 		if (candidates.isEmpty()) {
 			System.err.println("Eviction prep found no HOT candidates; size=" + size
 				+ " limit=" + _limit + " hardLimit=" + _hardLimit
-				+ " lockBusy=" + lockBusy);
+				+ " lockBusy=" + lockBusy + " highPressure=" + highPressure
+				+ " needSpill=" + needSpill + " drops=" + drops);
 		}
 		return candidates;
 	}
@@ -456,10 +485,10 @@ public class OOCEvictionManager {
 	}
 
 	public static void requestBlock(long streamId, int blockId, Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> consumer) {
-		IndexedMatrixValue val = tryGet(streamId, blockId);
+		BlockEntry val = tryGet(streamId, blockId);
 
 		if (val != null) {
-			consumer.accept(new OOCStream.QueueCallback<>(val, null));
+			consumer.accept(new CachedQueueCallback(val, null));
 			return;
 		}
 
@@ -477,15 +506,22 @@ public class OOCEvictionManager {
 
 		if (!alreadyQueued.getValue()) {
 			getReadExec().submit(() -> {
-				IndexedMatrixValue mVal = loadFromDisk(streamId, blockId);
+				BlockEntry mVal = loadFromDisk(streamId, blockId);
+
 				LinkedList<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> callbacks = _readRequests.remove(key);
-				OOCStream.QueueCallback<IndexedMatrixValue> v = new OOCStream.QueueCallback<>(mVal, null);
 
-				if (callbacks.size() > 1)
-					System.out.println("COULD REUSE: " + callbacks.size());
+				if (callbacks.size() > 1) {
+					mVal.lock.lock();
+					try {
+						mVal.pins += callbacks.size()-1;
+					} finally {
+						mVal.lock.unlock();
+					}
+				}
 
-				for(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> callback : callbacks)
-					callback.accept(v);
+				for(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> callback : callbacks) {
+					callback.accept(new CachedQueueCallback(mVal, null));
+				}
 			});
 		}
 	}
@@ -493,7 +529,7 @@ public class OOCEvictionManager {
 	/**
 	 * Get a block if it is hot (available in memory). Otherwise return null.
 	 */
-	public static IndexedMatrixValue tryGet(long streamId, int blockId) {
+	private static BlockEntry tryGet(long streamId, int blockId) {
 		String key = streamId + "_" + blockId;
 		BlockEntry imv;
 
@@ -526,8 +562,9 @@ public class OOCEvictionManager {
 			}
 
 			// 2. check if the block is in HOT
-			if (imv.state == BlockState.HOT) {
-				return imv.value;
+			if (imv.state == BlockState.HOT || imv.state == BlockState.WARM) {
+				imv.pins++;
+				return imv;
 			}
 
 		} finally {
@@ -540,14 +577,14 @@ public class OOCEvictionManager {
 	/**
 	 * Get a block from the OOC cache (deserialize on read)
 	 */
-	public static IndexedMatrixValue get(long streamId, int blockId) {
-		IndexedMatrixValue val = tryGet(streamId, blockId);
+	public static OOCStream.QueueCallback<IndexedMatrixValue> getAndPin(long streamId, int blockId) {
+		BlockEntry val = tryGet(streamId, blockId);
 
 		if (val != null)
-			return val;
+			return new CachedQueueCallback(val, null);
 
 		// restore, since the block is COLD
-		return loadFromDisk(streamId, blockId);
+		return new CachedQueueCallback(loadFromDisk(streamId, blockId), null);
 	}
 
 	/**
@@ -557,7 +594,7 @@ public class OOCEvictionManager {
 		if (candidates == null || candidates.isEmpty())
 			return;
 
-		long currentSize = _size.get();
+		long currentSize = _residentSize.get();
 		long totalFreedSize = 0;
 
 		// --- 1. WRITE PHASE ---
@@ -615,30 +652,52 @@ public class OOCEvictionManager {
 										.add(filename);
 					}
 
-					// 5. change state to COLD
+					// 5. change state based on pressure
 					entry.lock.lock();
 					long entrySize = entry.size;
+					boolean dropFromMemory = _residentSize.get() > _inMemoryLimit || _residentSize.get() > _hardLimit;
 					try {
-						entry.value = null; // only release ref, don't mutate object
-						entry.state = BlockState.COLD; // set state to cold, since writing to disk
+						if (dropFromMemory) {
+							entry.value = null; // only release ref, don't mutate object
+							entry.state = BlockState.COLD; // set state to cold, since writing to disk
+						}
+						else {
+							entry.state = BlockState.WARM; // spilled but still resident
+						}
 						entry.stateUpdate.signalAll(); // wake up any "get()" threads
-					} finally {
-						entry.lock.unlock();
-					}
+				} finally {
+					entry.lock.unlock();
+				}
 
-					synchronized (_cacheLock) {
-						_cache.put(key, entry); // add last semantic
-					}
+				synchronized (_cacheLock) {
+					_cache.put(key, entry); // add last semantic
+				}
 
 					if (DMLScript.STATISTICS) {
 						if (wrote)
 							Statistics.incrementOOCEvictionWrite();
 					}
 
-					long newSize = _size.addAndGet(-entrySize);
-					totalFreedSize += entrySize;
-					if (newSize < _hardLimit)
-						signalIfBelowHardLimit();
+					if (dropFromMemory) {
+						long newSize = _residentSize.addAndGet(-entrySize);
+						totalFreedSize += entrySize;
+						if (newSize < _hardLimit)
+							signalIfBelowHardLimit();
+						else {
+							System.err.println("Evicted block " + key + " freed " + entrySize
+								+ " bytes; size now " + newSize + " (still above hard limit "
+								+ _hardLimit + ")");
+						}
+					}
+					else {
+						if (DMLScript.STATISTICS && !alreadySpilled) {
+							System.err.println("Spilled but kept in memory: " + key + " size=" + entrySize);
+						}
+					}
+
+					if (wrote && !_spillLocations.containsKey(key)) {
+						_unspilledSize.addAndGet(-entrySize);
+					}
 				}
 				catch (Throwable t) {
 					// Recovery: return to HOT so we don't leave stranded EVICTING entries.
@@ -670,14 +729,14 @@ public class OOCEvictionManager {
 		if (DMLScript.STATISTICS) {
 			System.err.println("Eviction batch summary: candidates=" + candidates.size()
 				+ " freedBytes=" + totalFreedSize
-				+ " sizeBefore=" + currentSize + " sizeAfter=" + _size.get());
+				+ " sizeBefore=" + currentSize + " sizeAfter=" + _residentSize.get());
 		}
 	}
 
 	/**
 	 * Load block from spill file
 	 */
-	private static IndexedMatrixValue loadFromDisk(long streamId, int blockId) {
+	private static BlockEntry loadFromDisk(long streamId, int blockId) {
 		awaitBelowHardLimit();
 
 		String key = streamId + "_" + blockId;
@@ -734,7 +793,7 @@ public class OOCEvictionManager {
 			if (imvCacheEntry.state == BlockState.COLD) {
 				imvCacheEntry.value = new IndexedMatrixValue(ix, mb);
 				imvCacheEntry.state = BlockState.HOT;
-				_size.addAndGet(imvCacheEntry.size);
+				_residentSize.addAndGet(imvCacheEntry.size);
 
 				synchronized (_cacheLock) {
 					_cache.remove(key);
@@ -754,7 +813,17 @@ public class OOCEvictionManager {
 			Statistics.accumulateOOCLoadFromDiskTime(ioDuration);
 		}
 
-		return imvCacheEntry.value;
+		if (!_spillLocations.containsKey(key))
+			_unspilledSize.addAndGet(imvCacheEntry.size);
+
+		imvCacheEntry.lock.lock();
+		try {
+			imvCacheEntry.pins++;
+		} finally {
+			imvCacheEntry.lock.unlock();
+		}
+
+		return imvCacheEntry;
 	}
 
 	private static long estimateSerializedSize(MatrixBlock mb) {
@@ -768,22 +837,49 @@ public class OOCEvictionManager {
 	private static void signalIfBelowHardLimit() {
 		_memLock.lock();
 		try {
-			if (_size.get() < _hardLimit)
+			if (_residentSize.get() < _hardLimit)
 				_belowHardLimit.signalAll();
 		} finally {
 			_memLock.unlock();
 		}
 	}
 
+	public static void unpin(long streamId, int blockId) {
+		String key = streamId + "_" + blockId;
+		BlockEntry be;
+		synchronized (_cacheLock) {
+			be = _cache.get(key);
+		}
+		if (be == null)
+			return;
+		be.lock.lock();
+		try {
+			if (be.pins > 0)
+				be.pins--;
+		} finally {
+			be.lock.unlock();
+		}
+	}
+
+	private static boolean hasHotBlocks() {
+		synchronized (_cacheLock) {
+			for (BlockEntry be : _cache.values()) {
+				if (be.state == BlockState.HOT)
+					return true;
+			}
+		}
+		return false;
+	}
+
 	private static void sanityCheckSize() {
-		long accounted = _size.get();
+		long accounted = _residentSize.get();
 		long recomputed = 0;
 
 		synchronized (_cacheLock) {
 			for (Map.Entry<String, BlockEntry> e : _cache.entrySet()) {
 				BlockEntry be = e.getValue();
 				// Count only blocks that should occupy memory
-				if (be.state == BlockState.HOT || be.state == BlockState.EVICTING)
+				if (be.state == BlockState.HOT || be.state == BlockState.WARM || be.state == BlockState.EVICTING)
 					recomputed += be.size;
 			}
 		}
@@ -799,15 +895,15 @@ public class OOCEvictionManager {
 
 	private static void awaitBelowHardLimit() {
 		for (;;) {
-			if (_size.get() < _hardLimit)
+			if (_residentSize.get() < _hardLimit)
 				return;
 
-			System.err.println("Hard limit reached: " + _size.get());
+			System.err.println("Hard limit reached: " + _residentSize.get());
 			invokeWriterIfNecessary();
 
 			_memLock.lock();
 			try {
-				while (_size.get() >= _hardLimit) {
+				while (_residentSize.get() >= _hardLimit) {
 					_belowHardLimit.await();
 				}
 				return;
@@ -835,6 +931,63 @@ public class OOCEvictionManager {
 			iter.remove();
 
 			return entry;
+		}
+	}
+
+	static class CachedQueueCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
+		private final BlockEntry _result;
+		private DMLRuntimeException _failure;
+		private final AtomicBoolean _pinned;
+
+		CachedQueueCallback(BlockEntry result, DMLRuntimeException failure) {
+			this._result = result;
+			this._failure = failure;
+			this._pinned = new AtomicBoolean(true);
+		}
+
+		@Override
+		public IndexedMatrixValue get() {
+			if (_failure != null)
+				throw _failure;
+			if (!_pinned.get())
+				throw new IllegalStateException("Cannot get cached item of a closed callback");
+			IndexedMatrixValue ret = _result.value;
+			if (ret == null)
+				throw new IllegalStateException("Cannot get a cached item if it is not pinned in memory");
+			return ret;
+		}
+
+		@Override
+		public OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
+			_result.lock.lock();
+			try {
+				_result.pins++;
+			} finally {
+				_result.lock.unlock();
+			}
+			return new CachedQueueCallback(_result, _failure);
+		}
+
+		@Override
+		public void fail(DMLRuntimeException failure) {
+			this._failure = failure;
+		}
+
+		@Override
+		public boolean isEos() {
+			return get() == null;
+		}
+
+		@Override
+		public void close() {
+			if (_pinned.compareAndSet(true, false)) {
+				_result.lock.lock();
+				try {
+					_result.pins--;
+				} finally {
+					_result.lock.unlock();
+				}
+			}
 		}
 	}
 }

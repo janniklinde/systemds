@@ -185,31 +185,35 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 							if(mIdx == null)
 								continue;
 
-							IndexedMatrixValue mv = cachedStream.peekCached(mIdx);
-							MatrixBlock srcBlock = (MatrixBlock) mv.getValue();
+							try (OOCStream.QueueCallback<IndexedMatrixValue> cb = cachedStream.peekCached(mIdx)) {
+								IndexedMatrixValue mv = cb.get();
+								MatrixBlock srcBlock = (MatrixBlock) mv.getValue();
 
-							if(target == null)
-								target = new MatrixBlock(nRows, nCols, srcBlock.isInSparseFormat());
+								if(target == null)
+									target = new MatrixBlock(nRows, nCols, srcBlock.isInSparseFormat());
 
-							long srcBlockRowStart = (mIdx.getRowIndex() - 1) * blocksize;
-							long srcBlockColStart = (mIdx.getColumnIndex() - 1) * blocksize;
-							long sliceRowStartGlobal = Math.max(targetRowStartGlobal, srcBlockRowStart);
-							long sliceRowEndGlobal = Math.min(targetRowEndGlobal,
-								srcBlockRowStart + srcBlock.getNumRows() - 1);
-							long sliceColStartGlobal = Math.max(targetColStartGlobal, srcBlockColStart);
-							long sliceColEndGlobal = Math.min(targetColEndGlobal,
-								srcBlockColStart + srcBlock.getNumColumns() - 1);
+								long srcBlockRowStart = (mIdx.getRowIndex() - 1) * blocksize;
+								long srcBlockColStart = (mIdx.getColumnIndex() - 1) * blocksize;
+								long sliceRowStartGlobal = Math.max(targetRowStartGlobal, srcBlockRowStart);
+								long sliceRowEndGlobal = Math.min(targetRowEndGlobal,
+									srcBlockRowStart + srcBlock.getNumRows() - 1);
+								long sliceColStartGlobal = Math.max(targetColStartGlobal, srcBlockColStart);
+								long sliceColEndGlobal = Math.min(targetColEndGlobal,
+									srcBlockColStart + srcBlock.getNumColumns() - 1);
 
-							int sliceRowStart = (int) (sliceRowStartGlobal - srcBlockRowStart);
-							int sliceRowEnd = (int) (sliceRowEndGlobal - srcBlockRowStart);
-							int sliceColStart = (int) (sliceColStartGlobal - srcBlockColStart);
-							int sliceColEnd = (int) (sliceColEndGlobal - srcBlockColStart);
+								int sliceRowStart = (int) (sliceRowStartGlobal - srcBlockRowStart);
+								int sliceRowEnd = (int) (sliceRowEndGlobal - srcBlockRowStart);
+								int sliceColStart = (int) (sliceColStartGlobal - srcBlockColStart);
+								int sliceColEnd = (int) (sliceColEndGlobal - srcBlockColStart);
 
-							int targetRowOffset = (int) (sliceRowStartGlobal - targetRowStartGlobal);
-							int targetColOffset = (int) (sliceColStartGlobal - targetColStartGlobal);
+								int targetRowOffset = (int) (sliceRowStartGlobal - targetRowStartGlobal);
+								int targetColOffset = (int) (sliceColStartGlobal - targetColStartGlobal);
 
-							MatrixBlock sliced = srcBlock.slice(sliceRowStart, sliceRowEnd, sliceColStart, sliceColEnd);
-							sliced.putInto(target, targetRowOffset, targetColOffset, true);
+								MatrixBlock sliced = srcBlock.slice(sliceRowStart, sliceRowEnd, sliceColStart,
+									sliceColEnd);
+								sliced.putInto(target, targetRowOffset, targetColOffset, true);
+							}
+
 							final int maxConsumptions = aligner.getNumConsumptions(mIdx);
 
 							Integer con = consumptionCounts.compute(mIdx, (k, v) -> {
