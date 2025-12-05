@@ -426,9 +426,9 @@ public abstract class OOCInstruction extends Instruction {
 		submitOOCTasks(List.of(leftCache.getReadStream(), rightCache.getReadStream()), (i, tmp) -> {
 			try (tmp) {
 				if(i == 0)
-					join.addLeft(onLeft.apply((T) tmp), ((IndexedMatrixValue) tmp).getIndexes());
+					join.addLeft(onLeft.apply((T) tmp.get()), tmp.get().getIndexes());
 				else
-					join.addRight(onRight.apply((T) tmp), ((IndexedMatrixValue) tmp).getIndexes());
+					join.addRight(onRight.apply((T) tmp.get()), tmp.get().getIndexes());
 			}
 		}, () -> {
 			join.close();
