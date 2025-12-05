@@ -737,13 +737,16 @@ public class OOCEvictionManager {
 			if (entry.state == BlockState.COLD) {
 				entry.value = new IndexedMatrixValue(ix, mb);
 				entry.state = BlockState.HOT;
-				_resourceManager.pinReserved(entry.size);
+				_resourceManager.unpinReserved(entry.size);
 				pin(entry);
 
 				synchronized (_cacheLock) {
 					_cache.remove(key);
 					_cache.put(key, entry);
 				}
+			} else {
+				_resourceManager.freeReserved(entry.size);
+				throw new IllegalStateException();
 			}
 		} finally {
 			entry.lock.unlock();
@@ -794,13 +797,14 @@ public class OOCEvictionManager {
 
 			if (incr) {
 				int total = _pinCount.incrementAndGet();
+				_resourceManager.pinUnpinned(be.size);
 				if (total > PIN_WARN_THRESHOLD)
 					System.err.println("Warning: high pinned count: " + total + " (threshold " + PIN_WARN_THRESHOLD + ")");
 			}
 			else if (decr) {
-				int total = _pinCount.decrementAndGet();
-				freed = total == 0;
-				if (freed && be.state == BlockState.WARM) {
+				freed = true;
+				_pinCount.decrementAndGet();
+				if (be.state == BlockState.WARM) {
 					be.value = null;
 					be.state = BlockState.COLD;
 					evicted = true;

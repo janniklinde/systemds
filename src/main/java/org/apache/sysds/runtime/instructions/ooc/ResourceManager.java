@@ -117,6 +117,16 @@ public class ResourceManager {
 		return unpinned;
 	}
 
+	public void pinUnpinned(long memory) {
+		_pinnedMemory.addAndGet(memory);
+		_unpinnedMemory.addAndGet(-memory);
+	}
+
+	public void unpinReserved(long memory) {
+		_unpinnedMemory.addAndGet(memory);
+		_reservedMemory.addAndGet(-memory);
+	}
+
 	/**
 	 * Frees unpinned memory
 	 * @param memory the number of bytes to be freed
