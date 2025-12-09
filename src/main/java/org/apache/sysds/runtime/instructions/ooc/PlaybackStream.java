@@ -23,6 +23,7 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -78,7 +79,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreama
 				_lastDequeue.close();
 			_lastDequeue = _streamCache.get(_streamIdx.getAndIncrement());
 			return _lastDequeue.get();
-		} catch (InterruptedException e) {
+		} catch (InterruptedException | ExecutionException e) {
 			throw new DMLRuntimeException(e);
 		}
 	}

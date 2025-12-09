@@ -1,4 +1,4 @@
-package org.apache.sysds.runtime.ooc;
+package org.apache.sysds.runtime.ooc.cache;
 
 import org.jetbrains.annotations.NotNull;
 
@@ -9,6 +9,14 @@ public class BlockKey implements Comparable<BlockKey> {
 	public BlockKey(long streamId, long sequenceNumber) {
 		this._streamId = streamId;
 		this._sequenceNumber = sequenceNumber;
+	}
+
+	public long getStreamId() {
+		return _streamId;
+	}
+
+	public long getSequenceNumber() {
+		return _sequenceNumber;
 	}
 
 	@Override
@@ -25,7 +33,16 @@ public class BlockKey implements Comparable<BlockKey> {
 	}
 
 	@Override
+	public boolean equals(Object obj) {
+		return obj instanceof BlockKey && ((BlockKey)obj)._streamId == _streamId && ((BlockKey)obj)._sequenceNumber == _sequenceNumber;
+	}
+
+	@Override
 	public String toString() {
-		return "BlockEntry(" + _streamId + ", " + _sequenceNumber + ")";
+		return "BlockKey(" + _streamId + ", " + _sequenceNumber + ")";
+	}
+
+	public String toFileKey() {
+		return _streamId + "_" + _sequenceNumber;
 	}
 }

@@ -30,6 +30,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.util.CommonThreadPool;
 import org.apache.sysds.runtime.util.OOCJoin;
 import scala.Tuple3;
@@ -236,10 +237,15 @@ public abstract class OOCInstruction extends Instruction {
 					if(queued != null) {
 						for(MatrixIndexes idx : queued) {
 							waitCtr.incrementAndGet();
-							leftCache.findCachedAsync(idx,
-								callback -> {
-									try(callback){
-										broadcastingQueue.enqueue(new Tuple3<>(key, callback.keepOpen(), b));
+
+							OOCCacheManager.requestManyBlocks(
+								List.of(rightCache.findCachedBlockEntry(tmp.get().getIndexes()), leftCache.findCachedBlockEntry(idx)))
+								.whenComplete((items, err) -> {
+									try{
+										// TODO Ensure b stays open
+										broadcastingQueue.enqueue(new Tuple3<>(key, items.get(1).keepOpen(), b));
+									} finally {
+										items.forEach(OOCStream.QueueCallback::close);
 									}
 								});
 						}
@@ -358,8 +364,8 @@ public abstract class OOCInstruction extends Instruction {
 			Arrays.stream(caches).map(CachingStream::getReadStream).collect(java.util.stream.Collectors.toList()),
 			(i, tmp) -> {
 				Function<T, P> keyFn = on.get(i);
-				P key = keyFn.apply((T)tmp);
-				MatrixIndexes idx = ((IndexedMatrixValue) tmp).getIndexes();
+				P key = keyFn.apply((T)tmp.get());
+				MatrixIndexes idx = tmp.get().getIndexes();
 
 				MatrixIndexes[] arr = seen.computeIfAbsent(key, k -> new MatrixIndexes[n]);
 				boolean ready;

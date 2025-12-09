@@ -1,14 +1,9 @@
-package org.apache.sysds.runtime.ooc;
+package org.apache.sysds.runtime.ooc.cache;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 public interface OOCCacheScheduler {
-	static OOCCacheScheduler _scheduler = null;
-
-	static OOCCacheScheduler get() {
-		return null;
-	}
 
 	/**
 	 * Requests a single block from the cache.
@@ -49,4 +44,9 @@ public interface OOCCacheScheduler {
 	 * @param entry the entry to be unpinned
 	 */
 	void unpin(BlockEntry entry);
+
+	/**
+	 * Shuts down the cache scheduler.
+	 */
+	void shutdown();
 }

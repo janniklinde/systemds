@@ -1,6 +1,6 @@
-package org.apache.sysds.runtime.ooc;
+package org.apache.sysds.runtime.ooc.cache;
 
-import java.util.concurrent.CompletableFuture;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 
 public final class BlockEntry {
 	private final BlockKey _key;
@@ -8,7 +8,6 @@ public final class BlockEntry {
 	private volatile int _pinCount;
 	private volatile BlockState _state;
 	private Object _data;
-	private CompletableFuture<BlockEntry> _availabilityCallback;
 
 	BlockEntry(BlockKey key, long size, Object data) {
 		this._key = key;
@@ -32,6 +31,14 @@ public final class BlockEntry {
 		throw new IllegalStateException("Cannot get the data of an unpinned entry");
 	}
 
+	Object getDataUnsafe() {
+		return _data;
+	}
+
+	void setDataUnsafe(Object data) {
+		_data = data;
+	}
+
 	public BlockState getState() {
 		return _state;
 	}
@@ -41,31 +48,7 @@ public final class BlockEntry {
 	}
 
 	synchronized void setState(BlockState state) {
-		if (_state.isAvailable() && state.isUnavailable())
-			_availabilityCallback = new CompletableFuture<>();
 		_state = state;
-		if (_state.isUnavailable() && state.isAvailable()) {
-			_availabilityCallback.complete(this);
-			_availabilityCallback = null;
-		}
-	}
-
-	CompletableFuture<BlockEntry> getAvailabilityCallback() {
-		return _availabilityCallback;
-	}
-
-	/**
-	 * Sets the data and pins it to memory
-	 * @param data the data to be pinned
-	 * @param dataOnDisk if the data is already backed by disk
-	 */
-	synchronized void setDataAndPin(Object data, boolean dataOnDisk) {
-		if (_data != null || _pinCount != 0)
-			throw new IllegalStateException("Cannot set data when it is already available");
-
-		_data = data;
-		_state = dataOnDisk ? BlockState.WARM : BlockState.HOT;
-		_pinCount++;
 	}
 
 	/**
@@ -75,6 +58,8 @@ public final class BlockEntry {
 	synchronized long clear() {
 		if (_pinCount != 0 || _data == null)
 			return 0;
+		if (_data instanceof IndexedMatrixValue)
+			((IndexedMatrixValue)_data).setValue(null); // Explicitly clear
 		_data = null;
 		return _size;
 	}

@@ -1,8 +1,10 @@
-package org.apache.sysds.runtime.ooc;
+package org.apache.sysds.runtime.ooc.cache;
 
 import java.util.concurrent.CompletableFuture;
 
-public interface IOHandlerOOC {
+public interface OOCIOHandler {
+	void shutdown();
+
 	CompletableFuture<Void> scheduleEviction(BlockEntry block);
 
 	CompletableFuture<BlockEntry> scheduleRead(BlockEntry block);

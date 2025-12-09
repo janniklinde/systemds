@@ -1,11 +1,11 @@
-package org.apache.sysds.runtime.ooc;
+package org.apache.sysds.runtime.ooc.cache;
 
 public enum BlockState {
 	HOT,
 	WARM,
 	EVICTING,
 	READING,
-	DEFERRED_READ, // Deferred read
+	//DEFERRED_READ, // Deferred read
 	COLD,
 	REMOVED; // Removed state means that it is not owned by the cache anymore. It doesn't mean the object is dereferenced
 
@@ -18,12 +18,12 @@ public enum BlockState {
 	}
 
 	public boolean readScheduled() {
-		return this == READING || this == DEFERRED_READ;
+		return this == READING;
 	}
 
 	public boolean isBackedByDisk() {
 		return switch(this) {
-			case WARM, COLD, READING, DEFERRED_READ -> true;
+			case WARM, COLD, READING -> true;
 			default -> false;
 		};
 	}
