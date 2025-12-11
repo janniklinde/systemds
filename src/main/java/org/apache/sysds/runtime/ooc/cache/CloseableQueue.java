@@ -26,15 +26,26 @@ public class CloseableQueue<T> {
 		return true;
 	}
 
+	public T take() throws InterruptedException {
+		if (closed && queue.isEmpty())
+			return null;
+
+		Object x = queue.take();
+
+		if (x == POISON)
+			return null;
+
+		return (T) x;
+	}
+
 	/**
-	 * Take with max timeout.
+	 * Poll with max timeout.
 	 * @return item, or null if:
 	 *   - timeout, or
 	 *   - queue has been closed and this consumer reached its poison pill
 	 */
 	@SuppressWarnings("unchecked")
-	public T take(long timeout, TimeUnit unit) throws InterruptedException {
-		// Fast-path: already closed and empty → don't block
+	public T poll(long timeout, TimeUnit unit) throws InterruptedException {
 		if (closed && queue.isEmpty())
 			return null;
 
@@ -43,7 +54,7 @@ public class CloseableQueue<T> {
 			return null;          // timeout
 
 		if (x == POISON)
-			return null;          // end-of-stream for this consumer
+			return null;
 
 		return (T) x;
 	}
@@ -60,5 +71,9 @@ public class CloseableQueue<T> {
 		}
 		queue.put(POISON);
 		return true;
+	}
+
+	public synchronized boolean isFinished() {
+		return closed && queue.isEmpty();
 	}
 }

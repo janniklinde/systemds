@@ -31,9 +31,10 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
+import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.util.CommonThreadPool;
 import org.apache.sysds.runtime.util.OOCJoin;
-import scala.Tuple3;
+import org.apache.sysds.utils.Statistics;
 import scala.Tuple4;
 
 import java.util.ArrayList;
@@ -49,6 +50,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
@@ -69,6 +71,8 @@ public abstract class OOCInstruction extends Instruction {
 	protected Set<OOCStream<?>> _inQueues;
 	protected Set<OOCStream<?>> _outQueues;
 	private boolean _failed;
+	private LongAdder _localStatisticsAdder;
+	private final int _callerId;
 
 	protected OOCInstruction(OOCInstruction.OOCType type, String opcode, String istr) {
 		this(type, null, opcode, istr);
@@ -82,6 +86,10 @@ public abstract class OOCInstruction extends Instruction {
 
 		_requiresLabelUpdate = super.requiresLabelUpdate();
 		_failed = false;
+
+		if (DMLScript.STATISTICS)
+			_localStatisticsAdder = new LongAdder();
+		_callerId = OOCEventLog.USE_OOC_EVENT_LOG ? OOCEventLog.registerCaller(getExtendedOpcode() + "_" + hashCode()) : 0;
 	}
 
 	@Override
@@ -180,7 +188,7 @@ public abstract class OOCInstruction extends Instruction {
 		Map<P, List<MatrixIndexes>> availableLeftInput = new ConcurrentHashMap<>();
 		Map<P, BroadcastedElement> availableBroadcastInput = new ConcurrentHashMap<>();
 
-		OOCStream<Tuple3<P, OOCStream.QueueCallback<IndexedMatrixValue>, BroadcastedElement>> broadcastingQueue = createWritableStream();
+		OOCStream<Tuple4<P, OOCStream.QueueCallback<IndexedMatrixValue>, OOCStream.QueueCallback<IndexedMatrixValue>, BroadcastedElement>> broadcastingQueue = createWritableStream();
 		AtomicInteger waitCtr = new AtomicInteger(1);
 		CompletableFuture<Void> fut1 = new CompletableFuture<>();
 
@@ -204,7 +212,18 @@ public abstract class OOCInstruction extends Instruction {
 							leftCache.getWriteStream().enqueue(tmp.get());
 					}
 					else {
-						if(!explicitLeftCaching)
+						waitCtr.incrementAndGet();
+
+						OOCCacheManager.requestManyBlocks(
+							List.of(leftCache.peekCachedBlockKey(tmp.get().getIndexes()), rightCache.peekCachedBlockKey(b.idx)))
+							.whenComplete((items, err) -> {
+								try {
+									broadcastingQueue.enqueue(new Tuple4<>(key, items.get(0).keepOpen(), items.get(1).keepOpen(), b));
+								} finally {
+									items.forEach(OOCStream.QueueCallback::close);
+								}
+							});
+						/*if(!explicitLeftCaching)
 							leftCache.incrProcessingCount(leftCache.findCachedIndex(tmp.get().getIndexes()),
 								1); // Correct for incremented subscriber count to allow block deletion
 
@@ -222,7 +241,7 @@ public abstract class OOCInstruction extends Instruction {
 							if(!explicitRightCaching)
 								rightCache.incrProcessingCount(rightCache.findCachedIndex(b.idx),
 									1); // Correct for incremented subscriber count to allow block deletion
-						}
+						}*/
 					}
 				}
 				else { // broadcast stream
@@ -239,11 +258,10 @@ public abstract class OOCInstruction extends Instruction {
 							waitCtr.incrementAndGet();
 
 							OOCCacheManager.requestManyBlocks(
-								List.of(rightCache.findCachedBlockEntry(tmp.get().getIndexes()), leftCache.findCachedBlockEntry(idx)))
+								List.of(leftCache.peekCachedBlockKey(idx), rightCache.peekCachedBlockKey(tmp.get().getIndexes())))
 								.whenComplete((items, err) -> {
 									try{
-										// TODO Ensure b stays open
-										broadcastingQueue.enqueue(new Tuple3<>(key, items.get(1).keepOpen(), b));
+										broadcastingQueue.enqueue(new Tuple4<>(key, items.get(0).keepOpen(), items.get(1).keepOpen(), b));
 									} finally {
 										items.forEach(OOCStream.QueueCallback::close);
 									}
@@ -261,21 +279,22 @@ public abstract class OOCInstruction extends Instruction {
 		CompletableFuture<Void> fut2 = new CompletableFuture<>();
 		submitOOCTasks(List.of(broadcastingQueue), (i, tpl) -> {
 			try (tpl) {
-				final BroadcastedElement b = tpl.get()._3();
+				final BroadcastedElement b = tpl.get()._4();
 				final OOCStream.QueueCallback<IndexedMatrixValue> lValue = tpl.get()._2();
-				OOCStream.QueueCallback<IndexedMatrixValue> bValue = rightCache.peekCached(b.idx);
+				final OOCStream.QueueCallback<IndexedMatrixValue> bValue = tpl.get()._3();
 
 				try (lValue; bValue) {
 					b.value = bValue.get();
 					qOut.enqueue(mapper.apply(lValue.get(), b));
-				}
+					leftCache.incrProcessingCount(leftCache.findCachedIndex(lValue.get().getIndexes()), 1);
 
-				if(b.canRelease()) {
-					availableBroadcastInput.remove(tpl.get()._1());
+					if(b.canRelease()) {
+						availableBroadcastInput.remove(tpl.get()._1());
 
-					if(!explicitRightCaching)
-						rightCache.incrProcessingCount(rightCache.findCachedIndex(b.idx),
-							1); // Correct for incremented subscriber count to allow block deletion
+						if(!explicitRightCaching)
+							rightCache.incrProcessingCount(rightCache.findCachedIndex(b.idx),
+								1); // Correct for incremented subscriber count to allow block deletion
+					}
 				}
 
 				if(waitCtr.decrementAndGet() == 0)
@@ -490,6 +509,7 @@ public abstract class OOCInstruction extends Instruction {
 
 			//System.out.println("Substream (k " + k + ", id " + streamId + ", type '" + queue.getClass().getSimpleName() + "', stream_id " + queue.hashCode() + ")");
 			queue.setSubscriber(oocTask(callback -> {
+				long startTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
 				try (callback) {
 					if(callback.isEos()) {
 						if(!closeRaceWatchdog.compareAndSet(false, true))
@@ -522,16 +542,35 @@ public abstract class OOCInstruction extends Instruction {
 					final OOCStream.QueueCallback<T> pinned = callback.keepOpen();
 
 					pool.submit(oocTask(() -> {
+						long taskStartTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
 						try (pinned) {
 							consumer.accept(k, pinned);
 
 							if(localTaskCtr.decrementAndGet() == 0)
 								localFuture.complete(null);
+						} finally {
+							if (DMLScript.STATISTICS) {
+								_localStatisticsAdder.add(System.nanoTime() - taskStartTime);
+								if (globalFuture.isDone()) {
+									Statistics.maintainOOCHeavyHitter(getExtendedOpcode(), _localStatisticsAdder.sum());
+									_localStatisticsAdder.reset();
+								}
+								if (OOCEventLog.USE_OOC_EVENT_LOG)
+									OOCEventLog.onComputeEvent(_callerId, taskStartTime, System.nanoTime());
+							}
 						}
 					}, localFuture, Stream.concat(_outQueues.stream(), _inQueues.stream()).toArray(OOCStream[]::new)));
 
 					if(closeRaceWatchdog.get()) // Sanity check
 						throw new DMLRuntimeException("Race condition observed");
+				} finally {
+					if (DMLScript.STATISTICS) {
+						_localStatisticsAdder.add(System.nanoTime() - startTime);
+						if (globalFuture.isDone()) {
+							Statistics.maintainOOCHeavyHitter(getExtendedOpcode(), _localStatisticsAdder.sum());
+							_localStatisticsAdder.reset();
+						}
+					}
 				}
 			}, null,  Stream.concat(_outQueues.stream(), _inQueues.stream()).toArray(OOCStream[]::new)));
 
@@ -567,7 +606,13 @@ public abstract class OOCInstruction extends Instruction {
 		ExecutorService pool = CommonThreadPool.get();
 		final CompletableFuture<Void> future = new CompletableFuture<>();
 		try {
-			pool.submit(oocTask(() -> {r.run();future.complete(null);}, future, queues));
+			pool.submit(oocTask(() -> {
+				long startTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
+				r.run();
+				future.complete(null);
+				if (DMLScript.STATISTICS)
+					Statistics.maintainOOCHeavyHitter(getExtendedOpcode(), System.nanoTime() - startTime);
+				}, future, queues));
 		}
 		catch (Exception ex) {
 			throw new DMLRuntimeException(ex);
@@ -581,6 +626,7 @@ public abstract class OOCInstruction extends Instruction {
 
 	private Runnable oocTask(Runnable r, CompletableFuture<Void> future,  OOCStream<?>... queues) {
 		return () -> {
+			long startTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
 			try {
 				r.run();
 			}
@@ -600,6 +646,9 @@ public abstract class OOCInstruction extends Instruction {
 
 				// Rethrow to ensure proper future handling
 				throw re;
+			} finally {
+				if (DMLScript.STATISTICS)
+					_localStatisticsAdder.add(System.nanoTime() - startTime);
 			}
 		};
 	}

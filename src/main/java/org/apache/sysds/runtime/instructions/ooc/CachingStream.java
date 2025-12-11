@@ -212,7 +212,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		return _index.get(idx);
 	}
 
-	public synchronized BlockKey findCachedBlockEntry(MatrixIndexes idx) {
+	public synchronized BlockKey peekCachedBlockKey(MatrixIndexes idx) {
 		return new BlockKey(_streamId, _index.get(idx));
 	}
 

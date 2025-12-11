@@ -224,6 +224,7 @@ public class Statistics
 	public static boolean allowWorkerStatistics = true;
 
 	// Out-of-core eviction metrics
+	private static final ConcurrentHashMap<String, LongAdder> oocHeavyHitters = new  ConcurrentHashMap<>();
 	private static final LongAdder oocGetCalls = new LongAdder();
 	private static final LongAdder oocPutCalls = new LongAdder();
 	private static final LongAdder oocLoadFromDiskCalls = new LongAdder();
@@ -350,6 +351,7 @@ public class Statistics
 	}
 
 	public static void resetOOCEvictionStats() {
+		oocHeavyHitters.clear();
 		oocGetCalls.reset();
 		oocPutCalls.reset();
 		oocLoadFromDiskCalls.reset();
@@ -359,8 +361,92 @@ public class Statistics
 		oocStatsStartTime.set(System.nanoTime());
 	}
 
+	public static String getOOCHeavyHitters(int num) {
+		if (num <= 0 || oocHeavyHitters == null || oocHeavyHitters.isEmpty())
+			return "-";
+
+		@SuppressWarnings("unchecked")
+		Map.Entry<String, LongAdder>[] tmp =
+			oocHeavyHitters.entrySet().toArray(new Map.Entry[0]);
+
+		Arrays.sort(tmp, (e1, e2) ->
+			Long.compare(e1.getValue().longValue(), e2.getValue().longValue())
+		);
+
+		final String numCol   = "#";
+		final String instCol  = "Instruction";
+		final String timeCol  = "Time(s)";
+
+		DecimalFormat sFormat = new DecimalFormat("#,##0.000");
+
+		StringBuilder sb = new StringBuilder();
+		int len = tmp.length;
+		int numHittersToDisplay = Math.min(num, len);
+
+		int maxNumLen  = String.valueOf(numHittersToDisplay).length();
+		int maxInstLen = instCol.length();
+		int maxTimeLen = timeCol.length();
+
+		// first pass: compute column widths
+		for (int i = 0; i < numHittersToDisplay; i++) {
+			Map.Entry<String, LongAdder> hh = tmp[len - 1 - i];
+
+			String instruction = hh.getKey();
+			double timeS = hh.getValue().longValue() / 1_000_000_000d;
+			String timeStr = sFormat.format(timeS);
+
+			maxInstLen = Math.max(maxInstLen, instruction.length());
+			maxTimeLen = Math.max(maxTimeLen, timeStr.length());
+		}
+
+		maxInstLen = Math.min(maxInstLen, DMLScript.STATISTICS_MAX_WRAP_LEN);
+
+		// header
+		sb.append(String.format(
+			" %" + maxNumLen + "s  %-" + maxInstLen + "s  %" + maxTimeLen + "s",
+			numCol, instCol, timeCol));
+		sb.append("\n");
+
+		// rows
+		for (int i = 0; i < numHittersToDisplay; i++) {
+			Map.Entry<String, LongAdder> hh = tmp[len - 1 - i];
+
+			String instruction = hh.getKey();
+			double timeS = hh.getValue().longValue() / 1_000_000_000d;
+			String timeStr = sFormat.format(timeS);
+
+			String[] wrappedInstruction = wrap(instruction, maxInstLen);
+
+			for (int w = 0; w < wrappedInstruction.length; w++) {
+				if (w == 0) {
+					sb.append(String.format(
+						" %" + maxNumLen + "d  %-" + maxInstLen + "s  %"
+							+ maxTimeLen + "s",
+						(i + 1), wrappedInstruction[w], timeStr));
+				} else {
+					sb.append(String.format(
+						" %" + maxNumLen + "s  %-" + maxInstLen + "s  %"
+							+ maxTimeLen + "s",
+						"", wrappedInstruction[w], ""));
+				}
+				sb.append("\n");
+			}
+		}
+
+		return sb.toString();
+	}
+
+	public static void maintainOOCHeavyHitter(String op, long timeNanos) {
+		LongAdder adder = oocHeavyHitters.computeIfAbsent(op, k -> new LongAdder());
+		adder.add(timeNanos);
+	}
+
 	public static void incrementOOCEvictionGet() {
 		oocGetCalls.increment();
+	}
+
+	public static void incrementOOCEvictionGet(int incr) {
+		oocGetCalls.add(incr);
 	}
 
 	public static void incrementOOCEvictionPut() {
@@ -391,6 +477,7 @@ public class Statistics
 
 		StringBuilder sb = new StringBuilder();
 		sb.append("OOC eviction stats (since last reset):\n");
+		sb.append(getOOCHeavyHitters(10));
 		sb.append(String.format(Locale.US, "  get calls:\t\t%d (%.2f/sec)\n",
 			oocGetCalls.longValue(), getThroughput));
 		sb.append(String.format(Locale.US, "  put calls:\t\t%d (%.2f/sec)\n",

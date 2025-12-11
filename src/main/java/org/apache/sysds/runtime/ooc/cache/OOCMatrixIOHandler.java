@@ -6,26 +6,35 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.io.IOUtilFunctions;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.util.FastBufferedDataInputStream;
 import org.apache.sysds.runtime.util.FastBufferedDataOutputStream;
 import org.apache.sysds.runtime.util.LocalFileUtils;
 import org.apache.sysds.utils.Statistics;
 import scala.Tuple2;
+import scala.Tuple3;
 
-import java.io.BufferedInputStream;
-import java.io.DataInputStream;
+import java.io.DataInput;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.nio.channels.Channels;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class OOCMatrixIOHandler implements OOCIOHandler {
+	private static final int WRITER_SIZE = 2;
+	private static final long OVERFLOW = 8192 * 1024;
+	private static final long MAX_PARTITION_SIZE = 8192 * 8192;
+
 	private final String _spillDir;
 	private final ThreadPoolExecutor _writeExec;
 	private final ThreadPoolExecutor _readExec;
@@ -34,12 +43,15 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 	private final ConcurrentHashMap<String, SpillLocation> _spillLocations =  new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<Integer, PartitionFile> _partitions = new ConcurrentHashMap<>();
 	private final AtomicInteger _partitionCounter = new AtomicInteger(0);
+	private final CloseableQueue<Tuple2<BlockEntry, CompletableFuture<Void>>>[] _q;
+	private final AtomicLong _wCtr;
+	private final AtomicBoolean _started;
 
 	public OOCMatrixIOHandler() {
 		this._spillDir = LocalFileUtils.getUniqueWorkingDir("ooc_stream");
 		_writeExec = new ThreadPoolExecutor(
-			1,
-			1,
+			WRITER_SIZE,
+			WRITER_SIZE,
 			0L,
 			TimeUnit.MILLISECONDS,
 			new ArrayBlockingQueue<>(100000));
@@ -49,43 +61,63 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			0L,
 			TimeUnit.MILLISECONDS,
 			new ArrayBlockingQueue<>(100000));
+		_q = new CloseableQueue[WRITER_SIZE];
+		_wCtr = new AtomicLong(0);
+		_started = new  AtomicBoolean(false);
+	}
+
+	private synchronized void start() {
+		if (_started.compareAndSet(false, true)) {
+			for (int i = 0; i < WRITER_SIZE; i++) {
+				final int finalIdx = i;
+				_q[i] = new CloseableQueue<>();
+				_writeExec.submit(() -> evictTask(_q[finalIdx]));
+			}
+		}
 	}
 
 	@Override
 	public void shutdown() {
+		boolean started = _started.get();
+		if (started) {
+			try {
+				for(int i = 0; i < WRITER_SIZE; i++) {
+					_q[i].close();
+				}
+			}
+			catch(InterruptedException e) {
+				e.printStackTrace();
+			}
+		}
 		_writeExec.getQueue().clear();
-		_writeExec.shutdown();
+		_writeExec.shutdownNow();
 		_readExec.getQueue().clear();
-		_readExec.shutdown();
+		_readExec.shutdownNow();
 		_spillLocations.clear();
 		_partitions.clear();
-		LocalFileUtils.deleteFileIfExists(_spillDir);
+		if (started)
+			LocalFileUtils.deleteFileIfExists(_spillDir);
 	}
 
 	@Override
 	public CompletableFuture<Void> scheduleEviction(BlockEntry block) {
-		System.out.println("Schedule eviction: " + block.getKey());
+		start();
 		CompletableFuture<Void> future = new CompletableFuture<>();
-		CloseableQueue<Tuple2<BlockEntry, CompletableFuture<Void>>> q = new CloseableQueue<>();
 		try {
-			q.enqueueIfOpen(new Tuple2<>(block, future));
-			q.close();
-		} catch (InterruptedException e) {
-			throw new DMLRuntimeException(e);
+			long q = _wCtr.getAndAdd(block.getSize()) / OVERFLOW;
+			int i = (int)(q % WRITER_SIZE);
+			_q[i].enqueueIfOpen(new Tuple2<>(block, future));
 		}
-		try {
-			_writeExec.submit(() -> evict(q));
-		} catch (RejectedExecutionException e) {
-			System.out.println("Eviction rejected: " + block.getKey());
-			future.completeExceptionally(e);
+		catch(InterruptedException e) {
+			e.printStackTrace();
 		}
-		future.whenComplete((e, r) -> System.out.println("Eviction done: " + block.getKey()));
+
 		return future;
 	}
 
 	@Override
 	public CompletableFuture<BlockEntry> scheduleRead(final BlockEntry block) {
-		System.out.println("Schedule read: " + block.getKey());
+		//System.out.println("Schedule read: " + block.getKey());
 		final CompletableFuture<BlockEntry> future = new CompletableFuture<>();
 		try {
 			_readExec.submit(() -> {
@@ -97,7 +129,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 					future.completeExceptionally(e);
 				}
 
-				System.out.println("Read done: " + block.getKey());
+				//System.out.println("Read done: " + block.getKey());
 			});
 		} catch (RejectedExecutionException e) {
 			future.completeExceptionally(e);
@@ -134,8 +166,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		try (RandomAccessFile raf = new RandomAccessFile(filename, "r")) {
 			raf.seek(sloc.offset);
 
-			DataInputStream dis = new DataInputStream(
-				new BufferedInputStream(Channels.newInputStream(raf.getChannel())));
+			DataInput dis = new FastBufferedDataInputStream(Channels.newInputStream(raf.getChannel()));
 			long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
 			ix.readFields(dis); // 1. Read Indexes
 			mb.readFields(dis); // 2. Read Block
@@ -153,87 +184,96 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		}
 	}
 
-	/**
-	 * Evict ByteBuffers to disk
-	 */
-	private void evict(CloseableQueue<Tuple2<BlockEntry, CompletableFuture<Void>>> candidates) {
-		// --- 1. WRITE PHASE ---
-		// write to partition file
-		// 1. generate a new ID for the present "partition" (file)
-		int partitionId = _partitionCounter.getAndIncrement();
+	private void evictTask(CloseableQueue<Tuple2<BlockEntry, CompletableFuture<Void>>> q) {
+		long byteCtr = 0;
 
-		LocalFileUtils.createLocalFileIfNotExist(_spillDir);
+		while (!q.isFinished()) {
+			// --- 1. WRITE PHASE ---
+			// write to partition file
+			// 1. generate a new ID for the present "partition" (file)
+			int partitionId = _partitionCounter.getAndIncrement();
 
-		// Spill to disk
-		String filename = _spillDir + "/stream_batch_part_" + partitionId;
+			LocalFileUtils.createLocalFileIfNotExist(_spillDir);
 
-		long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
+			// Spill to disk
+			String filename = _spillDir + "/stream_batch_part_" + partitionId;
+			System.out.println("Opening partition " + partitionId);
 
-		// 2. create the partition file metadata
-		PartitionFile partFile = new PartitionFile(filename);
-		_partitions.put(partitionId, partFile);
+			// 2. create the partition file metadata
+			PartitionFile partFile = new PartitionFile(filename);
+			_partitions.put(partitionId, partFile);
 
-		FileOutputStream fos = null;
-		FastBufferedDataOutputStream dos = null;
-		try {
-			fos = new FileOutputStream(filename);
-			dos = new FastBufferedDataOutputStream(fos);
+			FileOutputStream fos = null;
+			CountableFastBufferedDataOutputStream dos = null;
+			ConcurrentLinkedDeque<Tuple3<Long, Long, CompletableFuture<Void>>> waitingForFlush = null;
 
-			Tuple2<BlockEntry, CompletableFuture<Void>> tpl;
-			int cnt = 0;
+			try {
+				fos = new FileOutputStream(filename);
+				dos = new CountableFastBufferedDataOutputStream(fos);
 
-			// loop over the list of blocks we collected
-			while ((tpl = candidates.take(10, TimeUnit.MILLISECONDS)) != null) {
-				cnt++;
-				BlockEntry entry = tpl._1;
-				CompletableFuture<Void> future = tpl._2;
-				boolean wrote = writeOut(partitionId, entry, fos, dos);
+				Tuple2<BlockEntry, CompletableFuture<Void>> tpl;
+				waitingForFlush = new ConcurrentLinkedDeque<>();
+				boolean closePartition = false;
 
-				if (DMLScript.STATISTICS) {
-					if (wrote)
-						Statistics.incrementOOCEvictionWrite();
-				}
-
-				future.complete(null);
-			}
-			if (candidates.close()) {
-				while((tpl = candidates.take(1, TimeUnit.MILLISECONDS)) != null) {
-					cnt++;
+				// loop over the list of blocks we collected
+				while((tpl = q.take()) != null) {
 					BlockEntry entry = tpl._1;
 					CompletableFuture<Void> future = tpl._2;
-					boolean wrote = writeOut(partitionId, entry, fos, dos);
+					long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
+					long wrote = writeOut(partitionId, entry, future, fos, dos, waitingForFlush);
 
 					if(DMLScript.STATISTICS) {
-						if(wrote)
+						if(wrote > 0) {
 							Statistics.incrementOOCEvictionWrite();
+							Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
+						}
 					}
 
-					future.complete(null);
+					byteCtr += wrote;
+					if (byteCtr >= MAX_PARTITION_SIZE) {
+						closePartition = true;
+						byteCtr = 0;
+						break;
+					}
 				}
-			}
-			System.out.println("Total evictions: " + cnt);
-		}
-		catch(IOException | InterruptedException ex) {
-			ex.printStackTrace();
-			throw new DMLRuntimeException(ex);
-		} catch (Exception e) {
-			e.printStackTrace(); // TODO
-		} finally {
-			if (DMLScript.STATISTICS)
-				Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
-			IOUtilFunctions.closeSilently(dos);
-			IOUtilFunctions.closeSilently(fos);
-		}
+				if (!closePartition) {
+					if(q.close()) {
+						while((tpl = q.take()) != null) {
+							BlockEntry entry = tpl._1;
+							CompletableFuture<Void> future = tpl._2;
+							long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
+							long wrote = writeOut(partitionId, entry, future, fos, dos, waitingForFlush);
+							byteCtr += wrote;
 
-		// --- 3. ACCOUNTING PHASE ---
-		/*if (DMLScript.STATISTICS) {
-			System.err.println("Eviction batch summary: candidates=" + candidates.size()
-				+ " freedBytes=" + totalFreedSize
-				+ " sizeBefore=" + currentSize + " sizeAfter=" + _resourceManager.getResidentBytes());
-		}*/
+							if(DMLScript.STATISTICS) {
+								if(wrote > 0) {
+									Statistics.incrementOOCEvictionWrite();
+									Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
+								}
+							}
+						}
+					}
+				}
+				//System.out.println("Total evictions: " + cnt);
+			}
+			catch(IOException | InterruptedException ex) {
+				ex.printStackTrace();
+				throw new DMLRuntimeException(ex);
+			}
+			catch(Exception e) {
+				e.printStackTrace(); // TODO
+			}
+			finally {
+				IOUtilFunctions.closeSilently(dos);
+				IOUtilFunctions.closeSilently(fos);
+				if(waitingForFlush != null)
+					flushQueue(Long.MAX_VALUE, waitingForFlush);
+			}
+		}
 	}
 
-	private boolean writeOut(int partitionId, BlockEntry entry, FileOutputStream fos, FastBufferedDataOutputStream dos) throws IOException {
+	private long writeOut(int partitionId, BlockEntry entry, CompletableFuture<Void> future, FileOutputStream fos,
+		CountableFastBufferedDataOutputStream dos, ConcurrentLinkedDeque<Tuple3<Long, Long, CompletableFuture<Void>>> flushQueue) throws IOException {
 		String key = entry.getKey().toFileKey();
 		boolean alreadySpilled = _spillLocations.containsKey(key);
 
@@ -241,20 +281,32 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			// 1. get the current file position. this is the offset.
 			// flush any buffered data to the file
 			//dos.flush();
-			dos.flush();
-			long offset = fos.getChannel().position();
+			long offsetBefore = fos.getChannel().position() + dos.getCount();
 
 			// 2. write indexes and block
 			IndexedMatrixValue imv = (IndexedMatrixValue) entry.getDataUnsafe(); // Get data without requiring pin
 			imv.getIndexes().write(dos); // write Indexes
 			imv.getValue().write(dos);
 
+			long offsetAfter = fos.getChannel().position() + dos.getCount();
+			flushQueue.offer(new Tuple3<>(offsetBefore, offsetAfter, future));
+
 			// 3. create the spillLocation
-			SpillLocation sloc = new SpillLocation(partitionId, offset);
+			SpillLocation sloc = new SpillLocation(partitionId, offsetBefore);
 			_spillLocations.put(key, sloc);
-			return true;
+			flushQueue(fos.getChannel().position(), flushQueue);
+
+			return offsetAfter - offsetBefore;
 		}
-		return false;
+		return 0;
+	}
+
+	private void flushQueue(long offset, ConcurrentLinkedDeque<Tuple3<Long, Long, CompletableFuture<Void>>> flushQueue) {
+		Tuple3<Long, Long, CompletableFuture<Void>> tmp;
+		while ((tmp = flushQueue.peek()) != null && tmp._2() < offset) {
+			flushQueue.poll();
+			tmp._3().complete(null);
+		}
 	}
 
 
@@ -277,6 +329,16 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 		PartitionFile(String filePath) {
 			this.filePath = filePath;
+		}
+	}
+
+	private class CountableFastBufferedDataOutputStream extends FastBufferedDataOutputStream {
+		public CountableFastBufferedDataOutputStream(OutputStream out) {
+			super(out);
+		}
+
+		public int getCount() {
+			return _count;
 		}
 	}
 }

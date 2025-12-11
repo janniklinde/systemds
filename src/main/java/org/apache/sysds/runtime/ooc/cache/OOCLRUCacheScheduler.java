@@ -1,5 +1,6 @@
 package org.apache.sysds.runtime.ooc.cache;
 
+import org.apache.sysds.utils.Statistics;
 import scala.Tuple2;
 
 import java.util.ArrayDeque;
@@ -25,7 +26,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private final long _evictionLimit;
 	private long _cacheSize;
 	private long _bytesUpForEviction;
-	private volatile boolean running;
+	private volatile boolean _running;
+	private boolean _warnThrottling = false;
 
 	public OOCLRUCacheScheduler(OOCIOHandler ioHandler, long evictionLimit, long hardLimit) {
 		this._ioHandler = ioHandler;
@@ -37,13 +39,15 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		this._evictionLimit = evictionLimit;
 		this._cacheSize = 0;
 		this._bytesUpForEviction = 0;
-		this.running = true;
+		this._running = true;
 	}
 
 	@Override
 	public CompletableFuture<BlockEntry> request(BlockKey key) {
-		if (!this.running)
+		if (!this._running)
 			throw new IllegalStateException("Cache scheduler has been shut down.");
+
+		Statistics.incrementOOCEvictionGet();
 
 		BlockEntry entry;
 		boolean couldPin = false;
@@ -68,7 +72,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			return CompletableFuture.completedFuture(entry);
 		}
 
-		System.out.println("Requesting deferred: " + key);
+		//System.out.println("Requesting deferred: " + key);
 		// Schedule deferred read otherwise
 		final CompletableFuture<BlockEntry> future = new CompletableFuture<>();
 		final CompletableFuture<List<BlockEntry>> requestFuture = new CompletableFuture<>();
@@ -79,8 +83,10 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	@Override
 	public CompletableFuture<List<BlockEntry>> request(List<BlockKey> keys) {
-		if (!this.running)
+		if (!this._running)
 			throw new IllegalStateException("Cache scheduler has been shut down.");
+
+		Statistics.incrementOOCEvictionGet(keys.size());
 
 		List<BlockEntry> entries = new ArrayList<>(keys.size());
 		boolean couldPinAll = true;
@@ -134,10 +140,12 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	@Override
 	public void put(BlockKey key, Object data, long size) {
-		if (!this.running)
+		if (!this._running)
 			return;
 		if (data == null)
 			throw new IllegalArgumentException();
+
+		Statistics.incrementOOCEvictionPut();
 		BlockEntry entry = new BlockEntry(key, size, data);
 		synchronized(this) {
 			BlockEntry avail = _cache.putIfAbsent(key, entry);
@@ -150,7 +158,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	@Override
 	public void forget(BlockKey key) {
-		if (!this.running)
+		if (!this._running)
 			return;
 		BlockEntry entry;
 		boolean shouldScheduleDeletion = false;
@@ -178,7 +186,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	@Override
 	public void pin(BlockEntry entry) {
-		if (!this.running)
+		if (!this._running)
 			throw new IllegalStateException("Cache scheduler has been shut down.");
 
 		int pinCount = entry.pin();
@@ -223,7 +231,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	@Override
 	public synchronized void shutdown() {
-		this.running = false;
+		this._running = false;
 		_cache.clear();
 		_evictionCache.clear();
 		_processingReadRequests.clear();
@@ -250,6 +258,17 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	}
 
 	private synchronized void sanityCheck() {
+		if (_cacheSize > _hardLimit) {
+			if (!_warnThrottling) {
+				_warnThrottling = true;
+				System.out.println("[INFO] Throttling: " + _cacheSize/1000 + "KB - " + _bytesUpForEviction/1000 + "KB > " + _hardLimit/1000 + "KB");
+			}
+		}
+		else if (_warnThrottling) {
+			_warnThrottling = false;
+			System.out.println("[INFO] No more throttling: " + _cacheSize/1000 + "KB - " + _bytesUpForEviction/1000 + "KB <= " + _hardLimit/1000 + "KB");
+		}
+
 		if (!SANITY_CHECKS)
 			return;
 
@@ -346,7 +365,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 			// Try to schedule the next disk read
 			req = _deferredReadRequests.peek();
-			System.out.println("Handling deferred: " + req.getEntries().get(0).getKey());
+			//System.out.println("Handling deferred: " + req.getEntries().get(0).getKey());
 			toRead = new ArrayList<>(req.getEntries().size());
 
 			for(int idx = 0; idx < req.getEntries().size(); idx++) {

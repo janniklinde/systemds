@@ -5,15 +5,19 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.utils.Statistics;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class OOCCacheManager {
-	private static final double OOC_BUFFER_PERCENTAGE = 0.1;
-	private static final double OOC_BUFFER_PERCENTAGE_HARD = 0.15;
+	private static final double OOC_BUFFER_PERCENTAGE = 0.2;
+	private static final double OOC_BUFFER_PERCENTAGE_HARD = 0.3;
 	private static final long _evictionLimit;
 	private static final long _hardLimit;
 
@@ -23,22 +27,37 @@ public class OOCCacheManager {
 	static {
 		_evictionLimit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE);
 		_hardLimit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE_HARD);
-		_ioHandler = new OOCMatrixIOHandler();
-		_scheduler = new OOCLRUCacheScheduler(_ioHandler, _evictionLimit, _hardLimit);
+		_ioHandler = null;
+		_scheduler = null;
 	}
 
 	public static void reset() {
+		if (_scheduler == null)
+			return;
 		_ioHandler.shutdown();
 		_scheduler.shutdown();
-		_ioHandler = new OOCMatrixIOHandler();
-		_scheduler = new OOCLRUCacheScheduler(_ioHandler, _evictionLimit, _hardLimit);
+		_ioHandler = null;
+		_scheduler = null;
 		if (DMLScript.STATISTICS) {
 			System.out.println(Statistics.displayOOCEvictionStats());
 			Statistics.resetOOCEvictionStats();
+			if (OOCEventLog.USE_OOC_EVENT_LOG) {
+				String csv = OOCEventLog.toCSV();
+				try {
+					Files.writeString(Path.of("EventLog.csv"), csv);
+				}
+				catch(IOException e) {
+				}
+				OOCEventLog.clear();
+			}
 		}
 	}
 
 	public static OOCCacheScheduler getCache() {
+		if (_scheduler == null) {
+			_ioHandler = new OOCMatrixIOHandler();
+			_scheduler = new OOCLRUCacheScheduler(_ioHandler, _evictionLimit, _hardLimit);
+		}
 		return _scheduler;
 	}
 
@@ -47,7 +66,7 @@ public class OOCCacheManager {
 	 */
 	public static void forget(long streamId, int blockId) {
 		BlockKey key = new BlockKey(streamId, blockId);
-		_scheduler.forget(key);
+		getCache().forget(key);
 	}
 
 	/**
@@ -55,25 +74,25 @@ public class OOCCacheManager {
 	 */
 	public static void put(long streamId, int blockId, IndexedMatrixValue value) {
 		BlockKey key = new BlockKey(streamId, blockId);
-		_scheduler.put(key, value, ((MatrixBlock)value.getValue()).getExactSerializedSize());
+		getCache().put(key, value, ((MatrixBlock)value.getValue()).getExactSerializedSize());
 	}
 
 	public static CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> requestBlock(long streamId, long blockId) {
 		BlockKey key = new BlockKey(streamId, blockId);
-		return _scheduler.request(key).thenApply(e -> new CachedQueueCallback(e, null));
+		return getCache().request(key).thenApply(e -> new CachedQueueCallback(e, null));
 	}
 
 	public static CompletableFuture<List<OOCStream.QueueCallback<IndexedMatrixValue>>> requestManyBlocks(List<BlockKey> keys) {
-		return _scheduler.request(keys).thenApply(
+		return getCache().request(keys).thenApply(
 			l -> l.stream().map(e -> (OOCStream.QueueCallback<IndexedMatrixValue>)new CachedQueueCallback(e, null)).toList());
 	}
 
 	private static void pin(BlockEntry entry) {
-		_scheduler.pin(entry);
+		getCache().pin(entry);
 	}
 
 	private static void unpin(BlockEntry entry) {
-		_scheduler.unpin(entry);
+		getCache().unpin(entry);
 	}
 
 
@@ -104,6 +123,8 @@ public class OOCCacheManager {
 
 		@Override
 		public OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
+			if (!_pinned.get())
+				throw new IllegalStateException("Cannot keep open an already closed callback");
 			pin(_result);
 			return new CachedQueueCallback(_result, _failure);
 		}
