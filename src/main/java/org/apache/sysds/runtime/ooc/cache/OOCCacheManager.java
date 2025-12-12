@@ -42,9 +42,13 @@ public class OOCCacheManager {
 			System.out.println(Statistics.displayOOCEvictionStats());
 			Statistics.resetOOCEvictionStats();
 			if (OOCEventLog.USE_OOC_EVENT_LOG) {
-				String csv = OOCEventLog.toCSV();
 				try {
-					Files.writeString(Path.of("EventLog.csv"), csv);
+					String csv = OOCEventLog.getComputeEventsCSV();
+					Files.writeString(Path.of("ComputeEventLog.csv"), csv);
+					csv = OOCEventLog.getDiskReadEventsCSV();
+					Files.writeString(Path.of("DiskReadEventLog.csv"), csv);
+					csv = OOCEventLog.getDiskWriteEventsCSV();
+					Files.writeString(Path.of("DiskWriteEventLog.csv"), csv);
 				}
 				catch(IOException e) {
 				}

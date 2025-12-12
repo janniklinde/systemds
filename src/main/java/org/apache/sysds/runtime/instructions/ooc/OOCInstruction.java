@@ -60,6 +60,7 @@ import java.util.stream.Stream;
 public abstract class OOCInstruction extends Instruction {
 	protected static final Log LOG = LogFactory.getLog(OOCInstruction.class.getName());
 	private static final AtomicInteger nextStreamId = new AtomicInteger(0);
+	private long nanoTime;
 
 	public enum OOCType {
 		Reblock, Tee, Binary, Unary, AggregateUnary, AggregateBinary, AggregateTernary, MAPMM, MMTSJ,
@@ -72,7 +73,7 @@ public abstract class OOCInstruction extends Instruction {
 	protected Set<OOCStream<?>> _outQueues;
 	private boolean _failed;
 	private LongAdder _localStatisticsAdder;
-	private final int _callerId;
+	public final int _callerId;
 
 	protected OOCInstruction(OOCInstruction.OOCType type, String opcode, String istr) {
 		this(type, null, opcode, istr);
@@ -113,6 +114,8 @@ public abstract class OOCInstruction extends Instruction {
 
 	@Override
 	public Instruction preprocessInstruction(ExecutionContext ec) {
+		if (OOCEventLog.USE_OOC_EVENT_LOG)
+			nanoTime = System.nanoTime();
 		// TODO
 		return super.preprocessInstruction(ec);
 	}
@@ -124,6 +127,8 @@ public abstract class OOCInstruction extends Instruction {
 	public void postprocessInstruction(ExecutionContext ec) {
 		if(DMLScript.LINEAGE_DEBUGGER)
 			ec.maintainLineageDebuggerInfo(this);
+		if (OOCEventLog.USE_OOC_EVENT_LOG)
+			OOCEventLog.onComputeEvent(_callerId, nanoTime, System.nanoTime());
 	}
 
 	protected void addInStream(OOCStream<?>... queue) {

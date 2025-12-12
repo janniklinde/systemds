@@ -6,6 +6,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.io.IOUtilFunctions;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.util.FastBufferedDataInputStream;
 import org.apache.sysds.runtime.util.FastBufferedDataOutputStream;
 import org.apache.sysds.runtime.util.LocalFileUtils;
@@ -46,6 +47,9 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 	private final CloseableQueue<Tuple2<BlockEntry, CompletableFuture<Void>>>[] _q;
 	private final AtomicLong _wCtr;
 	private final AtomicBoolean _started;
+
+	private final int _evictCallerId = OOCEventLog.registerCaller("write");
+	private final int _readCallerId = OOCEventLog.registerCaller("read");
 
 	public OOCMatrixIOHandler() {
 		this._spillDir = LocalFileUtils.getUniqueWorkingDir("ooc_stream");
@@ -122,7 +126,10 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		try {
 			_readExec.submit(() -> {
 				try {
+					long ioStart = OOCEventLog.USE_OOC_EVENT_LOG ? System.nanoTime() : 0;
 					loadFromDisk(block);
+					if (OOCEventLog.USE_OOC_EVENT_LOG)
+						OOCEventLog.onDiskReadEvent(_readCallerId, ioStart, System.nanoTime(), block.getSize());
 					future.complete(block);
 				} catch (Throwable e) {
 					e.printStackTrace();
@@ -217,9 +224,9 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 				// loop over the list of blocks we collected
 				while((tpl = q.take()) != null) {
+					long ioStart = DMLScript.STATISTICS || OOCEventLog.USE_OOC_EVENT_LOG ? System.nanoTime() : 0;
 					BlockEntry entry = tpl._1;
 					CompletableFuture<Void> future = tpl._2;
-					long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
 					long wrote = writeOut(partitionId, entry, future, fos, dos, waitingForFlush);
 
 					if(DMLScript.STATISTICS) {
@@ -235,13 +242,16 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 						byteCtr = 0;
 						break;
 					}
+
+					if (OOCEventLog.USE_OOC_EVENT_LOG)
+						OOCEventLog.onDiskWriteEvent(_evictCallerId, ioStart, System.nanoTime(), wrote);
 				}
 				if (!closePartition) {
 					if(q.close()) {
 						while((tpl = q.take()) != null) {
+							long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
 							BlockEntry entry = tpl._1;
 							CompletableFuture<Void> future = tpl._2;
-							long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
 							long wrote = writeOut(partitionId, entry, future, fos, dos, waitingForFlush);
 							byteCtr += wrote;
 
@@ -251,13 +261,14 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 									Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
 								}
 							}
+
+							if (OOCEventLog.USE_OOC_EVENT_LOG)
+								OOCEventLog.onDiskWriteEvent(_evictCallerId, ioStart, System.nanoTime(), wrote);
 						}
 					}
 				}
-				//System.out.println("Total evictions: " + cnt);
 			}
 			catch(IOException | InterruptedException ex) {
-				ex.printStackTrace();
 				throw new DMLRuntimeException(ex);
 			}
 			catch(Exception e) {
