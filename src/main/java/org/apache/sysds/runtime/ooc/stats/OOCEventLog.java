@@ -1,5 +1,7 @@
 package org.apache.sysds.runtime.ooc.stats;
 
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -9,6 +11,7 @@ public class OOCEventLog {
 
 	private static AtomicInteger _callerCtr = new AtomicInteger(0);
 	private static ConcurrentHashMap<Integer, String> _callerNames = new ConcurrentHashMap<>();
+	private static ConcurrentHashMap<String, Object> _runSettings = new ConcurrentHashMap<>();
 
 	private static AtomicInteger _logCtr = new AtomicInteger(0);
 	private static final EventType[] _eventTypes = USE_OOC_EVENT_LOG ? new  EventType[MAX_NUM_EVENTS] : null;
@@ -53,6 +56,20 @@ public class OOCEventLog {
 		_data[idx] = size;
 	}
 
+	public static void onCacheSizeChangedEvent(int callerId, long timestamp, long cacheSize, long bytesToEvict) {
+		int idx = _logCtr.getAndIncrement();
+		_eventTypes[idx] = EventType.CACHESIZE_CHANGE;
+		_startTimestamps[idx] = timestamp;
+		_endTimestamps[idx] = bytesToEvict;
+		_callerIds[idx] = callerId;
+		_threadIds[idx] = Thread.currentThread().getId();
+		_data[idx] = cacheSize;
+	}
+
+	public static void putRunSetting(String setting, Object data) {
+		_runSettings.put(setting, data);
+	}
+
 	public static String getComputeEventsCSV() {
 		return getFilteredCSV("ThreadID,CallerID,StartNanos,EndNanos\n", EventType.COMPUTE, false);
 	}
@@ -63,6 +80,10 @@ public class OOCEventLog {
 
 	public static String getDiskWriteEventsCSV() {
 		return getFilteredCSV("ThreadID,CallerID,StartNanos,EndNanos,NumBytes\n", EventType.DISK_WRITE, true);
+	}
+
+	public static String getCacheSizeEventsCSV() {
+		return getFilteredCSV("ThreadID,CallerID,Timestamp,ScheduledEvictionSize,CacheSize\n", EventType.CACHESIZE_CHANGE, true);
 	}
 
 	private static String getFilteredCSV(String header, EventType filter, boolean data) {
@@ -90,15 +111,42 @@ public class OOCEventLog {
 		return sb.toString();
 	}
 
+	public static String getRunSettingsCSV() {
+		StringBuilder sb = new StringBuilder();
+		Set<Map.Entry<String, Object>> entrySet = _runSettings.entrySet();
+
+		int ctr = 0;
+		for (Map.Entry<String, Object> entry : entrySet) {
+			sb.append(entry.getKey());
+			ctr++;
+			if (ctr >= entrySet.size())
+				sb.append('\n');
+			else
+				sb.append(',');
+		}
+
+		ctr = 0;
+		for (Map.Entry<String, Object> entry : _runSettings.entrySet()) {
+			sb.append(entry.getValue());
+			ctr++;
+			if (ctr < entrySet.size())
+				sb.append(',');
+		}
+
+		return sb.toString();
+	}
+
 	public static void clear() {
 		_callerCtr.set(0);
 		_logCtr.set(0);
 		_callerNames.clear();
+		_runSettings.clear();
 	}
 
 	public enum EventType {
 		COMPUTE,
 		DISK_WRITE,
-		DISK_READ
+		DISK_READ,
+		CACHESIZE_CHANGE
 	}
 }

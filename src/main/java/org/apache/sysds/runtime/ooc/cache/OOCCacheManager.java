@@ -49,6 +49,10 @@ public class OOCCacheManager {
 					Files.writeString(Path.of("DiskReadEventLog.csv"), csv);
 					csv = OOCEventLog.getDiskWriteEventsCSV();
 					Files.writeString(Path.of("DiskWriteEventLog.csv"), csv);
+					csv = OOCEventLog.getCacheSizeEventsCSV();
+					Files.writeString(Path.of("CacheSizeEventLog.csv"), csv);
+					csv = OOCEventLog.getRunSettingsCSV();
+					Files.writeString(Path.of("RunSettings.csv"), csv);
 				}
 				catch(IOException e) {
 				}

@@ -1,5 +1,6 @@
 package org.apache.sysds.runtime.ooc.cache;
 
+import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.utils.Statistics;
 import scala.Tuple2;
 
@@ -24,10 +25,11 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private final Deque<DeferredReadRequest> _processingReadRequests;
 	private final long _hardLimit;
 	private final long _evictionLimit;
+	private final int _callerId;
 	private long _cacheSize;
 	private long _bytesUpForEviction;
 	private volatile boolean _running;
-	private boolean _warnThrottling = false;
+	private boolean _warnThrottling;
 
 	public OOCLRUCacheScheduler(OOCIOHandler ioHandler, long evictionLimit, long hardLimit) {
 		this._ioHandler = ioHandler;
@@ -40,6 +42,13 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		this._cacheSize = 0;
 		this._bytesUpForEviction = 0;
 		this._running = true;
+		this._warnThrottling = false;
+		this._callerId = OOCEventLog.USE_OOC_EVENT_LOG ? OOCEventLog.registerCaller("LRUCacheScheduler") : 0;
+
+		if (OOCEventLog.USE_OOC_EVENT_LOG) {
+			OOCEventLog.putRunSetting("CacheEvictionLimit", _evictionLimit);
+			OOCEventLog.putRunSetting("CacheHardLimit", _hardLimit);
+		}
 	}
 
 	@Override
@@ -255,6 +264,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		else {
 			while(onCacheSizeDecremented()) {}
 		}
+		if (OOCEventLog.USE_OOC_EVENT_LOG)
+			OOCEventLog.onCacheSizeChangedEvent(_callerId, System.nanoTime(), _cacheSize, _bytesUpForEviction);
 	}
 
 	private synchronized void sanityCheck() {
