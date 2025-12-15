@@ -36,6 +36,7 @@ import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.AggregateUnaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.stream.PrefetchedOOCStream;
 
 import java.util.HashMap;
 
@@ -76,7 +77,8 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 		//setup operators and input queue
 		AggregateUnaryOperator aggun = (AggregateUnaryOperator) getOperator(); 
 		MatrixObject min = ec.getMatrixObject(input1);
-		OOCStream<IndexedMatrixValue> q = min.getStreamHandle();
+		// Use a prefetched OOC stream
+		OOCStream<IndexedMatrixValue> q = new PrefetchedOOCStream<>(min.getStreamHandle());
 		int blen = ConfigurationManager.getBlocksize();
 
 		if (aggun.isRowAggregate() || aggun.isColAggregate()) {
@@ -87,9 +89,8 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 			HashMap<Long, MatrixBlock> corrs = new HashMap<>(); // correction blocks
 
 			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
-			ec.getMatrixObject(output).setStreamHandle(qOut);
 
-			q.warmup();
+			ec.getMatrixObject(output).setStreamHandle(qOut);
 
 			submitOOCTask(() -> {
 					IndexedMatrixValue tmp = null;

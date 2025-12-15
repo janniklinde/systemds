@@ -199,7 +199,4 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	public CachingStream getStreamCache() {
 		return null;
 	}
-
-	@Override
-	public void warmup() {}
 }

@@ -44,11 +44,6 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 	CachingStream getStreamCache();
 
 	/**
-	 * Warms up the queue for faster on-demand access
-	 */
-	void warmup();
-
-	/**
 	 * Registers a new subscriber that consumes the stream.
 	 * While there is no guarantee for any specific order, the closing item LocalTaskQueue.NO_MORE_TASKS
 	 * is guaranteed to be invoked after every other item has finished processing. Thus, the NO_MORE_TASKS

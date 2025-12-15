@@ -121,9 +121,4 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreama
 	public CachingStream getStreamCache() {
 		return _streamCache;
 	}
-
-	@Override
-	public void warmup() {
-		// TODO
-	}
 }

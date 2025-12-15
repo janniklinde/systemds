@@ -612,11 +612,13 @@ public abstract class OOCInstruction extends Instruction {
 		final CompletableFuture<Void> future = new CompletableFuture<>();
 		try {
 			pool.submit(oocTask(() -> {
-				long startTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
+				long startTime = DMLScript.STATISTICS || OOCEventLog.USE_OOC_EVENT_LOG ? System.nanoTime() : 0;
 				r.run();
 				future.complete(null);
 				if (DMLScript.STATISTICS)
 					Statistics.maintainOOCHeavyHitter(getExtendedOpcode(), System.nanoTime() - startTime);
+				if (OOCEventLog.USE_OOC_EVENT_LOG)
+					OOCEventLog.onComputeEvent(_callerId, startTime,  System.nanoTime());
 				}, future, queues));
 		}
 		catch (Exception ex) {

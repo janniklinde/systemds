@@ -38,6 +38,7 @@ import org.apache.sysds.runtime.matrix.operators.AggregateBinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
+import org.apache.sysds.runtime.ooc.stream.PrefetchedOOCStream;
 
 public class MatrixVectorBinaryOOCInstruction extends ComputationOOCInstruction {
 
@@ -83,12 +84,10 @@ public class MatrixVectorBinaryOOCInstruction extends ComputationOOCInstruction 
 		long emitThreshold = min.getDataCharacteristics().getNumColBlocks();
 		OOCMatrixBlockTracker aggTracker = new OOCMatrixBlockTracker(emitThreshold);
 
-		OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
+		OOCStream<IndexedMatrixValue> qIn = new PrefetchedOOCStream<>(min.getStreamHandle());
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 		BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
 		ec.getMatrixObject(output).setStreamHandle(qOut);
-
-		qIn.warmup();
 
 		submitOOCTask(() -> {
 				IndexedMatrixValue tmp = null;
