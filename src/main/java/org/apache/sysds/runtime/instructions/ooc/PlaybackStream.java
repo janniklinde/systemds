@@ -52,24 +52,6 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreama
 	}
 
 	@Override
-	public LocalTaskQueue<IndexedMatrixValue> toLocalTaskQueue() {
-		final LocalTaskQueue<IndexedMatrixValue> q = new LocalTaskQueue<>();
-		setSubscriber(val -> {
-			if (val.get() == null) {
-				q.closeInput();
-				return;
-			}
-			try {
-				q.enqueueTask(val.get());
-			}
-			catch(InterruptedException e) {
-				throw new RuntimeException(e);
-			}
-		});
-		return q;
-	}
-
-	@Override
 	public synchronized IndexedMatrixValue dequeue() {
 		if (_subscriberSet.get())
 			throw new IllegalStateException("Cannot dequeue from a playback stream if a subscriber has been set");

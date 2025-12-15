@@ -64,6 +64,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	private boolean deletable = false;
 	private int maxConsumptionCount = 0;
+	private String _watchdogId = null;
 
 	public CachingStream(OOCStream<IndexedMatrixValue> source) {
 		this(source, _streamSeq.getNextID());
@@ -72,17 +73,27 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	public CachingStream(OOCStream<IndexedMatrixValue> source, long streamId) {
 		_source = source;
 		_streamId = streamId;
+		if (OOCWatchdog.WATCH) {
+			_watchdogId = "CS-" + hashCode();
+			// Capture a short context to help identify origin
+			OOCWatchdog.registerOpen(_watchdogId, "CachingStream@" + hashCode(), getCtxMsg(), this);
+		}
 		source.setSubscriber(tmp -> {
 			try (tmp) {
 				final IndexedMatrixValue task = tmp.get();
 				int blk;
 				Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>[] mSubscribers;
+				OOCStream.QueueCallback<IndexedMatrixValue> mCallback = null;
 
 				synchronized (this) {
+					mSubscribers = _subscribers;
 					if(task != LocalTaskQueue.NO_MORE_TASKS) {
 						if (!_cacheInProgress)
 							throw new DMLRuntimeException("Stream is closed");
-						OOCCacheManager.put(_streamId, _numBlocks, task);
+						if (mSubscribers == null || mSubscribers.length == 0)
+							OOCCacheManager.put(_streamId, _numBlocks, task);
+						else
+							mCallback = OOCCacheManager.putAndPin(_streamId, _numBlocks, task);
 						if (_index != null)
 							_index.put(task.getIndexes(), _numBlocks);
 						blk = _numBlocks;
@@ -92,26 +103,32 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 					}
 					else {
 						_cacheInProgress = false; // caching is complete
+						if (OOCWatchdog.WATCH)
+							OOCWatchdog.registerClose(_watchdogId);
 						notifyAll();
 						blk = -1;
 					}
-
-					mSubscribers = _subscribers;
 				}
 
-				if(mSubscribers != null) {
-					if (blk != -1) {
-						for (int i = 0; i < mSubscribers.length; i++) {
-							mSubscribers[i].accept(tmp);
-							if (onConsumed(blk, i))
-								mSubscribers[i].accept(OOCStream.eos(_failure));
+				if(mSubscribers != null && mSubscribers.length > 0) {
+					final OOCStream.QueueCallback<IndexedMatrixValue> finalCallback = mCallback;
+					try(finalCallback) {
+						if(blk != -1) {
+							for(int i = 0; i < mSubscribers.length; i++) {
+								OOCStream.QueueCallback<IndexedMatrixValue> localCallback = finalCallback.keepOpen();
+								try(localCallback) {
+									mSubscribers[i].accept(localCallback);
+								}
+								if(onConsumed(blk, i))
+									mSubscribers[i].accept(OOCStream.eos(_failure));
+							}
 						}
-					}
-					else {
-						OOCStream.QueueCallback<IndexedMatrixValue> cb = OOCStream.eos(_failure);
-						for (int i = 0; i < mSubscribers.length; i++) {
-							if (onNoMoreTasks(i))
-								mSubscribers[i].accept(cb);
+						else {
+							OOCStream.QueueCallback<IndexedMatrixValue> cb = OOCStream.eos(_failure);
+							for(int i = 0; i < mSubscribers.length; i++) {
+								if(onNoMoreTasks(i))
+									mSubscribers[i].accept(cb);
+							}
 						}
 					}
 				}
@@ -134,6 +151,20 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 				}
 			}
 		});
+	}
+
+	private String getCtxMsg() {
+		StackTraceElement[] st = new Exception().getStackTrace();
+		// Skip the first few frames (constructor, createWritableStream, etc.)
+		StringBuilder sb = new StringBuilder();
+		int limit = Math.min(st.length, 7);
+		for(int i = 2; i < limit; i++) {
+			sb.append(st[i].getClassName()).append(".").append(st[i].getMethodName()).append(":")
+				.append(st[i].getLineNumber());
+			if(i < limit - 1)
+				sb.append(" <- ");
+		}
+		return sb.toString();
 	}
 
 	public synchronized void scheduleDeletion() {

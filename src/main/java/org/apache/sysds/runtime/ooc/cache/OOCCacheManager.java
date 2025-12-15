@@ -85,6 +85,11 @@ public class OOCCacheManager {
 		getCache().put(key, value, ((MatrixBlock)value.getValue()).getExactSerializedSize());
 	}
 
+	public static OOCStream.QueueCallback<IndexedMatrixValue> putAndPin(long streamId, int blockId, IndexedMatrixValue value) {
+		BlockKey key = new BlockKey(streamId, blockId);
+		return new CachedQueueCallback<>(getCache().putAndPin(key, value, ((MatrixBlock)value.getValue()).getExactSerializedSize()), null);
+	}
+
 	public static CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> requestBlock(long streamId, long blockId) {
 		BlockKey key = new BlockKey(streamId, blockId);
 		return getCache().request(key).thenApply(e -> new CachedQueueCallback(e, null));
@@ -106,35 +111,35 @@ public class OOCCacheManager {
 
 
 
-	static class CachedQueueCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
+	static class CachedQueueCallback<T> implements OOCStream.QueueCallback<T> {
 		private final BlockEntry _result;
 		private DMLRuntimeException _failure;
 		private final AtomicBoolean _pinned;
 
-		private CachedQueueCallback(BlockEntry result, DMLRuntimeException failure) {
+		CachedQueueCallback(BlockEntry result, DMLRuntimeException failure) {
 			this._result = result;
 			this._failure = failure;
 			this._pinned = new AtomicBoolean(true);
 		}
 
 		@Override
-		public IndexedMatrixValue get() {
+		public T get() {
 			if (_failure != null)
 				throw _failure;
 			if (!_pinned.get())
 				throw new IllegalStateException("Cannot get cached item of a closed callback");
-			IndexedMatrixValue ret = (IndexedMatrixValue)_result.getData();
+			T ret = (T)_result.getData();
 			if (ret == null)
 				throw new IllegalStateException("Cannot get a cached item if it is not pinned in memory: " + _result.getState());
 			return ret;
 		}
 
 		@Override
-		public OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
+		public OOCStream.QueueCallback<T> keepOpen() {
 			if (!_pinned.get())
 				throw new IllegalStateException("Cannot keep open an already closed callback");
 			pin(_result);
-			return new CachedQueueCallback(_result, _failure);
+			return new CachedQueueCallback<>(_result, _failure);
 		}
 
 		@Override

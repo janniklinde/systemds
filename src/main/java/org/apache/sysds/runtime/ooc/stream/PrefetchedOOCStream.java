@@ -77,11 +77,6 @@ public class PrefetchedOOCStream<T> implements OOCStream<T> {
 	}
 
 	@Override
-	public LocalTaskQueue<T> toLocalTaskQueue() {
-		return null;
-	}
-
-	@Override
 	public void propagateFailure(DMLRuntimeException re) {
 		throw new UnsupportedOperationException("Prefetched OOC streams are read-only");
 	}

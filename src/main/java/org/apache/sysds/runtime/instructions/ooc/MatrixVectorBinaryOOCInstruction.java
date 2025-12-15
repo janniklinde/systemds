@@ -84,12 +84,50 @@ public class MatrixVectorBinaryOOCInstruction extends ComputationOOCInstruction 
 		long emitThreshold = min.getDataCharacteristics().getNumColBlocks();
 		OOCMatrixBlockTracker aggTracker = new OOCMatrixBlockTracker(emitThreshold);
 
-		OOCStream<IndexedMatrixValue> qIn = new PrefetchedOOCStream<>(min.getStreamHandle());
+		OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 		BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
 		ec.getMatrixObject(output).setStreamHandle(qOut);
+		final Object lock = new Object();
 
-		submitOOCTask(() -> {
+		submitOOCTasks(qIn, cb -> {
+			try(cb) {
+				IndexedMatrixValue tmp = cb.get();
+				MatrixBlock matrixBlock = (MatrixBlock) tmp.getValue();
+				long rowIndex = tmp.getIndexes().getRowIndex();
+				long colIndex = tmp.getIndexes().getColumnIndex();
+				MatrixBlock vectorSlice = partitionedVector.get(colIndex);
+
+				// Now, call the operation with the correct, specific operator.
+				MatrixBlock partialResult = matrixBlock.aggregateBinaryOperations(matrixBlock, vectorSlice,
+					new MatrixBlock(), (AggregateBinaryOperator) _optr);
+
+				// for single column block, no aggregation neeeded
+				if(emitThreshold == 1) {
+					qOut.enqueue(new IndexedMatrixValue(tmp.getIndexes(), partialResult));
+				}
+				else {
+					// aggregation
+					synchronized(lock) {
+						MatrixBlock currAgg = aggTracker.get(rowIndex);
+						if(currAgg == null) {
+							aggTracker.putAndIncrementCount(rowIndex, partialResult);
+						}
+						else {
+							currAgg = currAgg.binaryOperations(plus, partialResult);
+							if(aggTracker.putAndIncrementCount(rowIndex, currAgg)) {
+								// early block output: emit aggregated block
+								MatrixIndexes idx = new MatrixIndexes(rowIndex, 1L);
+								qOut.enqueue(new IndexedMatrixValue(idx, currAgg));
+								aggTracker.remove(rowIndex);
+							}
+						}
+					}
+				}
+			}
+		}, qOut::closeInput);
+
+		/*submitOOCTask(() -> {
 				IndexedMatrixValue tmp = null;
 				try {
 					while((tmp = qIn.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
@@ -130,6 +168,6 @@ public class MatrixVectorBinaryOOCInstruction extends ComputationOOCInstruction 
 				finally {
 					qOut.closeInput();
 				}
-		}, qIn, qOut);
+		}, qIn, qOut);*/
 	}
 }

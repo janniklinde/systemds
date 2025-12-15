@@ -21,11 +21,21 @@ public interface OOCCacheScheduler {
 
 	/**
 	 * Places a new block in the cache. Note that objects are immutable and cannot be overwritten.
+	 * The object data should now only be accessed via cache, as ownership has been transferred.
 	 * @param key the associated key of the block
 	 * @param data the block data
 	 * @param size the size of the data
 	 */
 	void put(BlockKey key, Object data, long size);
+
+	/**
+	 * Places a new block in the cache and returns a pinned handle.
+	 * Note that objects are immutable and cannot be overwritten.
+	 * @param key the associated key of the block
+	 * @param data the block data
+	 * @param size the size of the data
+	 */
+	BlockEntry putAndPin(BlockKey key, Object data, long size);
 
 	/**
 	 * Forgets a block from the cache.

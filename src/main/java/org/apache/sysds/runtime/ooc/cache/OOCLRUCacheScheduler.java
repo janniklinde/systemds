@@ -149,13 +149,24 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	@Override
 	public void put(BlockKey key, Object data, long size) {
+		put(key, data, size, false);
+	}
+
+	@Override
+	public BlockEntry putAndPin(BlockKey key, Object data, long size) {
+		return put(key, data, size, true);
+	}
+
+	private BlockEntry put(BlockKey key, Object data, long size, boolean pin) {
 		if (!this._running)
-			return;
+			throw new IllegalStateException();
 		if (data == null)
 			throw new IllegalArgumentException();
 
 		Statistics.incrementOOCEvictionPut();
 		BlockEntry entry = new BlockEntry(key, size, data);
+		if (pin)
+			entry.pin();
 		synchronized(this) {
 			BlockEntry avail = _cache.putIfAbsent(key, entry);
 			if (avail != null || _evictionCache.containsKey(key))
@@ -163,6 +174,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			_cacheSize += size;
 		}
 		onCacheSizeChanged(true);
+		return entry;
 	}
 
 	@Override

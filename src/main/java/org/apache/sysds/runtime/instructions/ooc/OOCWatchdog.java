@@ -32,7 +32,7 @@ public final class OOCWatchdog {
 		// no-op
 	}
 
-	public static void registerOpen(String id, String desc, String context, OOCStream<?> stream) {
+	public static void registerOpen(String id, String desc, String context, OOCStreamable<?> stream) {
 		OPEN.put(id, new Entry(desc, context, System.currentTimeMillis(), stream));
 	}
 
@@ -50,7 +50,7 @@ public final class OOCWatchdog {
 		long now = System.currentTimeMillis();
 		for (Map.Entry<String, Entry> e : OPEN.entrySet()) {
 			if (now - e.getValue().openedAt >= STALE_MS) {
-				if (e.getValue().events.isEmpty())
+				if (e.getValue().events.isEmpty() && !(e.getValue().stream instanceof CachingStream))
 					continue; // Probably just a stream that has no consumer (remains to be checked why this can happen)
 				System.err.println("[TemporaryWatchdog] Still open after " + (now - e.getValue().openedAt) + "ms: "
 					+ e.getKey() + " (" + e.getValue().desc + ")"
@@ -63,10 +63,10 @@ public final class OOCWatchdog {
 		final String desc;
 		final String context;
 		final long openedAt;
-		final OOCStream<?> stream;
+		final OOCStreamable<?> stream;
 		ConcurrentLinkedQueue<String> events;
 
-		Entry(String desc, String context, long openedAt, OOCStream<?> stream) {
+		Entry(String desc, String context, long openedAt, OOCStreamable<?> stream) {
 			this.desc = desc;
 			this.context = context;
 			this.openedAt = openedAt;

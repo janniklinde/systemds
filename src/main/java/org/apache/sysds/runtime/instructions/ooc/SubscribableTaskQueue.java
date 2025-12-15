@@ -176,11 +176,6 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	}
 
 	@Override
-	public LocalTaskQueue<T> toLocalTaskQueue() {
-		return this;
-	}
-
-	@Override
 	public OOCStream<T> getReadStream() {
 		return this;
 	}

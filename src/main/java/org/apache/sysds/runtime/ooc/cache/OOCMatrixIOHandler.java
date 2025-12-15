@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.nio.channels.Channels;
+import java.nio.channels.ClosedByInterruptException;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -112,9 +113,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			int i = (int)(q % WRITER_SIZE);
 			_q[i].enqueueIfOpen(new Tuple2<>(block, future));
 		}
-		catch(InterruptedException e) {
-			e.printStackTrace();
-		}
+		catch(InterruptedException e) {}
 
 		return future;
 	}
@@ -179,6 +178,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			mb.readFields(dis); // 2. Read Block
 			if (DMLScript.STATISTICS)
 				ioDuration = System.nanoTime() - ioStart;
+		} catch (ClosedByInterruptException ignored) {
 		} catch (IOException e) {
 			throw new RuntimeException(e);
 		}
