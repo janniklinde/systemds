@@ -1,25 +1,33 @@
 package org.apache.sysds.runtime.ooc.stats;
 
+import org.apache.sysds.api.DMLScript;
+
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class OOCEventLog {
-	public static final boolean USE_OOC_EVENT_LOG = true;
-	private static final int MAX_NUM_EVENTS = 100000;
+	private static final AtomicInteger _callerCtr = new AtomicInteger(0);
+	private static final ConcurrentHashMap<Integer, String> _callerNames = new ConcurrentHashMap<>();
+	private static final ConcurrentHashMap<String, Object> _runSettings = new ConcurrentHashMap<>();
 
-	private static AtomicInteger _callerCtr = new AtomicInteger(0);
-	private static ConcurrentHashMap<Integer, String> _callerNames = new ConcurrentHashMap<>();
-	private static ConcurrentHashMap<String, Object> _runSettings = new ConcurrentHashMap<>();
+	private static final AtomicInteger _logCtr = new AtomicInteger(0);
+	private static EventType[] _eventTypes;
+	private static long[] _startTimestamps;
+	private static long[] _endTimestamps;
+	private static int[] _callerIds;
+	private static long[] _threadIds;
+	private static long[] _data;
 
-	private static AtomicInteger _logCtr = new AtomicInteger(0);
-	private static final EventType[] _eventTypes = USE_OOC_EVENT_LOG ? new  EventType[MAX_NUM_EVENTS] : null;
-	private static final long[] _startTimestamps = USE_OOC_EVENT_LOG ? new long[MAX_NUM_EVENTS] : null;
-	private static final long[] _endTimestamps = USE_OOC_EVENT_LOG ? new long[MAX_NUM_EVENTS] : null;
-	private static final int[] _callerIds = USE_OOC_EVENT_LOG ? new int[MAX_NUM_EVENTS] : null;
-	private static final long[] _threadIds =  USE_OOC_EVENT_LOG ? new long[MAX_NUM_EVENTS] : null;
-	private static final long[] _data = USE_OOC_EVENT_LOG ? new long[MAX_NUM_EVENTS] : null;
+	public static void setup(int maxNumEvents) {
+		_eventTypes = DMLScript.OOC_LOG_EVENTS ? new  EventType[maxNumEvents] : null;
+		_startTimestamps = DMLScript.OOC_LOG_EVENTS ? new long[maxNumEvents] : null;
+		_endTimestamps = DMLScript.OOC_LOG_EVENTS ? new long[maxNumEvents] : null;
+		_callerIds = DMLScript.OOC_LOG_EVENTS ? new int[maxNumEvents] : null;
+		_threadIds = DMLScript.OOC_LOG_EVENTS ? new long[maxNumEvents] : null;
+		_data = DMLScript.OOC_LOG_EVENTS ? new long[maxNumEvents] : null;
+	}
 
 	public static int registerCaller(String callerName) {
 		int callerId = _callerCtr.incrementAndGet();

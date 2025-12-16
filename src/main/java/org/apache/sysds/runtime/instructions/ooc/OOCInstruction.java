@@ -90,7 +90,7 @@ public abstract class OOCInstruction extends Instruction {
 
 		if (DMLScript.STATISTICS)
 			_localStatisticsAdder = new LongAdder();
-		_callerId = OOCEventLog.USE_OOC_EVENT_LOG ? OOCEventLog.registerCaller(getExtendedOpcode() + "_" + hashCode()) : 0;
+		_callerId = DMLScript.OOC_LOG_EVENTS ? OOCEventLog.registerCaller(getExtendedOpcode() + "_" + hashCode()) : 0;
 	}
 
 	@Override
@@ -114,7 +114,7 @@ public abstract class OOCInstruction extends Instruction {
 
 	@Override
 	public Instruction preprocessInstruction(ExecutionContext ec) {
-		if (OOCEventLog.USE_OOC_EVENT_LOG)
+		if (DMLScript.OOC_LOG_EVENTS)
 			nanoTime = System.nanoTime();
 		// TODO
 		return super.preprocessInstruction(ec);
@@ -127,7 +127,7 @@ public abstract class OOCInstruction extends Instruction {
 	public void postprocessInstruction(ExecutionContext ec) {
 		if(DMLScript.LINEAGE_DEBUGGER)
 			ec.maintainLineageDebuggerInfo(this);
-		if (OOCEventLog.USE_OOC_EVENT_LOG)
+		if (DMLScript.OOC_LOG_EVENTS)
 			OOCEventLog.onComputeEvent(_callerId, nanoTime, System.nanoTime());
 	}
 
@@ -228,25 +228,6 @@ public abstract class OOCInstruction extends Instruction {
 									items.forEach(OOCStream.QueueCallback::close);
 								}
 							});
-						/*if(!explicitLeftCaching)
-							leftCache.incrProcessingCount(leftCache.findCachedIndex(tmp.get().getIndexes()),
-								1); // Correct for incremented subscriber count to allow block deletion
-
-						final OOCStream.QueueCallback<IndexedMatrixValue> cb = rightCache.peekCached(b.idx);
-
-						try (cb) {
-							b.value = cb.get();
-							// Directly emit
-							qOut.enqueue(mapper.apply(tmp.get(), b));
-						}
-
-						if(b.canRelease()) {
-							availableBroadcastInput.remove(key);
-
-							if(!explicitRightCaching)
-								rightCache.incrProcessingCount(rightCache.findCachedIndex(b.idx),
-									1); // Correct for incremented subscriber count to allow block deletion
-						}*/
 					}
 				}
 				else { // broadcast stream
@@ -361,6 +342,7 @@ public abstract class OOCInstruction extends Instruction {
 		return joinOOC(qIn1, qIn2, qOut, mapper, on, on);
 	}
 
+	@SuppressWarnings("unchecked")
 	protected <T, R, P> CompletableFuture<Void> joinOOC(List<OOCStream<T>> qIn, OOCStream<R> qOut, Function<List<T>, R> mapper, List<Function<T, P>> on) {
 		if (qIn == null || on == null || qIn.size() != on.size())
 			throw new DMLRuntimeException("joinOOC(list) requires the same number of streams and key functions.");
@@ -560,7 +542,7 @@ public abstract class OOCInstruction extends Instruction {
 									Statistics.maintainOOCHeavyHitter(getExtendedOpcode(), _localStatisticsAdder.sum());
 									_localStatisticsAdder.reset();
 								}
-								if (OOCEventLog.USE_OOC_EVENT_LOG)
+								if (DMLScript.OOC_LOG_EVENTS)
 									OOCEventLog.onComputeEvent(_callerId, taskStartTime, System.nanoTime());
 							}
 						}
@@ -612,12 +594,12 @@ public abstract class OOCInstruction extends Instruction {
 		final CompletableFuture<Void> future = new CompletableFuture<>();
 		try {
 			pool.submit(oocTask(() -> {
-				long startTime = DMLScript.STATISTICS || OOCEventLog.USE_OOC_EVENT_LOG ? System.nanoTime() : 0;
+				long startTime = DMLScript.STATISTICS || DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
 				r.run();
 				future.complete(null);
 				if (DMLScript.STATISTICS)
 					Statistics.maintainOOCHeavyHitter(getExtendedOpcode(), System.nanoTime() - startTime);
-				if (OOCEventLog.USE_OOC_EVENT_LOG)
+				if (DMLScript.OOC_LOG_EVENTS)
 					OOCEventLog.onComputeEvent(_callerId, startTime,  System.nanoTime());
 				}, future, queues));
 		}

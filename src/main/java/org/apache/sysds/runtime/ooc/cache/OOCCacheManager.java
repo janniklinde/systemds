@@ -38,26 +38,27 @@ public class OOCCacheManager {
 		_scheduler.shutdown();
 		_ioHandler = null;
 		_scheduler = null;
-		if (DMLScript.STATISTICS) {
-			System.out.println(Statistics.displayOOCEvictionStats());
+		if (DMLScript.OOC_STATISTICS)
 			Statistics.resetOOCEvictionStats();
-			if (OOCEventLog.USE_OOC_EVENT_LOG) {
-				try {
-					String csv = OOCEventLog.getComputeEventsCSV();
-					Files.writeString(Path.of("ComputeEventLog.csv"), csv);
-					csv = OOCEventLog.getDiskReadEventsCSV();
-					Files.writeString(Path.of("DiskReadEventLog.csv"), csv);
-					csv = OOCEventLog.getDiskWriteEventsCSV();
-					Files.writeString(Path.of("DiskWriteEventLog.csv"), csv);
-					csv = OOCEventLog.getCacheSizeEventsCSV();
-					Files.writeString(Path.of("CacheSizeEventLog.csv"), csv);
-					csv = OOCEventLog.getRunSettingsCSV();
-					Files.writeString(Path.of("RunSettings.csv"), csv);
-				}
-				catch(IOException e) {
-				}
-				OOCEventLog.clear();
+
+		if (DMLScript.OOC_LOG_EVENTS) {
+			try {
+				String csv = OOCEventLog.getComputeEventsCSV();
+				Files.writeString(Path.of(DMLScript.OOC_LOG_PATH, "ComputeEventLog.csv"), csv);
+				csv = OOCEventLog.getDiskReadEventsCSV();
+				Files.writeString(Path.of(DMLScript.OOC_LOG_PATH, "DiskReadEventLog.csv"), csv);
+				csv = OOCEventLog.getDiskWriteEventsCSV();
+				Files.writeString(Path.of(DMLScript.OOC_LOG_PATH, "DiskWriteEventLog.csv"), csv);
+				csv = OOCEventLog.getCacheSizeEventsCSV();
+				Files.writeString(Path.of(DMLScript.OOC_LOG_PATH, "CacheSizeEventLog.csv"), csv);
+				csv = OOCEventLog.getRunSettingsCSV();
+				Files.writeString(Path.of(DMLScript.OOC_LOG_PATH, "RunSettings.csv"), csv);
+				System.out.println("Event logs written to: " + DMLScript.OOC_LOG_PATH);
 			}
+			catch(IOException e) {
+				System.err.println("Could not write event logs: " + e.getMessage());
+			}
+			OOCEventLog.clear();
 		}
 	}
 
@@ -92,12 +93,12 @@ public class OOCCacheManager {
 
 	public static CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> requestBlock(long streamId, long blockId) {
 		BlockKey key = new BlockKey(streamId, blockId);
-		return getCache().request(key).thenApply(e -> new CachedQueueCallback(e, null));
+		return getCache().request(key).thenApply(e -> new CachedQueueCallback<>(e, null));
 	}
 
 	public static CompletableFuture<List<OOCStream.QueueCallback<IndexedMatrixValue>>> requestManyBlocks(List<BlockKey> keys) {
 		return getCache().request(keys).thenApply(
-			l -> l.stream().map(e -> (OOCStream.QueueCallback<IndexedMatrixValue>)new CachedQueueCallback(e, null)).toList());
+			l -> l.stream().map(e -> (OOCStream.QueueCallback<IndexedMatrixValue>)new CachedQueueCallback<IndexedMatrixValue>(e, null)).toList());
 	}
 
 	private static void pin(BlockEntry entry) {
@@ -122,6 +123,7 @@ public class OOCCacheManager {
 			this._pinned = new AtomicBoolean(true);
 		}
 
+		@SuppressWarnings("unchecked")
 		@Override
 		public T get() {
 			if (_failure != null)

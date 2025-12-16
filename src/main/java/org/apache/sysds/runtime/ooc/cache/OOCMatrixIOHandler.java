@@ -52,6 +52,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 	private final int _evictCallerId = OOCEventLog.registerCaller("write");
 	private final int _readCallerId = OOCEventLog.registerCaller("read");
 
+	@SuppressWarnings("unchecked")
 	public OOCMatrixIOHandler() {
 		this._spillDir = LocalFileUtils.getUniqueWorkingDir("ooc_stream");
 		_writeExec = new ThreadPoolExecutor(
@@ -90,8 +91,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 					_q[i].close();
 				}
 			}
-			catch(InterruptedException e) {
-				e.printStackTrace();
+			catch(InterruptedException ignored) {
 			}
 		}
 		_writeExec.getQueue().clear();
@@ -113,29 +113,26 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			int i = (int)(q % WRITER_SIZE);
 			_q[i].enqueueIfOpen(new Tuple2<>(block, future));
 		}
-		catch(InterruptedException e) {}
+		catch(InterruptedException ignored) {
+		}
 
 		return future;
 	}
 
 	@Override
 	public CompletableFuture<BlockEntry> scheduleRead(final BlockEntry block) {
-		//System.out.println("Schedule read: " + block.getKey());
 		final CompletableFuture<BlockEntry> future = new CompletableFuture<>();
 		try {
 			_readExec.submit(() -> {
 				try {
-					long ioStart = OOCEventLog.USE_OOC_EVENT_LOG ? System.nanoTime() : 0;
+					long ioStart = DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
 					loadFromDisk(block);
-					if (OOCEventLog.USE_OOC_EVENT_LOG)
+					if (DMLScript.OOC_LOG_EVENTS)
 						OOCEventLog.onDiskReadEvent(_readCallerId, ioStart, System.nanoTime(), block.getSize());
 					future.complete(block);
 				} catch (Throwable e) {
-					e.printStackTrace();
 					future.completeExceptionally(e);
 				}
-
-				//System.out.println("Read done: " + block.getKey());
 			});
 		} catch (RejectedExecutionException e) {
 			future.completeExceptionally(e);
@@ -196,17 +193,12 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 		while (!q.isFinished()) {
 			// --- 1. WRITE PHASE ---
-			// write to partition file
-			// 1. generate a new ID for the present "partition" (file)
 			int partitionId = _partitionCounter.getAndIncrement();
 
 			LocalFileUtils.createLocalFileIfNotExist(_spillDir);
 
-			// Spill to disk
 			String filename = _spillDir + "/stream_batch_part_" + partitionId;
-			System.out.println("Opening partition " + partitionId);
 
-			// 2. create the partition file metadata
 			PartitionFile partFile = new PartitionFile(filename);
 			_partitions.put(partitionId, partFile);
 
@@ -222,18 +214,15 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 				waitingForFlush = new ConcurrentLinkedDeque<>();
 				boolean closePartition = false;
 
-				// loop over the list of blocks we collected
 				while((tpl = q.take()) != null) {
-					long ioStart = DMLScript.STATISTICS || OOCEventLog.USE_OOC_EVENT_LOG ? System.nanoTime() : 0;
+					long ioStart = DMLScript.STATISTICS || DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
 					BlockEntry entry = tpl._1;
 					CompletableFuture<Void> future = tpl._2;
 					long wrote = writeOut(partitionId, entry, future, fos, dos, waitingForFlush);
 
-					if(DMLScript.STATISTICS) {
-						if(wrote > 0) {
-							Statistics.incrementOOCEvictionWrite();
-							Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
-						}
+					if(DMLScript.STATISTICS && wrote > 0) {
+						Statistics.incrementOOCEvictionWrite();
+						Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
 					}
 
 					byteCtr += wrote;
@@ -243,28 +232,25 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 						break;
 					}
 
-					if (OOCEventLog.USE_OOC_EVENT_LOG)
+					if (DMLScript.OOC_LOG_EVENTS)
 						OOCEventLog.onDiskWriteEvent(_evictCallerId, ioStart, System.nanoTime(), wrote);
 				}
-				if (!closePartition) {
-					if(q.close()) {
-						while((tpl = q.take()) != null) {
-							long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
-							BlockEntry entry = tpl._1;
-							CompletableFuture<Void> future = tpl._2;
-							long wrote = writeOut(partitionId, entry, future, fos, dos, waitingForFlush);
-							byteCtr += wrote;
 
-							if(DMLScript.STATISTICS) {
-								if(wrote > 0) {
-									Statistics.incrementOOCEvictionWrite();
-									Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
-								}
-							}
+				if (!closePartition && q.close()) {
+					while((tpl = q.take()) != null) {
+						long ioStart = DMLScript.STATISTICS ? System.nanoTime() : 0;
+						BlockEntry entry = tpl._1;
+						CompletableFuture<Void> future = tpl._2;
+						long wrote = writeOut(partitionId, entry, future, fos, dos, waitingForFlush);
+						byteCtr += wrote;
 
-							if (OOCEventLog.USE_OOC_EVENT_LOG)
-								OOCEventLog.onDiskWriteEvent(_evictCallerId, ioStart, System.nanoTime(), wrote);
+						if(DMLScript.STATISTICS && wrote > 0) {
+							Statistics.incrementOOCEvictionWrite();
+							Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
 						}
+
+						if (DMLScript.OOC_LOG_EVENTS)
+							OOCEventLog.onDiskWriteEvent(_evictCallerId, ioStart, System.nanoTime(), wrote);
 					}
 				}
 			}
@@ -272,7 +258,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 				throw new DMLRuntimeException(ex);
 			}
 			catch(Exception e) {
-				e.printStackTrace(); // TODO
+				// TODO
 			}
 			finally {
 				IOUtilFunctions.closeSilently(dos);

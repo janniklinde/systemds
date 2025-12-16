@@ -1,5 +1,6 @@
 package org.apache.sysds.runtime.ooc.cache;
 
+import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.utils.Statistics;
 import scala.Tuple2;
@@ -43,9 +44,9 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		this._bytesUpForEviction = 0;
 		this._running = true;
 		this._warnThrottling = false;
-		this._callerId = OOCEventLog.USE_OOC_EVENT_LOG ? OOCEventLog.registerCaller("LRUCacheScheduler") : 0;
+		this._callerId = DMLScript.OOC_LOG_EVENTS ? OOCEventLog.registerCaller("LRUCacheScheduler") : 0;
 
-		if (OOCEventLog.USE_OOC_EVENT_LOG) {
+		if (DMLScript.OOC_LOG_EVENTS) {
 			OOCEventLog.putRunSetting("CacheEvictionLimit", _evictionLimit);
 			OOCEventLog.putRunSetting("CacheHardLimit", _hardLimit);
 		}
@@ -276,7 +277,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		else {
 			while(onCacheSizeDecremented()) {}
 		}
-		if (OOCEventLog.USE_OOC_EVENT_LOG)
+		if (DMLScript.OOC_LOG_EVENTS)
 			OOCEventLog.onCacheSizeChangedEvent(_callerId, System.nanoTime(), _cacheSize, _bytesUpForEviction);
 	}
 
@@ -544,9 +545,9 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 
 	private static class DeferredReadRequest {
-		private static short NOT_SCHEDULED = 0;
-		private static short SCHEDULED = 1;
-		private static short PINNED = 2;
+		private static final short NOT_SCHEDULED = 0;
+		private static final short SCHEDULED = 1;
+		private static final short PINNED = 2;
 
 		private final CompletableFuture<List<BlockEntry>> _future;
 		private final List<BlockEntry> _entries;

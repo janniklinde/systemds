@@ -476,8 +476,9 @@ public class Statistics
 		double putThroughput = oocPutCalls.longValue() / elapsedSeconds;
 
 		StringBuilder sb = new StringBuilder();
-		sb.append("OOC eviction stats (since last reset):\n");
-		sb.append(getOOCHeavyHitters(10));
+		sb.append("OOC heavy hitters:\n");
+		sb.append(getOOCHeavyHitters(DMLScript.OOC_STATISTICS_COUNT));
+		sb.append('\n');
 		sb.append(String.format(Locale.US, "  get calls:\t\t%d (%.2f/sec)\n",
 			oocGetCalls.longValue(), getThroughput));
 		sb.append(String.format(Locale.US, "  put calls:\t\t%d (%.2f/sec)\n",
@@ -1275,6 +1276,11 @@ public class Statistics
 			sb.append(FederatedStatistics.displayStatistics(DMLScript.FED_STATISTICS_COUNT));
 			sb.append("\n");
 			sb.append(ParamServStatistics.displayFloStatistics());
+		}
+
+		if (DMLScript.OOC_STATISTICS) {
+			sb.append('\n');
+			sb.append(displayOOCEvictionStats());
 		}
 
 		return sb.toString();
