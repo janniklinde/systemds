@@ -196,33 +196,19 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 	private CompletableFuture<SourceReadResult> submitSourceRead(SourceReadRequest request, SourceReadState state,
 		long maxBytesInFlight) {
-		CompletableFuture<SourceReadResult> future = new CompletableFuture<>();
-		try {
-			_readExec.submit(() -> {
-				try {
-					if (request.format != Types.FileFormat.BINARY)
-						throw new DMLRuntimeException("Unsupported format for source read: " + request.format);
-					SourceReadResult res = readBinarySourceParallel(request, state, maxBytesInFlight);
-					future.complete(res);
-				}
-				catch(Throwable t) {
-					future.completeExceptionally(t);
-				}
-			});
-		}
-		catch(RejectedExecutionException e) {
-			future.completeExceptionally(e);
-		}
-		return future;
+		if (request.format != Types.FileFormat.BINARY)
+			return CompletableFuture.failedFuture(new DMLRuntimeException("Unsupported format for source read: " + request.format));
+		return readBinarySourceParallel(request, state, maxBytesInFlight);
 	}
 
-	private SourceReadResult readBinarySourceParallel(SourceReadRequest request, SourceReadState state, long maxBytesInFlight) {
+	private CompletableFuture<SourceReadResult> readBinarySourceParallel(SourceReadRequest request, SourceReadState state, long maxBytesInFlight) {
 		final long byteLimit = maxBytesInFlight > 0 ? maxBytesInFlight : Long.MAX_VALUE;
 		final AtomicLong bytesRead = new AtomicLong(0);
 		final AtomicBoolean stop = new AtomicBoolean(false);
 		final AtomicBoolean budgetHit = new AtomicBoolean(false);
 		final AtomicReference<Throwable> error = new AtomicReference<>();
 		final Object budgetLock = new Object();
+		final CompletableFuture<SourceReadResult> result = new CompletableFuture<>();
 
 		JobConf job = new JobConf(ConfigurationManager.getCachedJobConf());
 		Path path = new Path(request.path);
@@ -277,7 +263,8 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 					}
 					finally {
 						if (remaining.decrementAndGet() == 0)
-							synchronized (remaining) { remaining.notifyAll(); }
+							completeResult(result, bytesRead, budgetHit, error, request, files, filePositions,
+								completed);
 					}
 				});
 			}
@@ -285,52 +272,38 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 				error.compareAndSet(null, e);
 				stop.set(true);
 				if (remaining.decrementAndGet() == 0)
-					synchronized (remaining) { remaining.notifyAll(); }
+					completeResult(result, bytesRead, budgetHit, error, request, files, filePositions, completed);
 				break;
 			}
 		}
 
 		if (!anyTask) {
 			tryCloseTarget(request.target, true);
-			return new SourceReadResult(bytesRead.get(), true, null);
+			result.complete(new SourceReadResult(bytesRead.get(), true, null));
 		}
 
-		synchronized (remaining) {
-			while (remaining.get() > 0 && error.get() == null && !stop.get()) {
-				try {
-					remaining.wait();
-				}
-				catch(InterruptedException ignored) {
-				}
-			}
-		}
+		return result;
+	}
 
-		// Wait for all tasks to finish if we exited due to stop/error
-		synchronized (remaining) {
-			while (remaining.get() > 0) {
-				try {
-					remaining.wait();
-				}
-				catch(InterruptedException ignored) {
-				}
-			}
-		}
-
-		if (error.get() != null) {
-			throw error.get() instanceof RuntimeException ? (RuntimeException) error.get()
-				: new DMLRuntimeException(error.get().getMessage(),
-					error.get() instanceof Exception ? (Exception) error.get() : new Exception(error.get()));
+	private void completeResult(CompletableFuture<SourceReadResult> future, AtomicLong bytesRead, AtomicBoolean budgetHit,
+		AtomicReference<Throwable> error, SourceReadRequest request, Path[] files, AtomicLongArray filePositions,
+		AtomicIntegerArray completed) {
+		Throwable err = error.get();
+		if (err != null) {
+			future.completeExceptionally(err instanceof Exception ? err : new Exception(err));
+			return;
 		}
 
 		if (budgetHit.get()) {
 			if (!request.keepOpenOnLimit)
 				tryCloseTarget(request.target, false);
 			SourceReadContinuation cont = new SourceReadState(request, files, filePositions, completed);
-			return new SourceReadResult(bytesRead.get(), false, cont);
+			future.complete(new SourceReadResult(bytesRead.get(), false, cont));
+			return;
 		}
 
 		tryCloseTarget(request.target, true);
-		return new SourceReadResult(bytesRead.get(), true, null);
+		future.complete(new SourceReadResult(bytesRead.get(), true, null));
 	}
 
 	private void readSequenceFile(JobConf job, Path path, SourceReadRequest request, int fileIdx,
