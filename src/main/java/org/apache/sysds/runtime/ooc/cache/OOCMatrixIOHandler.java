@@ -20,9 +20,16 @@
 package org.apache.sysds.runtime.ooc.cache;
 
 import org.apache.sysds.api.DMLScript;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.SequenceFile;
+import org.apache.hadoop.mapred.JobConf;
+import org.apache.sysds.common.Types;
+import org.apache.sysds.conf.ConfigurationManager;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.io.IOUtilFunctions;
+import org.apache.sysds.runtime.io.MatrixReader;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
@@ -40,6 +47,8 @@ import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.nio.channels.Channels;
 import java.nio.channels.ClosedByInterruptException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -50,9 +59,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicIntegerArray;
+import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class OOCMatrixIOHandler implements OOCIOHandler {
 	private static final int WRITER_SIZE = 2;
+	private static final int READER_SIZE = 5;
 	private static final long OVERFLOW = 8192 * 1024;
 	private static final long MAX_PARTITION_SIZE = 8192 * 8192;
 
@@ -70,6 +83,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 	private final int _evictCallerId = OOCEventLog.registerCaller("write");
 	private final int _readCallerId = OOCEventLog.registerCaller("read");
+	private final int _srcReadCallerId = OOCEventLog.registerCaller("read_src");
 
 	@SuppressWarnings("unchecked")
 	public OOCMatrixIOHandler() {
@@ -81,8 +95,8 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			TimeUnit.MILLISECONDS,
 			new ArrayBlockingQueue<>(100000));
 		_readExec = new ThreadPoolExecutor(
-			5,
-			5,
+			READER_SIZE,
+			READER_SIZE,
 			0L,
 			TimeUnit.MILLISECONDS,
 			new ArrayBlockingQueue<>(100000));
@@ -163,6 +177,213 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 	public CompletableFuture<Boolean> scheduleDeletion(BlockEntry block) {
 		// TODO
 		return CompletableFuture.completedFuture(true);
+	}
+
+	@Override
+	public CompletableFuture<SourceReadResult> scheduleSourceRead(SourceReadRequest request) {
+		return submitSourceRead(request, null, request.maxBytesInFlight);
+	}
+
+	@Override
+	public CompletableFuture<SourceReadResult> continueSourceRead(SourceReadContinuation continuation, long maxBytesInFlight) {
+		if (!(continuation instanceof SourceReadState state)) {
+			CompletableFuture<SourceReadResult> failed = new CompletableFuture<>();
+			failed.completeExceptionally(new DMLRuntimeException("Unsupported continuation type: " + continuation));
+			return failed;
+		}
+		return submitSourceRead(state.request, state, maxBytesInFlight);
+	}
+
+	private CompletableFuture<SourceReadResult> submitSourceRead(SourceReadRequest request, SourceReadState state,
+		long maxBytesInFlight) {
+		CompletableFuture<SourceReadResult> future = new CompletableFuture<>();
+		try {
+			_readExec.submit(() -> {
+				try {
+					if (request.format != Types.FileFormat.BINARY)
+						throw new DMLRuntimeException("Unsupported format for source read: " + request.format);
+					SourceReadResult res = readBinarySourceParallel(request, state, maxBytesInFlight);
+					future.complete(res);
+				}
+				catch(Throwable t) {
+					future.completeExceptionally(t);
+				}
+			});
+		}
+		catch(RejectedExecutionException e) {
+			future.completeExceptionally(e);
+		}
+		return future;
+	}
+
+	private SourceReadResult readBinarySourceParallel(SourceReadRequest request, SourceReadState state, long maxBytesInFlight) {
+		final long byteLimit = maxBytesInFlight > 0 ? maxBytesInFlight : Long.MAX_VALUE;
+		final AtomicLong bytesRead = new AtomicLong(0);
+		final AtomicBoolean stop = new AtomicBoolean(false);
+		final AtomicBoolean budgetHit = new AtomicBoolean(false);
+		final AtomicReference<Throwable> error = new AtomicReference<>();
+		final Object budgetLock = new Object();
+
+		JobConf job = new JobConf(ConfigurationManager.getCachedJobConf());
+		Path path = new Path(request.path);
+
+		Path[] files;
+		AtomicLongArray filePositions;
+		AtomicIntegerArray completed;
+
+		try {
+			FileSystem fs = IOUtilFunctions.getFileSystem(path, job);
+			MatrixReader.checkValidInputFile(fs, path);
+
+			if (state == null) {
+				List<Path> seqFiles = new ArrayList<>();
+				for (Path p : IOUtilFunctions.getSequenceFilePaths(fs, path))
+					seqFiles.add(p);
+				files = seqFiles.toArray(Path[]::new);
+				filePositions = new AtomicLongArray(files.length);
+				completed = new AtomicIntegerArray(files.length);
+			}
+			else {
+				files = state.paths;
+				filePositions = state.filePositions;
+				completed = state.completed;
+			}
+		}
+		catch(IOException e) {
+			throw new DMLRuntimeException(e);
+		}
+
+		int activeTasks = 0;
+		for (int i = 0; i < files.length; i++)
+			if (completed.get(i) == 0)
+				activeTasks++;
+
+		final AtomicInteger remaining = new AtomicInteger(activeTasks);
+		boolean anyTask = activeTasks > 0;
+
+		for (int i = 0; i < files.length; i++) {
+			if (completed.get(i) == 1)
+				continue;
+			final int fileIdx = i;
+			try {
+				_readExec.submit(() -> {
+					try {
+						readSequenceFile(job, files[fileIdx], request, fileIdx, filePositions, completed, stop, budgetHit,
+							bytesRead, byteLimit, budgetLock);
+					}
+					catch(Throwable t) {
+						error.compareAndSet(null, t);
+						stop.set(true);
+					}
+					finally {
+						if (remaining.decrementAndGet() == 0)
+							synchronized (remaining) { remaining.notifyAll(); }
+					}
+				});
+			}
+			catch(RejectedExecutionException e) {
+				error.compareAndSet(null, e);
+				stop.set(true);
+				if (remaining.decrementAndGet() == 0)
+					synchronized (remaining) { remaining.notifyAll(); }
+				break;
+			}
+		}
+
+		if (!anyTask) {
+			tryCloseTarget(request.target, true);
+			return new SourceReadResult(bytesRead.get(), true, null);
+		}
+
+		synchronized (remaining) {
+			while (remaining.get() > 0 && error.get() == null && !stop.get()) {
+				try {
+					remaining.wait();
+				}
+				catch(InterruptedException ignored) {
+				}
+			}
+		}
+
+		// Wait for all tasks to finish if we exited due to stop/error
+		synchronized (remaining) {
+			while (remaining.get() > 0) {
+				try {
+					remaining.wait();
+				}
+				catch(InterruptedException ignored) {
+				}
+			}
+		}
+
+		if (error.get() != null) {
+			throw error.get() instanceof RuntimeException ? (RuntimeException) error.get()
+				: new DMLRuntimeException(error.get().getMessage(),
+					error.get() instanceof Exception ? (Exception) error.get() : new Exception(error.get()));
+		}
+
+		if (budgetHit.get()) {
+			if (!request.keepOpenOnLimit)
+				tryCloseTarget(request.target, false);
+			SourceReadContinuation cont = new SourceReadState(request, files, filePositions, completed);
+			return new SourceReadResult(bytesRead.get(), false, cont);
+		}
+
+		tryCloseTarget(request.target, true);
+		return new SourceReadResult(bytesRead.get(), true, null);
+	}
+
+	private void readSequenceFile(JobConf job, Path path, SourceReadRequest request, int fileIdx,
+		AtomicLongArray filePositions, AtomicIntegerArray completed, AtomicBoolean stop, AtomicBoolean budgetHit,
+		AtomicLong bytesRead, long byteLimit, Object budgetLock) throws IOException {
+		MatrixIndexes key = new MatrixIndexes();
+		MatrixBlock value = new MatrixBlock();
+
+		try(SequenceFile.Reader reader = new SequenceFile.Reader(job, SequenceFile.Reader.file(path))) {
+			long pos = filePositions.get(fileIdx);
+			if (pos > 0)
+				reader.seek(pos);
+
+			long ioStart = DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
+			while(!stop.get() && reader.next(key, value)) {
+				long blockSize = value.getExactSerializedSize();
+
+				synchronized(budgetLock) {
+					if (stop.get())
+						break;
+					if (bytesRead.get() + blockSize > byteLimit) {
+						stop.set(true);
+						budgetHit.set(true);
+						break;
+					}
+					bytesRead.addAndGet(blockSize);
+				}
+
+				MatrixIndexes outIdx = new MatrixIndexes(key);
+				MatrixBlock outBlk = new MatrixBlock(value);
+				request.target.enqueue(new IndexedMatrixValue(outIdx, outBlk));
+				filePositions.set(fileIdx, reader.getPosition());
+
+				if (DMLScript.OOC_LOG_EVENTS) {
+					long currTime = System.nanoTime();
+					OOCEventLog.onDiskReadEvent(_srcReadCallerId, ioStart, currTime, blockSize);
+					ioStart = currTime;
+				}
+			}
+
+			if (!stop.get())
+				completed.set(fileIdx, 1);
+		}
+	}
+
+	private void tryCloseTarget(org.apache.sysds.runtime.instructions.ooc.OOCStream<IndexedMatrixValue> target, boolean close) {
+		if (close) {
+			try {
+				target.closeInput();
+			}
+			catch(Exception ignored) {
+			}
+		}
 	}
 
 
@@ -354,6 +575,21 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 		public int getCount() {
 			return _count;
+		}
+	}
+
+	private static class SourceReadState implements SourceReadContinuation {
+		final SourceReadRequest request;
+		final Path[] paths;
+		final AtomicLongArray filePositions;
+		final AtomicIntegerArray completed;
+
+		SourceReadState(SourceReadRequest request, Path[] paths, AtomicLongArray filePositions,
+			AtomicIntegerArray completed) {
+			this.request = request;
+			this.paths = paths;
+			this.filePositions = filePositions;
+			this.completed = completed;
 		}
 	}
 }

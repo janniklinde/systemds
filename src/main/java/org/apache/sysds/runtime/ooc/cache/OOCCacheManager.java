@@ -100,6 +100,15 @@ public class OOCCacheManager {
 		}
 	}
 
+	public static OOCIOHandler getIOHandler() {
+		OOCIOHandler io = _ioHandler.get();
+		if (io != null)
+			return io;
+		// Ensure initialization happens
+		getCache();
+		return _ioHandler.get();
+	}
+
 	/**
 	 * Removes a block from the cache without setting its data to null.
 	 */
