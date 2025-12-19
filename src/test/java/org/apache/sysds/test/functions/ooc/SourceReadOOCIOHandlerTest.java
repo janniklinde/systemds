@@ -81,6 +81,9 @@ public class SourceReadOOCIOHandlerTest extends AutomatedTestBase {
 		TestUtils.compareMatrices(src, reconstructed, 1e-12);
 		org.junit.Assert.assertTrue(res.eof);
 		org.junit.Assert.assertNull(res.continuation);
+		org.junit.Assert.assertNotNull(res.blocks);
+		org.junit.Assert.assertEquals((rows / blen) * (cols / blen), res.blocks.size());
+		org.junit.Assert.assertTrue(res.blocks.stream().allMatch(b -> b.indexes != null));
 	}
 
 	@Test
@@ -104,10 +107,13 @@ public class SourceReadOOCIOHandlerTest extends AutomatedTestBase {
 		OOCIOHandler.SourceReadResult first = handler.scheduleSourceRead(req).get();
 		org.junit.Assert.assertFalse(first.eof);
 		org.junit.Assert.assertNotNull(first.continuation);
+		org.junit.Assert.assertNotNull(first.blocks);
 
 		OOCIOHandler.SourceReadResult second = handler.continueSourceRead(first.continuation, Long.MAX_VALUE).get();
 		org.junit.Assert.assertTrue(second.eof);
 		org.junit.Assert.assertNull(second.continuation);
+		org.junit.Assert.assertNotNull(second.blocks);
+		org.junit.Assert.assertEquals((rows / blen) * (cols / blen), first.blocks.size() + second.blocks.size());
 
 		MatrixBlock reconstructed = drainToMatrix(target, rows, cols, blen);
 		TestUtils.compareMatrices(src, reconstructed, 1e-12);

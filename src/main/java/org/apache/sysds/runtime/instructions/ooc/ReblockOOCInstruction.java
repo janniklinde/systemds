@@ -31,6 +31,7 @@ import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
+import org.apache.sysds.runtime.ooc.stream.OOCSourceStream;
 
 public class ReblockOOCInstruction extends ComputationOOCInstruction {
 	private int blen;
@@ -68,7 +69,7 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 		//TODO support other formats than binary 
 		
 		//create queue, spawn thread for asynchronous reading, and return
-		OOCStream<IndexedMatrixValue> q = createWritableStream();
+		OOCStream<IndexedMatrixValue> q = new OOCSourceStream();
 		OOCIOHandler io = OOCCacheManager.getIOHandler();
 		OOCIOHandler.SourceReadRequest req = new OOCIOHandler.SourceReadRequest(
 			min.getFileName(), Types.FileFormat.BINARY, mc.getRows(), mc.getCols(), blen, mc.getNonZeros(),

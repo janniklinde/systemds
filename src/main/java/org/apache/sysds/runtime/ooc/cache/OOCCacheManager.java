@@ -125,9 +125,25 @@ public class OOCCacheManager {
 		getCache().put(key, value, ((MatrixBlock)value.getValue()).getExactSerializedSize());
 	}
 
+	/**
+	 * Store a source-backed block in the OOC cache and register its source location.
+	 */
+	public static void putSourceBacked(long streamId, int blockId, IndexedMatrixValue value,
+		OOCIOHandler.SourceBlockDescriptor descriptor) {
+		BlockKey key = new BlockKey(streamId, blockId);
+		getCache().putSourceBacked(key, value, ((MatrixBlock)value.getValue()).getExactSerializedSize(), descriptor);
+	}
+
 	public static OOCStream.QueueCallback<IndexedMatrixValue> putAndPin(long streamId, int blockId, IndexedMatrixValue value) {
 		BlockKey key = new BlockKey(streamId, blockId);
 		return new CachedQueueCallback<>(getCache().putAndPin(key, value, ((MatrixBlock)value.getValue()).getExactSerializedSize()), null);
+	}
+
+	public static OOCStream.QueueCallback<IndexedMatrixValue> putAndPinSourceBacked(long streamId, int blockId,
+		IndexedMatrixValue value, OOCIOHandler.SourceBlockDescriptor descriptor) {
+		BlockKey key = new BlockKey(streamId, blockId);
+		return new CachedQueueCallback<>(
+			getCache().putAndPinSourceBacked(key, value, ((MatrixBlock)value.getValue()).getExactSerializedSize(), descriptor), null);
 	}
 
 	public static CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> requestBlock(long streamId, long blockId) {

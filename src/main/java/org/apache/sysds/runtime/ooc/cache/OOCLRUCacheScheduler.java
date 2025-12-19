@@ -169,22 +169,36 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	@Override
 	public void put(BlockKey key, Object data, long size) {
-		put(key, data, size, false);
+		put(key, data, size, false, null);
 	}
 
 	@Override
 	public BlockEntry putAndPin(BlockKey key, Object data, long size) {
-		return put(key, data, size, true);
+		return put(key, data, size, true, null);
 	}
 
-	private BlockEntry put(BlockKey key, Object data, long size, boolean pin) {
+	@Override
+	public void putSourceBacked(BlockKey key, Object data, long size, OOCIOHandler.SourceBlockDescriptor descriptor) {
+		put(key, data, size, false, descriptor);
+	}
+
+	@Override
+	public BlockEntry putAndPinSourceBacked(BlockKey key, Object data, long size, OOCIOHandler.SourceBlockDescriptor descriptor) {
+		return put(key, data, size, true, descriptor);
+	}
+
+	private BlockEntry put(BlockKey key, Object data, long size, boolean pin, OOCIOHandler.SourceBlockDescriptor descriptor) {
 		if (!this._running)
 			throw new IllegalStateException();
 		if (data == null)
 			throw new IllegalArgumentException();
+		if (descriptor != null)
+			_ioHandler.registerSourceLocation(key, descriptor);
 
 		Statistics.incrementOOCEvictionPut();
 		BlockEntry entry = new BlockEntry(key, size, data);
+		if (descriptor != null)
+			entry.setState(BlockState.WARM);
 		if (pin)
 			entry.pin();
 		synchronized(this) {
