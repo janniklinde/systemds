@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.ooc.stream.OOCStreamMessage;
 
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -32,6 +33,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreama
 	private final AtomicInteger _streamIdx;
 	private final AtomicBoolean _subscriberSet;
 	private QueueCallback<IndexedMatrixValue> _lastDequeue;
+	private volatile Consumer<OOCStreamMessage> _downstreamRelay;
 
 	public PlaybackStream(CachingStream streamCache) {
 		this._streamCache = streamCache;
@@ -81,6 +83,16 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreama
 	}
 
 	@Override
+	public void messageUpstream(OOCStreamMessage msg) {
+		_streamCache.messageUpstream(msg);
+	}
+
+	@Override
+	public void messageDownstream(OOCStreamMessage msg) {
+		_downstreamRelay.accept(msg);
+	}
+
+	@Override
 	public void setSubscriber(Consumer<QueueCallback<IndexedMatrixValue>> subscriber) {
 		if (!_subscriberSet.compareAndSet(false, true))
 			throw new IllegalArgumentException("Subscriber cannot be set multiple times");
@@ -101,5 +113,16 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreama
 	@Override
 	public CachingStream getStreamCache() {
 		return _streamCache;
+	}
+
+	@Override
+	public void setUpstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+		throw new UnsupportedOperationException();
+	}
+
+	@Override
+	public void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+		_downstreamRelay = relay;
+		_streamCache.setDownstreamMessageRelay(relay);
 	}
 }

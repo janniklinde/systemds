@@ -492,7 +492,6 @@ public abstract class OOCInstruction extends Instruction {
 		int i = 0;
 		@SuppressWarnings("unused")
 		final int streamId = nextStreamId.getAndIncrement();
-		//System.out.println("New stream: (id " + streamId + ", size " + queues.size() + ", initiator '" + this.getClass().getSimpleName() + "')");
 
 		for (OOCStream<T> queue : queues) {
 			final int k = i;
@@ -500,7 +499,6 @@ public abstract class OOCInstruction extends Instruction {
 			final CompletableFuture<Void> localFuture = futures.get(k);
 			final AtomicBoolean closeRaceWatchdog = new AtomicBoolean(false);
 
-			//System.out.println("Substream (k " + k + ", id " + streamId + ", type '" + queue.getClass().getSimpleName() + "', stream_id " + queue.hashCode() + ")");
 			queue.setSubscriber(oocTask(callback -> {
 				long startTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
 				try (callback) {

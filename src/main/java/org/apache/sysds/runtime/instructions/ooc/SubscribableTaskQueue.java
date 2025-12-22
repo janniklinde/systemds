@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
+import org.apache.sysds.runtime.ooc.stream.OOCStreamMessage;
 
 import java.util.LinkedList;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -32,6 +33,8 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	private final AtomicInteger _availableCtr = new AtomicInteger(1);
 	private final AtomicBoolean _closed = new AtomicBoolean(false);
 	private volatile Consumer<QueueCallback<T>> _subscriber = null;
+	private volatile Consumer<OOCStreamMessage> _upstreamMsgRelay = null;
+	private volatile Consumer<OOCStreamMessage> _downstreamMsgRelay = null;
 	private String _watchdogId;
 
 	public SubscribableTaskQueue() {
@@ -126,6 +129,8 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		if (_closed.compareAndSet(false, true)) {
 			super.closeInput();
 			onDeliveryFinished();
+			_upstreamMsgRelay = null;
+			_downstreamMsgRelay = null;
 		} else {
 			throw new IllegalStateException("Multiple close input calls");
 		}
@@ -186,6 +191,20 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	}
 
 	@Override
+	public void messageUpstream(OOCStreamMessage msg) {
+		Consumer<OOCStreamMessage> s = _upstreamMsgRelay;
+		if (s != null)
+			s.accept(msg);
+	}
+
+	@Override
+	public void messageDownstream(OOCStreamMessage msg) {
+		Consumer<OOCStreamMessage> s = _downstreamMsgRelay;
+		if (s != null)
+			s.accept(msg);
+	}
+
+	@Override
 	public boolean hasStreamCache() {
 		return false;
 	}
@@ -193,5 +212,15 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	@Override
 	public CachingStream getStreamCache() {
 		return null;
+	}
+
+	@Override
+	public void setUpstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+		_upstreamMsgRelay = relay;
+	}
+
+	@Override
+	public void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+		_downstreamMsgRelay = relay;
 	}
 }

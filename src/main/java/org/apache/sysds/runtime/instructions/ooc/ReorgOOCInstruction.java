@@ -34,6 +34,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.ReorgOperator;
 import org.apache.sysds.runtime.util.DataConverter;
+import org.apache.sysds.runtime.util.IndexRange;
 
 public class ReorgOOCInstruction extends ComputationOOCInstruction {
 	// sort-specific attributes (to enable variable attributes)
@@ -110,6 +111,18 @@ public class ReorgOOCInstruction extends ComputationOOCInstruction {
 			OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
 			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 			ec.getMatrixObject(output).setStreamHandle(qOut);
+			qIn.setDownstreamMessageRelay(msg -> {
+				IndexRange range = msg.getAffectedIndexRange();
+				if(range != null)
+					msg = msg.transformAffectedTile(new IndexRange(range.colStart, range.colEnd, range.rowStart, range.rowEnd));
+				qOut.messageDownstream(msg);
+			});
+			qOut.setUpstreamMessageRelay(msg -> {
+				IndexRange range = msg.getAffectedIndexRange();
+				if (range != null)
+					msg = msg.transformAffectedTile(new IndexRange(range.colStart, range.colEnd, range.rowStart, range.rowEnd));
+				qIn.messageUpstream(msg);
+			});
 			// Transpose operation
 			mapOOC(qIn, qOut, tmp -> {
 				MatrixBlock inBlock = (MatrixBlock) tmp.getValue();

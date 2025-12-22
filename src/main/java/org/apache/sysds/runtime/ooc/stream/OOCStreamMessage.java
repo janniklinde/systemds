@@ -17,24 +17,12 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.instructions.ooc;
+package org.apache.sysds.runtime.ooc.stream;
 
-import org.apache.sysds.runtime.ooc.stream.OOCStreamMessage;
+import org.apache.sysds.runtime.util.IndexRange;
 
-import java.util.function.Consumer;
+public interface OOCStreamMessage {
+	IndexRange getAffectedIndexRange();
 
-public interface OOCStreamable<T> {
-	OOCStream<T> getReadStream();
-
-	OOCStream<T> getWriteStream();
-
-	boolean isProcessed();
-
-	void messageUpstream(OOCStreamMessage msg);
-
-	void messageDownstream(OOCStreamMessage msg);
-
-	void setUpstreamMessageRelay(Consumer<OOCStreamMessage> relay);
-
-	void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay);
+	OOCStreamMessage transformAffectedTile(IndexRange newRange);
 }

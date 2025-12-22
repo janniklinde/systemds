@@ -155,6 +155,9 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 		List<OOCStream<IndexedMatrixValue>> streams = List.of(
 			m1.getStreamHandle(), m2.getStreamHandle(), m3.getStreamHandle());
 
+		streams.forEach(s -> s.setDownstreamMessageRelay(qOut::messageDownstream));
+		qOut.setUpstreamMessageRelay(msg -> streams.forEach(s -> s.messageUpstream(msg)));
+
 		List<java.util.function.Function<IndexedMatrixValue, MatrixIndexes>> keyFns =
 			List.of(IndexedMatrixValue::getIndexes, IndexedMatrixValue::getIndexes, IndexedMatrixValue::getIndexes);
 

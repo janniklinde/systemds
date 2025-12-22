@@ -20,6 +20,8 @@ import org.apache.sysds.runtime.matrix.data.OperationsOnMatrixValues;
 import org.apache.sysds.runtime.matrix.operators.AggregateTernaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.stream.OOCStreamMessage;
+import org.apache.sysds.runtime.util.IndexRange;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -139,6 +141,22 @@ public class AggregateTernaryOOCInstruction extends ComputationOOCInstruction {
 		streams.add(qIn2);
 		if(qIn3 != null)
 			streams.add(qIn3);
+
+		streams.forEach(stream -> {
+			stream.setDownstreamMessageRelay(msg -> {
+				IndexRange range = msg.getAffectedIndexRange();
+				if(range != null)
+					msg = msg.transformAffectedTile(new IndexRange(1, 1, range.colStart, range.colEnd));
+				qOut.messageDownstream(msg);
+			});
+		});
+		qOut.setUpstreamMessageRelay(msg -> {
+			IndexRange range = msg.getAffectedIndexRange();
+			if (range != null)
+				msg = msg.transformAffectedTile(new IndexRange(1, dc.getRows(),  range.colStart, range.colEnd));
+			OOCStreamMessage mMsg = msg;
+			streams.forEach(stream -> stream.messageUpstream(mMsg));
+		});
 
 		List<Function<IndexedMatrixValue, MatrixIndexes>> keyFns = new ArrayList<>();
 		for(int i = 0; i < streams.size(); i++)
