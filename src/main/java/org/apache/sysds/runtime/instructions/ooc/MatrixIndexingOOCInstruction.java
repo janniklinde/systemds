@@ -88,6 +88,32 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 				throw new DMLRuntimeException("Desired block not found");
 			}
 
+			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
+			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
+			qOut.setIXTransform((downstream, range) -> {
+				if(downstream){
+					long rs = range.rowStart-ix.rowStart+1;
+					long re = range.rowEnd-ix.rowStart+1;
+					long cs = range.colStart-ix.colStart+1;
+					long ce = range.colEnd-ix.colStart+1;
+					// TODO
+					//if (re < 1 || ce < 1 || rs > ix.colSpan() || cs > ix.colSpan())
+					//	return new IndexRange(-1, -1, -1, -1);
+					rs = Math.max(1, rs);
+					cs = Math.max(1, cs);
+					re = Math.min(ix.rowSpan(), re);
+					ce = Math.min(ix.colSpan(), ce);
+					return new IndexRange(rs, re, cs, ce);
+				}
+				else{
+					long rs = range.rowStart+ix.rowStart;
+					long re = range.rowEnd+ix.rowStart;
+					long cs = range.colStart+ix.colStart;
+					long ce = range.colEnd+ix.colStart;
+					return new IndexRange(rs, re, cs, ce);
+				}
+			});
+
 			if(ix.rowStart % blocksize == 0 && ix.colStart % blocksize == 0) {
 				// Aligned case: interior blocks can be forwarded directly, borders may require slicing
 				final int outBlockRows = (int) Math.ceil((double) (ix.rowSpan() + 1) / blocksize);

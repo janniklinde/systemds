@@ -36,10 +36,10 @@ import org.junit.Test;
 
 import java.io.IOException;
 
-public class BinaryMatrixMatrixTest extends AutomatedTestBase {
-	private final static String TEST_NAME1 = "BinaryMatrixMatrix";
+public class JoinAccessPatternTest extends AutomatedTestBase {
+	private final static String TEST_NAME1 = "JoinAccessPattern";
 	private final static String TEST_DIR = "functions/ooc/";
-	private final static String TEST_CLASS_DIR = TEST_DIR + BinaryMatrixMatrixTest.class.getSimpleName() + "/";
+	private final static String TEST_CLASS_DIR = TEST_DIR + JoinAccessPatternTest.class.getSimpleName() + "/";
 	private final static double eps = 1e-8;
 	private static final String INPUT_NAME_1 = "X";
 	private static final String INPUT_NAME_2 = "Y";

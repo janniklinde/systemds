@@ -20,7 +20,6 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
-import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 
 import java.util.function.Consumer;
 
@@ -95,6 +94,8 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 
 		@Override
 		public boolean isEos() {
+			if(_failure != null)
+				throw _failure;
 			return get() == null;
 		}
 	}

@@ -39,6 +39,12 @@ public interface OOCCacheScheduler {
 	CompletableFuture<List<BlockEntry>> request(List<BlockKey> keys);
 
 	/**
+	 * Adds the given priority to any pending request accessing the key.
+	 * Multi-requests are prioritized partially.
+	 */
+	void prioritize(BlockKey key, double priority);
+
+	/**
 	 * Places a new block in the cache. Note that objects are immutable and cannot be overwritten.
 	 * The object data should now only be accessed via cache, as ownership has been transferred.
 	 * @param key the associated key of the block
@@ -94,7 +100,17 @@ public interface OOCCacheScheduler {
 	void unpin(BlockEntry entry);
 
 	/**
+	 * Returns the current cache size in bytes.
+	 */
+	long getCacheSize();
+
+	/**
 	 * Shuts down the cache scheduler.
 	 */
 	void shutdown();
+
+	/**
+	 * Updates the cache limits.
+	 */
+	void updateLimits(long evictionLimit, long hardLimit);
 }
