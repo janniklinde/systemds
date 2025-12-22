@@ -104,4 +104,8 @@ public final class BlockEntry {
 		_pinCount--;
 		return _pinCount == 0;
 	}
+
+	public String toString() {
+		return "Entry" + _key.toString();
+	}
 }

@@ -94,6 +94,8 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 
 		@Override
 		public boolean isEos() {
+			if(_failure != null)
+				throw _failure;
 			return get() == null;
 		}
 	}

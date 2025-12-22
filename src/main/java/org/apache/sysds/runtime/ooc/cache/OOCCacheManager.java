@@ -147,6 +147,10 @@ public class OOCCacheManager {
 				descriptor), null);
 	}
 
+	public static void prioritize(BlockKey key, int priority) {
+		getCache().prioritize(key, priority);
+	}
+
 	public static CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> requestBlock(long streamId, long blockId) {
 		BlockKey key = new BlockKey(streamId, blockId);
 		return getCache().request(key).thenApply(e -> new CachedQueueCallback<>(e, null));
