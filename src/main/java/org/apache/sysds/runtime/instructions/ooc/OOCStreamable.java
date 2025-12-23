@@ -19,6 +19,8 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
+import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.stream.OOCStreamMessage;
 
 import java.util.function.Consumer;
@@ -29,6 +31,12 @@ public interface OOCStreamable<T> {
 	OOCStream<T> getWriteStream();
 
 	boolean isProcessed();
+
+	DataCharacteristics getDataCharacteristics();
+
+	CacheableData<?> getData();
+
+	void setData(CacheableData<?> data);
 
 	void messageUpstream(OOCStreamMessage msg);
 

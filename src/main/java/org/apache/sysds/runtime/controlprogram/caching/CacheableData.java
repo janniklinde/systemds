@@ -474,6 +474,7 @@ public abstract class CacheableData<T extends CacheBlock<?>> extends Data
 	public synchronized OOCStream<IndexedMatrixValue> getStreamHandle() {
 		if( !hasStreamHandle() ) {
 			final SubscribableTaskQueue<IndexedMatrixValue> _mStream = new SubscribableTaskQueue<>();
+			_mStream.setData(this);
 			DataCharacteristics dc = getDataCharacteristics();
 			MatrixBlock src = (MatrixBlock)acquireReadAndRelease();
 			_streamHandle = _mStream;
@@ -540,6 +541,7 @@ public abstract class CacheableData<T extends CacheBlock<?>> extends Data
 	}
 
 	public synchronized void setStreamHandle(OOCStreamable<IndexedMatrixValue> q) {
+		q.setData(this);
 		_streamHandle = q;
 	}
 	

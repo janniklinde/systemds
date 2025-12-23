@@ -20,7 +20,9 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.stream.OOCStreamMessage;
 
 import java.util.LinkedList;
@@ -32,6 +34,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 
 	private final AtomicInteger _availableCtr = new AtomicInteger(1);
 	private final AtomicBoolean _closed = new AtomicBoolean(false);
+	private CacheableData<?> _cdata;
 	private volatile Consumer<QueueCallback<T>> _subscriber = null;
 	private volatile Consumer<OOCStreamMessage> _upstreamMsgRelay = null;
 	private volatile Consumer<OOCStreamMessage> _downstreamMsgRelay = null;
@@ -212,6 +215,21 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	@Override
 	public CachingStream getStreamCache() {
 		return null;
+	}
+
+	@Override
+	public DataCharacteristics getDataCharacteristics() {
+		return _cdata == null ? null : _cdata.getDataCharacteristics();
+	}
+
+	@Override
+	public CacheableData<?> getData() {
+		return _cdata;
+	}
+
+	@Override
+	public void setData(CacheableData<?> data) {
+		this._cdata = data;
 	}
 
 	@Override

@@ -20,10 +20,12 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.controlprogram.parfor.util.IDSequence;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
@@ -353,6 +355,21 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	@Override
 	public boolean isProcessed() {
 		return false;
+	}
+
+	@Override
+	public DataCharacteristics getDataCharacteristics() {
+		return _source.getDataCharacteristics();
+	}
+
+	@Override
+	public CacheableData<?> getData() {
+		return _source.getData();
+	}
+
+	@Override
+	public void setData(CacheableData<?> data) {
+		_source.setData(data);
 	}
 
 	@Override
