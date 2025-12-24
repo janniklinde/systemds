@@ -23,14 +23,16 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
-import org.apache.sysds.runtime.ooc.stream.OOCStreamMessage;
+import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
+import org.apache.sysds.runtime.util.IndexRange;
 
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
-public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreamable<IndexedMatrixValue> {
+public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	private final CachingStream _streamCache;
 	private final AtomicInteger _streamIdx;
 	private final AtomicBoolean _subscriberSet;
@@ -141,5 +143,10 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue>, OOCStreama
 	public void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
 		_downstreamRelay = relay;
 		_streamCache.setDownstreamMessageRelay(relay);
+	}
+
+	@Override
+	public void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
+		throw new UnsupportedOperationException();
 	}
 }

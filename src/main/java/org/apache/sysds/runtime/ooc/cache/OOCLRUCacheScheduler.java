@@ -160,6 +160,11 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		return future;
 	}
 
+	@Override
+	public void prioritize(BlockKey key, double priority) {
+		// TODO
+	}
+
 	private void scheduleDeferredRead(DeferredReadRequest deferredReadRequest) {
 		synchronized(this) {
 			_deferredReadRequests.add(deferredReadRequest);

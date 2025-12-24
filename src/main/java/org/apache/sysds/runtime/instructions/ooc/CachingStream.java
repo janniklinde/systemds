@@ -30,13 +30,20 @@ import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.stream.OOCSourceStream;
-import org.apache.sysds.runtime.ooc.stream.OOCStreamMessage;
+import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
+import org.apache.sysds.runtime.ooc.stream.message.OOCRequestRangeMsg;
+import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
+import org.apache.sysds.runtime.util.IndexRange;
 import shaded.parquet.it.unimi.dsi.fastutil.ints.IntArrayList;
 
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
 /**
@@ -374,6 +381,31 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	@Override
 	public void messageUpstream(OOCStreamMessage msg) {
+		if(msg instanceof OOCGetStreamTypeMessage) {
+			((OOCGetStreamTypeMessage) msg).setCachedType();
+			activateIndexing();
+			return;
+		} else if(msg instanceof OOCRequestRangeMsg) {
+			// Then we may check if the corresponding block indices
+			// are already present in cache
+			OOCRequestRangeMsg r = (OOCRequestRangeMsg) msg;
+			IndexRange range = r.getTransformedRange();
+			Collection<MatrixIndexes> idx = OOCUtils.getTilesOfRange(range, _source.getDataCharacteristics().getBlocksize());
+			int[] idxArray;
+
+			synchronized(this) {
+				idxArray = idx.stream().mapToInt(i -> _index.getOrDefault(i, -1)).toArray();
+			}
+
+			Arrays.stream(idxArray).forEach(i -> {
+				if (i == -1)
+					return;
+				OOCCacheManager.getCache().prioritize(new BlockKey(_streamId, i), 1);
+			});
+
+			return;
+		}
+
 		_source.messageUpstream(msg);
 	}
 
@@ -390,6 +422,11 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	@Override
 	public void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
 		_downstreamRelays.add(relay);
+	}
+
+	@Override
+	public void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
+		throw new UnsupportedOperationException();
 	}
 
 	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers) {

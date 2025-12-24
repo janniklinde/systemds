@@ -17,12 +17,20 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.ooc.stream;
+package org.apache.sysds.runtime.ooc.stream.message;
 
 import org.apache.sysds.runtime.util.IndexRange;
 
-public interface OOCStreamMessage {
-	IndexRange getAffectedIndexRange();
+import java.util.function.BiFunction;
 
-	OOCStreamMessage transformAffectedTile(IndexRange newRange);
+public interface OOCStreamMessage {
+	MessageType getMessageType();
+
+	void addIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform);
+
+	enum MessageType {
+		GET_STREAM_TYPE,
+		PREPROCESS_AVAILABLE_TILES,
+		REQUEST_RANGE
+	};
 }

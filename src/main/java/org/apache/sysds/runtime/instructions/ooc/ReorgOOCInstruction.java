@@ -111,18 +111,12 @@ public class ReorgOOCInstruction extends ComputationOOCInstruction {
 			OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
 			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 			ec.getMatrixObject(output).setStreamHandle(qOut);
-			qIn.setDownstreamMessageRelay(msg -> {
-				IndexRange range = msg.getAffectedIndexRange();
-				if(range != null)
-					msg = msg.transformAffectedTile(new IndexRange(range.colStart, range.colEnd, range.rowStart, range.rowEnd));
-				qOut.messageDownstream(msg);
-			});
-			qOut.setUpstreamMessageRelay(msg -> {
-				IndexRange range = msg.getAffectedIndexRange();
-				if (range != null)
-					msg = msg.transformAffectedTile(new IndexRange(range.colStart, range.colEnd, range.rowStart, range.rowEnd));
-				qIn.messageUpstream(msg);
-			});
+
+			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
+			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
+			qOut.setIXTransform((downstream, range) ->
+				new IndexRange(range.colStart, range.colEnd, range.rowStart, range.rowEnd));
+
 			// Transpose operation
 			mapOOC(qIn, qOut, tmp -> {
 				MatrixBlock inBlock = (MatrixBlock) tmp.getValue();

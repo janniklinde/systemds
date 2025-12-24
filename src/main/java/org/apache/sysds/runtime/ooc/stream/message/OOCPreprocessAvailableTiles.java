@@ -17,36 +17,37 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.instructions.ooc;
+package org.apache.sysds.runtime.ooc.stream.message;
 
-import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
-import org.apache.sysds.runtime.meta.DataCharacteristics;
-import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
+import java.util.ArrayList;
 import java.util.function.BiFunction;
-import java.util.function.Consumer;
 
-public interface OOCStreamable<T> {
-	OOCStream<T> getReadStream();
+public class OOCPreprocessAvailableTiles implements OOCStreamMessage {
+	private ArrayList<BiFunction<Boolean, IndexRange, IndexRange>> _ixTransformations;
 
-	OOCStream<T> getWriteStream();
+	public OOCPreprocessAvailableTiles() {
+		_ixTransformations = null;
+	}
 
-	boolean isProcessed();
+	@Override
+	public MessageType getMessageType() {
+		return MessageType.REQUEST_RANGE;
+	}
 
-	DataCharacteristics getDataCharacteristics();
+	@Override
+	public void addIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
+		if (transform != null) {
+			if (_ixTransformations == null)
+				_ixTransformations = new ArrayList<>();
+			_ixTransformations.add(transform);
+		}
+	}
 
-	CacheableData<?> getData();
-
-	void setData(CacheableData<?> data);
-
-	void messageUpstream(OOCStreamMessage msg);
-
-	void messageDownstream(OOCStreamMessage msg);
-
-	void setUpstreamMessageRelay(Consumer<OOCStreamMessage> relay);
-
-	void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay);
-
-	void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform);
+	public IndexRange transform(IndexRange range, boolean downstream) {
+		for (BiFunction<Boolean, IndexRange, IndexRange> transform : _ixTransformations)
+			range = transform.apply(downstream, range);
+		return range;
+	}
 }

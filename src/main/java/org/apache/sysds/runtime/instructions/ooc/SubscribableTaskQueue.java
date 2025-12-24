@@ -23,11 +23,13 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
-import org.apache.sysds.runtime.ooc.stream.OOCStreamMessage;
+import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
+import org.apache.sysds.runtime.util.IndexRange;
 
 import java.util.LinkedList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
 public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCStream<T> {
@@ -38,6 +40,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	private volatile Consumer<QueueCallback<T>> _subscriber = null;
 	private volatile Consumer<OOCStreamMessage> _upstreamMsgRelay = null;
 	private volatile Consumer<OOCStreamMessage> _downstreamMsgRelay = null;
+	private volatile BiFunction<Boolean, IndexRange, IndexRange> _ixTransform = null;
 	private String _watchdogId;
 
 	public SubscribableTaskQueue() {
@@ -195,6 +198,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 
 	@Override
 	public void messageUpstream(OOCStreamMessage msg) {
+		msg.addIXTransform(_ixTransform);
 		Consumer<OOCStreamMessage> s = _upstreamMsgRelay;
 		if (s != null)
 			s.accept(msg);
@@ -202,6 +206,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 
 	@Override
 	public void messageDownstream(OOCStreamMessage msg) {
+		msg.addIXTransform(_ixTransform);
 		Consumer<OOCStreamMessage> s = _downstreamMsgRelay;
 		if (s != null)
 			s.accept(msg);
@@ -240,5 +245,10 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	@Override
 	public void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
 		_downstreamMsgRelay = relay;
+	}
+
+	@Override
+	public void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
+		_ixTransform = transform;
 	}
 }

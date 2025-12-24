@@ -20,7 +20,6 @@ import org.apache.sysds.runtime.matrix.data.OperationsOnMatrixValues;
 import org.apache.sysds.runtime.matrix.operators.AggregateTernaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
-import org.apache.sysds.runtime.ooc.stream.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
 import java.util.ArrayList;
@@ -28,7 +27,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.Function;
 
 public class AggregateTernaryOOCInstruction extends ComputationOOCInstruction {
 
@@ -94,17 +92,13 @@ public class AggregateTernaryOOCInstruction extends ComputationOOCInstruction {
 		if(qIn3 != null)
 			streams.add(qIn3);
 
-		List<Function<IndexedMatrixValue, MatrixIndexes>> keyFns = new ArrayList<>();
-		for(int i = 0; i < streams.size(); i++)
-			keyFns.add(IndexedMatrixValue::getIndexes);
-
 		CompletableFuture<Void> fut = joinOOC(streams, qMid, blocks -> {
 			MatrixBlock b1 = (MatrixBlock) blocks.get(0).getValue();
 			MatrixBlock b2 = (MatrixBlock) blocks.get(1).getValue();
 			MatrixBlock b3 = blocks.size() == 3 ? (MatrixBlock) blocks.get(2).getValue() : null;
 			MatrixBlock partial = MatrixBlock.aggregateTernaryOperations(b1, b2, b3, new MatrixBlock(), abOp, false);
 			return new IndexedMatrixValue(blocks.get(0).getIndexes(), partial);
-		}, keyFns);
+		}, IndexedMatrixValue::getIndexes);
 
 		try {
 			IndexedMatrixValue imv;
@@ -142,25 +136,17 @@ public class AggregateTernaryOOCInstruction extends ComputationOOCInstruction {
 		if(qIn3 != null)
 			streams.add(qIn3);
 
-		streams.forEach(stream -> {
-			stream.setDownstreamMessageRelay(msg -> {
-				IndexRange range = msg.getAffectedIndexRange();
-				if(range != null)
-					msg = msg.transformAffectedTile(new IndexRange(1, 1, range.colStart, range.colEnd));
-				qOut.messageDownstream(msg);
-			});
-		});
-		qOut.setUpstreamMessageRelay(msg -> {
-			IndexRange range = msg.getAffectedIndexRange();
-			if (range != null)
-				msg = msg.transformAffectedTile(new IndexRange(1, dc.getRows(),  range.colStart, range.colEnd));
-			OOCStreamMessage mMsg = msg;
-			streams.forEach(stream -> stream.messageUpstream(mMsg));
-		});
+		for (OOCStream<IndexedMatrixValue> stream : streams)
+			stream.setDownstreamMessageRelay(qOut::messageDownstream);
 
-		List<Function<IndexedMatrixValue, MatrixIndexes>> keyFns = new ArrayList<>();
-		for(int i = 0; i < streams.size(); i++)
-			keyFns.add(IndexedMatrixValue::getIndexes);
+		qOut.setUpstreamMessageRelay(msg -> streams.forEach(stream -> stream.messageUpstream(msg)));
+
+		qOut.setIXTransform((downstream, range) -> {
+			if (downstream)
+				return new IndexRange(1, 1, range.colStart, range.colEnd);
+			else
+				return new IndexRange(1, dc.getRows(),  range.colStart, range.colEnd);
+		});
 
 		CompletableFuture<Void> fut = joinOOC(streams, qMid, blocks -> {
 			MatrixBlock b1 = (MatrixBlock) blocks.get(0).getValue();
@@ -168,7 +154,7 @@ public class AggregateTernaryOOCInstruction extends ComputationOOCInstruction {
 			MatrixBlock b3 = blocks.size() == 3 ? (MatrixBlock) blocks.get(2).getValue() : null;
 			MatrixBlock partial = MatrixBlock.aggregateTernaryOperations(b1, b2, b3, new MatrixBlock(), abOp, false);
 			return new IndexedMatrixValue(blocks.get(0).getIndexes(), partial);
-		}, keyFns);
+		}, IndexedMatrixValue::getIndexes);
 
 		final Map<Long, MatrixBlock> aggMap = new HashMap<>();
 		final Map<Long, MatrixBlock> corrMap = new HashMap<>();

@@ -35,7 +35,6 @@ import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.AggregateUnaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
-import org.apache.sysds.runtime.ooc.stream.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
 import java.util.HashMap;
@@ -91,27 +90,20 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 			OOCStream<IndexedMatrixValue> qLocal = createWritableStream();
 
 			ec.getMatrixObject(output).setStreamHandle(qOut);
-			qIn.setDownstreamMessageRelay(msg -> {
-				IndexRange range = msg.getAffectedIndexRange();
-				OOCStreamMessage mMsg = msg;
-				if (range != null) {
+
+			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
+			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
+			qOut.setIXTransform((downstream, range) -> {
+				if (downstream) {
 					if (aggun.isRowAggregate())
-						mMsg = msg.transformAffectedTile(new IndexRange(range.rowStart, range.rowEnd, 0, 1));
-					else if (aggun.isColAggregate())
-						mMsg = msg.transformAffectedTile(new IndexRange(0, 1, range.colStart, range.colEnd));
+						return new IndexRange(range.rowStart, range.rowEnd, 1, 1);
+					else
+						return new IndexRange(1, 1, range.colStart, range.colEnd);
 				}
-				qOut.messageUpstream(mMsg);
-			});
-			qOut.setUpstreamMessageRelay(msg -> {
-				IndexRange range = msg.getAffectedIndexRange();
-				OOCStreamMessage mMsg = msg;
-				if (range != null) {
-					if (aggun.isRowAggregate())
-						mMsg = msg.transformAffectedTile(new IndexRange(range.rowStart, range.rowEnd, 0, min.getNumColumns()));
-					else if (aggun.isColAggregate())
-						mMsg = msg.transformAffectedTile(new IndexRange(0, min.getNumRows(), range.colStart, range.colEnd));
-				}
-				qIn.messageUpstream(mMsg);
+				if (aggun.isRowAggregate())
+					return new IndexRange(range.rowStart, range.rowEnd, 1, min.getNumColumns() - 1);
+				else
+					return new IndexRange(1, min.getNumRows() - 1, range.colStart, range.colEnd);
 			});
 
 			// per-block aggregation (parallel map)

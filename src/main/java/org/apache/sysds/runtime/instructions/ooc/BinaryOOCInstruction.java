@@ -122,8 +122,6 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 				return tmpOut;
 			}, IndexedMatrixValue::getIndexes);
 		}
-
-
 	}
 
 	protected void processScalarMatrixInstruction(ExecutionContext ec) {

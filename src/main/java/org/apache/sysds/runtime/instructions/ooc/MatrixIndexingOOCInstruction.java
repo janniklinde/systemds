@@ -30,7 +30,6 @@ import org.apache.sysds.runtime.instructions.cp.DoubleObject;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
-import org.apache.sysds.runtime.ooc.stream.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
 import java.util.concurrent.CompletableFuture;
@@ -89,35 +88,30 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 				throw new DMLRuntimeException("Desired block not found");
 			}
 
-			qIn.setDownstreamMessageRelay(msg -> {
-				IndexRange range = msg.getAffectedIndexRange();
-				OOCStreamMessage mMsg = msg;
-				if (range != null) {
-					long rs = range.rowStart-ix.rowStart;
-					long re = range.rowEnd-ix.rowStart;
-					long cs = range.colStart-ix.colStart;
-					long ce = range.colEnd-ix.colStart;
-					if (re < 0 || ce < 0 || rs >= ix.colSpan() || cs >= ix.colSpan())
-						return;
-					rs = Math.max(0, rs);
-					cs = Math.max(0, cs);
+			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
+			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
+			qOut.setIXTransform((downstream, range) -> {
+				if(downstream){
+					long rs = range.rowStart-ix.rowStart+1;
+					long re = range.rowEnd-ix.rowStart+1;
+					long cs = range.colStart-ix.colStart+1;
+					long ce = range.colEnd-ix.colStart+1;
+					// TODO
+					//if (re < 1 || ce < 1 || rs > ix.colSpan() || cs > ix.colSpan())
+					//	return new IndexRange(-1, -1, -1, -1);
+					rs = Math.max(1, rs);
+					cs = Math.max(1, cs);
 					re = Math.min(ix.rowSpan(), re);
 					ce = Math.min(ix.colSpan(), ce);
-					mMsg = msg.transformAffectedTile(new IndexRange(rs, re, cs, ce));
+					return new IndexRange(rs, re, cs, ce);
 				}
-				qOut.messageDownstream(mMsg);
-			});
-			qOut.setUpstreamMessageRelay(msg -> {
-				IndexRange range = msg.getAffectedIndexRange();
-				OOCStreamMessage mMsg = msg;
-				if (range != null) {
+				else{
 					long rs = range.rowStart+ix.rowStart;
 					long re = range.rowEnd+ix.rowStart;
 					long cs = range.colStart+ix.colStart;
 					long ce = range.colEnd+ix.colStart;
-					mMsg = msg.transformAffectedTile(new IndexRange(rs, re, cs, ce));
+					return new IndexRange(rs, re, cs, ce);
 				}
-				qOut.messageUpstream(mMsg);
 			});
 
 			if(ix.rowStart % blocksize == 0 && ix.colStart % blocksize == 0) {

@@ -17,36 +17,37 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.instructions.ooc;
+package org.apache.sysds.runtime.ooc.stream.message;
 
-import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
-import org.apache.sysds.runtime.meta.DataCharacteristics;
-import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
 import java.util.function.BiFunction;
-import java.util.function.Consumer;
 
-public interface OOCStreamable<T> {
-	OOCStream<T> getReadStream();
+public class OOCRequestRangeMsg implements OOCStreamMessage {
+	private final double _priority;
+	private IndexRange _range;
 
-	OOCStream<T> getWriteStream();
+	public OOCRequestRangeMsg(IndexRange range, double priority) {
+		_priority = priority;
+		_range = range;
+	}
 
-	boolean isProcessed();
+	public double getPriority() {
+		return _priority;
+	}
 
-	DataCharacteristics getDataCharacteristics();
+	public IndexRange getTransformedRange() {
+		return _range;
+	}
 
-	CacheableData<?> getData();
+	@Override
+	public MessageType getMessageType() {
+		return null;
+	}
 
-	void setData(CacheableData<?> data);
-
-	void messageUpstream(OOCStreamMessage msg);
-
-	void messageDownstream(OOCStreamMessage msg);
-
-	void setUpstreamMessageRelay(Consumer<OOCStreamMessage> relay);
-
-	void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay);
-
-	void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform);
+	@Override
+	public void addIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
+		if (transform != null)
+			_range = transform.apply(false, _range);
+	}
 }

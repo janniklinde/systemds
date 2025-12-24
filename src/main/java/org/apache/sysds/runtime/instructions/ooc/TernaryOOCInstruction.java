@@ -158,9 +158,6 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 		streams.forEach(s -> s.setDownstreamMessageRelay(qOut::messageDownstream));
 		qOut.setUpstreamMessageRelay(msg -> streams.forEach(s -> s.messageUpstream(msg)));
 
-		List<java.util.function.Function<IndexedMatrixValue, MatrixIndexes>> keyFns =
-			List.of(IndexedMatrixValue::getIndexes, IndexedMatrixValue::getIndexes, IndexedMatrixValue::getIndexes);
-
 		joinOOC(streams, qOut, blocks -> {
 			IndexedMatrixValue b1 = blocks.get(0);
 			IndexedMatrixValue b2 = blocks.get(1);
@@ -169,7 +166,7 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 			outVal.set(b1.getIndexes(),
 				((MatrixBlock)b1.getValue()).ternaryOperations((TernaryOperator)_optr, (MatrixBlock)b2.getValue(), (MatrixBlock)b3.getValue(), new MatrixBlock()));
 			return outVal;
-		}, keyFns);
+		}, IndexedMatrixValue::getIndexes);
 	}
 
 	private MatrixObject getMatrixObject(ExecutionContext ec, int pos) {
