@@ -41,6 +41,15 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 	CachingStream getStreamCache();
 
 	/**
+	 * Gives a hint to the underlying stream that the item data must not be resident in memory
+	 * for this stream pass. A no-data pass does not explicitly request reads from the cache.
+	 * It can be used to quickly find items that are already known to the stream (e.g., a join
+	 * requires a first pass to know which items to jointly request, for which we don't need the
+	 * results to be materialized yet).
+	 */
+	void noDataPass();
+
+	/**
 	 * Registers a new subscriber that consumes the stream.
 	 * While there is no guarantee for any specific order, the closing item LocalTaskQueue.NO_MORE_TASKS
 	 * is guaranteed to be invoked after every other item has finished processing. Thus, the NO_MORE_TASKS

@@ -116,7 +116,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 		if (!_subscriberSet.compareAndSet(false, true))
 			throw new IllegalArgumentException("Subscriber cannot be set multiple times");
 
-		_streamCache.setSubscriber(subscriber, false);
+		_streamCache.setSubscriber(subscriber, false, false);
 	}
 
 	@Override
@@ -132,6 +132,11 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	@Override
 	public CachingStream getStreamCache() {
 		return _streamCache;
+	}
+
+	@Override
+	public void noDataPass() {
+		// TODO
 	}
 
 	@Override

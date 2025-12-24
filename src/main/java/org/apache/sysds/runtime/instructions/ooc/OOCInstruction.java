@@ -136,7 +136,7 @@ public abstract class OOCInstruction extends Instruction {
 
 	protected void addInStream(OOCStream<?>... queue) {
 		if (_inQueues == null)
-			_inQueues = new HashSet<>();
+			_inQueues = ConcurrentHashMap.newKeySet();
 		_inQueues.addAll(List.of(queue));
 	}
 
@@ -147,7 +147,7 @@ public abstract class OOCInstruction extends Instruction {
 		}
 
 		if (_outQueues == null || _outQueues.isEmpty())
-			_outQueues = new HashSet<>();
+			_outQueues = ConcurrentHashMap.newKeySet();
 		_outQueues.addAll(List.of(queue));
 	}
 
@@ -355,7 +355,7 @@ public abstract class OOCInstruction extends Instruction {
 	}
 
 	protected <R, P> CompletableFuture<Void> joinOOC(List<OOCStream<IndexedMatrixValue>> qIn, OOCStream<R> qOut, Function<List<IndexedMatrixValue>, R> mapper, List<Function<IndexedMatrixValue, P>> on, Function<P, List<MatrixIndexes>> invOn) {
-		if (qIn == null || on == null || qIn.size() != on.size())
+		if(qIn == null || on == null || qIn.size() != on.size())
 			throw new DMLRuntimeException("joinOOC(list) requires the same number of streams and key functions.");
 
 		addInStream(qIn.toArray(OOCStream[]::new));
@@ -363,12 +363,11 @@ public abstract class OOCInstruction extends Instruction {
 
 		final int n = qIn.size();
 
-		//byte[] streamTypes = new byte[n];
 		Set<Integer> mRequestableStreams = null;
 		CachingStream[] caches = new CachingStream[n];
 		boolean[] explicitCaching = new boolean[n];
 
-		for (int i = 0; i < n; i++) {
+		for(int i = 0; i < n; i++) {
 			OOCStream<IndexedMatrixValue> s = qIn.get(i);
 			OOCGetStreamTypeMessage msg = new OOCGetStreamTypeMessage();
 			s.messageUpstream(msg);
@@ -390,8 +389,15 @@ public abstract class OOCInstruction extends Instruction {
 		long blen = qIn.get(0).getDataCharacteristics().getBlocksize();
 		OOCStream<List<OOCStream.QueueCallback<IndexedMatrixValue>>> materialized = createWritableStream();
 
-		CompletableFuture<Void> future = submitOOCTasks(
-			Arrays.stream(caches).map(CachingStream::getReadStream).collect(java.util.stream.Collectors.toList()),
+		List<OOCStream<IndexedMatrixValue>> rStreams = new ArrayList<>(caches.length);
+		for(CachingStream cs : caches) {
+			OOCStream<IndexedMatrixValue> rStream = cs.getReadStream();
+			// Notify the stream that we don't actually need the data in the first pass (indices are sufficient)
+			rStream.noDataPass();
+			rStreams.add(rStream);
+		}
+
+		submitOOCTasks(rStreams,
 			(i, tmp) -> {
 				Function<IndexedMatrixValue, P> keyFn = on.get(i);
 				P key = keyFn.apply(tmp.get());
@@ -399,7 +405,7 @@ public abstract class OOCInstruction extends Instruction {
 
 				MatrixIndexes[] arr = seen.computeIfAbsent(key, k -> new MatrixIndexes[n]);
 				boolean ready;
-				synchronized (arr) {
+				synchronized(arr) {
 					arr[i] = idx;
 					ready = true;
 					List<MatrixIndexes> inv = null;
@@ -424,9 +430,8 @@ public abstract class OOCInstruction extends Instruction {
 					return;
 
 				List<BlockKey> entries = new ArrayList<>(arr.length);
-				for(int j = 0; j < arr.length; j++){
+				for(int j = 0; j < arr.length; j++)
 					entries.add(caches[j].peekCachedBlockKey(arr[j]));
-				}
 
 				var f = OOCCacheManager.requestManyBlocks(entries);
 				f.whenComplete((r, err) -> {
@@ -444,7 +449,7 @@ public abstract class OOCInstruction extends Instruction {
 				});
 			}, materialized::closeInput);
 
-		CompletableFuture<Void> mf = submitOOCTasks(materialized, cb -> {
+		CompletableFuture<Void> future = submitOOCTasks(materialized, cb -> {
 			try(cb) {
 				qOut.enqueue(mapper.apply(cb.get().stream().map(OOCStream.QueueCallback::get).toList()));
 			} finally {
@@ -452,12 +457,12 @@ public abstract class OOCInstruction extends Instruction {
 			}
 		}, qOut::closeInput);
 
-		for (int i = 0; i < n; i++) {
+		for(int i = 0; i < n; i++) {
 			if (explicitCaching[i])
 				caches[i].scheduleDeletion();
 		}
 
-		return mf;
+		return future;
 	}
 
 	protected <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues, BiConsumer<Integer, OOCStream.QueueCallback<T>> consumer, Runnable finalizer) {

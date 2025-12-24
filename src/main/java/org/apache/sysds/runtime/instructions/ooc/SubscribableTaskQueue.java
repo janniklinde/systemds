@@ -223,6 +223,11 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	}
 
 	@Override
+	public void noDataPass() {
+		// TODO
+	}
+
+	@Override
 	public DataCharacteristics getDataCharacteristics() {
 		return _cdata == null ? null : _cdata.getDataCharacteristics();
 	}
