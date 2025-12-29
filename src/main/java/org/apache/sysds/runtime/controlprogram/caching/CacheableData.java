@@ -470,8 +470,12 @@ public abstract class CacheableData<T extends CacheBlock<?>> extends Data
 	public boolean hasBroadcastHandle() {
 		return  _bcHandle != null && _bcHandle.hasBackReference();
 	}
-	
+
 	public synchronized OOCStream<IndexedMatrixValue> getStreamHandle() {
+		return getStreamHandle(true);
+	}
+
+	public synchronized OOCStream<IndexedMatrixValue> getStreamHandle(boolean withData) {
 		if( !hasStreamHandle() ) {
 			final SubscribableTaskQueue<IndexedMatrixValue> _mStream = new SubscribableTaskQueue<>();
 			_mStream.setData(this);
@@ -479,7 +483,7 @@ public abstract class CacheableData<T extends CacheBlock<?>> extends Data
 			MatrixBlock src = (MatrixBlock)acquireReadAndRelease();
 			_streamHandle = _mStream;
 			LongStream.range(0, dc.getNumBlocks())
-				.mapToObj(i -> UtilFunctions.createIndexedMatrixBlock(src, dc, i))
+				.mapToObj(i -> UtilFunctions.createIndexedMatrixBlock(src, dc, i, withData))
 				.forEach( blk -> {
 					try{ 
 						_mStream.enqueue(blk);
@@ -491,7 +495,7 @@ public abstract class CacheableData<T extends CacheBlock<?>> extends Data
 		}
 		
 		OOCStream<IndexedMatrixValue> stream = _streamHandle.getReadStream();
-		if (!stream.hasStreamCache())
+		if(!stream.hasStreamCache())
 			_streamHandle = null; // To ensure read once
 		return stream;
 	}

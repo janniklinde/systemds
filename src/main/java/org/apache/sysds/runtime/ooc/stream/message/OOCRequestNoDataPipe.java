@@ -19,40 +19,47 @@
 
 package org.apache.sysds.runtime.ooc.stream.message;
 
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.util.IndexRange;
 
-import java.util.ArrayList;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 
-public class OOCPreprocessAvailableTiles implements OOCStreamMessage {
-	private ArrayList<BiFunction<Boolean, IndexRange, IndexRange>> _ixTransformations;
+public class OOCRequestNoDataPipe implements OOCStreamMessage {
+	private final Consumer<IndexedMatrixValue> _consumer;
+	private boolean _cancelled;
 
-	public OOCPreprocessAvailableTiles() {
-		_ixTransformations = null;
+	public OOCRequestNoDataPipe(Consumer<IndexedMatrixValue> consumer) {
+		_consumer = consumer;
+		_cancelled = false;
+	}
+
+	public void emit(MatrixIndexes ix) {
+		if(_cancelled)
+			return;
+		_consumer.accept(new IndexedMatrixValue(ix, null));
+	}
+
+	@Override
+	public OOCStreamMessage split() {
+		_cancelled = true;
+		return this;
+	}
+
+	@Override
+	public boolean isCancelled() {
+		return _cancelled;
 	}
 
 	@Override
 	public MessageType getMessageType() {
-		return MessageType.REQUEST_RANGE;
+		return MessageType.REQUEST_NO_DATA_PIPE;
 	}
 
 	@Override
 	public void addIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
-		if(transform != null) {
-			if (_ixTransformations == null)
-				_ixTransformations = new ArrayList<>();
-			_ixTransformations.add(transform);
-		}
-	}
-
-	@Override
-	public void popIXTransform() {
-		_ixTransformations.remove(_ixTransformations.size() - 1);
-	}
-
-	public IndexRange transform(IndexRange range, boolean downstream) {
-		for(BiFunction<Boolean, IndexRange, IndexRange> transform : _ixTransformations)
-			range = transform.apply(downstream, range);
-		return range;
+		if(transform != null)
+			_cancelled = true;
 	}
 }

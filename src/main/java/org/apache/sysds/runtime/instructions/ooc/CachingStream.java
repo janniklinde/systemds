@@ -19,6 +19,8 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
+import org.apache.commons.collections4.BidiMap;
+import org.apache.commons.collections4.bidimap.DualHashBidiMap;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
@@ -39,8 +41,6 @@ import shaded.parquet.it.unimi.dsi.fastutil.ints.IntArrayList;
 
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.function.BiFunction;
@@ -71,7 +71,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	// state flags
 	private boolean _cacheInProgress = true; // caching in progress, in the first pass.
-	private Map<MatrixIndexes, Integer> _index;
+	private BidiMap<MatrixIndexes, Integer> _index;
 
 	private DMLRuntimeException _failure;
 
@@ -241,10 +241,22 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	public synchronized OOCStream.QueueCallback<IndexedMatrixValue> get(int idx) throws InterruptedException,
 		ExecutionException {
+		return get(idx, true);
+	}
+
+	public synchronized OOCStream.QueueCallback<IndexedMatrixValue> get(int idx, boolean withData) throws InterruptedException,
+		ExecutionException {
 		while (true) {
 			if (_failure != null)
 				throw _failure;
 			else if (idx < _numBlocks) {
+				if (!withData && _index != null) {
+					// Short circuit if we don't actually need the data
+					MatrixIndexes mIdx = _index.getKey(idx);
+					if (mIdx != null)
+						return new OOCStream.SimpleQueueCallback<>(new IndexedMatrixValue(mIdx, null), _failure);
+				}
+
 				OOCStream.QueueCallback<IndexedMatrixValue> out = OOCCacheManager.requestBlock(_streamId, idx).get();
 
 				if (_index != null) // Ensure index is up to date
@@ -346,12 +358,12 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	public synchronized void activateIndexing() {
 		if (_index == null)
-			_index = new HashMap<>();
+			_index = new DualHashBidiMap<>();
 	}
 
 	@Override
-	public OOCStream<IndexedMatrixValue> getReadStream() {
-		return new PlaybackStream(this);
+	public OOCStream<IndexedMatrixValue> getReadStream(boolean withData) {
+		return new PlaybackStream(this, withData);
 	}
 
 	@Override
@@ -429,7 +441,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		throw new UnsupportedOperationException();
 	}
 
-	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers, boolean noDataPass) {
+	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers, boolean withData) {
 		if(deletable)
 			throw new DMLRuntimeException("Cannot register a new subscriber on " + this + " because has been flagged for deletion");
 		if(_failure != null)
@@ -459,7 +471,16 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 		for(int i = 0; i < mNumBlocks; i++) {
 			final int idx = i;
-			// TODO noDataPass handling
+			if(!withData && _index != null) {
+				MatrixIndexes mIdx = _index.getKey(idx);
+				if(mIdx != null) {
+					subscriber.accept(new OOCStream.SimpleQueueCallback<>(new IndexedMatrixValue(mIdx, null), _failure));
+					if(onConsumed(idx, consumerIdx))
+						subscriber.accept(OOCStream.eos(_failure)); // NO_MORE_TASKS
+					continue;
+				}
+			}
+
 			OOCCacheManager.requestBlock(_streamId, i).whenComplete((cb, r) -> {
 				try(cb) {
 					synchronized(CachingStream.this) {

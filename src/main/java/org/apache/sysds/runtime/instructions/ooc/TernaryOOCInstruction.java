@@ -110,6 +110,8 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 		OOCStream<IndexedMatrixValue> qIn = mo.getStreamHandle();
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 		ec.getMatrixObject(output).setStreamHandle(qOut);
+		qIn.setDownstreamMessageRelay(qOut::messageDownstream);
+		qOut.setUpstreamMessageRelay(qIn::messageUpstream);
 
 		mapOOC(qIn, qOut, tmp -> {
 			IndexedMatrixValue outVal = new IndexedMatrixValue();
@@ -125,6 +127,8 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 	private void processTwoMatrixInstruction(ExecutionContext ec, int leftPos, int rightPos) {
 		MatrixObject left = getMatrixObject(ec, leftPos);
 		MatrixObject right = getMatrixObject(ec, rightPos);
+		OOCStream<IndexedMatrixValue> leftStream = left.getStreamHandle();
+		OOCStream<IndexedMatrixValue> rightStream = right.getStreamHandle();
 
 		MatrixBlock s1 = input1.isMatrix() ? null : getScalarInputBlock(ec, input1);
 		MatrixBlock s2 = input2.isMatrix() ? null : getScalarInputBlock(ec, input2);
@@ -132,8 +136,14 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 		ec.getMatrixObject(output).setStreamHandle(qOut);
+		qOut.setUpstreamMessageRelay(msg -> {
+			leftStream.messageUpstream(msg.split());
+			rightStream.messageUpstream(msg.split());
+		});
+		leftStream.setDownstreamMessageRelay(qOut::messageDownstream);
+		rightStream.setDownstreamMessageRelay(qOut::messageDownstream);
 
-		joinOOC(left.getStreamHandle(), right.getStreamHandle(), qOut, (l, r) -> {
+		joinOOC(leftStream, rightStream, qOut, (l, r) -> {
 			IndexedMatrixValue outVal = new IndexedMatrixValue();
 			MatrixBlock op1 = resolveOperandBlock(1, l, r, leftPos, rightPos, s1, s2, s3);
 			MatrixBlock op2 = resolveOperandBlock(2, l, r, leftPos, rightPos, s1, s2, s3);

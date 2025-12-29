@@ -140,7 +140,7 @@ public class AggregateTernaryOOCInstruction extends ComputationOOCInstruction {
 			stream.setDownstreamMessageRelay(qOut::messageDownstream);
 
 		qOut.setUpstreamMessageRelay(msg ->
-			streams.forEach(stream -> stream.messageUpstream(msg)));
+			streams.forEach(stream -> stream.messageUpstream(streams.size() > 1 ? msg.split() : msg)));
 
 		qOut.setIXTransform((downstream, range) -> {
 			if (downstream)

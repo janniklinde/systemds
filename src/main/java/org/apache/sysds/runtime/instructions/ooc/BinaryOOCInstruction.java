@@ -71,8 +71,8 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 		qIn1.setDownstreamMessageRelay(qOut::messageDownstream);
 		qIn2.setDownstreamMessageRelay(qOut::messageDownstream);
 		qOut.setUpstreamMessageRelay(msg -> {
-			qIn1.messageUpstream(msg);
-			qIn2.messageUpstream(msg);
+			qIn1.messageUpstream(msg.split());
+			qIn2.messageUpstream(msg.split());
 		});
 
 		if (m1.getNumRows() < 0 || m1.getNumColumns() < 0 || m2.getNumRows() < 0 || m2.getNumColumns() < 0)

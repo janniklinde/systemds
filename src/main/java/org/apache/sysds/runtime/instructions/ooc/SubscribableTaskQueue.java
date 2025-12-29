@@ -187,7 +187,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	}
 
 	@Override
-	public OOCStream<T> getReadStream() {
+	public OOCStream<T> getReadStream(boolean withData) {
 		return this;
 	}
 
@@ -198,17 +198,21 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 
 	@Override
 	public void messageUpstream(OOCStreamMessage msg) {
+		if(msg.isCancelled())
+			return;
 		msg.addIXTransform(_ixTransform);
 		Consumer<OOCStreamMessage> s = _upstreamMsgRelay;
-		if (s != null)
+		if(s != null)
 			s.accept(msg);
 	}
 
 	@Override
 	public void messageDownstream(OOCStreamMessage msg) {
+		if(!msg.isCancelled())
+			return;
 		msg.addIXTransform(_ixTransform);
 		Consumer<OOCStreamMessage> s = _downstreamMsgRelay;
-		if (s != null)
+		if(s != null)
 			s.accept(msg);
 	}
 
@@ -220,11 +224,6 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	@Override
 	public CachingStream getStreamCache() {
 		return null;
-	}
-
-	@Override
-	public void noDataPass() {
-		// TODO
 	}
 
 	@Override

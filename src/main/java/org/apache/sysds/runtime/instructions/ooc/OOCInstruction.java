@@ -391,9 +391,7 @@ public abstract class OOCInstruction extends Instruction {
 
 		List<OOCStream<IndexedMatrixValue>> rStreams = new ArrayList<>(caches.length);
 		for(CachingStream cs : caches) {
-			OOCStream<IndexedMatrixValue> rStream = cs.getReadStream();
-			// Notify the stream that we don't actually need the data in the first pass (indices are sufficient)
-			rStream.noDataPass();
+			OOCStream<IndexedMatrixValue> rStream = cs.getReadStream(false);
 			rStreams.add(rStream);
 		}
 

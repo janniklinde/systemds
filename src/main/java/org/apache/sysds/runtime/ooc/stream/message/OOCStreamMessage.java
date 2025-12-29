@@ -24,13 +24,24 @@ import org.apache.sysds.runtime.util.IndexRange;
 import java.util.function.BiFunction;
 
 public interface OOCStreamMessage {
+	default boolean isCancelled() {
+		return false;
+	}
+
+	default OOCStreamMessage split() {
+		return this;
+	}
+
 	MessageType getMessageType();
 
 	void addIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform);
 
+	default void popIXTransform() {}
+
 	enum MessageType {
 		GET_STREAM_TYPE,
 		PREPROCESS_AVAILABLE_TILES,
-		REQUEST_RANGE
+		REQUEST_RANGE,
+		REQUEST_NO_DATA_PIPE
 	};
 }
