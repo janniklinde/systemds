@@ -85,6 +85,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	public CachingStream(OOCStream<IndexedMatrixValue> source, long streamId) {
 		_source = source;
+		_source.setDownstreamMessageRelay(this::messageDownstream);
 		_streamId = streamId;
 		if (OOCWatchdog.WATCH) {
 			_watchdogId = "CS-" + hashCode();
@@ -361,8 +362,8 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	}
 
 	@Override
-	public OOCStream<IndexedMatrixValue> getReadStream() {
-		return new PlaybackStream(this);
+	public OOCStream<IndexedMatrixValue> getReadStream(boolean withData) {
+		return new PlaybackStream(this, withData);
 	}
 
 	@Override
@@ -391,11 +392,56 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	}
 
 	@Override
+	public void messageUpstream(OOCStreamMessage msg) {
+		if(msg instanceof OOCGetStreamTypeMessage) {
+			((OOCGetStreamTypeMessage) msg).setCachedType();
+			activateIndexing();
+			return;
+		} else if(msg instanceof OOCRequestRangeMsg) {
+			// Then we may check if the corresponding block indices
+			// are already present in cache
+			OOCRequestRangeMsg r = (OOCRequestRangeMsg) msg;
+			IndexRange range = r.getTransformedRange();
+			Collection<MatrixIndexes> idx = OOCUtils.getTilesOfRange(range, _source.getDataCharacteristics().getBlocksize());
+			int[] idxArray;
+
+			synchronized(this) {
+				idxArray = idx.stream().mapToInt(i -> _index.getOrDefault(i, -1)).toArray();
+			}
+
+			Arrays.stream(idxArray).forEach(i -> {
+				if (i == -1)
+					return;
+				OOCCacheManager.getCache().prioritize(new BlockKey(_streamId, i), 1);
+			});
+
+			return;
+		}
+
+		_source.messageUpstream(msg);
+	}
+
+	@Override
+	public void messageDownstream(OOCStreamMessage msg) {
+		_downstreamRelays.forEach(relay -> relay.accept(msg));
+	}
+
+	@Override
+	public void setUpstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+		throw new UnsupportedOperationException();
+	}
+
+	@Override
+	public void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+		_downstreamRelays.add(relay);
+	}
+
+	@Override
 	public void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
 		throw new UnsupportedOperationException();
 	}
 
-	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers) {
+	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers, boolean withData) {
 		if(deletable)
 			throw new DMLRuntimeException("Cannot register a new subscriber on " + this + " because has been flagged for deletion");
 		if(_failure != null)
@@ -425,6 +471,16 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 		for(int i = 0; i < mNumBlocks; i++) {
 			final int idx = i;
+			if(!withData && _index != null) {
+				MatrixIndexes mIdx = _index.getKey(idx);
+				if(mIdx != null) {
+					subscriber.accept(new OOCStream.SimpleQueueCallback<>(new IndexedMatrixValue(mIdx, null), _failure));
+					if(onConsumed(idx, consumerIdx))
+						subscriber.accept(OOCStream.eos(_failure)); // NO_MORE_TASKS
+					continue;
+				}
+			}
+
 			OOCCacheManager.requestBlock(_streamId, i).whenComplete((cb, r) -> {
 				try(cb) {
 					synchronized(CachingStream.this) {

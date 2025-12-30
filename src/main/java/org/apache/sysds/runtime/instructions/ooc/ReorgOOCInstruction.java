@@ -112,6 +112,8 @@ public class ReorgOOCInstruction extends ComputationOOCInstruction {
 			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 			ec.getMatrixObject(output).setStreamHandle(qOut);
 
+			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
+			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
 			qOut.setIXTransform((downstream, range) ->
 				new IndexRange(range.colStart, range.colEnd, range.rowStart, range.rowEnd));
 

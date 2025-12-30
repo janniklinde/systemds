@@ -187,13 +187,33 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	}
 
 	@Override
-	public OOCStream<T> getReadStream() {
+	public OOCStream<T> getReadStream(boolean withData) {
 		return this;
 	}
 
 	@Override
 	public OOCStream<T> getWriteStream() {
 		return this;
+	}
+
+	@Override
+	public void messageUpstream(OOCStreamMessage msg) {
+		if(msg.isCancelled())
+			return;
+		msg.addIXTransform(_ixTransform);
+		Consumer<OOCStreamMessage> s = _upstreamMsgRelay;
+		if(s != null)
+			s.accept(msg);
+	}
+
+	@Override
+	public void messageDownstream(OOCStreamMessage msg) {
+		if(!msg.isCancelled())
+			return;
+		msg.addIXTransform(_ixTransform);
+		Consumer<OOCStreamMessage> s = _downstreamMsgRelay;
+		if(s != null)
+			s.accept(msg);
 	}
 
 	@Override
@@ -219,6 +239,16 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	@Override
 	public void setData(CacheableData<?> data) {
 		this._cdata = data;
+	}
+
+	@Override
+	public void setUpstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+		_upstreamMsgRelay = relay;
+	}
+
+	@Override
+	public void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+		_downstreamMsgRelay = relay;
 	}
 
 	@Override

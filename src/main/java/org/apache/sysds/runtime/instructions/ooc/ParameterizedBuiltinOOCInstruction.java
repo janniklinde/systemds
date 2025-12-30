@@ -90,6 +90,9 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 				double pattern = Double.parseDouble(params.get("pattern"));
 				double replacement = Double.parseDouble(params.get("replacement"));
 
+				qIn.setDownstreamMessageRelay(qOut::messageDownstream);
+				qOut.setUpstreamMessageRelay(qIn::messageUpstream);
+
 				mapOOC(qIn, qOut, tmp -> new IndexedMatrixValue(tmp.getIndexes(), tmp.getValue().replaceOperations(new MatrixBlock(), pattern, replacement)));
 
 				ec.getMatrixObject(output).setStreamHandle(qOut);
