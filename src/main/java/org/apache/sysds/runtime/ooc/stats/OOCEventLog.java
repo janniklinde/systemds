@@ -93,6 +93,16 @@ public class OOCEventLog {
 		_data[idx] = cacheSize;
 	}
 
+	public static void onNoDataEnumerateEvent(int callerId, long timestamp, long count) {
+		int idx = _logCtr.getAndIncrement();
+		_eventTypes[idx] = EventType.NO_DATA_ENUMERATE;
+		_startTimestamps[idx] = timestamp;
+		_endTimestamps[idx] = timestamp;
+		_callerIds[idx] = callerId;
+		_threadIds[idx] = Thread.currentThread().getId();
+		_data[idx] = count;
+	}
+
 	public static void putRunSetting(String setting, Object data) {
 		_runSettings.put(setting, data);
 	}
@@ -111,6 +121,10 @@ public class OOCEventLog {
 
 	public static String getCacheSizeEventsCSV() {
 		return getFilteredCSV("ThreadID,CallerID,Timestamp,ScheduledEvictionSize,CacheSize\n", EventType.CACHESIZE_CHANGE, true);
+	}
+
+	public static String getNoDataEnumerateEventsCSV() {
+		return getFilteredCSV("ThreadID,CallerID,Timestamp,Count\n", EventType.NO_DATA_ENUMERATE, true);
 	}
 
 	private static String getFilteredCSV(String header, EventType filter, boolean data) {
@@ -174,6 +188,7 @@ public class OOCEventLog {
 		COMPUTE,
 		DISK_WRITE,
 		DISK_READ,
-		CACHESIZE_CHANGE
+		CACHESIZE_CHANGE,
+		NO_DATA_ENUMERATE
 	}
 }

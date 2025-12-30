@@ -33,14 +33,17 @@ import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.stream.OOCSourceStream;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
+import org.apache.sysds.runtime.ooc.stream.message.OOCRequestNoDataPipe;
 import org.apache.sysds.runtime.ooc.stream.message.OOCRequestRangeMsg;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.runtime.util.IndexRange;
 import shaded.parquet.it.unimi.dsi.fastutil.ints.IntArrayList;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.function.BiFunction;
@@ -393,9 +396,21 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	@Override
 	public void messageUpstream(OOCStreamMessage msg) {
+		if (msg.isCancelled())
+			return;
 		if(msg instanceof OOCGetStreamTypeMessage) {
 			((OOCGetStreamTypeMessage) msg).setCachedType();
 			activateIndexing();
+			return;
+		} else if (msg instanceof OOCRequestNoDataPipe) {
+			activateIndexing();
+			OOCRequestNoDataPipe pipe = (OOCRequestNoDataPipe) msg;
+			List<MatrixIndexes> snapshot;
+			synchronized(this) {
+				snapshot = _index == null ? List.of() : new ArrayList<>(_index.keySet());
+			}
+			for (MatrixIndexes ix : snapshot)
+				pipe.emit(ix);
 			return;
 		} else if(msg instanceof OOCRequestRangeMsg) {
 			// Then we may check if the corresponding block indices

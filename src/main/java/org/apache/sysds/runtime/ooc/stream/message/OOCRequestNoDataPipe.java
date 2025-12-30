@@ -19,25 +19,33 @@
 
 package org.apache.sysds.runtime.ooc.stream.message;
 
+import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.util.IndexRange;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
 public class OOCRequestNoDataPipe implements OOCStreamMessage {
+	private static final AtomicInteger CALLER_ID = new AtomicInteger(0);
 	private final Consumer<IndexedMatrixValue> _consumer;
 	private boolean _cancelled;
+	private final AtomicBoolean _logged;
 
 	public OOCRequestNoDataPipe(Consumer<IndexedMatrixValue> consumer) {
 		_consumer = consumer;
 		_cancelled = false;
+		_logged = new AtomicBoolean(false);
 	}
 
 	public void emit(MatrixIndexes ix) {
 		if(_cancelled)
 			return;
+		logEmitOnce();
 		_consumer.accept(new IndexedMatrixValue(ix, null));
 	}
 
@@ -61,5 +69,20 @@ public class OOCRequestNoDataPipe implements OOCStreamMessage {
 	public void addIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
 		if(transform != null)
 			_cancelled = true;
+	}
+
+	private void logEmitOnce() {
+		if (!DMLScript.OOC_LOG_EVENTS || !_logged.compareAndSet(false, true))
+			return;
+
+		int id = CALLER_ID.get();
+		if (id == 0) {
+			int newId = OOCEventLog.registerCaller("OOCNoDataPipe");
+			if (!CALLER_ID.compareAndSet(0, newId))
+				newId = CALLER_ID.get();
+			id = newId;
+		}
+
+		OOCEventLog.onNoDataEnumerateEvent(id, System.nanoTime(), 1);
 	}
 }

@@ -72,6 +72,8 @@ public class OOCCacheManager {
 				Files.writeString(Path.of(DMLScript.OOC_LOG_PATH, "DiskWriteEventLog.csv"), csv);
 				csv = OOCEventLog.getCacheSizeEventsCSV();
 				Files.writeString(Path.of(DMLScript.OOC_LOG_PATH, "CacheSizeEventLog.csv"), csv);
+				csv = OOCEventLog.getNoDataEnumerateEventsCSV();
+				Files.writeString(Path.of(DMLScript.OOC_LOG_PATH, "NoDataEnumerateEventLog.csv"), csv);
 				csv = OOCEventLog.getRunSettingsCSV();
 				Files.writeString(Path.of(DMLScript.OOC_LOG_PATH, "RunSettings.csv"), csv);
 				System.out.println("Event logs written to: " + DMLScript.OOC_LOG_PATH);

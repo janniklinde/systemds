@@ -22,8 +22,11 @@ package org.apache.sysds.runtime.ooc.stream;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
+import org.apache.sysds.runtime.ooc.stream.message.OOCRequestNoDataPipe;
+import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 
+import java.util.ArrayList;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class OOCSourceStream extends SubscribableTaskQueue<IndexedMatrixValue> {
@@ -48,5 +51,18 @@ public class OOCSourceStream extends SubscribableTaskQueue<IndexedMatrixValue> {
 
 	public OOCIOHandler.SourceBlockDescriptor getDescriptor(MatrixIndexes indexes) {
 		return _idx.get(indexes);
+	}
+
+	@Override
+	public void messageUpstream(OOCStreamMessage msg) {
+		if (msg.isCancelled())
+			return;
+		if (msg instanceof OOCRequestNoDataPipe) {
+			OOCRequestNoDataPipe pipe = (OOCRequestNoDataPipe) msg;
+			for (MatrixIndexes ix : new ArrayList<>(_idx.keySet()))
+				pipe.emit(ix);
+			return;
+		}
+		super.messageUpstream(msg);
 	}
 }
