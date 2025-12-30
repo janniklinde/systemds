@@ -91,8 +91,6 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 
 			ec.getMatrixObject(output).setStreamHandle(qOut);
 
-			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
-			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
 			qOut.setIXTransform((downstream, range) -> {
 				if (downstream) {
 					if (aggun.isRowAggregate())

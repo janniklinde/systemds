@@ -28,11 +28,7 @@ import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
 public interface OOCStreamable<T> {
-	default OOCStream<T> getReadStream() {
-		return getReadStream(true);
-	}
-
-	OOCStream<T> getReadStream(boolean withData);
+	OOCStream<T> getReadStream();
 
 	OOCStream<T> getWriteStream();
 
@@ -43,14 +39,6 @@ public interface OOCStreamable<T> {
 	CacheableData<?> getData();
 
 	void setData(CacheableData<?> data);
-
-	void messageUpstream(OOCStreamMessage msg);
-
-	void messageDownstream(OOCStreamMessage msg);
-
-	void setUpstreamMessageRelay(Consumer<OOCStreamMessage> relay);
-
-	void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay);
 
 	void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform);
 }

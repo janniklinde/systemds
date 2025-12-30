@@ -88,8 +88,6 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 				throw new DMLRuntimeException("Desired block not found");
 			}
 
-			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
-			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
 			qOut.setIXTransform((downstream, range) -> {
 				if(downstream){
 					long rs = range.rowStart-ix.rowStart+1;

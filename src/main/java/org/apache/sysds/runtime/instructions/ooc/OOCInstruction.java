@@ -363,19 +363,11 @@ public abstract class OOCInstruction extends Instruction {
 
 		final int n = qIn.size();
 
-		Set<Integer> mRequestableStreams = null;
 		CachingStream[] caches = new CachingStream[n];
 		boolean[] explicitCaching = new boolean[n];
 
 		for(int i = 0; i < n; i++) {
 			OOCStream<IndexedMatrixValue> s = qIn.get(i);
-			OOCGetStreamTypeMessage msg = new OOCGetStreamTypeMessage();
-			s.messageUpstream(msg);
-			if (msg.isRequestable()) {
-				if (mRequestableStreams == null)
-					mRequestableStreams = new HashSet<>(qIn.size());
-				mRequestableStreams.add(i);
-			}
 			explicitCaching[i] = !s.hasStreamCache();
 			caches[i] = explicitCaching[i] ? new CachingStream(s) : s.getStreamCache();
 			caches[i].activateIndexing();
@@ -383,15 +375,13 @@ public abstract class OOCInstruction extends Instruction {
 			caches[i].incrSubscriberCount(1);
 		}
 
-		Set<Integer> requestableStreams = mRequestableStreams == null ? Collections.emptySet() : mRequestableStreams;
-
 		Map<P, MatrixIndexes[]> seen = new ConcurrentHashMap<>();
 		long blen = qIn.get(0).getDataCharacteristics().getBlocksize();
 		OOCStream<List<OOCStream.QueueCallback<IndexedMatrixValue>>> materialized = createWritableStream();
 
 		List<OOCStream<IndexedMatrixValue>> rStreams = new ArrayList<>(caches.length);
 		for(CachingStream cs : caches) {
-			OOCStream<IndexedMatrixValue> rStream = cs.getReadStream(false);
+			OOCStream<IndexedMatrixValue> rStream = cs.getReadStream();
 			rStreams.add(rStream);
 		}
 
@@ -408,18 +398,16 @@ public abstract class OOCInstruction extends Instruction {
 					ready = true;
 					List<MatrixIndexes> inv = null;
 
-					for (int j = 0; j < arr.length; j++) {
+					for(int j = 0; j < arr.length; j++) {
 						MatrixIndexes ix = arr[j];
 						if (ix == null) {
 							ready = false;
-							if (blen == -1)
+							break;
+							/*if (blen == -1)
 								break;
 							if (inv == null)
-								inv = invOn.apply(key);
-							if (requestableStreams.contains(j)) {
-								qIn.get(j).messageUpstream(
-									new OOCRequestRangeMsg(OOCUtils.getRangeOfTile(inv.get(j), blen), 1));
-							}
+								inv = invOn.apply(key);*/
+							// TODO Explicitly request if possible
 						}
 					}
 				}

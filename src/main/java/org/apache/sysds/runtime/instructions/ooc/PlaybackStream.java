@@ -36,15 +36,13 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	private final CachingStream _streamCache;
 	private final AtomicInteger _streamIdx;
 	private final AtomicBoolean _subscriberSet;
-	private final boolean _withData;
 	private QueueCallback<IndexedMatrixValue> _lastDequeue;
 	private volatile Consumer<OOCStreamMessage> _downstreamRelay;
 
-	public PlaybackStream(CachingStream streamCache, boolean withData) {
+	public PlaybackStream(CachingStream streamCache) {
 		this._streamCache = streamCache;
 		this._streamIdx = new AtomicInteger(0);
 		this._subscriberSet = new AtomicBoolean(false);
-		this._withData = withData;
 		streamCache.incrSubscriberCount(1);
 	}
 
@@ -66,7 +64,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 		try {
 			if (_lastDequeue != null)
 				_lastDequeue.close();
-			_lastDequeue = _streamCache.get(_streamIdx.getAndIncrement(), _withData);
+			_lastDequeue = _streamCache.get(_streamIdx.getAndIncrement());
 			return _lastDequeue.get();
 		} catch (InterruptedException | ExecutionException e) {
 			throw new DMLRuntimeException(e);
@@ -74,8 +72,8 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	}
 
 	@Override
-	public OOCStream<IndexedMatrixValue> getReadStream(boolean withData) {
-		return _streamCache.getReadStream(withData);
+	public OOCStream<IndexedMatrixValue> getReadStream() {
+		return _streamCache.getReadStream();
 	}
 
 	@Override
@@ -104,25 +102,11 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	}
 
 	@Override
-	public void messageUpstream(OOCStreamMessage msg) {
-		if(msg.isCancelled())
-			return;
-		_streamCache.messageUpstream(msg);
-	}
-
-	@Override
-	public void messageDownstream(OOCStreamMessage msg) {
-		if(msg.isCancelled())
-			return;
-		_downstreamRelay.accept(msg);
-	}
-
-	@Override
 	public void setSubscriber(Consumer<QueueCallback<IndexedMatrixValue>> subscriber) {
 		if (!_subscriberSet.compareAndSet(false, true))
 			throw new IllegalArgumentException("Subscriber cannot be set multiple times");
 
-		_streamCache.setSubscriber(subscriber, false, _withData);
+		_streamCache.setSubscriber(subscriber, false);
 	}
 
 	@Override
@@ -138,17 +122,6 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	@Override
 	public CachingStream getStreamCache() {
 		return _streamCache;
-	}
-
-	@Override
-	public void setUpstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
-		throw new UnsupportedOperationException();
-	}
-
-	@Override
-	public void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
-		_downstreamRelay = relay;
-		_streamCache.setDownstreamMessageRelay(relay);
 	}
 
 	@Override
