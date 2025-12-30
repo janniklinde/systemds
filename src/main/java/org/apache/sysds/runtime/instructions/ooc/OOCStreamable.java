@@ -28,11 +28,7 @@ import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
 public interface OOCStreamable<T> {
-	default OOCStream<T> getReadStream() {
-		return getReadStream(true);
-	}
-
-	OOCStream<T> getReadStream(boolean withData);
+	OOCStream<T> getReadStream();
 
 	OOCStream<T> getWriteStream();
 

@@ -362,8 +362,8 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	}
 
 	@Override
-	public OOCStream<IndexedMatrixValue> getReadStream(boolean withData) {
-		return new PlaybackStream(this, withData);
+	public OOCStream<IndexedMatrixValue> getReadStream() {
+		return new PlaybackStream(this);
 	}
 
 	@Override
@@ -441,7 +441,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		throw new UnsupportedOperationException();
 	}
 
-	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers, boolean withData) {
+	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers) {
 		if(deletable)
 			throw new DMLRuntimeException("Cannot register a new subscriber on " + this + " because has been flagged for deletion");
 		if(_failure != null)
@@ -471,16 +471,6 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 		for(int i = 0; i < mNumBlocks; i++) {
 			final int idx = i;
-			if(!withData && _index != null) {
-				MatrixIndexes mIdx = _index.getKey(idx);
-				if(mIdx != null) {
-					subscriber.accept(new OOCStream.SimpleQueueCallback<>(new IndexedMatrixValue(mIdx, null), _failure));
-					if(onConsumed(idx, consumerIdx))
-						subscriber.accept(OOCStream.eos(_failure)); // NO_MORE_TASKS
-					continue;
-				}
-			}
-
 			OOCCacheManager.requestBlock(_streamId, i).whenComplete((cb, r) -> {
 				try(cb) {
 					synchronized(CachingStream.this) {
