@@ -28,6 +28,14 @@ public interface OOCStreamMessage {
 		return false;
 	}
 
+	default void cancel() {}
+
+	default boolean isHandled() {
+		return false;
+	}
+
+	default void markHandled() {}
+
 	default OOCStreamMessage split() {
 		return this;
 	}

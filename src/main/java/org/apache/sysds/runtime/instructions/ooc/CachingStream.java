@@ -95,7 +95,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 			// Capture a short context to help identify origin
 			OOCWatchdog.registerOpen(_watchdogId, "CachingStream@" + hashCode(), getCtxMsg(), this);
 		}
-		_downstreamRelays = new CopyOnWriteArrayList<>();
+		_downstreamRelays = null;
 		source.setSubscriber(tmp -> {
 			try (tmp) {
 				final IndexedMatrixValue task = tmp.get();
@@ -438,7 +438,14 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	@Override
 	public void messageDownstream(OOCStreamMessage msg) {
-		_downstreamRelays.forEach(relay -> relay.accept(msg));
+		CopyOnWriteArrayList<Consumer<OOCStreamMessage>> relays = _downstreamRelays;
+		if (relays != null) {
+			for (Consumer<OOCStreamMessage> relay : relays) {
+				if (msg.isCancelled() || msg.isHandled())
+					break;
+				relay.accept(msg);
+			}
+		}
 	}
 
 	@Override
@@ -448,7 +455,37 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	@Override
 	public void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
-		_downstreamRelays.add(relay);
+		addDownstreamMessageRelay(relay);
+	}
+
+	@Override
+	public void addUpstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+		throw new UnsupportedOperationException();
+	}
+
+	@Override
+	public void addDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+		if (relay == null)
+			throw new IllegalArgumentException("Cannot set downstream relay to null");
+		CopyOnWriteArrayList<Consumer<OOCStreamMessage>> relays = _downstreamRelays;
+		if (relays == null) {
+			synchronized(this) {
+				if (_downstreamRelays == null)
+					_downstreamRelays = new CopyOnWriteArrayList<>();
+				relays = _downstreamRelays;
+			}
+		}
+		relays.add(0, relay);
+	}
+
+	@Override
+	public void clearUpstreamMessageRelays() {
+		// No upstream relays supported
+	}
+
+	@Override
+	public void clearDownstreamMessageRelays() {
+		_downstreamRelays = null;
 	}
 
 	@Override

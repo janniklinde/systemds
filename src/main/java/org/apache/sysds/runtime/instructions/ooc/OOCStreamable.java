@@ -48,5 +48,13 @@ public interface OOCStreamable<T> {
 
 	void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay);
 
+	void addUpstreamMessageRelay(Consumer<OOCStreamMessage> relay);
+
+	void addDownstreamMessageRelay(Consumer<OOCStreamMessage> relay);
+
+	void clearUpstreamMessageRelays();
+
+	void clearDownstreamMessageRelays();
+
 	void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform);
 }

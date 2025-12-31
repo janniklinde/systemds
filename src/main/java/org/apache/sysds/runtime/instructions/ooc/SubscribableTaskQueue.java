@@ -30,6 +30,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.util.IndexRange;
 
 import java.util.LinkedList;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
@@ -41,8 +42,8 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	private final AtomicBoolean _closed = new AtomicBoolean(false);
 	private CacheableData<?> _cdata;
 	private volatile Consumer<QueueCallback<T>> _subscriber = null;
-	private volatile Consumer<OOCStreamMessage> _upstreamMsgRelay = null;
-	private volatile Consumer<OOCStreamMessage> _downstreamMsgRelay = null;
+	private volatile CopyOnWriteArrayList<Consumer<OOCStreamMessage>> _upstreamMsgRelays = null;
+	private volatile CopyOnWriteArrayList<Consumer<OOCStreamMessage>> _downstreamMsgRelays = null;
 	private volatile BiFunction<Boolean, IndexRange, IndexRange> _ixTransform = null;
 	private String _watchdogId;
 
@@ -138,8 +139,8 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		if (_closed.compareAndSet(false, true)) {
 			super.closeInput();
 			onDeliveryFinished();
-			_upstreamMsgRelay = null;
-			_downstreamMsgRelay = null;
+			_upstreamMsgRelays = null;
+			_downstreamMsgRelays = null;
 		} else {
 			throw new IllegalStateException("Multiple close input calls");
 		}
@@ -223,9 +224,14 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 					pipe.emit(new MatrixIndexes(r, c));
 			return;
 		}
-		Consumer<OOCStreamMessage> s = _upstreamMsgRelay;
-		if(s != null)
-			s.accept(msg);
+		CopyOnWriteArrayList<Consumer<OOCStreamMessage>> relays = _upstreamMsgRelays;
+		if(relays != null) {
+			for (Consumer<OOCStreamMessage> relay : relays) {
+				if (msg.isCancelled() || msg.isHandled())
+					break;
+				relay.accept(msg);
+			}
+		}
 	}
 
 	@Override
@@ -233,9 +239,14 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		if(!msg.isCancelled())
 			return;
 		msg.addIXTransform(_ixTransform);
-		Consumer<OOCStreamMessage> s = _downstreamMsgRelay;
-		if(s != null)
-			s.accept(msg);
+		CopyOnWriteArrayList<Consumer<OOCStreamMessage>> relays = _downstreamMsgRelays;
+		if(relays != null) {
+			for (Consumer<OOCStreamMessage> relay : relays) {
+				if (msg.isCancelled() || msg.isHandled())
+					break;
+				relay.accept(msg);
+			}
+		}
 	}
 
 	@Override
@@ -265,12 +276,52 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 
 	@Override
 	public void setUpstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
-		_upstreamMsgRelay = relay;
+		addUpstreamMessageRelay(relay);
 	}
 
 	@Override
 	public void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
-		_downstreamMsgRelay = relay;
+		addDownstreamMessageRelay(relay);
+	}
+
+	@Override
+	public void addUpstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+		if(relay == null)
+			throw new IllegalArgumentException("Cannot set upstream relay to null");
+		CopyOnWriteArrayList<Consumer<OOCStreamMessage>> relays = _upstreamMsgRelays;
+		if(relays == null) {
+			synchronized(this) {
+				if(_upstreamMsgRelays == null)
+					_upstreamMsgRelays = new CopyOnWriteArrayList<>();
+				relays = _upstreamMsgRelays;
+			}
+		}
+		relays.add(0, relay);
+	}
+
+	@Override
+	public void addDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+		if(relay == null)
+			throw new IllegalArgumentException("Cannot set downstream relay to null");
+		CopyOnWriteArrayList<Consumer<OOCStreamMessage>> relays = _downstreamMsgRelays;
+		if(relays == null) {
+			synchronized(this) {
+				if(_downstreamMsgRelays == null)
+					_downstreamMsgRelays = new CopyOnWriteArrayList<>();
+				relays = _downstreamMsgRelays;
+			}
+		}
+		relays.add(0, relay);
+	}
+
+	@Override
+	public void clearUpstreamMessageRelays() {
+		_upstreamMsgRelays = null;
+	}
+
+	@Override
+	public void clearDownstreamMessageRelays() {
+		_downstreamMsgRelays = null;
 	}
 
 	@Override

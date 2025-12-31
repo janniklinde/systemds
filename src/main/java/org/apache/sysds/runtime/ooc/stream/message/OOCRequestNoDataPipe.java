@@ -34,11 +34,13 @@ public class OOCRequestNoDataPipe implements OOCStreamMessage {
 	private static final AtomicInteger CALLER_ID = new AtomicInteger(0);
 	private final Consumer<IndexedMatrixValue> _consumer;
 	private boolean _cancelled;
+	private boolean _handled;
 	private final AtomicBoolean _logged;
 
 	public OOCRequestNoDataPipe(Consumer<IndexedMatrixValue> consumer) {
 		_consumer = consumer;
 		_cancelled = false;
+		_handled = false;
 		_logged = new AtomicBoolean(false);
 	}
 
@@ -51,13 +53,28 @@ public class OOCRequestNoDataPipe implements OOCStreamMessage {
 
 	@Override
 	public OOCStreamMessage split() {
-		_cancelled = true;
+		cancel();
 		return this;
 	}
 
 	@Override
 	public boolean isCancelled() {
 		return _cancelled;
+	}
+
+	@Override
+	public void cancel() {
+		_cancelled = true;
+	}
+
+	@Override
+	public boolean isHandled() {
+		return _handled;
+	}
+
+	@Override
+	public void markHandled() {
+		_handled = true;
 	}
 
 	@Override

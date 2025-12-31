@@ -363,6 +363,54 @@ public abstract class OOCInstruction extends Instruction {
 
 		final int n = qIn.size();
 
+		qOut.addUpstreamMessageRelay(msg -> {
+			if (!(msg instanceof OOCRequestNoDataPipe))
+				return;
+			if (msg.isCancelled())
+				return;
+			OOCRequestNoDataPipe pipe = (OOCRequestNoDataPipe) msg;
+
+			List<Set<P>> keySets = new ArrayList<>(n);
+			boolean[] hasData = new boolean[n];
+
+			for (int i = 0; i < n; i++) {
+				Set<P> keys = ConcurrentHashMap.newKeySet();
+				keySets.add(keys);
+				final int idx = i;
+				OOCRequestNoDataPipe child = new OOCRequestNoDataPipe(tmp -> {
+					keys.add(on.get(idx).apply(tmp));
+					hasData[idx] = true;
+				});
+				qIn.get(i).messageUpstream(child);
+				if (child.isCancelled()) {
+					pipe.cancel();
+					return;
+				}
+			}
+
+			for (boolean ok : hasData) {
+				if (!ok) {
+					pipe.markHandled();
+					return;
+				}
+			}
+
+			Set<P> intersection = new HashSet<>(keySets.get(0));
+			for (int i = 1; i < keySets.size(); i++) {
+				intersection.retainAll(keySets.get(i));
+				if (intersection.isEmpty())
+					break;
+			}
+
+			for (P key : intersection) {
+				List<MatrixIndexes> inv = invOn.apply(key);
+				if (inv == null || inv.isEmpty())
+					continue;
+				pipe.emit(inv.get(0));
+			}
+			pipe.markHandled();
+		});
+
 		Set<Integer> mRequestableStreams = null;
 		CachingStream[] caches = new CachingStream[n];
 		boolean[] explicitCaching = new boolean[n];
