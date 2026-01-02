@@ -100,6 +100,11 @@ public interface OOCCacheScheduler {
 	void unpin(BlockEntry entry);
 
 	/**
+	 * Returns the current cache size in bytes.
+	 */
+	long getCacheSize();
+
+	/**
 	 * Shuts down the cache scheduler.
 	 */
 	void shutdown();

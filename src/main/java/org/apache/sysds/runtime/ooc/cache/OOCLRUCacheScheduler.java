@@ -43,6 +43,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private final HashMap<BlockKey, BlockEntry> _evictionCache;
 	private final Deque<DeferredReadRequest> _deferredReadRequests;
 	private final Deque<DeferredReadRequest> _processingReadRequests;
+	private final HashMap<BlockKey, BlockReadState> _blockReads;
 	private final long _hardLimit;
 	private final long _evictionLimit;
 	private final int _callerId;
@@ -57,6 +58,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		this._evictionCache = new  HashMap<>();
 		this._deferredReadRequests = new ArrayDeque<>();
 		this._processingReadRequests = new ArrayDeque<>();
+		this._blockReads = new HashMap<>();
 		this._hardLimit = hardLimit;
 		this._evictionLimit = evictionLimit;
 		this._cacheSize = 0;
@@ -162,12 +164,76 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	@Override
 	public void prioritize(BlockKey key, double priority) {
-		// TODO
+		if (!this._running)
+			return;
+		if (priority == 0)
+			return;
+
+		synchronized(this) {
+			if (_deferredReadRequests.isEmpty())
+				return;
+
+			List<DeferredReadRequest> list = new ArrayList<>(_deferredReadRequests);
+			boolean[] boosted = new boolean[list.size()];
+			boolean anyBoosted = false;
+			boolean anyMatched = false;
+
+			for (int i = 0; i < list.size(); i++) {
+				DeferredReadRequest req = list.get(i);
+				if (req.addPriorityForKey(key, priority)) {
+					anyMatched = true;
+					if (priority > 0) {
+						boosted[i] = true;
+						anyBoosted = true;
+					}
+				}
+			}
+
+			if (!anyMatched)
+				return;
+
+			BlockReadState state = _blockReads.computeIfAbsent(key, k -> new BlockReadState());
+			state.priority += priority;
+
+			if (!anyBoosted)
+				return;
+
+			for (int i = 1; i < list.size(); i++) {
+				if (boosted[i]) {
+					Collections.swap(list, i, i - 1);
+					boosted[i] = false;
+					boosted[i - 1] = true;
+				}
+			}
+
+			_deferredReadRequests.clear();
+			_deferredReadRequests.addAll(list);
+		}
 	}
 
 	private void scheduleDeferredRead(DeferredReadRequest deferredReadRequest) {
 		synchronized(this) {
-			_deferredReadRequests.add(deferredReadRequest);
+			double score = 0;
+			for (BlockEntry entry : deferredReadRequest.getEntries()) {
+				BlockReadState state = _blockReads.get(entry.getKey());
+				if (state != null)
+					score += state.priority;
+			}
+			if (!deferredReadRequest.getEntries().isEmpty())
+				score /= deferredReadRequest.getEntries().size();
+			deferredReadRequest.setPriorityScore(score);
+
+			if (score <= 0) {
+				_deferredReadRequests.add(deferredReadRequest);
+			}
+			else {
+				List<DeferredReadRequest> list = new ArrayList<>(_deferredReadRequests);
+				int shift = Math.max(1, (int)Math.floor(score));
+				int newIndex = Math.max(0, list.size() - shift);
+				list.add(newIndex, deferredReadRequest);
+				_deferredReadRequests.clear();
+				_deferredReadRequests.addAll(list);
+			}
 		}
 		onCacheSizeChanged(false); // To schedule deferred reads if possible
 	}
@@ -290,12 +356,18 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	}
 
 	@Override
+	public synchronized long getCacheSize() {
+		return _cacheSize;
+	}
+
+	@Override
 	public synchronized void shutdown() {
 		this._running = false;
 		_cache.clear();
 		_evictionCache.clear();
 		_processingReadRequests.clear();
 		_deferredReadRequests.clear();
+		_blockReads.clear();
 		_cacheSize = 0;
 		_bytesUpForEviction = 0;
 	}
@@ -429,7 +501,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			req = _deferredReadRequests.peek();
 			toRead = new ArrayList<>(req.getEntries().size());
 
-			for(int idx = 0; idx < req.getEntries().size(); idx++) {
+			for (int idx = 0; idx < req.getEntries().size(); idx++) {
 				if(!req.actionRequired(idx))
 					continue;
 
@@ -440,11 +512,16 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 							throw new IllegalStateException();
 						req.setPinned(idx);
 					}
+					else if (entry.getState() == BlockState.READING) {
+						req.schedule(idx);
+						registerWaiter(entry.getKey(), req, idx);
+					}
 					else {
 						if(_cacheSize + entry.getSize() <= _hardLimit) {
 							transitionMemState(entry, BlockState.READING);
 							toRead.add(new Tuple2<>(idx, entry));
 							req.schedule(idx);
+							registerWaiter(entry.getKey(), req, idx);
 						}
 						else {
 							allReserved = false;
@@ -468,30 +545,38 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		}
 
 		for (Tuple2<Integer, BlockEntry> tpl : toRead) {
-			final int idx = tpl._1;
 			final BlockEntry entry = tpl._2;
 			CompletableFuture<BlockEntry> future = _ioHandler.scheduleRead(entry);
 			future.whenComplete((r, t) -> {
-				boolean allAvailable;
+				List<DeferredReadRequest> completedRequests = new ArrayList<>();
 				synchronized(this) {
 					synchronized(r) {
 						transitionMemState(r, BlockState.WARM);
-						if (r.pin() == 0)
-							throw new IllegalStateException();
 						_evictionCache.remove(r.getKey());
 						_cache.put(r.getKey(), r);
-						allAvailable = req.setPinned(idx);
 					}
 
-					if (allAvailable) {
-						_processingReadRequests.remove(req);
+					BlockReadState state = _blockReads.remove(r.getKey());
+					if (state != null) {
+						for (DeferredReadWaiter waiter : state.waiters) {
+							synchronized(r) {
+								if (r.pin() == 0)
+									throw new IllegalStateException();
+								if (waiter.request.setPinned(waiter.index))
+									completedRequests.add(waiter.request);
+							}
+						}
+					}
+
+					for (DeferredReadRequest done : completedRequests) {
+						_processingReadRequests.remove(done);
+						_deferredReadRequests.remove(done);
 					}
 
 					sanityCheck();
 				}
-				if (allAvailable) {
-					req.getFuture().complete(req.getEntries());
-				}
+				for (DeferredReadRequest done : completedRequests)
+					done.getFuture().complete(done.getEntries());
 			});
 		}
 
@@ -579,6 +664,31 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		return _cacheSize - oldCacheSize;
 	}
 
+	private void registerWaiter(BlockKey key, DeferredReadRequest request, int index) {
+		BlockReadState state = _blockReads.computeIfAbsent(key, k -> new BlockReadState());
+		state.waiters.add(new DeferredReadWaiter(request, index));
+	}
+
+	private static class BlockReadState {
+		private double priority;
+		private final List<DeferredReadWaiter> waiters;
+
+		private BlockReadState() {
+			this.priority = 0;
+			this.waiters = new ArrayList<>();
+		}
+	}
+
+	private static class DeferredReadWaiter {
+		private final DeferredReadRequest request;
+		private final int index;
+
+		private DeferredReadWaiter(DeferredReadRequest request, int index) {
+			this.request = request;
+			this.index = index;
+		}
+	}
+
 
 
 	private static class DeferredReadRequest {
@@ -590,12 +700,14 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		private final List<BlockEntry> _entries;
 		private final short[] _pinned;
 		private final AtomicInteger _availableCount;
+		private double _priorityScore;
 
 		DeferredReadRequest(CompletableFuture<List<BlockEntry>> future, List<BlockEntry> entries) {
 			this._future = future;
 			this._entries = entries;
 			this._pinned = new short[entries.size()];
 			this._availableCount = new AtomicInteger(0);
+			this._priorityScore = 0;
 		}
 
 		CompletableFuture<List<BlockEntry>> getFuture() {
@@ -604,6 +716,25 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 		List<BlockEntry> getEntries() {
 			return _entries;
+		}
+
+		public synchronized boolean addPriorityForKey(BlockKey key, double priority) {
+			for (BlockEntry entry : _entries) {
+				if (entry.getKey().equals(key)) {
+					double delta = priority / _entries.size();
+					_priorityScore += delta;
+					return true;
+				}
+			}
+			return false;
+		}
+
+		public synchronized void setPriorityScore(double score) {
+			_priorityScore = score;
+		}
+
+		public synchronized double getPriorityScore() {
+			return _priorityScore;
 		}
 
 		public synchronized boolean actionRequired(int idx) {
