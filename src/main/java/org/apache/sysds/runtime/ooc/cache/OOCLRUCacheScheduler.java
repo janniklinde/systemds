@@ -626,7 +626,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		// Remove old contribution
 		switch (oldState) {
 			case REMOVED:
-				throw new IllegalStateException();
+				break;
 			case HOT:
 			case WARM:
 				_cacheSize -= sz;

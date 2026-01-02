@@ -401,6 +401,9 @@ public abstract class OOCInstruction extends Instruction {
 			rStreams.add(rStream);
 		}
 
+		AtomicInteger processing = new AtomicInteger(1);
+		CompletableFuture<Void> mFuture = new CompletableFuture<>();
+
 		submitOOCTasks(rStreams,
 			(i, tmp) -> {
 				Function<IndexedMatrixValue, P> keyFn = on.get(i);
@@ -433,40 +436,64 @@ public abstract class OOCInstruction extends Instruction {
 				if(!ready || !seen.remove(key, arr))
 					return;
 
+				processing.incrementAndGet();
 				List<BlockKey> entries = new ArrayList<>(arr.length);
 				for(int j = 0; j < arr.length; j++)
 					entries.add(caches[j].peekCachedBlockKey(arr[j]));
 
 				var f = OOCCacheManager.requestManyBlocks(entries);
 				f.whenComplete((r, err) -> {
-					if (err != null) {
-						if (err instanceof DMLRuntimeException)
-							materialized.propagateFailure((DMLRuntimeException) err);
-						else if (err instanceof Exception)
-							materialized.propagateFailure(new DMLRuntimeException((Exception) err));
-						else
-							materialized.propagateFailure(new DMLRuntimeException(new Exception(err)));
-						return;
+					try {
+						if(err != null) {
+							if(err instanceof DMLRuntimeException)
+								materialized.propagateFailure((DMLRuntimeException) err);
+							else if(err instanceof Exception)
+								materialized.propagateFailure(new DMLRuntimeException((Exception) err));
+							else
+								materialized.propagateFailure(new DMLRuntimeException(new Exception(err)));
+							return;
+						}
+						materialized.enqueue(r.stream().map(OOCStream.QueueCallback::keepOpen).toList());
+						r.forEach(OOCStream.QueueCallback::close);
 					}
-					materialized.enqueue(r.stream().map(OOCStream.QueueCallback::keepOpen).toList());
-					r.forEach(OOCStream.QueueCallback::close);
+					catch(Throwable t) {
+						throw t;
+					}
+					finally {
+						if(processing.decrementAndGet() == 0)
+							mFuture.complete(null);
+					}
 				});
-			}, materialized::closeInput);
+			}, () -> {
+				if (processing.decrementAndGet() == 0)
+					mFuture.complete(null);
+			});
 
 		CompletableFuture<Void> future = submitOOCTasks(materialized, cb -> {
 			try(cb) {
 				qOut.enqueue(mapper.apply(cb.get().stream().map(OOCStream.QueueCallback::get).toList()));
-			} finally {
+			}
+			finally {
 				cb.get().forEach(OOCStream.QueueCallback::close);
 			}
-		}, qOut::closeInput);
+		}, () -> {
+			if(!seen.isEmpty())
+				throw new DMLRuntimeException("There are still remaining items to join!");
+			qOut.closeInput();
+		});
 
 		for(int i = 0; i < n; i++) {
 			if (explicitCaching[i])
 				caches[i].scheduleDeletion();
 		}
 
-		return future;
+		return mFuture.handle((r, err) -> {
+			if(err != null)
+				qOut.propagateFailure(err instanceof DMLRuntimeException ? (DMLRuntimeException) err : new DMLRuntimeException(new Exception(err)));
+			else
+				materialized.closeInput();
+			return null;
+		});
 	}
 
 	protected <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues, BiConsumer<Integer, OOCStream.QueueCallback<T>> consumer, Runnable finalizer) {

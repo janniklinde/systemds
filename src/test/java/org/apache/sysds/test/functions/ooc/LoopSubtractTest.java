@@ -89,8 +89,6 @@ public class LoopSubtractTest extends AutomatedTestBase {
 				Types.FileFormat.BINARY, rows, cols, 1000);
 			MatrixBlock ret2 = DataConverter.readMatrixFromHDFS(output(OUTPUT_NAME + "_target"),
 				Types.FileFormat.BINARY, rows, cols, 1000);
-			System.out.println("SparOOC: " + ret1.getSparsity());
-			System.out.println("SparTar: " + ret2.getSparsity());
 			TestUtils.compareMatrices(ret1, ret2, eps);
 		}
 		catch (IOException e) {

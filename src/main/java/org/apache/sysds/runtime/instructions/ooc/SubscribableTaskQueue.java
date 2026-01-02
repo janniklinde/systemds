@@ -314,4 +314,9 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	public void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
 		_ixTransform = transform;
 	}
+
+	@Override
+	public String toString() {
+		return "STQ-" + hashCode();
+	}
 }
