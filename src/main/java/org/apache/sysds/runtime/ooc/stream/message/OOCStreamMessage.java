@@ -30,12 +30,6 @@ public interface OOCStreamMessage {
 
 	default void cancel() {}
 
-	default boolean isHandled() {
-		return false;
-	}
-
-	default void markHandled() {}
-
 	default OOCStreamMessage split() {
 		return this;
 	}
@@ -49,7 +43,6 @@ public interface OOCStreamMessage {
 	enum MessageType {
 		GET_STREAM_TYPE,
 		PREPROCESS_AVAILABLE_TILES,
-		REQUEST_RANGE,
-		REQUEST_NO_DATA_PIPE
+		REQUEST_RANGE
 	};
 }

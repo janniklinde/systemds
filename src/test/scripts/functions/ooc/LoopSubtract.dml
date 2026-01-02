@@ -22,7 +22,8 @@
 X = read($1);
 Y = read($2);
 
-A = X / 7 - 5;
-res = A + Y;
+for (i in 1:5) {
+  X = X - Y;
+}
 
-write(res, $3, format="binary");
+write(X, $3, format="binary");

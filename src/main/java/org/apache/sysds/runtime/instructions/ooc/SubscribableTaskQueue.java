@@ -24,9 +24,7 @@ import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
-import org.apache.sysds.runtime.ooc.stream.message.OOCRequestNoDataPipe;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
-import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.util.IndexRange;
 
 import java.util.LinkedList;
@@ -212,22 +210,10 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 				((OOCGetStreamTypeMessage) msg).setInMemoryType();
 			return;
 		}
-		if (msg instanceof OOCRequestNoDataPipe) {
-			DataCharacteristics dc = getDataCharacteristics();
-			if (dc == null || !dc.dimsKnown())
-				return;
-			OOCRequestNoDataPipe pipe = (OOCRequestNoDataPipe) msg;
-			long rb = dc.getNumRowBlocks();
-			long cb = dc.getNumColBlocks();
-			for (long r = 1; r <= rb; r++)
-				for (long c = 1; c <= cb; c++)
-					pipe.emit(new MatrixIndexes(r, c));
-			return;
-		}
 		CopyOnWriteArrayList<Consumer<OOCStreamMessage>> relays = _upstreamMsgRelays;
 		if(relays != null) {
 			for (Consumer<OOCStreamMessage> relay : relays) {
-				if (msg.isCancelled() || msg.isHandled())
+				if (msg.isCancelled())
 					break;
 				relay.accept(msg);
 			}
@@ -242,7 +228,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		CopyOnWriteArrayList<Consumer<OOCStreamMessage>> relays = _downstreamMsgRelays;
 		if(relays != null) {
 			for (Consumer<OOCStreamMessage> relay : relays) {
-				if (msg.isCancelled() || msg.isHandled())
+				if (msg.isCancelled())
 					break;
 				relay.accept(msg);
 			}

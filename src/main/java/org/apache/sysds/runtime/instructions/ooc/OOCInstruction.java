@@ -34,7 +34,6 @@ import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
-import org.apache.sysds.runtime.ooc.stream.message.OOCRequestNoDataPipe;
 import org.apache.sysds.runtime.ooc.stream.message.OOCRequestRangeMsg;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.runtime.util.CommonThreadPool;
@@ -42,6 +41,7 @@ import org.apache.sysds.utils.Statistics;
 import scala.Tuple4;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -363,54 +363,6 @@ public abstract class OOCInstruction extends Instruction {
 
 		final int n = qIn.size();
 
-		qOut.addUpstreamMessageRelay(msg -> {
-			if (!(msg instanceof OOCRequestNoDataPipe))
-				return;
-			if (msg.isCancelled())
-				return;
-			OOCRequestNoDataPipe pipe = (OOCRequestNoDataPipe) msg;
-
-			List<Set<P>> keySets = new ArrayList<>(n);
-			boolean[] hasData = new boolean[n];
-
-			for (int i = 0; i < n; i++) {
-				Set<P> keys = ConcurrentHashMap.newKeySet();
-				keySets.add(keys);
-				final int idx = i;
-				OOCRequestNoDataPipe child = new OOCRequestNoDataPipe(tmp -> {
-					keys.add(on.get(idx).apply(tmp));
-					hasData[idx] = true;
-				});
-				qIn.get(i).messageUpstream(child);
-				if (child.isCancelled()) {
-					pipe.cancel();
-					return;
-				}
-			}
-
-			for (boolean ok : hasData) {
-				if (!ok) {
-					pipe.markHandled();
-					return;
-				}
-			}
-
-			Set<P> intersection = new HashSet<>(keySets.get(0));
-			for (int i = 1; i < keySets.size(); i++) {
-				intersection.retainAll(keySets.get(i));
-				if (intersection.isEmpty())
-					break;
-			}
-
-			for (P key : intersection) {
-				List<MatrixIndexes> inv = invOn.apply(key);
-				if (inv == null || inv.isEmpty())
-					continue;
-				pipe.emit(inv.get(0));
-			}
-			pipe.markHandled();
-		});
-
 		Set<Integer> mRequestableStreams = null;
 		CachingStream[] caches = new CachingStream[n];
 		boolean[] explicitCaching = new boolean[n];
@@ -436,43 +388,7 @@ public abstract class OOCInstruction extends Instruction {
 		Map<P, MatrixIndexes[]> seen = new ConcurrentHashMap<>();
 		long blen = qIn.get(0).getDataCharacteristics().getBlocksize();
 
-		if (!requestableStreams.isEmpty() && blen != -1) {
-			Map<Integer, Set<P>> keySets = new HashMap<>(requestableStreams.size());
-			boolean abortEnumeration = false;
-
-			for (int i : requestableStreams) {
-				Set<P> keys = ConcurrentHashMap.newKeySet();
-				OOCRequestNoDataPipe pipe = new OOCRequestNoDataPipe(tmp -> keys.add(on.get(i).apply(tmp)));
-				qIn.get(i).messageUpstream(pipe);
-				if (pipe.isCancelled()) {
-					abortEnumeration = true;
-					break;
-				}
-				keySets.put(i, keys);
-			}
-
-			if (!abortEnumeration && !keySets.isEmpty()) {
-				Set<P> intersection = null;
-				for (Set<P> keys : keySets.values()) {
-					if (intersection == null)
-						intersection = new HashSet<>(keys);
-					else
-						intersection.retainAll(keys);
-					if (intersection.isEmpty())
-						break;
-				}
-
-				if (intersection != null && !intersection.isEmpty()) {
-					for (P key : intersection) {
-						List<MatrixIndexes> inv = invOn.apply(key);
-						for (int j : requestableStreams) {
-							qIn.get(j).messageUpstream(
-								new OOCRequestRangeMsg(OOCUtils.getRangeOfTile(inv.get(j), blen), 1));
-						}
-					}
-				}
-			}
-		}
+		// No proactive enumeration; only reactive range requests in the join loop.
 		OOCStream<List<OOCStream.QueueCallback<IndexedMatrixValue>>> materialized = createWritableStream();
 
 		List<OOCStream<IndexedMatrixValue>> rStreams = new ArrayList<>(caches.length);

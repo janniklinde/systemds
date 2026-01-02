@@ -7,7 +7,7 @@
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *   http://www.apache.sysds.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -19,9 +19,7 @@
 
 package org.apache.sysds.test.functions.ooc;
 
-import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.common.Types;
-import org.apache.sysds.runtime.instructions.Instruction;
 import org.apache.sysds.runtime.io.MatrixWriter;
 import org.apache.sysds.runtime.io.MatrixWriterFactory;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
@@ -31,24 +29,22 @@ import org.apache.sysds.runtime.util.HDFSTool;
 import org.apache.sysds.test.AutomatedTestBase;
 import org.apache.sysds.test.TestConfiguration;
 import org.apache.sysds.test.TestUtils;
-import org.junit.Assert;
 import org.junit.Test;
 
 import java.io.IOException;
 
-public class TSMMPlusTest extends AutomatedTestBase {
-	private static final String TEST_NAME = "TSMMPlus";
+public class LoopSubtractTest extends AutomatedTestBase {
+	private static final String TEST_NAME = "LoopSubtract";
 	private static final String TEST_DIR = "functions/ooc/";
-	private static final String TEST_CLASS_DIR = TEST_DIR + TSMMPlusTest.class.getSimpleName() + "/";
+	private static final String TEST_CLASS_DIR = TEST_DIR + LoopSubtractTest.class.getSimpleName() + "/";
 	private static final double eps = 1e-8;
 	private static final String INPUT_NAME_X = "X";
 	private static final String INPUT_NAME_Y = "Y";
 	private static final String OUTPUT_NAME = "res";
 
-	private static final int rows = 10000;
-	private static final int cols = 500;
-	private static final double sparsityX = 0.9;
-	private static final double sparsityY = 0.1;
+	private static final int rows = 900;
+	private static final int cols = 700;
+	private static final double sparsity = 0.8;
 
 	@Override
 	public void setUp() {
@@ -58,7 +54,7 @@ public class TSMMPlusTest extends AutomatedTestBase {
 	}
 
 	@Test
-	public void testTSMMPlusOOC() {
+	public void testLoopSubtractOOC() {
 		Types.ExecMode platformOld = setExecMode(Types.ExecMode.SINGLE_NODE);
 
 		try {
@@ -69,8 +65,8 @@ public class TSMMPlusTest extends AutomatedTestBase {
 			programArgs = new String[] {"-explain", "-stats", "-ooc",
 				"-args", input(INPUT_NAME_X), input(INPUT_NAME_Y), output(OUTPUT_NAME)};
 
-			double[][] X_data = getRandomMatrix(rows, cols, 1, 7, sparsityX, 7);
-			double[][] Y_data = getRandomMatrix(rows, cols, 0, 1, sparsityY, 8);
+			double[][] X_data = getRandomMatrix(rows, cols, 1, 7, sparsity, 7);
+			double[][] Y_data = getRandomMatrix(rows, cols, 0, 1, sparsity, 8);
 
 			MatrixBlock X_mb = DataConverter.convertToMatrixBlock(X_data);
 			MatrixBlock Y_mb = DataConverter.convertToMatrixBlock(Y_data);

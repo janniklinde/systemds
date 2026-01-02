@@ -116,7 +116,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 		CopyOnWriteArrayList<Consumer<OOCStreamMessage>> relays = _downstreamRelays;
 		if (relays != null) {
 			for (Consumer<OOCStreamMessage> relay : relays) {
-				if (msg.isCancelled() || msg.isHandled())
+				if (msg.isCancelled())
 					break;
 				relay.accept(msg);
 			}
