@@ -22,7 +22,7 @@
 X = read($1);
 Y = read($2);
 
-for (i in 1:5) {
+for (i in 1:200) {
   X = X - Y;
 }
 

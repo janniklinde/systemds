@@ -62,7 +62,7 @@ public class LoopSubtractTest extends AutomatedTestBase {
 
 			String HOME = SCRIPT_DIR + TEST_DIR;
 			fullDMLScriptName = HOME + TEST_NAME + ".dml";
-			programArgs = new String[] {"-explain", "-stats", "-ooc",
+			programArgs = new String[] {"-explain", "-stats", "-ooc", "-oocStats",
 				"-args", input(INPUT_NAME_X), input(INPUT_NAME_Y), output(OUTPUT_NAME)};
 
 			double[][] X_data = getRandomMatrix(rows, cols, 1, 7, sparsity, 7);
@@ -89,6 +89,8 @@ public class LoopSubtractTest extends AutomatedTestBase {
 				Types.FileFormat.BINARY, rows, cols, 1000);
 			MatrixBlock ret2 = DataConverter.readMatrixFromHDFS(output(OUTPUT_NAME + "_target"),
 				Types.FileFormat.BINARY, rows, cols, 1000);
+			System.out.println("SparOOC: " + ret1.getSparsity());
+			System.out.println("SparTar: " + ret2.getSparsity());
 			TestUtils.compareMatrices(ret1, ret2, eps);
 		}
 		catch (IOException e) {

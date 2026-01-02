@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
+import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
 import org.apache.sysds.runtime.ooc.stream.message.OOCRequestRangeMsg;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -72,8 +73,7 @@ public abstract class OOCInstruction extends Instruction {
 
 	protected final OOCInstruction.OOCType _ooctype;
 	protected final boolean _requiresLabelUpdate;
-	protected Set<OOCStream<?>> _inQueues;
-	protected Set<OOCStream<?>> _outQueues;
+	protected StreamContext _streamContext;
 	private boolean _failed;
 	private LongAdder _localStatisticsAdder;
 	public final int _callerId;
@@ -128,6 +128,7 @@ public abstract class OOCInstruction extends Instruction {
 
 	@Override
 	public void postprocessInstruction(ExecutionContext ec) {
+		_streamContext = null;
 		if(DMLScript.LINEAGE_DEBUGGER)
 			ec.maintainLineageDebuggerInfo(this);
 		if (DMLScript.OOC_LOG_EVENTS)
@@ -135,20 +136,23 @@ public abstract class OOCInstruction extends Instruction {
 	}
 
 	protected void addInStream(OOCStream<?>... queue) {
-		if (_inQueues == null)
-			_inQueues = ConcurrentHashMap.newKeySet();
-		_inQueues.addAll(List.of(queue));
+		if(_streamContext == null)
+			_streamContext = new StreamContext();
+		_streamContext.addInStream(queue);
 	}
 
 	protected void addOutStream(OOCStream<?>... queue) {
-		if (queue.length == 0 && _outQueues == null) {
-			_outQueues = Collections.emptySet();
-			return;
-		}
+		if(_streamContext == null)
+			_streamContext = new StreamContext();
+		_streamContext.addOutStream(queue);
+	}
 
-		if (_outQueues == null || _outQueues.isEmpty())
-			_outQueues = ConcurrentHashMap.newKeySet();
-		_outQueues.addAll(List.of(queue));
+	protected boolean inStreamsDefined() {
+		return _streamContext != null && _streamContext.inStreamsDefined();
+	}
+
+	protected boolean outStreamsDefined() {
+		return _streamContext != null && _streamContext.outStreamsDefined();
 	}
 
 	protected <T> OOCStream<T> createWritableStream() {
@@ -160,7 +164,7 @@ public abstract class OOCInstruction extends Instruction {
 	}
 
 	protected <T> CompletableFuture<Void> filterOOC(OOCStream<T> qIn, Consumer<T> processor, Function<T, Boolean> predicate, Runnable finalizer, Consumer<T> onNotProcessed) {
-		if (_inQueues == null || _outQueues == null)
+		if (inStreamsDefined() || outStreamsDefined())
 			throw new NotImplementedException("filterOOC requires manual specification of all input and output streams for error propagation");
 
 		return submitOOCTasks(qIn, c -> processor.accept(c.get()), finalizer, p -> predicate.apply(p.get()), onNotProcessed != null ? (i, tmp) -> onNotProcessed.accept(tmp.get()) : null);
@@ -480,19 +484,18 @@ public abstract class OOCInstruction extends Instruction {
 
 	protected <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues, BiConsumer<Integer, OOCStream.QueueCallback<T>> consumer, Runnable finalizer, List<CompletableFuture<Void>> futures, BiFunction<Integer, OOCStream.QueueCallback<T>, Boolean> predicate, BiConsumer<Integer, OOCStream.QueueCallback<T>> onNotProcessed) {
 		addInStream(queues.toArray(OOCStream[]::new));
-		if (_outQueues == null)
+		if(!outStreamsDefined())
 			throw new IllegalArgumentException("Explicit specification of all output streams is required before submitting tasks. If no output streams are present use addOutStream().");
 		ExecutorService pool = CommonThreadPool.get();
 
 		final List<AtomicInteger> activeTaskCtrs = new ArrayList<>(queues.size());
 
-		for (int i = 0; i < queues.size(); i++)
+		for(int i = 0; i < queues.size(); i++)
 			activeTaskCtrs.add(new AtomicInteger(1));
 
 		final CompletableFuture<Void> globalFuture = CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new));
-		if (_outQueues == null)
-			_outQueues = Collections.emptySet();
-		final Runnable oocFinalizer = oocTask(finalizer, null, Stream.concat(_outQueues.stream(), _inQueues.stream()).toArray(OOCStream[]::new));
+		final StreamContext streamContext = _streamContext; // Snapshot of the current stream context
+		final Runnable oocFinalizer = oocTask(finalizer, null, Stream.concat(streamContext.outStreams().stream(), streamContext.inStreams().stream()).toArray(OOCStream[]::new));
 
 		int i = 0;
 		@SuppressWarnings("unused")
@@ -506,7 +509,7 @@ public abstract class OOCInstruction extends Instruction {
 
 			queue.setSubscriber(oocTask(callback -> {
 				long startTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
-				try (callback) {
+				try(callback) {
 					if(callback.isEos()) {
 						if(!closeRaceWatchdog.compareAndSet(false, true))
 							throw new DMLRuntimeException(
@@ -539,7 +542,7 @@ public abstract class OOCInstruction extends Instruction {
 
 					pool.submit(oocTask(() -> {
 						long taskStartTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
-						try (pinned) {
+						try(pinned) {
 							consumer.accept(k, pinned);
 
 							if(localTaskCtr.decrementAndGet() == 0)
@@ -555,11 +558,16 @@ public abstract class OOCInstruction extends Instruction {
 									OOCEventLog.onComputeEvent(_callerId, taskStartTime, System.nanoTime());
 							}
 						}
-					}, localFuture, Stream.concat(_outQueues.stream(), _inQueues.stream()).toArray(OOCStream[]::new)));
+					}, localFuture, Stream.concat(streamContext.outStreams().stream(), streamContext.inStreams().stream()).toArray(OOCStream[]::new)));
 
 					if(closeRaceWatchdog.get()) // Sanity check
 						throw new DMLRuntimeException("Race condition observed");
-				} finally {
+				}
+				catch(Throwable t) {
+					streamContext.failAll(t instanceof DMLRuntimeException ? (DMLRuntimeException) t : new DMLRuntimeException(new Exception(t)));
+					throw t;
+				}
+				finally {
 					if (DMLScript.STATISTICS) {
 						_localStatisticsAdder.add(System.nanoTime() - startTime);
 						if (globalFuture.isDone()) {
@@ -568,7 +576,7 @@ public abstract class OOCInstruction extends Instruction {
 						}
 					}
 				}
-			}, null,  Stream.concat(_outQueues.stream(), _inQueues.stream()).toArray(OOCStream[]::new)));
+			}, null,  Stream.concat(streamContext.outStreams().stream(), streamContext.inStreams().stream()).toArray(OOCStream[]::new)));
 
 			i++;
 		}

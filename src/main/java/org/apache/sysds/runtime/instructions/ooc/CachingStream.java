@@ -130,6 +130,12 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 					}
 					else {
 						_cacheInProgress = false; // caching is complete
+						try {
+							validateBlockCountOnClose();
+						}
+						catch(Exception e) {
+							_failure = e instanceof DMLRuntimeException ? (DMLRuntimeException) e : new DMLRuntimeException(e);
+						}
 						if (OOCWatchdog.WATCH)
 							OOCWatchdog.registerClose(_watchdogId);
 						notifyAll();
@@ -167,7 +173,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 				}
 
 				Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>[] mSubscribers = _subscribers;
-				OOCStream.QueueCallback<IndexedMatrixValue> err = OOCStream.eos( _failure);
+				OOCStream.QueueCallback<IndexedMatrixValue> err = OOCStream.eos(_failure);
 				if(mSubscribers != null) {
 					for(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> mSubscriber : mSubscribers) {
 						try {
@@ -241,22 +247,10 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	public synchronized OOCStream.QueueCallback<IndexedMatrixValue> get(int idx) throws InterruptedException,
 		ExecutionException {
-		return get(idx, true);
-	}
-
-	public synchronized OOCStream.QueueCallback<IndexedMatrixValue> get(int idx, boolean withData) throws InterruptedException,
-		ExecutionException {
 		while (true) {
 			if (_failure != null)
 				throw _failure;
 			else if (idx < _numBlocks) {
-				if (!withData && _index != null) {
-					// Short circuit if we don't actually need the data
-					MatrixIndexes mIdx = _index.getKey(idx);
-					if (mIdx != null)
-						return new OOCStream.SimpleQueueCallback<>(new IndexedMatrixValue(mIdx, null), _failure);
-				}
-
 				OOCStream.QueueCallback<IndexedMatrixValue> out = OOCCacheManager.requestBlock(_streamId, idx).get();
 
 				if (_index != null) // Ensure index is up to date
@@ -271,8 +265,9 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 					tryDeleteBlock(idx);
 
 				return out;
-			} else if (!_cacheInProgress)
-				return new OOCStream.SimpleQueueCallback<>(null, null);
+			} else if (!_cacheInProgress) {
+				return new OOCStream.SimpleQueueCallback<>(null, _failure);
+			}
 
 			wait();
 		}
@@ -328,6 +323,17 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 				callback.accept(cb);
 			}
 		});
+	}
+
+	private void validateBlockCountOnClose() {
+		DataCharacteristics dc = _source.getDataCharacteristics();
+		if (dc != null && dc.dimsKnown() && dc.getBlocksize() > 0) {
+			long expected = dc.getNumBlocks();
+			if (expected >= 0 && _numBlocks != expected) {
+				throw new DMLRuntimeException("CachingStream block count mismatch: expected "
+					+ expected + " but saw " + _numBlocks);
+			}
+		}
 	}
 
 	/**
