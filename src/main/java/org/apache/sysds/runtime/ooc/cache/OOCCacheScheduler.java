@@ -108,4 +108,9 @@ public interface OOCCacheScheduler {
 	 * Shuts down the cache scheduler.
 	 */
 	void shutdown();
+
+	/**
+	 * Updates the cache limits.
+	 */
+	void updateLimits(long evictionLimit, long hardLimit);
 }

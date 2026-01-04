@@ -44,8 +44,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private final Deque<DeferredReadRequest> _deferredReadRequests;
 	private final Deque<DeferredReadRequest> _processingReadRequests;
 	private final HashMap<BlockKey, BlockReadState> _blockReads;
-	private final long _hardLimit;
-	private final long _evictionLimit;
+	private long _hardLimit;
+	private long _evictionLimit;
 	private final int _callerId;
 	private long _cacheSize;
 	private long _bytesUpForEviction;
@@ -370,6 +370,12 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		_blockReads.clear();
 		_cacheSize = 0;
 		_bytesUpForEviction = 0;
+	}
+
+	@Override
+	public synchronized void updateLimits(long evictionLimit, long hardLimit) {
+		_evictionLimit = evictionLimit;
+		_hardLimit = hardLimit;
 	}
 
 	/**

@@ -164,7 +164,7 @@ public abstract class OOCInstruction extends Instruction {
 	}
 
 	protected <T> CompletableFuture<Void> filterOOC(OOCStream<T> qIn, Consumer<T> processor, Function<T, Boolean> predicate, Runnable finalizer, Consumer<T> onNotProcessed) {
-		if (inStreamsDefined() || outStreamsDefined())
+		if (!inStreamsDefined() || !outStreamsDefined())
 			throw new NotImplementedException("filterOOC requires manual specification of all input and output streams for error propagation");
 
 		return submitOOCTasks(qIn, c -> processor.accept(c.get()), finalizer, p -> predicate.apply(p.get()), onNotProcessed != null ? (i, tmp) -> onNotProcessed.accept(tmp.get()) : null);

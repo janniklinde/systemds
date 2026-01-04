@@ -331,7 +331,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 			long expected = dc.getNumBlocks();
 			if (expected >= 0 && _numBlocks != expected) {
 				throw new DMLRuntimeException("CachingStream block count mismatch: expected "
-					+ expected + " but saw " + _numBlocks);
+					+ expected + " but saw " + _numBlocks + " (" + dc.getRows() + "x" + dc.getCols() + ")");
 			}
 		}
 	}

@@ -24,6 +24,7 @@ import org.apache.sysds.runtime.io.MatrixWriter;
 import org.apache.sysds.runtime.io.MatrixWriterFactory;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.util.DataConverter;
 import org.apache.sysds.runtime.util.HDFSTool;
 import org.apache.sysds.test.AutomatedTestBase;
@@ -42,8 +43,8 @@ public class LoopSubtractTest extends AutomatedTestBase {
 	private static final String INPUT_NAME_Y = "Y";
 	private static final String OUTPUT_NAME = "res";
 
-	private static final int rows = 900;
-	private static final int cols = 700;
+	private static final int rows = 2000;
+	private static final int cols = 500;
 	private static final double sparsity = 0.8;
 
 	@Override
@@ -79,6 +80,7 @@ public class LoopSubtractTest extends AutomatedTestBase {
 			HDFSTool.writeMetaDataFile(input(INPUT_NAME_Y + ".mtd"), Types.ValueType.FP64,
 				new MatrixCharacteristics(rows, cols, 1000, Y_mb.getNonZeros()), Types.FileFormat.BINARY);
 
+			OOCCacheManager.getCache().updateLimits(100000000, 200000000);
 			runTest(true, false, null, -1);
 
 			programArgs = new String[] {"-explain", "-stats",
