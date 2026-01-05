@@ -184,13 +184,20 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private void scheduleDeferredRead(DeferredReadRequest deferredReadRequest) {
 		synchronized(this) {
 			double score = 0;
+			int readyCount = 0;
 			for (BlockEntry entry : deferredReadRequest.getEntries()) {
+				synchronized(entry) {
+					if (entry.getState().isAvailable())
+						readyCount++;
+				}
 				BlockReadState state = _blockReads.get(entry.getKey());
 				if (state != null)
 					score += state.priority;
 			}
 			if (!deferredReadRequest.getEntries().isEmpty())
 				score /= deferredReadRequest.getEntries().size();
+			if (!deferredReadRequest.getEntries().isEmpty())
+				score += ((double) readyCount) / deferredReadRequest.getEntries().size();
 			deferredReadRequest.setPriorityScore(score);
 
 			_deferredReadRequests.add(deferredReadRequest);

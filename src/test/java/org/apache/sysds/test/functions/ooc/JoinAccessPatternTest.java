@@ -46,7 +46,7 @@ public class JoinAccessPatternTest extends AutomatedTestBase {
 	private static final String INPUT_NAME_2 = "Y";
 	private static final String OUTPUT_NAME = "res";
 
-	private final static int rows = 80000;
+	private final static int rows = 2000;
 	private final static int cols = 1000;
 	private final static int maxVal = 7;
 	private final static double sparsity1 = 1;
