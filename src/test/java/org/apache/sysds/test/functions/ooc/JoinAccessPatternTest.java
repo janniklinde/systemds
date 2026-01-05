@@ -26,6 +26,7 @@ import org.apache.sysds.runtime.io.MatrixWriter;
 import org.apache.sysds.runtime.io.MatrixWriterFactory;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.util.DataConverter;
 import org.apache.sysds.runtime.util.HDFSTool;
 import org.apache.sysds.test.AutomatedTestBase;
@@ -45,8 +46,8 @@ public class JoinAccessPatternTest extends AutomatedTestBase {
 	private static final String INPUT_NAME_2 = "Y";
 	private static final String OUTPUT_NAME = "res";
 
-	private final static int rows = 1500;
-	private final static int cols = 1200;
+	private final static int rows = 80000;
+	private final static int cols = 1000;
 	private final static int maxVal = 7;
 	private final static double sparsity1 = 1;
 	private final static double sparsity2 = 0.05;
@@ -107,6 +108,7 @@ public class JoinAccessPatternTest extends AutomatedTestBase {
 			HDFSTool.writeMetaDataFile(input(INPUT_NAME_2 + ".mtd"), Types.ValueType.FP64,
 				new MatrixCharacteristics(rows, cols, 1000, Y_mb.getNonZeros()), Types.FileFormat.BINARY);
 
+			OOCCacheManager.getCache().updateLimits(50000000, 100000000);
 			runTest(true, false, null, -1);
 
 			//check tsmm OOC

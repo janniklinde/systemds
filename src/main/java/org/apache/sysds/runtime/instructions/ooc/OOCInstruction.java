@@ -384,7 +384,8 @@ public abstract class OOCInstruction extends Instruction {
 			caches[i] = explicitCaching[i] ? new CachingStream(s) : s.getStreamCache();
 			caches[i].activateIndexing();
 			// One additional consumption for the materialization when emitting
-			caches[i].incrSubscriberCount(1);
+			if(explicitCaching[i])
+				caches[i].incrSubscriberCount(1);
 		}
 
 		Set<Integer> requestableStreams = mRequestableStreams == null ? Collections.emptySet() : mRequestableStreams;
@@ -469,11 +470,17 @@ public abstract class OOCInstruction extends Instruction {
 			});
 
 		CompletableFuture<Void> future = submitOOCTasks(materialized, cb -> {
+			List<MatrixIndexes> idx = List.of();
 			try(cb) {
-				qOut.enqueue(mapper.apply(cb.get().stream().map(OOCStream.QueueCallback::get).toList()));
+				List<IndexedMatrixValue> imvs = cb.get().stream().map(OOCStream.QueueCallback::get).toList();
+				idx = imvs.stream().map(IndexedMatrixValue::getIndexes).toList();
+				qOut.enqueue(mapper.apply(imvs));
 			}
 			finally {
 				cb.get().forEach(OOCStream.QueueCallback::close);
+				for(int i = 0; i < explicitCaching.length; i++)
+					if(!explicitCaching[i])
+						caches[i].incrProcessingCount(caches[i].findCachedIndex(idx.get(i)), 1);
 			}
 		}, () -> {
 			if(!seen.isEmpty())
