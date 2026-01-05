@@ -42,7 +42,6 @@ import org.apache.sysds.utils.Statistics;
 import scala.Tuple4;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
