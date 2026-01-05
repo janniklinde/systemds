@@ -39,7 +39,6 @@ import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.runtime.util.IndexRange;
 import shaded.parquet.it.unimi.dsi.fastutil.ints.IntArrayList;
 
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -424,13 +423,17 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 				idxArray = idx.stream().mapToInt(i -> _index.getOrDefault(i, -1)).toArray();
 			}
 
-			Arrays.stream(idxArray).forEach(i -> {
-				if (i == -1)
-					return;
+			boolean unrequestable = false;
+			for(int i : idxArray) {
+				if(i == -1) {
+					unrequestable = true;
+					continue;
+				}
 				OOCCacheManager.getCache().prioritize(new BlockKey(_streamId, i), 1);
-			});
+			}
 
-			return;
+			if(!unrequestable)
+				return;
 		}
 
 		_source.messageUpstream(msg);

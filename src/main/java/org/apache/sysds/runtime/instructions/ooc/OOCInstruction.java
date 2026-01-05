@@ -383,8 +383,7 @@ public abstract class OOCInstruction extends Instruction {
 			caches[i] = explicitCaching[i] ? new CachingStream(s) : s.getStreamCache();
 			caches[i].activateIndexing();
 			// One additional consumption for the materialization when emitting
-			if(explicitCaching[i])
-				caches[i].incrSubscriberCount(1);
+			caches[i].incrSubscriberCount(1);
 		}
 
 		Set<Integer> requestableStreams = mRequestableStreams == null ? Collections.emptySet() : mRequestableStreams;
@@ -395,10 +394,8 @@ public abstract class OOCInstruction extends Instruction {
 		OOCStream<List<OOCStream.QueueCallback<IndexedMatrixValue>>> materialized = createWritableStream();
 
 		List<OOCStream<IndexedMatrixValue>> rStreams = new ArrayList<>(caches.length);
-		for(CachingStream cs : caches) {
-			OOCStream<IndexedMatrixValue> rStream = cs.getReadStream();
-			rStreams.add(rStream);
-		}
+		for(int i = 0; i < caches.length; i++)
+			rStreams.add(explicitCaching[i] ? caches[i].getReadStream() : qIn.get(i));
 
 		AtomicInteger processing = new AtomicInteger(1);
 		CompletableFuture<Void> mFuture = new CompletableFuture<>();
@@ -477,9 +474,8 @@ public abstract class OOCInstruction extends Instruction {
 			}
 			finally {
 				cb.get().forEach(OOCStream.QueueCallback::close);
-				for(int i = 0; i < explicitCaching.length; i++)
-					if(!explicitCaching[i])
-						caches[i].incrProcessingCount(caches[i].findCachedIndex(idx.get(i)), 1);
+				for(int i = 0; i < caches.length; i++)
+					caches[i].incrProcessingCount(caches[i].findCachedIndex(idx.get(i)), 1);
 			}
 		}, () -> {
 			if(!seen.isEmpty())
@@ -580,7 +576,8 @@ public abstract class OOCInstruction extends Instruction {
 
 							if(localTaskCtr.decrementAndGet() == 0)
 								localFuture.complete(null);
-						} finally {
+						}
+						finally {
 							if (DMLScript.STATISTICS) {
 								_localStatisticsAdder.add(System.nanoTime() - taskStartTime);
 								if (globalFuture.isDone()) {

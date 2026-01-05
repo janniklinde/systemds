@@ -568,6 +568,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		long cacheSizeDelta;
 		synchronized(this) {
 			synchronized(entry) {
+				if(entry.getState() == BlockState.REMOVED)
+					return;
 				if(entry.isPinned()) {
 					transitionMemState(entry, BlockState.WARM);
 					return; // Then we cannot clear the data
@@ -602,7 +604,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		// Remove old contribution
 		switch (oldState) {
 			case REMOVED:
-				break;
+				throw new IllegalStateException();
 			case HOT:
 			case WARM:
 				_cacheSize -= sz;
