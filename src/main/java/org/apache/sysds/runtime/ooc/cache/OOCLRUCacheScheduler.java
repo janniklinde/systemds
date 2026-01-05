@@ -24,8 +24,8 @@ import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.utils.Statistics;
 import scala.Tuple2;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Deque;
@@ -33,7 +33,6 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicInteger;
 
 public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private static final boolean SANITY_CHECKS = false;
@@ -41,7 +40,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private final OOCIOHandler _ioHandler;
 	private final LinkedHashMap<BlockKey, BlockEntry> _cache;
 	private final HashMap<BlockKey, BlockEntry> _evictionCache;
-	private final Deque<DeferredReadRequest> _deferredReadRequests;
+	private final DeferredReadQueue _deferredReadRequests;
 	private final Deque<DeferredReadRequest> _processingReadRequests;
 	private final HashMap<BlockKey, BlockReadState> _blockReads;
 	private long _hardLimit;
@@ -56,7 +55,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		this._ioHandler = ioHandler;
 		this._cache = new LinkedHashMap<>(1024, 0.75f, true);
 		this._evictionCache = new  HashMap<>();
-		this._deferredReadRequests = new ArrayDeque<>();
+		this._deferredReadRequests = new DeferredReadQueue();
 		this._processingReadRequests = new ArrayDeque<>();
 		this._blockReads = new HashMap<>();
 		this._hardLimit = hardLimit;
@@ -169,44 +168,16 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			return;
 
 		synchronized(this) {
-			if (_deferredReadRequests.isEmpty())
+			if(_deferredReadRequests.isEmpty())
 				return;
 
-			List<DeferredReadRequest> list = new ArrayList<>(_deferredReadRequests);
-			boolean[] boosted = new boolean[list.size()];
-			boolean anyBoosted = false;
-			boolean anyMatched = false;
 
-			for (int i = 0; i < list.size(); i++) {
-				DeferredReadRequest req = list.get(i);
-				if (req.addPriorityForKey(key, priority)) {
-					anyMatched = true;
-					if (priority > 0) {
-						boosted[i] = true;
-						anyBoosted = true;
-					}
-				}
-			}
-
-			if (!anyMatched)
+			boolean matched = _deferredReadRequests.boost(key, priority);
+			if(!matched)
 				return;
 
 			BlockReadState state = _blockReads.computeIfAbsent(key, k -> new BlockReadState());
 			state.priority += priority;
-
-			if (!anyBoosted)
-				return;
-
-			for (int i = 1; i < list.size(); i++) {
-				if (boosted[i]) {
-					Collections.swap(list, i, i - 1);
-					boosted[i] = false;
-					boosted[i - 1] = true;
-				}
-			}
-
-			_deferredReadRequests.clear();
-			_deferredReadRequests.addAll(list);
 		}
 	}
 
@@ -222,17 +193,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 				score /= deferredReadRequest.getEntries().size();
 			deferredReadRequest.setPriorityScore(score);
 
-			if (score <= 0) {
-				_deferredReadRequests.add(deferredReadRequest);
-			}
-			else {
-				List<DeferredReadRequest> list = new ArrayList<>(_deferredReadRequests);
-				int shift = Math.max(1, (int)Math.floor(score));
-				int newIndex = Math.max(0, list.size() - shift);
-				list.add(newIndex, deferredReadRequest);
-				_deferredReadRequests.clear();
-				_deferredReadRequests.addAll(list);
-			}
+			_deferredReadRequests.add(deferredReadRequest);
 		}
 		onCacheSizeChanged(false); // To schedule deferred reads if possible
 	}
@@ -694,70 +655,6 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		private DeferredReadWaiter(DeferredReadRequest request, int index) {
 			this.request = request;
 			this.index = index;
-		}
-	}
-
-
-
-	private static class DeferredReadRequest {
-		private static final short NOT_SCHEDULED = 0;
-		private static final short SCHEDULED = 1;
-		private static final short PINNED = 2;
-
-		private final CompletableFuture<List<BlockEntry>> _future;
-		private final List<BlockEntry> _entries;
-		private final short[] _pinned;
-		private final AtomicInteger _availableCount;
-		private double _priorityScore;
-
-		DeferredReadRequest(CompletableFuture<List<BlockEntry>> future, List<BlockEntry> entries) {
-			this._future = future;
-			this._entries = entries;
-			this._pinned = new short[entries.size()];
-			this._availableCount = new AtomicInteger(0);
-			this._priorityScore = 0;
-		}
-
-		CompletableFuture<List<BlockEntry>> getFuture() {
-			return _future;
-		}
-
-		List<BlockEntry> getEntries() {
-			return _entries;
-		}
-
-		public synchronized boolean addPriorityForKey(BlockKey key, double priority) {
-			for (BlockEntry entry : _entries) {
-				if (entry.getKey().equals(key)) {
-					double delta = priority / _entries.size();
-					_priorityScore += delta;
-					return true;
-				}
-			}
-			return false;
-		}
-
-		public synchronized void setPriorityScore(double score) {
-			_priorityScore = score;
-		}
-
-		public synchronized double getPriorityScore() {
-			return _priorityScore;
-		}
-
-		public synchronized boolean actionRequired(int idx) {
-			return _pinned[idx] == NOT_SCHEDULED;
-		}
-
-		public synchronized boolean setPinned(int idx) {
-			if (_pinned[idx] == PINNED)
-				return false; // already pinned
-			_pinned[idx] = PINNED;
-			return _availableCount.incrementAndGet() == _entries.size();
-		}
-
-		public synchronized void schedule(int idx) {
-			_pinned[idx] = SCHEDULED;
 		}
 	}
 }
