@@ -25,6 +25,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
+import org.apache.sysds.runtime.ooc.util.OOCMemoryManager;
 import org.apache.sysds.utils.Statistics;
 
 import java.io.IOException;
@@ -43,17 +44,20 @@ public class OOCCacheManager {
 
 	private static final AtomicReference<OOCIOHandler> _ioHandler;
 	private static final AtomicReference<OOCCacheScheduler> _scheduler;
+	private static final AtomicReference<OOCMemoryManager> _memoryManager;
 
 	static {
 		_evictionLimit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE);
 		_hardLimit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE_HARD);
 		_ioHandler = new AtomicReference<>();
 		_scheduler = new AtomicReference<>();
+		_memoryManager = new AtomicReference<>();
 	}
 
 	public static void reset() {
 		OOCIOHandler ioHandler = _ioHandler.getAndSet(null);
 		OOCCacheScheduler cacheScheduler = _scheduler.getAndSet(null);
+		_memoryManager.set(null);
 		if (ioHandler != null)
 			ioHandler.shutdown();
 		if (cacheScheduler != null)
@@ -107,6 +111,16 @@ public class OOCCacheManager {
 		// Ensure initialization happens
 		getCache();
 		return _ioHandler.get();
+	}
+
+	public static OOCMemoryManager getMemoryManager() {
+		OOCMemoryManager manager = _memoryManager.get();
+		if (manager != null)
+			return manager;
+		manager = new OOCMemoryManager(_hardLimit);
+		if (_memoryManager.compareAndSet(null, manager))
+			return manager;
+		return _memoryManager.get();
 	}
 
 	/**

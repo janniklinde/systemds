@@ -330,6 +330,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 			long ioStart = DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
 			while(!stop.get()) {
+				waitForCacheBelowEvictionLimit(stop);
 				long recordStart = reader.getPosition();
 				if (!reader.next(key, value))
 					break;
@@ -374,6 +375,18 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 			if (!stop.get())
 				completed.set(fileIdx, 1);
+		}
+	}
+
+	private void waitForCacheBelowEvictionLimit(AtomicBoolean stop) {
+		while (!stop.get() && !OOCCacheManager.getCache().isBelowEvictionLimit()) {
+			try {
+				Thread.sleep(1);
+			}
+			catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				stop.set(true);
+			}
 		}
 	}
 

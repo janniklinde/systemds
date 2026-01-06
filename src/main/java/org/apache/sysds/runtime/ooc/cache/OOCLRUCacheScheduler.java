@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.ooc.cache;
 
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
+import org.apache.sysds.runtime.ooc.util.OOCMemoryManager;
 import org.apache.sysds.utils.Statistics;
 import scala.Tuple2;
 
@@ -43,11 +44,14 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private final DeferredReadQueue _deferredReadRequests;
 	private final Deque<DeferredReadRequest> _processingReadRequests;
 	private final HashMap<BlockKey, BlockReadState> _blockReads;
+	private final OOCMemoryManager.Allowance _memoryAllowance;
+	private final int _callerId;
 	private long _hardLimit;
 	private long _evictionLimit;
-	private final int _callerId;
 	private long _cacheSize;
 	private long _bytesUpForEviction;
+	private long _borrowedBytes;
+	private long _lastBorrowWarnMs;
 	private volatile boolean _running;
 	private boolean _warnThrottling;
 
@@ -60,8 +64,12 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		this._blockReads = new HashMap<>();
 		this._hardLimit = hardLimit;
 		this._evictionLimit = evictionLimit;
+		this._memoryAllowance = OOCCacheManager.getMemoryManager()
+			.createAllowance(Math.max(1024L * 1024L, hardLimit / 10));
 		this._cacheSize = 0;
 		this._bytesUpForEviction = 0;
+		this._borrowedBytes = 0;
+		this._lastBorrowWarnMs = 0;
 		this._running = true;
 		this._warnThrottling = false;
 		this._callerId = DMLScript.OOC_LOG_EVENTS ? OOCEventLog.registerCaller("LRUCacheScheduler") : 0;
@@ -232,6 +240,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			throw new IllegalArgumentException();
 		if (descriptor != null)
 			_ioHandler.registerSourceLocation(key, descriptor);
+		ensureBorrowedBudget(size);
 
 		Statistics.incrementOOCEvictionPut();
 		BlockEntry entry = new BlockEntry(key, size, data);
@@ -251,7 +260,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	@Override
 	public void forget(BlockKey key) {
-		if (!this._running)
+		if(!this._running)
 			return;
 		BlockEntry entry;
 		boolean shouldScheduleDeletion = false;
@@ -259,21 +268,20 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		synchronized(this) {
 			entry = _cache.remove(key);
 
-			if (entry == null)
+			if(entry == null)
 				entry = _evictionCache.remove(key);
 
-			if (entry != null) {
+			if(entry != null) {
 				synchronized(entry) {
 					shouldScheduleDeletion = entry.getState().isBackedByDisk()
 						|| entry.getState() == BlockState.EVICTING;
 					cacheSizeDelta = transitionMemState(entry, BlockState.REMOVED);
 				}
-
 			}
 		}
-		if (cacheSizeDelta != 0)
+		if(cacheSizeDelta != 0)
 			onCacheSizeChanged(cacheSizeDelta > 0);
-		if (shouldScheduleDeletion)
+		if(shouldScheduleDeletion)
 			_ioHandler.scheduleDeletion(entry);
 	}
 
@@ -328,6 +336,11 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	}
 
 	@Override
+	public synchronized boolean isBelowEvictionLimit() {
+		return _cacheSize - _bytesUpForEviction <= _evictionLimit;
+	}
+
+	@Override
 	public synchronized void shutdown() {
 		this._running = false;
 		_cache.clear();
@@ -337,6 +350,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		_blockReads.clear();
 		_cacheSize = 0;
 		_bytesUpForEviction = 0;
+		releaseBorrowedBytes();
 	}
 
 	@Override
@@ -360,6 +374,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		else {
 			while(onCacheSizeDecremented()) {}
 		}
+		releaseBorrowedBytes();
 		if (DMLScript.OOC_LOG_EVENTS)
 			OOCEventLog.onCacheSizeChangedEvent(_callerId, System.nanoTime(), _cacheSize, _bytesUpForEviction);
 	}
@@ -645,6 +660,45 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private void registerWaiter(BlockKey key, DeferredReadRequest request, int index) {
 		BlockReadState state = _blockReads.computeIfAbsent(key, k -> new BlockReadState());
 		state.waiters.add(new DeferredReadWaiter(request, index));
+	}
+
+	private void ensureBorrowedBudget(long upcomingBytes) {
+		long toAcquire;
+		synchronized(this) {
+			long required = (_cacheSize + upcomingBytes) - _hardLimit;
+			toAcquire = Math.max(0, required - _borrowedBytes);
+		}
+		if (toAcquire <= 0)
+			return;
+		if (!_memoryAllowance.tryAcquire(toAcquire)) {
+			maybeWarnBorrowFailed();
+			return;
+		}
+		synchronized(this) {
+			_borrowedBytes += toAcquire;
+		}
+	}
+
+	private void releaseBorrowedBytes() {
+		long toRelease;
+		synchronized(this) {
+			long required = Math.max(0, _cacheSize - _hardLimit);
+			toRelease = _borrowedBytes - required;
+			if (toRelease <= 0)
+				return;
+			_borrowedBytes -= toRelease;
+		}
+		_memoryAllowance.release(toRelease);
+	}
+
+	private void maybeWarnBorrowFailed() {
+		long now = System.currentTimeMillis();
+		synchronized(this) {
+			if (now - _lastBorrowWarnMs < 1000)
+				return;
+			_lastBorrowWarnMs = now;
+		}
+		System.out.println("[WARN] Cache exceeded hard limit but memory borrow failed; proceeding without blocking.");
 	}
 
 	private static class BlockReadState {

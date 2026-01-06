@@ -174,12 +174,13 @@ public abstract class OOCInstruction extends Instruction {
 		addOutStream(qOut);
 
 		return submitOOCTasks(qIn, tmp -> {
+			R r = null;
 			try (tmp) {
-				R r = mapper.apply(tmp.get());
-				qOut.enqueue(r);
+				r = mapper.apply(tmp.get());
 			} catch (Exception e) {
 				throw e instanceof DMLRuntimeException ? (DMLRuntimeException) e : new DMLRuntimeException(e);
 			}
+			qOut.enqueue(r);
 		}, qOut::closeInput);
 	}
 

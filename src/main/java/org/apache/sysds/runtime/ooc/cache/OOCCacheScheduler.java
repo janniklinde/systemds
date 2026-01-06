@@ -108,6 +108,11 @@ public interface OOCCacheScheduler {
 	long getCacheSize();
 
 	/**
+	 * Returns true if the cache is currently below the eviction limit.
+	 */
+	boolean isBelowEvictionLimit();
+
+	/**
 	 * Shuts down the cache scheduler.
 	 */
 	void shutdown();

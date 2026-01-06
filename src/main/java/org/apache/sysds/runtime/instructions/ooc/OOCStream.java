@@ -20,8 +20,11 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.ooc.util.OOCMemoryManager;
 
 import java.util.function.Consumer;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public interface OOCStream<T> extends OOCStreamable<T> {
 	static <T> QueueCallback<T> eos(DMLRuntimeException e) {
@@ -97,6 +100,76 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 			if(_failure != null)
 				throw _failure;
 			return get() == null;
+		}
+	}
+
+	class MemoryManagedQueueCallback<T> implements QueueCallback<T> {
+		private final T _result;
+		private DMLRuntimeException _failure;
+		private final SharedMemoryState _state;
+		private final AtomicBoolean _closed;
+
+		public MemoryManagedQueueCallback(T result, DMLRuntimeException failure, OOCMemoryManager.Allowance allowance, long bytes) {
+			this._result = result;
+			this._failure = failure;
+			this._state = new SharedMemoryState(allowance, bytes);
+			this._closed = new AtomicBoolean(false);
+		}
+
+		private MemoryManagedQueueCallback(T result, DMLRuntimeException failure, SharedMemoryState state) {
+			this._result = result;
+			this._failure = failure;
+			this._state = state;
+			this._closed = new AtomicBoolean(false);
+		}
+
+		@Override
+		public T get() {
+			if (_failure != null)
+				throw _failure;
+			if (_closed.get())
+				throw new IllegalStateException("Cannot get item of a closed callback");
+			return _result;
+		}
+
+		@Override
+		public QueueCallback<T> keepOpen() {
+			if (_closed.get())
+				throw new IllegalStateException("Cannot keep open an already closed callback");
+			_state.refs.incrementAndGet();
+			return new MemoryManagedQueueCallback<>(_result, _failure, _state);
+		}
+
+		@Override
+		public void close() {
+			if (!_closed.compareAndSet(false, true))
+				return;
+			if (_state.refs.decrementAndGet() == 0)
+				_state.allowance.release(_state.bytes);
+		}
+
+		@Override
+		public void fail(DMLRuntimeException failure) {
+			this._failure = failure;
+		}
+
+		@Override
+		public boolean isEos() {
+			if (_failure != null)
+				throw _failure;
+			return get() == null;
+		}
+
+		private static final class SharedMemoryState {
+			private final OOCMemoryManager.Allowance allowance;
+			private final long bytes;
+			private final AtomicInteger refs;
+
+			private SharedMemoryState(OOCMemoryManager.Allowance allowance, long bytes) {
+				this.allowance = allowance;
+				this.bytes = bytes;
+				this.refs = new AtomicInteger(1);
+			}
 		}
 	}
 }
