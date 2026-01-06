@@ -23,13 +23,23 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class OOCMemoryManager {
+	public enum Priority {
+		LOW,
+		MEDIUM,
+		HIGH,
+		FORCE
+	}
+
 	private final long _totalBytes;
 	private final AtomicLong _availableBytes;
 	private final Object _waitLock;
-	private final Deque<Waiter> _waiters;
+	private final Deque<Waiter> _waitersHigh;
+	private final Deque<Waiter> _waitersMedium;
+	private final Deque<Waiter> _waitersLow;
 
 	public OOCMemoryManager(long totalBytes) {
 		if(totalBytes <= 0)
@@ -37,7 +47,9 @@ public class OOCMemoryManager {
 		_totalBytes = totalBytes;
 		_availableBytes = new AtomicLong(totalBytes);
 		_waitLock = new Object();
-		_waiters = new ArrayDeque<>();
+		_waitersHigh = new ArrayDeque<>();
+		_waitersMedium = new ArrayDeque<>();
+		_waitersLow = new ArrayDeque<>();
 	}
 
 	public long getTotalBytes() {
@@ -64,27 +76,34 @@ public class OOCMemoryManager {
 		}
 	}
 
-	private void reserveBlocking(long bytes) throws InterruptedException {
-		if(tryReserve(bytes))
+	private void forceReserve(long bytes) {
+		if (bytes <= 0)
 			return;
-		Waiter waiter = new Waiter(bytes, null);
-		synchronized(_waitLock) {
-			if(tryReserve(bytes))
-				return;
-			_waiters.addLast(waiter);
-			while(!waiter.done)
-				_waitLock.wait();
+		_availableBytes.addAndGet(-bytes);
+	}
+
+	private void reserveBlocking(long bytes, Priority priority) throws InterruptedException {
+		try {
+			reserveAsync(bytes, priority).get();
+		}
+		catch (ExecutionException e) {
+			throw new IllegalStateException("Unexpected failure while acquiring memory", e.getCause());
 		}
 	}
 
-	private CompletableFuture<Void> reserveAsync(long bytes) {
+	private CompletableFuture<Void> reserveAsync(long bytes, Priority priority) {
+		if (priority == Priority.FORCE) {
+			if (bytes > 0)
+				_availableBytes.addAndGet(-bytes);
+			return CompletableFuture.completedFuture(null);
+		}
 		if(tryReserve(bytes))
 			return CompletableFuture.completedFuture(null);
 		Waiter waiter = new Waiter(bytes, new CompletableFuture<>());
 		synchronized(_waitLock) {
 			if(tryReserve(bytes))
 				return CompletableFuture.completedFuture(null);
-			_waiters.addLast(waiter);
+			getWaiterQueue(priority).addLast(waiter);
 		}
 		return waiter.future;
 	}
@@ -99,11 +118,22 @@ public class OOCMemoryManager {
 	private void drainWaiters() {
 		synchronized(_waitLock) {
 			boolean anyCompleted = false;
-			while(!_waiters.isEmpty()) {
-				Waiter waiter = _waiters.peekFirst();
-				if(!tryReserve(waiter.bytes))
+			while(true) {
+				Waiter waiter = _waitersHigh.peekFirst();
+				Deque<Waiter> queue = _waitersHigh;
+				if (waiter == null) {
+					waiter = _waitersMedium.peekFirst();
+					queue = _waitersMedium;
+				}
+				if (waiter == null) {
+					waiter = _waitersLow.peekFirst();
+					queue = _waitersLow;
+				}
+				if (waiter == null)
 					break;
-				_waiters.pollFirst();
+				if(!tryReserve(waiter.bytes))
+					return;
+				queue.pollFirst();
 				waiter.done = true;
 				if(waiter.future != null)
 					waiter.future.complete(null);
@@ -112,6 +142,15 @@ public class OOCMemoryManager {
 			if(anyCompleted)
 				_waitLock.notifyAll();
 		}
+	}
+
+	private Deque<Waiter> getWaiterQueue(Priority priority) {
+		return switch(priority) {
+			case HIGH -> _waitersHigh;
+			case MEDIUM -> _waitersMedium;
+			case LOW -> _waitersLow;
+			case FORCE -> _waitersHigh;
+		};
 	}
 
 	private static final class Waiter {
@@ -130,6 +169,7 @@ public class OOCMemoryManager {
 		private final OOCMemoryManager _manager;
 		private final long _refillBytes;
 		private long _localAvailable;
+		private boolean _closed;
 
 		private Allowance(OOCMemoryManager manager, long refillBytes) {
 			if(refillBytes <= 0)
@@ -137,23 +177,43 @@ public class OOCMemoryManager {
 			_manager = Objects.requireNonNull(manager);
 			_refillBytes = refillBytes;
 			_localAvailable = 0;
+			_closed = false;
 		}
 
 		public synchronized void acquire(long bytes) throws InterruptedException {
+			acquire(bytes, Priority.MEDIUM);
+		}
+
+		public synchronized void acquire(long bytes, Priority priority) throws InterruptedException {
+			ensureOpen();
 			if(bytes <= 0)
 				return;
 			if(bytes > _localAvailable) {
 				long needed = bytes - _localAvailable;
 				long request = Math.max(_refillBytes, needed);
-				_manager.reserveBlocking(request);
+				_manager.reserveBlocking(request, priority);
 				_localAvailable += request;
 			}
 			_localAvailable -= bytes;
 		}
 
 		public synchronized boolean tryAcquire(long bytes) {
+			return tryAcquire(bytes, Priority.MEDIUM);
+		}
+
+		public synchronized boolean tryAcquire(long bytes, Priority priority) {
+			if(_closed)
+				return false;
 			if(bytes <= 0)
 				return true;
+			if(priority == Priority.FORCE) {
+				long needed = bytes - _localAvailable;
+				long request = Math.max(_refillBytes, needed);
+				_localAvailable = 0;
+				_manager.forceReserve(request);
+				_localAvailable += request - bytes;
+				return true;
+			}
 			if(bytes > _localAvailable) {
 				long needed = bytes - _localAvailable;
 				long request = Math.max(_refillBytes, needed);
@@ -166,6 +226,15 @@ public class OOCMemoryManager {
 		}
 
 		public synchronized CompletableFuture<Void> acquireAsync(long bytes) {
+			return acquireAsync(bytes, Priority.MEDIUM);
+		}
+
+		public synchronized CompletableFuture<Void> acquireAsync(long bytes, Priority priority) {
+			if(_closed) {
+				CompletableFuture<Void> failed = new CompletableFuture<>();
+				failed.completeExceptionally(new IllegalStateException("Allowance is closed"));
+				return failed;
+			}
 			if(bytes <= 0)
 				return CompletableFuture.completedFuture(null);
 			if(bytes <= _localAvailable) {
@@ -175,7 +244,7 @@ public class OOCMemoryManager {
 			long needed = bytes - _localAvailable;
 			long request = Math.max(_refillBytes, needed);
 			_localAvailable = 0;
-			return _manager.reserveAsync(request).thenRun(() -> {
+			return _manager.reserveAsync(request, priority).thenRun(() -> {
 				synchronized(this) {
 					_localAvailable += request - bytes;
 				}
@@ -185,6 +254,10 @@ public class OOCMemoryManager {
 		public synchronized void release(long bytes) {
 			if(bytes <= 0)
 				return;
+			if (_closed) {
+				_manager.release(bytes);
+				return;
+			}
 			_localAvailable += bytes;
 			long excess = _localAvailable - _refillBytes;
 			if(excess > 0) {
@@ -195,6 +268,22 @@ public class OOCMemoryManager {
 
 		public synchronized long getLocalAvailableBytes() {
 			return _localAvailable;
+		}
+
+		public synchronized void close() {
+			if (_closed)
+				return;
+			_closed = true;
+			if (_localAvailable > 0) {
+				long toRelease = _localAvailable;
+				_localAvailable = 0;
+				_manager.release(toRelease);
+			}
+		}
+
+		private void ensureOpen() {
+			if (_closed)
+				throw new IllegalStateException("Allowance is closed");
 		}
 	}
 }

@@ -82,7 +82,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		Consumer<QueueCallback<T>> s = _subscriber;
 
 		if (s != null) {
-			s.accept(new SimpleQueueCallback<>(t, _failure));
+			s.accept(createCallback(t));
 			onDeliveryFinished();
 			return;
 		}
@@ -103,7 +103,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		}
 
 		// Last case if due to race a subscriber has been set
-		s.accept(new SimpleQueueCallback<>(t, _failure));
+		s.accept(createCallback(t));
 		onDeliveryFinished();
 	}
 
@@ -162,7 +162,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		}
 
 		for (T t : data) {
-			subscriber.accept(new SimpleQueueCallback<>(t, _failure));
+			subscriber.accept(createCallback(t));
 			onDeliveryFinished();
 		}
 	}
@@ -180,6 +180,11 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 				OOCWatchdog.registerClose(_watchdogId);
 		}
 	}
+
+	protected QueueCallback<T> createCallback(T t) {
+		return new SimpleQueueCallback<>(t, _failure);
+	}
+
 
 	@Override
 	public synchronized void propagateFailure(DMLRuntimeException re) {

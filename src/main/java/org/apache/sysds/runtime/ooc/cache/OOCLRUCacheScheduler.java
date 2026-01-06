@@ -45,13 +45,13 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private final Deque<DeferredReadRequest> _processingReadRequests;
 	private final HashMap<BlockKey, BlockReadState> _blockReads;
 	private final OOCMemoryManager.Allowance _memoryAllowance;
-	private final int _callerId;
 	private long _hardLimit;
 	private long _evictionLimit;
+	private final int _callerId;
 	private long _cacheSize;
 	private long _bytesUpForEviction;
-	private long _borrowedBytes;
-	private long _lastBorrowWarnMs;
+	private long _acquiredBytes;
+	private long _lastAcquireWarnMs;
 	private volatile boolean _running;
 	private boolean _warnThrottling;
 
@@ -68,11 +68,12 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			.createAllowance(Math.max(1024L * 1024L, hardLimit / 10));
 		this._cacheSize = 0;
 		this._bytesUpForEviction = 0;
-		this._borrowedBytes = 0;
-		this._lastBorrowWarnMs = 0;
+		this._acquiredBytes = 0;
+		this._lastAcquireWarnMs = 0;
 		this._running = true;
 		this._warnThrottling = false;
 		this._callerId = DMLScript.OOC_LOG_EVENTS ? OOCEventLog.registerCaller("LRUCacheScheduler") : 0;
+		ensureAcquiredBytes(_hardLimit, false);
 
 		if (DMLScript.OOC_LOG_EVENTS) {
 			OOCEventLog.putRunSetting("CacheEvictionLimit", _evictionLimit);
@@ -240,7 +241,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			throw new IllegalArgumentException();
 		if (descriptor != null)
 			_ioHandler.registerSourceLocation(key, descriptor);
-		ensureBorrowedBudget(size);
+		ensureAcquiredForPut(size);
 
 		Statistics.incrementOOCEvictionPut();
 		BlockEntry entry = new BlockEntry(key, size, data);
@@ -350,13 +351,15 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		_blockReads.clear();
 		_cacheSize = 0;
 		_bytesUpForEviction = 0;
-		releaseBorrowedBytes();
+		releaseExcessAcquiredBytes();
 	}
 
 	@Override
 	public synchronized void updateLimits(long evictionLimit, long hardLimit) {
 		_evictionLimit = evictionLimit;
 		_hardLimit = hardLimit;
+		ensureAcquiredBytes(_hardLimit, false);
+		releaseExcessAcquiredBytes();
 	}
 
 	/**
@@ -374,7 +377,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		else {
 			while(onCacheSizeDecremented()) {}
 		}
-		releaseBorrowedBytes();
+		releaseExcessAcquiredBytes();
 		if (DMLScript.OOC_LOG_EVENTS)
 			OOCEventLog.onCacheSizeChangedEvent(_callerId, System.nanoTime(), _cacheSize, _bytesUpForEviction);
 	}
@@ -662,43 +665,51 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		state.waiters.add(new DeferredReadWaiter(request, index));
 	}
 
-	private void ensureBorrowedBudget(long upcomingBytes) {
-		long toAcquire;
+	private void ensureAcquiredForPut(long upcomingBytes) {
+		long target;
 		synchronized(this) {
-			long required = (_cacheSize + upcomingBytes) - _hardLimit;
-			toAcquire = Math.max(0, required - _borrowedBytes);
+			target = Math.max(_hardLimit, _cacheSize + upcomingBytes);
 		}
-		if (toAcquire <= 0)
-			return;
-		if (!_memoryAllowance.tryAcquire(toAcquire)) {
-			maybeWarnBorrowFailed();
-			return;
-		}
-		synchronized(this) {
-			_borrowedBytes += toAcquire;
-		}
+		ensureAcquiredBytes(target, true);
 	}
 
-	private void releaseBorrowedBytes() {
+	private void releaseExcessAcquiredBytes() {
 		long toRelease;
 		synchronized(this) {
-			long required = Math.max(0, _cacheSize - _hardLimit);
-			toRelease = _borrowedBytes - required;
+			long target = Math.max(_hardLimit, _cacheSize);
+			toRelease = _acquiredBytes - target;
 			if (toRelease <= 0)
 				return;
-			_borrowedBytes -= toRelease;
+			_acquiredBytes -= toRelease;
 		}
 		_memoryAllowance.release(toRelease);
 	}
 
-	private void maybeWarnBorrowFailed() {
+	private void ensureAcquiredBytes(long targetBytes, boolean warnOnForce) {
+		long toAcquire;
+		synchronized(this) {
+			toAcquire = targetBytes - _acquiredBytes;
+		}
+		if (toAcquire <= 0)
+			return;
+		if (!_memoryAllowance.tryAcquire(toAcquire, OOCMemoryManager.Priority.HIGH)) {
+			_memoryAllowance.tryAcquire(toAcquire, OOCMemoryManager.Priority.FORCE);
+			if (warnOnForce)
+				maybeWarnAcquireForced();
+		}
+		synchronized(this) {
+			_acquiredBytes += toAcquire;
+		}
+	}
+
+	private void maybeWarnAcquireForced() {
 		long now = System.currentTimeMillis();
 		synchronized(this) {
-			if (now - _lastBorrowWarnMs < 1000)
+			if (now - _lastAcquireWarnMs < 1000)
 				return;
-			_lastBorrowWarnMs = now;
+			_lastAcquireWarnMs = now;
 		}
-		System.out.println("[WARN] Cache exceeded hard limit but memory borrow failed; proceeding without blocking.");
+		System.out.println("[WARN] Cache acquired memory via FORCE priority; memory budget overdrafted.");
 	}
 
 	private static class BlockReadState {
