@@ -51,6 +51,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ForkJoinTask;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
@@ -173,15 +174,24 @@ public abstract class OOCInstruction extends Instruction {
 		addInStream(qIn);
 		addOutStream(qOut);
 
-		return submitOOCTasks(qIn, tmp -> {
+		Consumer<OOCStream.QueueCallback<T>> exec = tmp -> {
 			R r = null;
-			try (tmp) {
+			try(tmp) {
 				r = mapper.apply(tmp.get());
 			} catch (Exception e) {
 				throw e instanceof DMLRuntimeException ? (DMLRuntimeException) e : new DMLRuntimeException(e);
 			}
 			qOut.enqueue(r);
-		}, qOut::closeInput);
+		};
+
+		return submitOOCTasks(qIn, exec, qOut::closeInput, tmp -> {
+			// Try to run as a predicate to prefer pipelining rather than fan-out
+			if(ForkJoinTask.getPool() == CommonThreadPool.get()) {
+				exec.accept(tmp);
+				return false;
+			}
+			return true;
+		}, (i, tmp) -> {});
 	}
 
 	protected <R, P> CompletableFuture<Void> broadcastJoinOOC(OOCStream<IndexedMatrixValue> qIn, OOCStream<IndexedMatrixValue> broadcast, OOCStream<R> qOut, BiFunction<IndexedMatrixValue, BroadcastedElement, R> mapper, Function<IndexedMatrixValue, P> on) {

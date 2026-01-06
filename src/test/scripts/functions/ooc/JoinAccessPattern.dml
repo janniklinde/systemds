@@ -23,6 +23,11 @@
 X = read($1);
 Y = read($2);
 
-res = X * Y / X + X - Y * X
+for (i in 1:15) {
+    #X = X * Y / X + X - Y * X;
+    #Y = X + Y;
+    X = X * 5;
+}
 
-write(res, $3, format="binary");
+out = colSums(X);
+write(out, $3, format="binary");
