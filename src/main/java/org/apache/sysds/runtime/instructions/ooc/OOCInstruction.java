@@ -34,6 +34,7 @@ import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
+import org.apache.sysds.runtime.ooc.stream.TaskContext;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
 import org.apache.sysds.runtime.ooc.stream.message.OOCRequestRangeMsg;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -62,6 +63,10 @@ import java.util.function.Function;
 import java.util.stream.Stream;
 
 public abstract class OOCInstruction extends Instruction {
+	public static final ExecutorService COMPUTE_EXECUTOR = CommonThreadPool.get();
+	private static final AtomicInteger COMPUTE_IN_FLIGHT = new AtomicInteger(0);
+	private static final int COMPUTE_BACKPRESSURE_THRESHOLD =
+		Integer.getInteger("sysds.ooc.computeBackpressure", 100);
 	protected static final Log LOG = LogFactory.getLog(OOCInstruction.class.getName());
 	private static final AtomicInteger nextStreamId = new AtomicInteger(0);
 	private long nanoTime;
@@ -94,6 +99,14 @@ public abstract class OOCInstruction extends Instruction {
 		if (DMLScript.STATISTICS)
 			_localStatisticsAdder = new LongAdder();
 		_callerId = DMLScript.OOC_LOG_EVENTS ? OOCEventLog.registerCaller(getExtendedOpcode() + "_" + hashCode()) : 0;
+	}
+
+	public static int getComputeInFlight() {
+		return COMPUTE_IN_FLIGHT.get();
+	}
+
+	public static int getComputeBackpressureThreshold() {
+		return COMPUTE_BACKPRESSURE_THRESHOLD;
 	}
 
 	@Override
@@ -175,18 +188,19 @@ public abstract class OOCInstruction extends Instruction {
 		addOutStream(qOut);
 
 		Consumer<OOCStream.QueueCallback<T>> exec = tmp -> {
-			R r = null;
+			R r;
 			try(tmp) {
 				r = mapper.apply(tmp.get());
-			} catch (Exception e) {
+			}
+			catch(Exception e) {
 				throw e instanceof DMLRuntimeException ? (DMLRuntimeException) e : new DMLRuntimeException(e);
 			}
-			qOut.enqueue(r);
+			TaskContext.defer(() -> qOut.enqueue(r));
 		};
 
 		return submitOOCTasks(qIn, exec, qOut::closeInput, tmp -> {
 			// Try to run as a predicate to prefer pipelining rather than fan-out
-			if(ForkJoinTask.getPool() == CommonThreadPool.get()) {
+			if(ForkJoinTask.getPool() == COMPUTE_EXECUTOR) {
 				exec.accept(tmp);
 				return false;
 			}
@@ -526,7 +540,6 @@ public abstract class OOCInstruction extends Instruction {
 		addInStream(queues.toArray(OOCStream[]::new));
 		if(!outStreamsDefined())
 			throw new IllegalArgumentException("Explicit specification of all output streams is required before submitting tasks. If no output streams are present use addOutStream().");
-		ExecutorService pool = CommonThreadPool.get();
 
 		final List<AtomicInteger> activeTaskCtrs = new ArrayList<>(queues.size());
 
@@ -580,7 +593,9 @@ public abstract class OOCInstruction extends Instruction {
 					// The item needs to be pinned in memory to be accessible in the executor thread
 					final OOCStream.QueueCallback<T> pinned = callback.keepOpen();
 
-					pool.submit(oocTask(() -> {
+					COMPUTE_IN_FLIGHT.incrementAndGet();
+					try {
+						COMPUTE_EXECUTOR.submit(oocTask(() -> {
 						long taskStartTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
 						try(pinned) {
 							consumer.accept(k, pinned);
@@ -589,6 +604,7 @@ public abstract class OOCInstruction extends Instruction {
 								localFuture.complete(null);
 						}
 						finally {
+							COMPUTE_IN_FLIGHT.decrementAndGet();
 							if (DMLScript.STATISTICS) {
 								_localStatisticsAdder.add(System.nanoTime() - taskStartTime);
 								if (globalFuture.isDone()) {
@@ -600,6 +616,11 @@ public abstract class OOCInstruction extends Instruction {
 							}
 						}
 					}, localFuture, Stream.concat(streamContext.outStreams().stream(), streamContext.inStreams().stream()).toArray(OOCStream[]::new)));
+					}
+					catch (Exception e) {
+						COMPUTE_IN_FLIGHT.decrementAndGet();
+						throw e;
+					}
 
 					if(closeRaceWatchdog.get()) // Sanity check
 						throw new DMLRuntimeException("Race condition observed");
@@ -651,17 +672,24 @@ public abstract class OOCInstruction extends Instruction {
 		ExecutorService pool = CommonThreadPool.get();
 		final CompletableFuture<Void> future = new CompletableFuture<>();
 		try {
+			COMPUTE_IN_FLIGHT.incrementAndGet();
 			pool.submit(oocTask(() -> {
 				long startTime = DMLScript.STATISTICS || DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
-				r.run();
-				future.complete(null);
-				if (DMLScript.STATISTICS)
-					Statistics.maintainOOCHeavyHitter(getExtendedOpcode(), System.nanoTime() - startTime);
-				if (DMLScript.OOC_LOG_EVENTS)
-					OOCEventLog.onComputeEvent(_callerId, startTime,  System.nanoTime());
+				try {
+					r.run();
+					future.complete(null);
+					if (DMLScript.STATISTICS)
+						Statistics.maintainOOCHeavyHitter(getExtendedOpcode(), System.nanoTime() - startTime);
+					if (DMLScript.OOC_LOG_EVENTS)
+						OOCEventLog.onComputeEvent(_callerId, startTime,  System.nanoTime());
+				}
+				finally {
+					COMPUTE_IN_FLIGHT.decrementAndGet();
+				}
 				}, future, queues));
 		}
 		catch (Exception ex) {
+			COMPUTE_IN_FLIGHT.decrementAndGet();
 			throw new DMLRuntimeException(ex);
 		}
 		finally {
@@ -673,9 +701,12 @@ public abstract class OOCInstruction extends Instruction {
 
 	private Runnable oocTask(Runnable r, CompletableFuture<Void> future,  OOCStream<?>... queues) {
 		return () -> {
+			TaskContext ctx = new TaskContext();
+			TaskContext.setContext(ctx);
 			long startTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
 			try {
 				r.run();
+				while(TaskContext.runDeferred()) {}
 			}
 			catch (Exception ex) {
 				DMLRuntimeException re = ex instanceof DMLRuntimeException ? (DMLRuntimeException) ex : new DMLRuntimeException(ex);
