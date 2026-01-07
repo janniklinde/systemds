@@ -195,7 +195,7 @@ public abstract class OOCInstruction extends Instruction {
 			catch(Exception e) {
 				throw e instanceof DMLRuntimeException ? (DMLRuntimeException) e : new DMLRuntimeException(e);
 			}
-			TaskContext.defer(() -> qOut.enqueue(r));
+			qOut.enqueue(r);
 		};
 
 		return submitOOCTasks(qIn, exec, qOut::closeInput, tmp -> {
@@ -701,15 +701,20 @@ public abstract class OOCInstruction extends Instruction {
 
 	private Runnable oocTask(Runnable r, CompletableFuture<Void> future,  OOCStream<?>... queues) {
 		return () -> {
-			TaskContext ctx = new TaskContext();
-			TaskContext.setContext(ctx);
+			boolean setContext = TaskContext.getContext() == null;
+			if(setContext)
+				TaskContext.setContext(new TaskContext());
 			long startTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
 			try {
 				r.run();
-				while(TaskContext.runDeferred()) {}
+				if(setContext) {
+					while(TaskContext.runDeferred()) {
+					}
+				}
 			}
 			catch (Exception ex) {
 				DMLRuntimeException re = ex instanceof DMLRuntimeException ? (DMLRuntimeException) ex : new DMLRuntimeException(ex);
+				LOG.error(re.getMessage(), re);
 
 				synchronized(this) {
 					if(_failed) // Do avoid infinite cycles
@@ -732,6 +737,8 @@ public abstract class OOCInstruction extends Instruction {
 				// Rethrow to ensure proper future handling
 				throw re;
 			} finally {
+				if(setContext)
+					TaskContext.clearContext();
 				if (DMLScript.STATISTICS)
 					_localStatisticsAdder.add(System.nanoTime() - startTime);
 			}

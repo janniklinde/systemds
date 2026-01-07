@@ -174,11 +174,14 @@ public class OOCCacheManager {
 
 	static class CachedQueueCallback<T> implements OOCStream.QueueCallback<T> {
 		private final BlockEntry _result;
+		private T _data;
 		private DMLRuntimeException _failure;
 		private final AtomicBoolean _pinned;
 
+		@SuppressWarnings("unchecked")
 		CachedQueueCallback(BlockEntry result, DMLRuntimeException failure) {
 			this._result = result;
+			this._data = (T)result.getData();
 			this._failure = failure;
 			this._pinned = new AtomicBoolean(true);
 		}
@@ -186,19 +189,16 @@ public class OOCCacheManager {
 		@SuppressWarnings("unchecked")
 		@Override
 		public T get() {
-			if (_failure != null)
+			if(_failure != null)
 				throw _failure;
-			if (!_pinned.get())
+			if(!_pinned.get())
 				throw new IllegalStateException("Cannot get cached item of a closed callback");
-			T ret = (T)_result.getData();
-			if (ret == null)
-				throw new IllegalStateException("Cannot get a cached item if it is not pinned in memory: " + _result.getState());
-			return ret;
+			return _data;
 		}
 
 		@Override
 		public OOCStream.QueueCallback<T> keepOpen() {
-			if (!_pinned.get())
+			if(!_pinned.get())
 				throw new IllegalStateException("Cannot keep open an already closed callback");
 			pin(_result);
 			return new CachedQueueCallback<>(_result, _failure);
@@ -216,7 +216,8 @@ public class OOCCacheManager {
 
 		@Override
 		public void close() {
-			if (_pinned.compareAndSet(true, false)) {
+			if(_pinned.compareAndSet(true, false)) {
+				_data = null;
 				unpin(_result);
 			}
 		}

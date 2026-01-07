@@ -23,6 +23,7 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.stream.TaskContext;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
@@ -38,6 +39,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 
 	private final AtomicInteger _availableCtr = new AtomicInteger(1);
 	private final AtomicBoolean _closed = new AtomicBoolean(false);
+	private final AtomicInteger _blockCount = new AtomicInteger(0);
 	private CacheableData<?> _cdata;
 	private volatile Consumer<QueueCallback<T>> _subscriber = null;
 	private volatile CopyOnWriteArrayList<Consumer<OOCStreamMessage>> _upstreamMsgRelays = null;
@@ -79,11 +81,15 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 			throw new DMLRuntimeException("Cannot enqueue into closed SubscribableTaskQueue");
 		}
 
-		Consumer<QueueCallback<T>> s = _subscriber;
 
-		if (s != null) {
-			s.accept(new SimpleQueueCallback<>(t, _failure));
-			onDeliveryFinished();
+		Consumer<QueueCallback<T>> s = _subscriber;
+		final Consumer<QueueCallback<T>> fS = s;
+
+		if (fS != null) {
+			TaskContext.defer(() -> {
+				fS.accept(new SimpleQueueCallback<>(t, _failure));
+				onDeliveryFinished();
+			});
 			return;
 		}
 
@@ -136,11 +142,22 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	public synchronized void closeInput() {
 		if (_closed.compareAndSet(false, true)) {
 			super.closeInput();
-			onDeliveryFinished();
+			TaskContext.defer(this::onDeliveryFinished);
 			_upstreamMsgRelays = null;
 			_downstreamMsgRelays = null;
 		} else {
 			throw new IllegalStateException("Multiple close input calls");
+		}
+	}
+
+	private void validateBlockCountOnClose() {
+		DataCharacteristics dc = getDataCharacteristics();
+		if (dc != null && dc.dimsKnown() && dc.getBlocksize() > 0) {
+			long expected = dc.getNumBlocks();
+			if (expected >= 0 && _blockCount.get() != expected) {
+				throw new DMLRuntimeException("CachingStream block count mismatch: expected "
+					+ expected + " but saw " + _blockCount.get() + " (" + dc.getRows() + "x" + dc.getCols() + ")");
+			}
 		}
 	}
 
@@ -172,6 +189,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		int ctr = _availableCtr.decrementAndGet();
 
 		if (ctr == 0) {
+			validateBlockCountOnClose();
 			Consumer<QueueCallback<T>> s = _subscriber;
 			if (s != null)
 				s.accept(new SimpleQueueCallback<>((T) LocalTaskQueue.NO_MORE_TASKS, _failure));

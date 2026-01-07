@@ -267,6 +267,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 					shouldScheduleDeletion = entry.getState().isBackedByDisk()
 						|| entry.getState() == BlockState.EVICTING;
 					cacheSizeDelta = transitionMemState(entry, BlockState.REMOVED);
+					entry.setDataUnsafe(null);
 				}
 
 			}

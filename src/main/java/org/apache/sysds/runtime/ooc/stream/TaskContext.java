@@ -19,16 +19,20 @@
 
 package org.apache.sysds.runtime.ooc.stream;
 
+import java.util.ArrayDeque;
+
 public class TaskContext {
 	private static final ThreadLocal<TaskContext> CTX = new ThreadLocal<>();
 
-	private Runnable _deferred;
+	private ArrayDeque<Runnable> _deferred;
 
 	public static TaskContext getContext() {
 		return CTX.get();
 	}
 
 	public static void setContext(TaskContext context) {
+		if(CTX.get() != null)
+			throw new IllegalStateException();
 		CTX.set(context);
 	}
 
@@ -42,18 +46,18 @@ public class TaskContext {
 			deferred.run();
 			return;
 		}
-		if(ctx._deferred != null)
-			throw new IllegalStateException("Cannot defer multiple tasks within the same context");
-		ctx._deferred = deferred;
+		if(ctx._deferred == null)
+			ctx._deferred = new ArrayDeque<>();
+		ctx._deferred.add(deferred);
 	}
 
 	public static boolean runDeferred() {
 		TaskContext ctx = CTX.get();
-		Runnable deferred = ctx._deferred;
-		if(deferred == null)
+		if(ctx == null || ctx._deferred == null || ctx._deferred.isEmpty())
 			return false;
-		ctx._deferred = null;
-		deferred.run();
+		Runnable deferred;
+		while((deferred = ctx._deferred.poll()) != null)
+			deferred.run();
 		return true;
 	}
 }

@@ -550,6 +550,8 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 			// 2. write indexes and block
 			IndexedMatrixValue imv = (IndexedMatrixValue) entry.getDataUnsafe(); // Get data without requiring pin
+			if(imv == null)
+				return 0;
 			imv.getIndexes().write(dos); // write Indexes
 			imv.getValue().write(dos);
 
