@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.commons.lang3.NotImplementedException;
+import org.apache.commons.lang3.mutable.MutableObject;
 import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
@@ -32,6 +33,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.util.IndexRange;
 
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -114,6 +116,7 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 				final int outBlockRows = (int) Math.ceil((double) (ix.rowSpan() + 1) / blocksize);
 				final int outBlockCols = (int) Math.ceil((double) (ix.colSpan() + 1) / blocksize);
 				final int totalBlocks = outBlockRows * outBlockCols;
+				final boolean isCached = qIn.hasStreamCache();
 				final AtomicInteger producedBlocks = new AtomicInteger(0);
 				CompletableFuture<Void> future = new  CompletableFuture<>();
 
@@ -134,7 +137,8 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 					MatrixBlock outBlock;
 					if(rowStartLocal == 0 && rowEndLocal == block.getNumRows() - 1 && colStartLocal == 0 &&
 						colEndLocal == block.getNumColumns() - 1) {
-						outBlock = block;
+						// If the block is cached, we need to copy because otherwise it could lead to nullpointers
+						outBlock = isCached ? new MatrixBlock(block) : block;
 					}
 					else {
 						outBlock = block.slice(rowStartLocal, rowEndLocal, colStartLocal, colEndLocal);
@@ -163,18 +167,28 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 
 			// We may need to construct our own intermediate stream to properly manage the cached items
 			boolean hasIntermediateStream = !qIn.hasStreamCache();
-			final CachingStream cachedStream = hasIntermediateStream ? new CachingStream(new SubscribableTaskQueue<>()) : qOut.getStreamCache();
-			cachedStream.activateIndexing();
-			cachedStream.incrSubscriberCount(1); // We may require re-consumption of blocks (up to 4 times)
 			final CompletableFuture<Void> future = new CompletableFuture<>();
 
-			filterOOC(qIn.getReadStream(), tmp -> {
-				if (hasIntermediateStream) {
-					// We write to an intermediate stream to ensure that these matrix blocks are properly cached
-					cachedStream.getWriteStream().enqueue(tmp);
-				}
+			OOCStream<IndexedMatrixValue> filteredStream = filteredOOCStream(qIn, tmp -> {
+				boolean pass = !future.isDone();
+				// Pre-filter incoming blocks to avoid unnecessary task submission
+				long blockRow = tmp.getIndexes().getRowIndex() - 1;
+				long blockCol = tmp.getIndexes().getColumnIndex() - 1;
+				pass &= blockRow >= firstBlockRow && blockRow <= lastBlockRow && blockCol >= firstBlockCol &&
+					blockCol <= lastBlockCol;
 
-				boolean completed = aligner.putNext(tmp.getIndexes(), tmp.getIndexes(), (idx, sector) -> {
+				if(!pass && !hasIntermediateStream)
+					qIn.getStreamCache().incrProcessingCount(qIn.getStreamCache().findCachedIndex(tmp.getIndexes()), 1);
+				return pass;
+			});
+
+			final CachingStream cachedStream = hasIntermediateStream ? new CachingStream(filteredStream) : qIn.getStreamCache();
+			cachedStream.activateIndexing();
+			cachedStream.incrSubscriberCount(1); // We may require re-consumption of blocks (up to 4 times)
+			OOCStream<IndexedMatrixValue> readStream = cachedStream.getReadStream();
+
+			submitOOCTasks(readStream, tmp -> {
+				boolean completed = aligner.putNext(tmp.get().getIndexes(), tmp.get().getIndexes(), (idx, sector) -> {
 					int targetBlockRow = (int) (idx.getRowIndex() - 1);
 					int targetBlockCol = (int) (idx.getColumnIndex() - 1);
 
@@ -252,22 +266,9 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 
 				if(completed)
 					future.complete(null);
-			}, tmp -> {
-				if (future.isDone()) // Then we may skip blocks and avoid submitting tasks
-					return false;
-
-				// Pre-filter incoming blocks to avoid unnecessary task submission
-				long blockRow = tmp.getIndexes().getRowIndex() - 1;
-				long blockCol = tmp.getIndexes().getColumnIndex() - 1;
-				return blockRow >= firstBlockRow && blockRow <= lastBlockRow && blockCol >= firstBlockCol &&
-					blockCol <= lastBlockCol;
 			}, () -> {
 				aligner.close();
 				qOut.closeInput();
-			}, tmp -> {
-				// If elements are not processed in an existing caching stream, we increment the process counter to allow block deletion
-				if (!hasIntermediateStream)
-					cachedStream.incrProcessingCount(cachedStream.findCachedIndex(tmp.getIndexes()), 1);
 			});
 
 			if (hasIntermediateStream)

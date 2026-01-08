@@ -31,7 +31,7 @@ import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
-import org.apache.sysds.runtime.ooc.stream.OOCSourceStream;
+import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
 import org.apache.sysds.runtime.ooc.stream.message.OOCRequestRangeMsg;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
@@ -106,7 +106,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 						if (!_cacheInProgress)
 							throw new DMLRuntimeException("Stream is closed");
 						OOCIOHandler.SourceBlockDescriptor descriptor = null;
-						if (_source instanceof OOCSourceStream src) {
+						if (_source instanceof SourceOOCStream src) {
 							descriptor = src.getDescriptor(task.getIndexes());
 						}
 						if (descriptor == null) {

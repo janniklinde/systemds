@@ -220,6 +220,11 @@ public class OOCCacheManager {
 		}
 
 		@Override
+		public boolean isFailure() {
+			return _failure != null;
+		}
+
+		@Override
 		public void close() {
 			if(_pinned.compareAndSet(true, false)) {
 				_data = null;

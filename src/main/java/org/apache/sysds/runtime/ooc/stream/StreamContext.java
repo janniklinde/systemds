@@ -31,6 +31,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class StreamContext {
 	private Set<OOCStream<?>> _inStreams;
 	private Set<OOCStream<?>> _outStreams;
+	private DMLRuntimeException _failure;
 
 	public boolean inStreamsDefined() {
 		return _inStreams != null;
@@ -40,21 +41,23 @@ public class StreamContext {
 		return _outStreams != null;
 	}
 
-	public void addInStream(OOCStream<?>... inStream) {
+	public StreamContext addInStream(OOCStream<?>... inStream) {
 		if(_inStreams == null)
 			_inStreams = ConcurrentHashMap.newKeySet();
 		_inStreams.addAll(List.of(inStream));
+		return this;
 	}
 
-	public void addOutStream(OOCStream<?>... outStream) {
+	public StreamContext addOutStream(OOCStream<?>... outStream) {
 		if(outStream.length == 0 && _outStreams == null) {
 			_outStreams = Collections.emptySet();
-			return;
+			return this;
 		}
 
 		if(_outStreams == null || _outStreams.isEmpty())
 			_outStreams = ConcurrentHashMap.newKeySet();
 		_outStreams.addAll(List.of(outStream));
+		return this;
 	}
 
 	public Collection<OOCStream<?>> inStreams() {
@@ -66,6 +69,10 @@ public class StreamContext {
 	}
 
 	public void failAll(DMLRuntimeException e) {
+		if(_failure != null)
+			return;
+		_failure = e;
+
 		for(OOCStream<?> stream : _outStreams) {
 			try {
 				stream.propagateFailure(e);
@@ -79,5 +86,10 @@ public class StreamContext {
 			}
 			catch(Throwable ignored) {}
 		}
+	}
+
+	public void clear() {
+		_inStreams = null;
+		_outStreams = null;
 	}
 }

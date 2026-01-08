@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
+import org.apache.sysds.runtime.ooc.stream.FilteredOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.stream.TaskContext;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
@@ -48,6 +49,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -60,7 +62,6 @@ import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
-import java.util.stream.Stream;
 
 public abstract class OOCInstruction extends Instruction {
 	public static final ExecutorService COMPUTE_EXECUTOR = CommonThreadPool.get();
@@ -79,7 +80,6 @@ public abstract class OOCInstruction extends Instruction {
 	protected final OOCInstruction.OOCType _ooctype;
 	protected final boolean _requiresLabelUpdate;
 	protected StreamContext _streamContext;
-	private boolean _failed;
 	private LongAdder _localStatisticsAdder;
 	public final int _callerId;
 
@@ -94,7 +94,6 @@ public abstract class OOCInstruction extends Instruction {
 		instOpcode = opcode;
 
 		_requiresLabelUpdate = super.requiresLabelUpdate();
-		_failed = false;
 
 		if (DMLScript.STATISTICS)
 			_localStatisticsAdder = new LongAdder();
@@ -183,6 +182,10 @@ public abstract class OOCInstruction extends Instruction {
 		return submitOOCTasks(qIn, c -> processor.accept(c.get()), finalizer, p -> predicate.apply(p.get()), onNotProcessed != null ? (i, tmp) -> onNotProcessed.accept(tmp.get()) : null);
 	}
 
+	protected <T> OOCStream<T> filteredOOCStream(OOCStream<T> qIn, Function<T, Boolean> predicate) {
+		return new FilteredOOCStream<>(qIn, predicate);
+	}
+
 	protected <T, R> CompletableFuture<Void> mapOOC(OOCStream<T> qIn, OOCStream<R> qOut, Function<T, R> mapper) {
 		addInStream(qIn);
 		addOutStream(qOut);
@@ -196,6 +199,31 @@ public abstract class OOCInstruction extends Instruction {
 				throw e instanceof DMLRuntimeException ? (DMLRuntimeException) e : new DMLRuntimeException(e);
 			}
 			qOut.enqueue(r);
+		};
+
+		return submitOOCTasks(qIn, exec, qOut::closeInput, tmp -> {
+			// Try to run as a predicate to prefer pipelining rather than fan-out
+			if(ForkJoinTask.getPool() == COMPUTE_EXECUTOR) {
+				exec.accept(tmp);
+				return false;
+			}
+			return true;
+		}, (i, tmp) -> {});
+	}
+
+	protected <T, R> CompletableFuture<Void> optionalMapOOC(OOCStream<T> qIn, OOCStream<R> qOut, Function<T, Optional<R>> optionalMapper) {
+		addInStream(qIn);
+		addOutStream(qOut);
+
+		Consumer<OOCStream.QueueCallback<T>> exec = tmp -> {
+			Optional<R> r;
+			try(tmp) {
+				r = optionalMapper.apply(tmp.get());
+			}
+			catch(Exception e) {
+				throw e instanceof DMLRuntimeException ? (DMLRuntimeException) e : new DMLRuntimeException(e);
+			}
+			r.ifPresent(qOut::enqueue);
 		};
 
 		return submitOOCTasks(qIn, exec, qOut::closeInput, tmp -> {
@@ -548,7 +576,9 @@ public abstract class OOCInstruction extends Instruction {
 
 		final CompletableFuture<Void> globalFuture = CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new));
 		final StreamContext streamContext = _streamContext; // Snapshot of the current stream context
-		final Runnable oocFinalizer = oocTask(finalizer, null, Stream.concat(streamContext.outStreams().stream(), streamContext.inStreams().stream()).toArray(OOCStream[]::new));
+		if(streamContext == null || !streamContext.inStreamsDefined() || !streamContext.outStreamsDefined())
+			throw new IllegalArgumentException("Explicit specification of all output streams is required before submitting tasks. If no output streams are present use addOutStream().");
+		final Runnable oocFinalizer = oocTask(finalizer, null, streamContext);
 
 		int i = 0;
 		@SuppressWarnings("unused")
@@ -595,27 +625,29 @@ public abstract class OOCInstruction extends Instruction {
 
 					COMPUTE_IN_FLIGHT.incrementAndGet();
 					try {
-						COMPUTE_EXECUTOR.submit(oocTask(() -> {
-						long taskStartTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
-						try(pinned) {
-							consumer.accept(k, pinned);
-
+						Runnable oocTask = oocTask(() -> {
+							long taskStartTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
+							try(pinned) {
+								consumer.accept(k, pinned);
+							}
+							finally {
+								COMPUTE_IN_FLIGHT.decrementAndGet();
+								if (DMLScript.STATISTICS) {
+									_localStatisticsAdder.add(System.nanoTime() - taskStartTime);
+									if (globalFuture.isDone()) {
+										Statistics.maintainOOCHeavyHitter(getExtendedOpcode(), _localStatisticsAdder.sum());
+										_localStatisticsAdder.reset();
+									}
+									if (DMLScript.OOC_LOG_EVENTS)
+										OOCEventLog.onComputeEvent(_callerId, taskStartTime, System.nanoTime());
+								}
+							}
+						}, localFuture, streamContext);
+						COMPUTE_EXECUTOR.submit(() -> {
+							oocTask.run();
 							if(localTaskCtr.decrementAndGet() == 0)
 								localFuture.complete(null);
-						}
-						finally {
-							COMPUTE_IN_FLIGHT.decrementAndGet();
-							if (DMLScript.STATISTICS) {
-								_localStatisticsAdder.add(System.nanoTime() - taskStartTime);
-								if (globalFuture.isDone()) {
-									Statistics.maintainOOCHeavyHitter(getExtendedOpcode(), _localStatisticsAdder.sum());
-									_localStatisticsAdder.reset();
-								}
-								if (DMLScript.OOC_LOG_EVENTS)
-									OOCEventLog.onComputeEvent(_callerId, taskStartTime, System.nanoTime());
-							}
-						}
-					}, localFuture, Stream.concat(streamContext.outStreams().stream(), streamContext.inStreams().stream()).toArray(OOCStream[]::new)));
+						});
 					}
 					catch (Exception e) {
 						COMPUTE_IN_FLIGHT.decrementAndGet();
@@ -638,7 +670,7 @@ public abstract class OOCInstruction extends Instruction {
 						}
 					}
 				}
-			}, null,  Stream.concat(streamContext.outStreams().stream(), streamContext.inStreams().stream()).toArray(OOCStream[]::new)));
+			}, null,  streamContext));
 
 			i++;
 		}
@@ -656,6 +688,7 @@ public abstract class OOCInstruction extends Instruction {
 			}
 
 			oocFinalizer.run();
+			streamContext.clear();
 			return null;
 		});
 	}
@@ -668,7 +701,7 @@ public abstract class OOCInstruction extends Instruction {
 		return submitOOCTasks(List.of(queue), (i, tmp) -> consumer.accept(tmp), finalizer, List.of(new CompletableFuture<Void>()), (i, tmp) -> predicate.apply(tmp), onNotProcessed);
 	}
 
-	protected CompletableFuture<Void> submitOOCTask(Runnable r, OOCStream<?>... queues) {
+	protected CompletableFuture<Void> submitOOCTask(Runnable r, StreamContext ctx) {
 		ExecutorService pool = CommonThreadPool.get();
 		final CompletableFuture<Void> future = new CompletableFuture<>();
 		try {
@@ -678,6 +711,7 @@ public abstract class OOCInstruction extends Instruction {
 				try {
 					r.run();
 					future.complete(null);
+					ctx.clear();
 					if (DMLScript.STATISTICS)
 						Statistics.maintainOOCHeavyHitter(getExtendedOpcode(), System.nanoTime() - startTime);
 					if (DMLScript.OOC_LOG_EVENTS)
@@ -686,7 +720,7 @@ public abstract class OOCInstruction extends Instruction {
 				finally {
 					COMPUTE_IN_FLIGHT.decrementAndGet();
 				}
-				}, future, queues));
+				}, future, ctx));
 		}
 		catch (Exception ex) {
 			COMPUTE_IN_FLIGHT.decrementAndGet();
@@ -699,7 +733,7 @@ public abstract class OOCInstruction extends Instruction {
 		return future;
 	}
 
-	private Runnable oocTask(Runnable r, CompletableFuture<Void> future,  OOCStream<?>... queues) {
+	private Runnable oocTask(Runnable r, CompletableFuture<Void> future,  StreamContext ctx) {
 		return () -> {
 			boolean setContext = TaskContext.getContext() == null;
 			if(setContext)
@@ -714,22 +748,8 @@ public abstract class OOCInstruction extends Instruction {
 			}
 			catch (Exception ex) {
 				DMLRuntimeException re = ex instanceof DMLRuntimeException ? (DMLRuntimeException) ex : new DMLRuntimeException(ex);
-				LOG.error(re.getMessage(), re);
 
-				synchronized(this) {
-					if(_failed) // Do avoid infinite cycles
-						throw re;
-
-					_failed = true;
-				}
-
-				for(OOCStream<?> q : queues) {
-					try {
-						q.propagateFailure(re);
-					} catch(Throwable ignore) {
-						// Should not happen, but catch just in case
-					}
-				}
+				ctx.failAll(re);
 
 				if (future != null)
 					future.completeExceptionally(re);
@@ -745,7 +765,7 @@ public abstract class OOCInstruction extends Instruction {
 		};
 	}
 
-	private <T> Consumer<OOCStream.QueueCallback<T>> oocTask(Consumer<OOCStream.QueueCallback<T>> c, CompletableFuture<Void> future,  OOCStream<?>... queues) {
+	private <T> Consumer<OOCStream.QueueCallback<T>> oocTask(Consumer<OOCStream.QueueCallback<T>> c, CompletableFuture<Void> future,  StreamContext ctx) {
 		return callback -> {
 			try {
 				c.accept(callback);
@@ -753,20 +773,7 @@ public abstract class OOCInstruction extends Instruction {
 			catch (Exception ex) {
 				DMLRuntimeException re = ex instanceof DMLRuntimeException ? (DMLRuntimeException) ex : new DMLRuntimeException(ex);
 
-				synchronized(this) {
-					if (_failed) // Do avoid infinite cycles
-						throw re;
-
-					_failed = true;
-				}
-
-				for(OOCStream<?> q : queues) {
-					try {
-						q.propagateFailure(re);
-					} catch(Throwable ignored) {
-						// Should not happen, but catch just in case
-					}
-				}
+				ctx.failAll(re);
 
 				if (future != null)
 					future.completeExceptionally(re);

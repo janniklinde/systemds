@@ -31,12 +31,12 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.LockSupport;
 
-public class OOCSourceStream extends SubscribableTaskQueue<IndexedMatrixValue> {
+public class SourceOOCStream extends SubscribableTaskQueue<IndexedMatrixValue> {
 	private final ConcurrentHashMap<MatrixIndexes, OOCIOHandler.SourceBlockDescriptor> _idx;
 	private static final long BACKPRESSURE_PARK_NANOS = 1_000_000L;
 	private static final long MAX_BACKPRESSURE_PARK_NANOS = 2_000_000_000L;
 
-	public OOCSourceStream() {
+	public SourceOOCStream() {
 		this._idx = new ConcurrentHashMap<>();
 	}
 

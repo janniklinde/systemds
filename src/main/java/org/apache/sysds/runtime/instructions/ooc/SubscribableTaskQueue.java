@@ -156,7 +156,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		if (dc != null && dc.dimsKnown() && dc.getBlocksize() > 0) {
 			long expected = dc.getNumBlocks();
 			if (expected >= 0 && _blockCount.get() != expected) {
-				throw new DMLRuntimeException("CachingStream block count mismatch: expected "
+				throw new DMLRuntimeException("OOCStream block count mismatch: expected "
 					+ expected + " but saw " + _blockCount.get() + " (" + dc.getRows() + "x" + dc.getCols() + ")");
 			}
 		}

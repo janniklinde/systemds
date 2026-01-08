@@ -33,7 +33,7 @@ import org.apache.sysds.runtime.io.MatrixReader;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
-import org.apache.sysds.runtime.ooc.stream.OOCSourceStream;
+import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
 import org.apache.sysds.runtime.util.FastBufferedDataInputStream;
 import org.apache.sysds.runtime.util.FastBufferedDataOutputStream;
 import org.apache.sysds.runtime.util.LocalFileUtils;
@@ -295,8 +295,13 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		}
 
 		if(!anyTask) {
-			tryCloseTarget(request.target, true);
-			result.complete(new SourceReadResult(bytesRead.get(), true, null, List.of()));
+			try {
+				closeTarget(request.target, true);
+				result.complete(new SourceReadResult(bytesRead.get(), true, null, List.of()));
+			}
+			catch(DMLRuntimeException e) {
+				result.completeExceptionally(e);
+			}
 		}
 
 		return result;
@@ -311,16 +316,23 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			return;
 		}
 
-		if (budgetHit.get()) {
-			if (!request.keepOpenOnLimit)
-				tryCloseTarget(request.target, false);
-			SourceReadContinuation cont = new SourceReadState(request, files, filePositions, completed);
-			future.complete(new SourceReadResult(bytesRead.get(), false, cont, new ArrayList<>(descriptors)));
-			return;
-		}
+		try {
+			if (budgetHit.get()) {
+				if(!request.keepOpenOnLimit) {
+					closeTarget(request.target, false);
+				}
+				SourceReadContinuation cont = new SourceReadState(request, files, filePositions, completed);
+				future.complete(new SourceReadResult(bytesRead.get(), false, cont, new ArrayList<>(descriptors)));
 
-		tryCloseTarget(request.target, true);
-		future.complete(new SourceReadResult(bytesRead.get(), true, null, new ArrayList<>(descriptors)));
+				return;
+			}
+
+			closeTarget(request.target, true);
+			future.complete(new SourceReadResult(bytesRead.get(), true, null, new ArrayList<>(descriptors)));
+		}
+		catch(DMLRuntimeException e) {
+			future.completeExceptionally(e);
+		}
 	}
 
 	private void readSequenceFile(JobConf job, Path path, SourceReadRequest request, int fileIdx,
@@ -361,7 +373,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 				SourceBlockDescriptor descriptor = new SourceBlockDescriptor(path.toString(), request.format, outIdx,
 					recordStart, (int)(recordEnd - recordStart), blockSize);
 
-				if (request.target instanceof OOCSourceStream src)
+				if (request.target instanceof SourceOOCStream src)
 					src.enqueue(imv, descriptor);
 				else
 					request.target.enqueue(imv);
@@ -384,12 +396,13 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		}
 	}
 
-	private void tryCloseTarget(org.apache.sysds.runtime.instructions.ooc.OOCStream<IndexedMatrixValue> target, boolean close) {
-		if (close) {
+	private void closeTarget(org.apache.sysds.runtime.instructions.ooc.OOCStream<IndexedMatrixValue> target, boolean close) {
+		if(close) {
 			try {
 				target.closeInput();
 			}
-			catch(Exception ignored) {
+			catch(Exception ex) {
+				throw ex instanceof DMLRuntimeException ? (DMLRuntimeException) ex : new DMLRuntimeException(ex);
 			}
 		}
 	}
