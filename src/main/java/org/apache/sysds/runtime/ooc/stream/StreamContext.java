@@ -92,4 +92,11 @@ public class StreamContext {
 		_inStreams = null;
 		_outStreams = null;
 	}
+
+	public StreamContext copy() {
+		StreamContext cpy = new StreamContext();
+		cpy._inStreams = _inStreams;
+		cpy._outStreams = _outStreams;
+		return cpy;
+	}
 }

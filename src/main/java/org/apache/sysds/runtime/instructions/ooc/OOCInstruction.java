@@ -414,8 +414,7 @@ public abstract class OOCInstruction extends Instruction {
 		if(qIn == null || on == null || qIn.size() != on.size())
 			throw new DMLRuntimeException("joinOOC(list) requires the same number of streams and key functions.");
 
-		addInStream(qIn.toArray(OOCStream[]::new));
-		addOutStream(qOut);
+
 
 		final int n = qIn.size();
 
@@ -452,6 +451,9 @@ public abstract class OOCInstruction extends Instruction {
 
 		AtomicInteger processing = new AtomicInteger(1);
 		CompletableFuture<Void> mFuture = new CompletableFuture<>();
+
+		addInStream(qIn.toArray(OOCStream[]::new));
+		addOutStream(qOut);
 
 		submitOOCTasks(rStreams,
 			(i, tmp) -> {
@@ -575,7 +577,7 @@ public abstract class OOCInstruction extends Instruction {
 			activeTaskCtrs.add(new AtomicInteger(1));
 
 		final CompletableFuture<Void> globalFuture = CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new));
-		final StreamContext streamContext = _streamContext; // Snapshot of the current stream context
+		final StreamContext streamContext = _streamContext.copy(); // Snapshot of the current stream context
 		if(streamContext == null || !streamContext.inStreamsDefined() || !streamContext.outStreamsDefined())
 			throw new IllegalArgumentException("Explicit specification of all output streams is required before submitting tasks. If no output streams are present use addOutStream().");
 		final Runnable oocFinalizer = oocTask(finalizer, null, streamContext);
