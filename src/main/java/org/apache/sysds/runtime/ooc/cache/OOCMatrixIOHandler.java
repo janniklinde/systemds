@@ -74,6 +74,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 	private final String _spillDir;
 	private final ThreadPoolExecutor _writeExec;
 	private final ThreadPoolExecutor _readExec;
+	private final ThreadPoolExecutor _srcReadExec;
 
 	// Spill related structures
 	private final ConcurrentHashMap<String, SpillLocation> _spillLocations =  new ConcurrentHashMap<>();
@@ -98,6 +99,12 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			TimeUnit.MILLISECONDS,
 			new ArrayBlockingQueue<>(100000));
 		_readExec = new ThreadPoolExecutor(
+			READER_SIZE,
+			READER_SIZE,
+			0L,
+			TimeUnit.MILLISECONDS,
+			new ArrayBlockingQueue<>(100000));
+		_srcReadExec = new ThreadPoolExecutor(
 			READER_SIZE,
 			READER_SIZE,
 			0L,
@@ -261,7 +268,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 				continue;
 			final int fileIdx = i;
 			try {
-				_readExec.submit(() -> {
+				_srcReadExec.submit(() -> {
 					try {
 						readSequenceFile(job, files[fileIdx], request, fileIdx, filePositions, completed, stop,
 							budgetHit, bytesRead, byteLimit, budgetLock, descriptors);
