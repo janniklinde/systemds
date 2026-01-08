@@ -81,6 +81,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 			throw new DMLRuntimeException("Cannot enqueue into closed SubscribableTaskQueue");
 		}
 
+		_blockCount.incrementAndGet();
 
 		Consumer<QueueCallback<T>> s = _subscriber;
 		final Consumer<QueueCallback<T>> fS = s;

@@ -108,6 +108,11 @@ public interface OOCCacheScheduler {
 	long getCacheSize();
 
 	/**
+	 * Returns if the current cache size is within its defined memory limits.
+	 */
+	boolean isWithinLimits();
+
+	/**
 	 * Shuts down the cache scheduler.
 	 */
 	void shutdown();

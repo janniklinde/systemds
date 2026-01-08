@@ -329,6 +329,11 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	}
 
 	@Override
+	public boolean isWithinLimits() {
+		return _cacheSize < _hardLimit;
+	}
+
+	@Override
 	public synchronized void shutdown() {
 		this._running = false;
 		_cache.clear();

@@ -23,6 +23,7 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
@@ -59,10 +60,10 @@ public class OOCSourceStream extends SubscribableTaskQueue<IndexedMatrixValue> {
 
 	private void waitForBackpressure() {
 		int limit = OOCInstruction.getComputeBackpressureThreshold();
-		if (limit <= 0)
+		if(limit <= 0)
 			return;
 		long parkNanos = BACKPRESSURE_PARK_NANOS;
-		while (OOCInstruction.getComputeInFlight() > limit) {
+		while(!OOCCacheManager.canClaimMemory()) {
 			LockSupport.parkNanos(parkNanos);
 			if (Thread.interrupted())
 				throw new DMLRuntimeException(new InterruptedException());
@@ -73,7 +74,7 @@ public class OOCSourceStream extends SubscribableTaskQueue<IndexedMatrixValue> {
 
 	@Override
 	public void messageUpstream(OOCStreamMessage msg) {
-		if (msg.isCancelled())
+		if(msg.isCancelled())
 			return;
 		super.messageUpstream(msg);
 	}

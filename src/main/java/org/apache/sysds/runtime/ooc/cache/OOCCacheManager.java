@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.ooc.cache;
 
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.instructions.ooc.OOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
@@ -159,6 +160,10 @@ public class OOCCacheManager {
 	public static CompletableFuture<List<OOCStream.QueueCallback<IndexedMatrixValue>>> requestManyBlocks(List<BlockKey> keys) {
 		return getCache().request(keys).thenApply(
 			l -> l.stream().map(e -> (OOCStream.QueueCallback<IndexedMatrixValue>)new CachedQueueCallback<IndexedMatrixValue>(e, null)).toList());
+	}
+
+	public static boolean canClaimMemory() {
+		return getCache().isWithinLimits() && OOCInstruction.getComputeInFlight() <= OOCInstruction.getComputeBackpressureThreshold();
 	}
 
 	private static void pin(BlockEntry entry) {
