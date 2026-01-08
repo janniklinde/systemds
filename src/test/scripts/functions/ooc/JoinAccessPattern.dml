@@ -24,10 +24,8 @@ X = read($1);
 Y = read($2);
 
 for (i in 1:15) {
-    #X = X * Y / X + X - Y * X;
-    #Y = X + Y;
+    X = X * Y / X + X - Y * X;
     X = X * 5;
 }
 
-out = colSums(X);
-write(out, $3, format="binary");
+write(X, $3, format="binary");

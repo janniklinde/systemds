@@ -85,11 +85,9 @@ public class JoinAccessPatternTest extends AutomatedTestBase {
 		try {
 			getAndLoadTestConfiguration(TEST_NAME1);
 
-			String largeMatrix = "/home/jannik/Dev/OOCExperiments/data/mat_1000000x1000s1.0_1";
-
 			String HOME = SCRIPT_DIR + TEST_DIR;
 			fullDMLScriptName = HOME + TEST_NAME1 + ".dml";
-			programArgs = new String[] {"-explain", "-stats", "-ooc", "-args", largeMatrix/*input(INPUT_NAME_1)*/, input(INPUT_NAME_2), output(OUTPUT_NAME)};
+			programArgs = new String[] {"-explain", "-stats", "-ooc", "-args", input(INPUT_NAME_1), input(INPUT_NAME_2), output(OUTPUT_NAME)};
 
 			// 1. Generate the data in-memory as MatrixBlock objects
 			double[][] X_data = getRandomMatrix(rows, cols, 1, maxVal, sparse1 ? sparsity2 : sparsity1, 7);
