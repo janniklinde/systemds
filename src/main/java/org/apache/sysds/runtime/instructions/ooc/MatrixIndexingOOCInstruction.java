@@ -32,6 +32,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.util.IndexRange;
 
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -118,10 +119,16 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 				final AtomicInteger producedBlocks = new AtomicInteger(0);
 				CompletableFuture<Void> future = new  CompletableFuture<>();
 
-				filterOOC(qIn, tmp -> {
-					MatrixIndexes inIdx = tmp.getIndexes();
-					long blockRow = inIdx.getRowIndex() - 1;
-					long blockCol = inIdx.getColumnIndex() - 1;
+				optionalMapOOC(qIn, qOut, tmp -> {
+					if (future.isDone()) // Then we may skip blocks and avoid submitting tasks
+						return Optional.empty();
+
+					long blockRow = tmp.getIndexes().getRowIndex() - 1;
+					long blockCol = tmp.getIndexes().getColumnIndex() - 1;
+					boolean within = blockRow >= firstBlockRow && blockRow <= lastBlockRow &&
+						blockCol >= firstBlockCol && blockCol <= lastBlockCol;
+					if(!within)
+						return Optional.empty();
 
 					MatrixBlock block = (MatrixBlock) tmp.getValue();
 
@@ -144,19 +151,11 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 
 					long outBlockRow = blockRow - firstBlockRow + 1;
 					long outBlockCol = blockCol - firstBlockCol + 1;
-					qOut.enqueue(new IndexedMatrixValue(new MatrixIndexes(outBlockRow, outBlockCol), outBlock));
 
 					if(producedBlocks.incrementAndGet() >= totalBlocks)
 						future.complete(null);
-				}, tmp -> {
-					if (future.isDone()) // Then we may skip blocks and avoid submitting tasks
-						return false;
-
-					long blockRow = tmp.getIndexes().getRowIndex() - 1;
-					long blockCol = tmp.getIndexes().getColumnIndex() - 1;
-					return blockRow >= firstBlockRow && blockRow <= lastBlockRow && blockCol >= firstBlockCol &&
-						blockCol <= lastBlockCol;
-				}, qOut::closeInput);
+					return Optional.of(new IndexedMatrixValue(new MatrixIndexes(outBlockRow, outBlockCol), outBlock));
+				});
 				return;
 			}
 

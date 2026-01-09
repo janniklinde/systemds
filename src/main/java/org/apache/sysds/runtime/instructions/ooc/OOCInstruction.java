@@ -199,7 +199,6 @@ public abstract class OOCInstruction extends Instruction {
 				throw e instanceof DMLRuntimeException ? (DMLRuntimeException) e : new DMLRuntimeException(e);
 			}
 			TaskContext.defer(() -> qOut.enqueue(r));
-			//qOut.enqueue(r);
 		};
 
 		return submitOOCTasks(qIn, exec, () -> TaskContext.defer(qOut::closeInput), tmp -> {
