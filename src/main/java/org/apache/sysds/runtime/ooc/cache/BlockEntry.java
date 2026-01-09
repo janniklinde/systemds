@@ -27,6 +27,7 @@ public final class BlockEntry {
 	private volatile int _pinCount;
 	private volatile BlockState _state;
 	private Object _data;
+	private int _retainHintCount;
 
 	BlockEntry(BlockKey key, long size, Object data) {
 		this._key = key;
@@ -34,6 +35,7 @@ public final class BlockEntry {
 		this._pinCount = 0;
 		this._state = BlockState.HOT;
 		this._data = data;
+		this._retainHintCount = 0;
 	}
 
 	public BlockKey getKey() {
@@ -68,6 +70,20 @@ public final class BlockEntry {
 
 	synchronized void setState(BlockState state) {
 		_state = state;
+	}
+
+	synchronized void addRetainHint() {
+		_retainHintCount++;
+	}
+
+	synchronized void removeRetainHint() {
+		if (_retainHintCount <= 0)
+			throw new IllegalStateException("Cannot remove retain hint below zero");
+		_retainHintCount--;
+	}
+
+	synchronized int getRetainHintCount() {
+		return _retainHintCount;
 	}
 
 	/**

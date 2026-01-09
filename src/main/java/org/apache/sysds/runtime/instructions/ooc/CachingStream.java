@@ -75,7 +75,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	private DMLRuntimeException _failure;
 
-	private boolean deletable = false;
+	private boolean _deletable = false;
 	private int maxConsumptionCount = 0;
 	private String _watchdogId = null;
 
@@ -201,13 +201,13 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	}
 
 	public synchronized void scheduleDeletion() {
-		if (deletable)
+		if (_deletable)
 			return; // Deletion already scheduled
 
 		if (_cacheInProgress && maxConsumptionCount == 0)
 			throw new DMLRuntimeException("Cannot have a caching stream with no listeners");
 
-		deletable = true;
+		_deletable = true;
 		for (int i = 0; i < _consumptionCounts.size(); i++) {
 			tryDeleteBlock(i);
 		}
@@ -233,7 +233,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		int newConsumerCount = _consumerConsumptionCounts.getInt(consumerIdx)+1;
 		_consumerConsumptionCounts.set(consumerIdx, newConsumerCount);
 
-		if (deletable)
+		if (_deletable)
 			tryDeleteBlock(blockIdx);
 
 		return !_cacheInProgress && newConsumerCount == _numBlocks + 1;
@@ -262,7 +262,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 								throw new DMLRuntimeException("Consumer overflow! Expected: " + maxConsumptionCount);
 							_consumptionCounts.set(idx, newCount);
 
-							if(deletable)
+							if(_deletable)
 								tryDeleteBlock(idx);
 						}
 						return cb;
@@ -297,7 +297,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		} catch (InterruptedException | ExecutionException e) {
 			return new OOCStream.SimpleQueueCallback<>(null, new DMLRuntimeException(e));
 		} finally {
-			if (deletable)
+			if (_deletable)
 				tryDeleteBlock(mIdx);
 		}
 	}
@@ -499,7 +499,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	}
 
 	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers) {
-		if(deletable)
+		if(_deletable)
 			throw new DMLRuntimeException("Cannot register a new subscriber on " + this + " because has been flagged for deletion");
 		if(_failure != null)
 			throw _failure;
@@ -551,7 +551,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	 * Only use if certain blocks are accessed more than once.
 	 */
 	public synchronized void incrSubscriberCount(int count) {
-		if (deletable)
+		if (_deletable)
 			throw new IllegalStateException("Cannot increment the subscriber count if flagged for deletion");
 
 		maxConsumptionCount += count;
@@ -564,7 +564,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		int cnt = _consumptionCounts.getInt(i)+count;
 		_consumptionCounts.set(i, cnt);
 
-		if (deletable)
+		if (_deletable)
 			tryDeleteBlock(i);
 	}
 }

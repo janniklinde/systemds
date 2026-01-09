@@ -118,7 +118,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		Statistics.incrementOOCEvictionGet(keys.size());
 
 		List<BlockEntry> entries = new ArrayList<>(keys.size());
-		boolean couldPinAll = true;
+		boolean allAvailable = true;
 
 		synchronized(this) {
 			for (BlockKey key : keys) {
@@ -128,35 +128,41 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 				if (entry == null)
 					throw new IllegalArgumentException("Could not find requested block with key " + key);
 
-				if (couldPinAll) {
-					synchronized(entry) {
-						if(entry.getState().isAvailable()) {
-							if(entry.pin() == 0)
-								throw new IllegalStateException();
-						}
-						else {
-							couldPinAll = false;
-						}
-					}
-
-					if (!couldPinAll) {
-						// Undo pin for all previous entries
-						for (BlockEntry e : entries)
-							e.unpin(); // Do not unpin using unpin(...) method to avoid explicit eviction on memory pressure
-					}
+				synchronized(entry) {
+					if(!entry.getState().isAvailable())
+						allAvailable = false;
 				}
 				entries.add(entry);
 			}
+
+			if(allAvailable) {
+				for(BlockEntry entry : entries) {
+					synchronized(entry) {
+						if(entry.pin() == 0)
+							throw new IllegalStateException();
+					}
+				}
+			}
 		}
 
-		if (couldPinAll) {
+		if (allAvailable) {
 			// Then we could pin all entries
 			return CompletableFuture.completedFuture(entries);
 		}
 
 		// Schedule deferred read otherwise
 		final  CompletableFuture<List<BlockEntry>> future = new CompletableFuture<>();
-		scheduleDeferredRead(new DeferredReadRequest(future, entries));
+		DeferredReadRequest request = new DeferredReadRequest(future, entries);
+		for (int i = 0; i < entries.size(); i++) {
+			BlockEntry entry = entries.get(i);
+			synchronized(entry) {
+				if (entry.getState().isAvailable()) {
+					entry.addRetainHint();
+					request.markRetainHinted(i);
+				}
+			}
+		}
+		scheduleDeferredRead(request);
 		return future;
 	}
 
@@ -294,6 +300,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 		if (couldFree) {
 			long cacheSizeDelta = 0;
+			boolean shouldCheckEviction = false;
 			synchronized(this) {
 				if (_cacheSize <= _evictionLimit)
 					return; // Nothing to do
@@ -303,19 +310,31 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 						return; // Pin state changed so we cannot evict
 
 					if (entry.getState().isAvailable() && entry.getState().isBackedByDisk()) {
-						cacheSizeDelta =  transitionMemState(entry, BlockState.COLD);
-						long cleared = entry.clear();
-						if (cleared != entry.getSize())
-							throw new IllegalStateException();
-						_cache.remove(entry.getKey());
-						_evictionCache.put(entry.getKey(), entry);
+						if (entry.getRetainHintCount() > 0) {
+							shouldCheckEviction = true;
+						}
+						else {
+							cacheSizeDelta =  transitionMemState(entry, BlockState.COLD);
+							long cleared = entry.clear();
+							if (cleared != entry.getSize())
+								throw new IllegalStateException();
+							_cache.remove(entry.getKey());
+							_evictionCache.put(entry.getKey(), entry);
+						}
 					} else if (entry.getState() == BlockState.HOT) {
-						cacheSizeDelta = onUnpinnedHotBlockUnderMemoryPressure(entry);
+						if (entry.getRetainHintCount() > 0) {
+							shouldCheckEviction = true;
+						}
+						else {
+							cacheSizeDelta = onUnpinnedHotBlockUnderMemoryPressure(entry);
+						}
 					}
 				}
 			}
 			if (cacheSizeDelta != 0)
 				onCacheSizeChanged(cacheSizeDelta > 0);
+			else if (shouldCheckEviction)
+				onCacheSizeChanged(true);
 		}
 	}
 
@@ -436,21 +455,35 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			List<BlockEntry> toRemove = new ArrayList<>();
 			upForEviction = new ArrayList<>();
 
-			for(BlockEntry entry : entries) {
-				if(_cacheSize - _bytesUpForEviction <= _evictionLimit)
-					break;
+			for(int pass = 0; pass < 2; pass++) {
+				boolean allowRetainHint = pass == 1;
+				for(BlockEntry entry : entries) {
+					if(_cacheSize - _bytesUpForEviction <= _evictionLimit)
+						break;
 
-				synchronized(entry) {
-					if(!entry.isPinned() && entry.getState().isBackedByDisk()) {
-						cacheSizeDelta += transitionMemState(entry, BlockState.COLD);
-						entry.clear();
-						toRemove.add(entry);
-					}
-					else if(entry.getState() != BlockState.EVICTING && !entry.getState().isBackedByDisk()) {
-						cacheSizeDelta += transitionMemState(entry, BlockState.EVICTING);
-						upForEviction.add(entry);
+					synchronized(entry) {
+						if(entry.isPinned())
+							continue;
+						if(!allowRetainHint && entry.getRetainHintCount() > 0)
+							continue;
+						if(entry.getState() == BlockState.COLD || entry.getState() == BlockState.EVICTING)
+							continue;
+
+						if(entry.getState().isBackedByDisk()) {
+							//if(entry.getRetainHintCount() > 0)
+							//	System.out.println("[WARN] Evicted unfavorable: " + entry.getRetainHintCount() + " --> " + entry.getKey());
+							cacheSizeDelta += transitionMemState(entry, BlockState.COLD);
+							entry.clear();
+							toRemove.add(entry);
+						}
+						else {
+							cacheSizeDelta += transitionMemState(entry, BlockState.EVICTING);
+							upForEviction.add(entry);
+						}
 					}
 				}
+				if(_cacheSize - _bytesUpForEviction <= _evictionLimit)
+					break;
 			}
 
 			for(BlockEntry entry : toRemove) {
@@ -523,6 +556,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		}
 
 		if(allReserved && !reading) {
+			clearRetainHints(req);
 			req.getFuture().complete(req.getEntries());
 			return true;
 		}
@@ -552,6 +586,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 					}
 
 					for(DeferredReadRequest done : completedRequests) {
+						clearRetainHints(done);
 						_processingReadRequests.remove(done);
 						_deferredReadRequests.remove(done);
 					}
@@ -594,6 +629,17 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		}
 		if (cacheSizeDelta != 0)
 			onCacheSizeChanged(cacheSizeDelta > 0);
+	}
+
+	private void clearRetainHints(DeferredReadRequest request) {
+		for (int i = 0; i < request.getEntries().size(); i++) {
+			if (!request.isRetainHinted(i))
+				continue;
+			BlockEntry entry = request.getEntries().get(i);
+			synchronized(entry) {
+				entry.removeRetainHint();
+			}
+		}
 	}
 
 	/**

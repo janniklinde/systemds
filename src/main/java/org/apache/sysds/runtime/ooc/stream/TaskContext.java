@@ -49,6 +49,8 @@ public class TaskContext {
 		if(ctx._deferred == null)
 			ctx._deferred = new ArrayDeque<>();
 		ctx._deferred.add(deferred);
+		if(ctx._deferred.size() > 3)
+			System.out.println("[WARN] Defer size bigger than 3");
 	}
 
 	public static boolean runDeferred() {

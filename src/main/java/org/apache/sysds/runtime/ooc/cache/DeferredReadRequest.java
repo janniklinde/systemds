@@ -31,6 +31,7 @@ class DeferredReadRequest {
 	private final CompletableFuture<List<BlockEntry>> _future;
 	private final List<BlockEntry> _entries;
 	private final short[] _pinned;
+	private final boolean[] _retainHinted;
 	private final AtomicInteger _availableCount;
 	private double _priorityScore;
 	private long _sequence;
@@ -39,6 +40,7 @@ class DeferredReadRequest {
 		this._future = future;
 		this._entries = entries;
 		this._pinned = new short[entries.size()];
+		this._retainHinted = new boolean[entries.size()];
 		this._availableCount = new AtomicInteger(0);
 		this._priorityScore = 0;
 		this._sequence = 0;
@@ -85,5 +87,13 @@ class DeferredReadRequest {
 
 	synchronized void schedule(int idx) {
 		_pinned[idx] = SCHEDULED;
+	}
+
+	synchronized void markRetainHinted(int idx) {
+		_retainHinted[idx] = true;
+	}
+
+	synchronized boolean isRetainHinted(int idx) {
+		return _retainHinted[idx];
 	}
 }
