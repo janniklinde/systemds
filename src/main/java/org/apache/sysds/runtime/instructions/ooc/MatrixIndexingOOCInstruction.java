@@ -20,7 +20,6 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.commons.lang3.NotImplementedException;
-import org.apache.commons.lang3.mutable.MutableObject;
 import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
@@ -33,7 +32,6 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.util.IndexRange;
 
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;

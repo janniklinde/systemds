@@ -198,10 +198,11 @@ public abstract class OOCInstruction extends Instruction {
 			catch(Exception e) {
 				throw e instanceof DMLRuntimeException ? (DMLRuntimeException) e : new DMLRuntimeException(e);
 			}
-			qOut.enqueue(r);
+			TaskContext.defer(() -> qOut.enqueue(r));
+			//qOut.enqueue(r);
 		};
 
-		return submitOOCTasks(qIn, exec, qOut::closeInput, tmp -> {
+		return submitOOCTasks(qIn, exec, () -> TaskContext.defer(qOut::closeInput), tmp -> {
 			// Try to run as a predicate to prefer pipelining rather than fan-out
 			if(ForkJoinTask.getPool() == COMPUTE_EXECUTOR) {
 				exec.accept(tmp);
@@ -223,10 +224,10 @@ public abstract class OOCInstruction extends Instruction {
 			catch(Exception e) {
 				throw e instanceof DMLRuntimeException ? (DMLRuntimeException) e : new DMLRuntimeException(e);
 			}
-			r.ifPresent(qOut::enqueue);
+			r.ifPresent(t -> TaskContext.defer(() -> qOut.enqueue(t)));
 		};
 
-		return submitOOCTasks(qIn, exec, qOut::closeInput, tmp -> {
+		return submitOOCTasks(qIn, exec, () -> TaskContext.defer(qOut::closeInput), tmp -> {
 			// Try to run as a predicate to prefer pipelining rather than fan-out
 			if(ForkJoinTask.getPool() == COMPUTE_EXECUTOR) {
 				exec.accept(tmp);

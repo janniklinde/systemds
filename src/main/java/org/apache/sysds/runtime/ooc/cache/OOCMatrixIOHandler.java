@@ -141,6 +141,8 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		_writeExec.shutdownNow();
 		_readExec.getQueue().clear();
 		_readExec.shutdownNow();
+		_srcReadExec.getQueue().clear();
+		_srcReadExec.shutdownNow();
 		_spillLocations.clear();
 		_partitions.clear();
 		if (started)

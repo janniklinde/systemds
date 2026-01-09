@@ -121,7 +121,6 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 			// global reduce
 			submitOOCTask(() -> {
 				IndexedMatrixValue partial;
-				System.out.println("Waiting for local queue: " + qLocal);
 				while ((partial = qLocal.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
 					long idx = aggun.isRowAggregate() ? partial.getIndexes().getRowIndex() : partial.getIndexes()
 						.getColumnIndex();

@@ -23,7 +23,6 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
-import org.apache.sysds.runtime.ooc.stream.TaskContext;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
@@ -87,10 +86,8 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		final Consumer<QueueCallback<T>> fS = s;
 
 		if (fS != null) {
-			TaskContext.defer(() -> {
-				fS.accept(new SimpleQueueCallback<>(t, _failure));
-				onDeliveryFinished();
-			});
+			fS.accept(new SimpleQueueCallback<>(t, _failure));
+			onDeliveryFinished();
 			return;
 		}
 
@@ -143,7 +140,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	public synchronized void closeInput() {
 		if (_closed.compareAndSet(false, true)) {
 			super.closeInput();
-			TaskContext.defer(this::onDeliveryFinished);
+			onDeliveryFinished();
 			_upstreamMsgRelays = null;
 			_downstreamMsgRelays = null;
 		} else {
