@@ -23,6 +23,7 @@ import java.util.HashMap;
 
 import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.functionobjects.Multiply;
@@ -123,6 +124,14 @@ public class MatrixVectorBinaryOOCInstruction extends ComputationOOCInstruction 
 					}
 				}
 			}
-		}, qOut::closeInput);
+		})
+			.thenApply(v -> {
+				qOut.closeInput();
+				return null;
+			})
+			.exceptionally(err -> {
+				qOut.propagateFailure(DMLRuntimeException.of(err));
+				return null;
+			});
 	}
 }

@@ -274,7 +274,9 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 
 	@Override
 	public void setData(CacheableData<?> data) {
-		this._cdata = data;
+		if(_cdata == null && _closed.get())
+			System.out.println("[WARN] Data type was defined after closing, which may bypass validation checks");
+		_cdata = data;
 	}
 
 	@Override

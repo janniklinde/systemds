@@ -37,8 +37,6 @@ import org.apache.sysds.runtime.ooc.stream.FilteredOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.stream.TaskContext;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
-import org.apache.sysds.runtime.ooc.stream.message.OOCRequestRangeMsg;
-import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.runtime.util.CommonThreadPool;
 import org.apache.sysds.utils.Statistics;
 import scala.Tuple4;
@@ -171,15 +169,15 @@ public abstract class OOCInstruction extends Instruction {
 		return new SubscribableTaskQueue<>();
 	}
 
-	protected <T> CompletableFuture<Void> filterOOC(OOCStream<T> qIn, Consumer<T> processor, Function<T, Boolean> predicate, Runnable finalizer) {
-		return filterOOC(qIn, processor, predicate, finalizer, null);
+	protected <T> CompletableFuture<Void> filterOOC(OOCStream<T> qIn, Consumer<T> processor, Function<T, Boolean> predicate) {
+		return filterOOC(qIn, processor, predicate, null);
 	}
 
-	protected <T> CompletableFuture<Void> filterOOC(OOCStream<T> qIn, Consumer<T> processor, Function<T, Boolean> predicate, Runnable finalizer, Consumer<T> onNotProcessed) {
+	protected <T> CompletableFuture<Void> filterOOC(OOCStream<T> qIn, Consumer<T> processor, Function<T, Boolean> predicate, Consumer<T> onNotProcessed) {
 		if (!inStreamsDefined() || !outStreamsDefined())
 			throw new NotImplementedException("filterOOC requires manual specification of all input and output streams for error propagation");
 
-		return submitOOCTasks(qIn, c -> processor.accept(c.get()), finalizer, p -> predicate.apply(p.get()), onNotProcessed != null ? (i, tmp) -> onNotProcessed.accept(tmp.get()) : null);
+		return submitOOCTasks(qIn, c -> processor.accept(c.get()), p -> predicate.apply(p.get()), onNotProcessed != null ? (i, tmp) -> onNotProcessed.accept(tmp.get()) : null);
 	}
 
 	protected <T> OOCStream<T> filteredOOCStream(OOCStream<T> qIn, Function<T, Boolean> predicate) {
@@ -187,33 +185,15 @@ public abstract class OOCInstruction extends Instruction {
 	}
 
 	protected <T, R> CompletableFuture<Void> mapOOC(OOCStream<T> qIn, OOCStream<R> qOut, Function<T, R> mapper) {
-		addInStream(qIn);
-		addOutStream(qOut);
-
-		Consumer<OOCStream.QueueCallback<T>> exec = tmp -> {
-			R r;
-			try(tmp) {
-				r = mapper.apply(tmp.get());
-			}
-			catch(Exception e) {
-				throw e instanceof DMLRuntimeException ? (DMLRuntimeException) e : new DMLRuntimeException(e);
-			}
-			TaskContext.defer(() -> qOut.enqueue(r));
-		};
-
-		return submitOOCTasks(qIn, exec, () -> TaskContext.defer(qOut::closeInput), tmp -> {
-			// Try to run as a predicate to prefer pipelining rather than fan-out
-			if(ForkJoinTask.getPool() == COMPUTE_EXECUTOR) {
-				exec.accept(tmp);
-				return false;
-			}
-			return true;
-		}, (i, tmp) -> {});
+		return mapOptionalOOC(qIn, qOut, tmp -> Optional.of(mapper.apply(tmp)));
 	}
 
-	protected <T, R> CompletableFuture<Void> optionalMapOOC(OOCStream<T> qIn, OOCStream<R> qOut, Function<T, Optional<R>> optionalMapper) {
+	protected <T, R> CompletableFuture<Void> mapOptionalOOC(OOCStream<T> qIn, OOCStream<R> qOut, Function<T, Optional<R>> optionalMapper) {
 		addInStream(qIn);
 		addOutStream(qOut);
+
+		AtomicInteger deferredCtr = new AtomicInteger(1);
+		CompletableFuture<Void> future = new CompletableFuture<>();
 
 		Consumer<OOCStream.QueueCallback<T>> exec = tmp -> {
 			Optional<R> r;
@@ -223,17 +203,39 @@ public abstract class OOCInstruction extends Instruction {
 			catch(Exception e) {
 				throw e instanceof DMLRuntimeException ? (DMLRuntimeException) e : new DMLRuntimeException(e);
 			}
-			r.ifPresent(t -> TaskContext.defer(() -> qOut.enqueue(t)));
+			r.ifPresent(t -> {
+				deferredCtr.incrementAndGet();
+				// Defer to clean the stack of large objects
+				TaskContext.defer(() -> {
+					qOut.enqueue(t);
+					if(deferredCtr.decrementAndGet() == 0)
+						future.complete(null);
+				});
+			});
 		};
 
-		return submitOOCTasks(qIn, exec, () -> TaskContext.defer(qOut::closeInput), tmp -> {
-			// Try to run as a predicate to prefer pipelining rather than fan-out
-			if(ForkJoinTask.getPool() == COMPUTE_EXECUTOR) {
-				exec.accept(tmp);
-				return false;
-			}
-			return true;
-		}, (i, tmp) -> {});
+		submitOOCTasks(qIn, exec, tmp -> {
+					// Try to run as a predicate to prefer pipelining rather than fan-out
+					if(ForkJoinTask.getPool() == COMPUTE_EXECUTOR) {
+						exec.accept(tmp);
+						return false;
+					}
+					return true;
+				}, null)
+			.thenRun(() -> {
+				if(deferredCtr.decrementAndGet() == 0)
+					future.complete(null);
+			})
+			.exceptionally(err -> {
+				future.completeExceptionally(err);
+				return null;
+			});
+
+		return future.thenRun(qOut::closeInput).exceptionally(err -> {
+			DMLRuntimeException dmlErr = DMLRuntimeException.of(err);
+			qOut.propagateFailure(dmlErr);
+			throw dmlErr;
+		});
 	}
 
 	protected <R, P> CompletableFuture<Void> broadcastJoinOOC(OOCStream<IndexedMatrixValue> qIn, OOCStream<IndexedMatrixValue> broadcast, OOCStream<R> qOut, BiFunction<IndexedMatrixValue, BroadcastedElement, R> mapper, Function<IndexedMatrixValue, P> on) {
@@ -258,9 +260,8 @@ public abstract class OOCInstruction extends Instruction {
 
 		OOCStream<Tuple4<P, OOCStream.QueueCallback<IndexedMatrixValue>, OOCStream.QueueCallback<IndexedMatrixValue>, BroadcastedElement>> broadcastingQueue = createWritableStream();
 		AtomicInteger waitCtr = new AtomicInteger(1);
-		CompletableFuture<Void> fut1 = new CompletableFuture<>();
 
-		submitOOCTasks(List.of(qIn, broadcast), (i, tmp) -> {
+		CompletableFuture<Void> fut1 = submitOOCTasks(List.of(qIn, broadcast), (i, tmp) -> {
 			try (tmp) {
 				P key = on.apply(tmp.get());
 
@@ -319,14 +320,14 @@ public abstract class OOCInstruction extends Instruction {
 					}
 				}
 			}
-		}, () -> {
-			fut1.complete(null);
+		});
+		fut1 = fut1.thenApply(v -> {
 			if (waitCtr.decrementAndGet() == 0)
 				broadcastingQueue.closeInput();
+			return null;
 		});
 
-		CompletableFuture<Void> fut2 = new CompletableFuture<>();
-		submitOOCTasks(List.of(broadcastingQueue), (i, tpl) -> {
+		CompletableFuture<Void> fut2 = submitOOCTasks(List.of(broadcastingQueue), (i, tpl) -> {
 			try (tpl) {
 				final BroadcastedElement b = tpl.get()._4();
 				final OOCStream.QueueCallback<IndexedMatrixValue> lValue = tpl.get()._2();
@@ -349,7 +350,7 @@ public abstract class OOCInstruction extends Instruction {
 				if(waitCtr.decrementAndGet() == 0)
 					broadcastingQueue.closeInput();
 			}
-		}, () -> fut2.complete(null));
+		});
 
 		if (explicitLeftCaching)
 			leftCache.scheduleDeletion();
@@ -414,8 +415,6 @@ public abstract class OOCInstruction extends Instruction {
 		if(qIn == null || on == null || qIn.size() != on.size())
 			throw new DMLRuntimeException("joinOOC(list) requires the same number of streams and key functions.");
 
-
-
 		final int n = qIn.size();
 
 		Set<Integer> mRequestableStreams = null;
@@ -450,12 +449,107 @@ public abstract class OOCInstruction extends Instruction {
 			rStreams.add(explicitCaching[i] ? caches[i].getReadStream() : qIn.get(i));
 
 		AtomicInteger processing = new AtomicInteger(1);
-		CompletableFuture<Void> mFuture = new CompletableFuture<>();
+		//CompletableFuture<Void> mFuture = new CompletableFuture<>();
 
 		addInStream(qIn.toArray(OOCStream[]::new));
 		addOutStream(qOut);
 
-		submitOOCTasks(rStreams,
+		CompletableFuture<Void> future = pipeOOC(rStreams, (i, tmp) -> {
+			//System.out.println("Observed: [" + i + ", " + tmp.get().getIndexes() + "]");
+			Function<IndexedMatrixValue, P> keyFn = on.get(i);
+			P key = keyFn.apply(tmp.get());
+			MatrixIndexes idx = tmp.get().getIndexes();
+
+			MatrixIndexes[] arr = seen.computeIfAbsent(key, k -> new MatrixIndexes[n]);
+			boolean ready;
+			synchronized(arr) {
+				arr[i] = idx;
+				ready = true;
+				List<MatrixIndexes> inv = null;
+
+				for (int j = 0; j < arr.length; j++) {
+					MatrixIndexes ix = arr[j];
+					if (ix == null) {
+						ready = false;
+						if (blen == -1)
+							break;
+						if (inv == null)
+							inv = invOn.apply(key);
+						if (requestableStreams.contains(j)) {
+							//qIn.get(j).messageUpstream(
+							//	new OOCRequestRangeMsg(OOCUtils.getRangeOfTile(inv.get(j), blen), 1));
+						}
+					}
+				}
+			}
+
+			if(!ready || !seen.remove(key, arr))
+				return;
+
+			processing.incrementAndGet();
+			//System.out.println("Incr " + hashCode());
+			List<BlockKey> entries = new ArrayList<>(arr.length);
+			for(int j = 0; j < arr.length; j++)
+				entries.add(caches[j].peekCachedBlockKey(arr[j]));
+
+			var f = OOCCacheManager.requestManyBlocks(entries);
+			f.whenComplete((r, err) -> {
+				try {
+					if(err != null) {
+						if(err instanceof DMLRuntimeException)
+							materialized.propagateFailure((DMLRuntimeException) err);
+						else if(err instanceof Exception)
+							materialized.propagateFailure(new DMLRuntimeException((Exception) err));
+						else
+							materialized.propagateFailure(new DMLRuntimeException(new Exception(err)));
+						return;
+					}
+					materialized.enqueue(r.stream().map(OOCStream.QueueCallback::keepOpen).toList());
+					r.forEach(OOCStream.QueueCallback::close);
+				}
+				catch(Throwable t) {
+					throw t;
+				}
+				finally {
+					//System.out.println("Decr " + hashCode());
+					if(processing.decrementAndGet() == 0) {
+						materialized.closeInput();
+						//System.out.println("CloseMat " + hashCode());
+					}
+				}
+			});
+		});
+
+		future.whenComplete((r, err) -> {
+			//System.out.println("Decr -- Close");
+			if (processing.decrementAndGet() == 0) {
+				materialized.closeInput();
+				//System.out.println("CloseMat");
+			}
+		});
+
+		CompletableFuture<Void> outFuture = mapOOC(materialized, qOut, cb -> {
+			List<MatrixIndexes> idx = List.of();
+			try {
+				List<IndexedMatrixValue> imvs = cb.stream().map(OOCStream.QueueCallback::get).toList();
+				idx = imvs.stream().map(IndexedMatrixValue::getIndexes).toList();
+				return mapper.apply(imvs);
+			}
+			finally {
+				cb.forEach(OOCStream.QueueCallback::close);
+				for(int i = 0; i < caches.length; i++)
+					caches[i].incrProcessingCount(caches[i].findCachedIndex(idx.get(i)), 1);
+			}
+		});
+
+		for(int i = 0; i < n; i++) {
+			if (explicitCaching[i])
+				caches[i].scheduleDeletion();
+		}
+
+		return outFuture;
+
+		/*submitOOCTasks(rStreams,
 			(i, tmp) -> {
 				Function<IndexedMatrixValue, P> keyFn = on.get(i);
 				P key = keyFn.apply(tmp.get());
@@ -550,37 +644,45 @@ public abstract class OOCInstruction extends Instruction {
 				materialized.closeInput();
 		});
 
-		return future;
+		return future;*/
 	}
 
-	protected <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues, BiConsumer<Integer, OOCStream.QueueCallback<T>> consumer, Runnable finalizer) {
-		return submitOOCTasks(queues, consumer, finalizer, null);
+	protected <T> CompletableFuture<Void> pipeOOC(OOCStream<T> queue, Consumer<OOCStream.QueueCallback<T>> consumer) {
+		return pipeOOC(List.of(queue), (i, tmp) -> consumer.accept(tmp));
 	}
 
-	protected <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues, BiConsumer<Integer, OOCStream.QueueCallback<T>> consumer, Runnable finalizer, BiConsumer<Integer, OOCStream.QueueCallback<T>> onNotProcessed) {
-		List<CompletableFuture<Void>> futures = new ArrayList<>(queues.size());
-
-		for (int i = 0; i < queues.size(); i++)
-			futures.add(new CompletableFuture<>());
-
-		return submitOOCTasks(queues, consumer, finalizer, futures, null, onNotProcessed);
+	protected <T> CompletableFuture<Void> pipeOOC(List<OOCStream<T>> queues, BiConsumer<Integer, OOCStream.QueueCallback<T>> consumer) {
+		return submitOOCTasks(queues, consumer, (i, tmp) -> {
+			// Try to run as a predicate to prefer pipelining rather than fan-out
+			if(ForkJoinTask.getPool() == COMPUTE_EXECUTOR) {
+				consumer.accept(i, tmp);
+				return false;
+			}
+			return true;
+		}, (i, tmp) -> {});
 	}
 
-	protected <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues, BiConsumer<Integer, OOCStream.QueueCallback<T>> consumer, Runnable finalizer, List<CompletableFuture<Void>> futures, BiFunction<Integer, OOCStream.QueueCallback<T>, Boolean> predicate, BiConsumer<Integer, OOCStream.QueueCallback<T>> onNotProcessed) {
+	protected <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues, BiConsumer<Integer, OOCStream.QueueCallback<T>> consumer) {
+		return submitOOCTasks(queues, consumer, null, null);
+	}
+
+	protected <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues, BiConsumer<Integer, OOCStream.QueueCallback<T>> consumer, BiFunction<Integer, OOCStream.QueueCallback<T>, Boolean> predicate, BiConsumer<Integer, OOCStream.QueueCallback<T>> onNotProcessed) {
 		addInStream(queues.toArray(OOCStream[]::new));
 		if(!outStreamsDefined())
 			throw new IllegalArgumentException("Explicit specification of all output streams is required before submitting tasks. If no output streams are present use addOutStream().");
 
 		final List<AtomicInteger> activeTaskCtrs = new ArrayList<>(queues.size());
+		final List<CompletableFuture<Void>> futures = new ArrayList<>(queues.size());
 
-		for(int i = 0; i < queues.size(); i++)
+		for(int i = 0; i < queues.size(); i++) {
 			activeTaskCtrs.add(new AtomicInteger(1));
+			futures.add(new CompletableFuture<>());
+		}
 
 		final CompletableFuture<Void> globalFuture = CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new));
 		final StreamContext streamContext = _streamContext.copy(); // Snapshot of the current stream context
 		if(streamContext == null || !streamContext.inStreamsDefined() || !streamContext.outStreamsDefined())
 			throw new IllegalArgumentException("Explicit specification of all output streams is required before submitting tasks. If no output streams are present use addOutStream().");
-		final Runnable oocFinalizer = oocTask(finalizer, null, streamContext);
 
 		int i = 0;
 		@SuppressWarnings("unused")
@@ -602,6 +704,7 @@ public abstract class OOCInstruction extends Instruction {
 
 						if(localTaskCtr.decrementAndGet() == 0) {
 							// Then we can run the finalization procedure already
+							//System.out.println("Close substream " + k + " of " + queues.size() + " (" + streamId + ")");
 							localFuture.complete(null);
 						}
 						return;
@@ -631,6 +734,11 @@ public abstract class OOCInstruction extends Instruction {
 							long taskStartTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
 							try(pinned) {
 								consumer.accept(k, pinned);
+
+								if(localTaskCtr.decrementAndGet() == 0) {
+									//System.out.println("Close substream " + k + " of " + queues.size() + " (" + streamId + ")");
+									TaskContext.defer(() -> localFuture.complete(null));
+								}
 							}
 							finally {
 								COMPUTE_IN_FLIGHT.decrementAndGet();
@@ -645,11 +753,7 @@ public abstract class OOCInstruction extends Instruction {
 								}
 							}
 						}, localFuture, streamContext);
-						COMPUTE_EXECUTOR.submit(() -> {
-							oocTask.run();
-							if(localTaskCtr.decrementAndGet() == 0)
-								localFuture.complete(null);
-						});
+						COMPUTE_EXECUTOR.submit(oocTask);
 					}
 					catch (Exception e) {
 						COMPUTE_IN_FLIGHT.decrementAndGet();
@@ -678,6 +782,7 @@ public abstract class OOCInstruction extends Instruction {
 		}
 
 		return globalFuture.handle((res, e) -> {
+			//System.out.println("OnClosed" + " (" + streamId + ")");
 			if (globalFuture.isCancelled() || globalFuture.isCompletedExceptionally()) {
 				futures.forEach(f -> {
 					if(!f.isDone()) {
@@ -689,18 +794,17 @@ public abstract class OOCInstruction extends Instruction {
 				});
 			}
 
-			oocFinalizer.run();
 			streamContext.clear();
 			return null;
 		});
 	}
 
-	protected <T> CompletableFuture<Void> submitOOCTasks(OOCStream<T> queue, Consumer<OOCStream.QueueCallback<T>> consumer, Runnable finalizer) {
-		return submitOOCTasks(List.of(queue), (i, tmp) -> consumer.accept(tmp), finalizer);
+	protected <T> CompletableFuture<Void> submitOOCTasks(OOCStream<T> queue, Consumer<OOCStream.QueueCallback<T>> consumer) {
+		return submitOOCTasks(List.of(queue), (i, tmp) -> consumer.accept(tmp), null, null);
 	}
 
-	protected <T> CompletableFuture<Void> submitOOCTasks(OOCStream<T> queue, Consumer<OOCStream.QueueCallback<T>> consumer, Runnable finalizer, Function<OOCStream.QueueCallback<T>, Boolean> predicate, BiConsumer<Integer, OOCStream.QueueCallback<T>> onNotProcessed) {
-		return submitOOCTasks(List.of(queue), (i, tmp) -> consumer.accept(tmp), finalizer, List.of(new CompletableFuture<Void>()), (i, tmp) -> predicate.apply(tmp), onNotProcessed);
+	protected <T> CompletableFuture<Void> submitOOCTasks(OOCStream<T> queue, Consumer<OOCStream.QueueCallback<T>> consumer, Function<OOCStream.QueueCallback<T>, Boolean> predicate, BiConsumer<Integer, OOCStream.QueueCallback<T>> onNotProcessed) {
+		return submitOOCTasks(List.of(queue), (i, tmp) -> consumer.accept(tmp), (i, tmp) -> predicate.apply(tmp), onNotProcessed);
 	}
 
 	protected CompletableFuture<Void> submitOOCTask(Runnable r, StreamContext ctx) {
@@ -749,7 +853,7 @@ public abstract class OOCInstruction extends Instruction {
 				}
 			}
 			catch (Exception ex) {
-				DMLRuntimeException re = ex instanceof DMLRuntimeException ? (DMLRuntimeException) ex : new DMLRuntimeException(ex);
+				DMLRuntimeException re = DMLRuntimeException.of(ex);
 
 				ctx.failAll(re);
 
@@ -773,7 +877,7 @@ public abstract class OOCInstruction extends Instruction {
 				c.accept(callback);
 			}
 			catch (Exception ex) {
-				DMLRuntimeException re = ex instanceof DMLRuntimeException ? (DMLRuntimeException) ex : new DMLRuntimeException(ex);
+				DMLRuntimeException re = DMLRuntimeException.of(ex);
 
 				ctx.failAll(re);
 

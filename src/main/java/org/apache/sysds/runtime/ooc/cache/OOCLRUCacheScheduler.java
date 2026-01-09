@@ -168,17 +168,13 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			return;
 
 		synchronized(this) {
-			if(_deferredReadRequests.isEmpty())
-				return;
-
-
 			boolean matched = _deferredReadRequests.boost(key, priority);
-			if(!matched)
-				return;
-
-			BlockReadState state = _blockReads.computeIfAbsent(key, k -> new BlockReadState());
-			state.priority += priority;
+			if(matched) {
+				BlockReadState state = _blockReads.computeIfAbsent(key, k -> new BlockReadState());
+				state.priority += priority;
+			}
 		}
+		_ioHandler.prioritizeRead(key, priority);
 	}
 
 	private void scheduleDeferredRead(DeferredReadRequest deferredReadRequest) {
@@ -331,6 +327,11 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	@Override
 	public boolean isWithinLimits() {
 		return _cacheSize < _hardLimit;
+	}
+
+	@Override
+	public boolean isWithinSoftLimits() {
+		return _cacheSize < _evictionLimit;
 	}
 
 	@Override

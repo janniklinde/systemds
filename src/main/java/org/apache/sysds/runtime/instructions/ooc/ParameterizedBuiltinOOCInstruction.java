@@ -117,12 +117,12 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 			CompletableFuture<Boolean> future = new CompletableFuture<>();
 
 			filterOOC(qIn, tmp -> {
-				boolean contains = ((MatrixBlock)tmp.getValue()).containsValue(((ScalarObject)finalPattern).getDoubleValue());
+					boolean contains = ((MatrixBlock)tmp.getValue()).containsValue(((ScalarObject)finalPattern).getDoubleValue());
 
-				if (contains)
-					future.complete(true);
-			}, tmp -> !future.isDone(), // Don't start a separate worker if result already known
-				() -> future.complete(false));     // Then the pattern was not found
+					if (contains)
+						future.complete(true);
+				}, tmp -> !future.isDone()) // Don't start a separate worker if result already known
+				.whenComplete((v, err) -> future.complete(false)); // Then the pattern was not found
 
 			boolean ret;
 			try {

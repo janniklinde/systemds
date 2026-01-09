@@ -119,7 +119,7 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 				final AtomicInteger producedBlocks = new AtomicInteger(0);
 				CompletableFuture<Void> future = new  CompletableFuture<>();
 
-				optionalMapOOC(qIn, qOut, tmp -> {
+				mapOptionalOOC(qIn, qOut, tmp -> {
 					if (future.isDone()) // Then we may skip blocks and avoid submitting tasks
 						return Optional.empty();
 
@@ -263,10 +263,15 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 
 				if(completed)
 					future.complete(null);
-			}, () -> {
-				aligner.close();
-				qOut.closeInput();
-			});
+			})
+				.thenRun(() -> {
+					aligner.close();
+					qOut.closeInput();
+				})
+				.exceptionally(err -> {
+					qOut.propagateFailure(DMLRuntimeException.of(err));
+					return null;
+				});
 
 			if (hasIntermediateStream)
 				cachedStream.scheduleDeletion(); // We can immediately delete blocks after consumption

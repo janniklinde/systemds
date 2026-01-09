@@ -55,6 +55,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -75,6 +76,8 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 	private final ThreadPoolExecutor _writeExec;
 	private final ThreadPoolExecutor _readExec;
 	private final ThreadPoolExecutor _srcReadExec;
+	private final ConcurrentHashMap<BlockKey, ReadTask> _pendingReads = new ConcurrentHashMap<>();
+	private final AtomicLong _readSeq = new AtomicLong(0);
 
 	// Spill related structures
 	private final ConcurrentHashMap<String, SpillLocation> _spillLocations =  new ConcurrentHashMap<>();
@@ -103,7 +106,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			READER_SIZE,
 			0L,
 			TimeUnit.MILLISECONDS,
-			new ArrayBlockingQueue<>(100000));
+			new PriorityBlockingQueue<>());
 		_srcReadExec = new ThreadPoolExecutor(
 			READER_SIZE,
 			READER_SIZE,
@@ -168,21 +171,28 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 	public CompletableFuture<BlockEntry> scheduleRead(final BlockEntry block) {
 		final CompletableFuture<BlockEntry> future = new CompletableFuture<>();
 		try {
-			_readExec.submit(() -> {
-				try {
-					long ioStart = DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
-					loadFromDisk(block);
-					if (DMLScript.OOC_LOG_EVENTS)
-						OOCEventLog.onDiskReadEvent(_readCallerId, ioStart, System.nanoTime(), block.getSize());
-					future.complete(block);
-				} catch (Throwable e) {
-					future.completeExceptionally(e);
-				}
-			});
+			ReadTask task = new ReadTask(block, future, _readSeq.getAndIncrement());
+			_pendingReads.put(block.getKey(), task);
+			_readExec.execute(task);
 		} catch (RejectedExecutionException e) {
+			_pendingReads.remove(block.getKey());
 			future.completeExceptionally(e);
 		}
 		return future;
+	}
+
+	@Override
+	public void prioritizeRead(BlockKey key, double priority) {
+		if (priority == 0)
+			return;
+		ReadTask task = _pendingReads.get(key);
+		if (task == null)
+			return;
+		if (_readExec.getQueue().remove(task)) {
+			task.addPriority(priority);
+			_readExec.getQueue().offer(task);
+			System.out.println("Prioritized: " + key);
+		}
 	}
 
 	@Override
@@ -595,6 +605,46 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		while ((tmp = flushQueue.peek()) != null && tmp._2() < offset) {
 			flushQueue.poll();
 			tmp._3().complete(null);
+		}
+	}
+
+	private class ReadTask implements Runnable, Comparable<ReadTask> {
+		private final BlockEntry _block;
+		private final CompletableFuture<BlockEntry> _future;
+		private final long _sequence;
+		private double _priority;
+
+		private ReadTask(BlockEntry block, CompletableFuture<BlockEntry> future, long sequence) {
+			this._block = block;
+			this._future = future;
+			this._sequence = sequence;
+			this._priority = 0;
+		}
+
+		private void addPriority(double delta) {
+			_priority += delta;
+		}
+
+		@Override
+		public void run() {
+			_pendingReads.remove(_block.getKey(), this);
+			try {
+				long ioStart = DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
+				loadFromDisk(_block);
+				if (DMLScript.OOC_LOG_EVENTS)
+					OOCEventLog.onDiskReadEvent(_readCallerId, ioStart, System.nanoTime(), _block.getSize());
+				_future.complete(_block);
+			} catch (Throwable e) {
+				_future.completeExceptionally(e);
+			}
+		}
+
+		@Override
+		public int compareTo(ReadTask other) {
+			int byPriority = Double.compare(other._priority, _priority);
+			if (byPriority != 0)
+				return byPriority;
+			return Long.compare(_sequence, other._sequence);
 		}
 	}
 

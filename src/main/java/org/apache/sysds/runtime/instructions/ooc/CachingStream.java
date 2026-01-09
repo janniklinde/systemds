@@ -432,8 +432,10 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 				OOCCacheManager.getCache().prioritize(new BlockKey(_streamId, i), 1);
 			}
 
-			if(!unrequestable)
+			if(!unrequestable) {
+				System.out.println("RangeRequest: " + ((OOCRequestRangeMsg) msg).getTransformedRange() + " (" + this + ")");
 				return;
+			}
 		}
 
 		_source.messageUpstream(msg);

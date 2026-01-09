@@ -113,6 +113,11 @@ public interface OOCCacheScheduler {
 	boolean isWithinLimits();
 
 	/**
+	 * Returns if the current cache size is within its soft memory limits.
+	 */
+	boolean isWithinSoftLimits();
+
+	/**
 	 * Shuts down the cache scheduler.
 	 */
 	void shutdown();

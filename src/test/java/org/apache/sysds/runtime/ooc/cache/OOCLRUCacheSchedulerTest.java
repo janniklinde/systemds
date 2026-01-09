@@ -216,6 +216,9 @@ public class OOCLRUCacheSchedulerTest {
 		}
 
 		@Override
+		public void prioritizeRead(BlockKey key, double priority) {}
+
+		@Override
 		public CompletableFuture<Boolean> scheduleDeletion(BlockEntry block) {
 			return CompletableFuture.completedFuture(true);
 		}
