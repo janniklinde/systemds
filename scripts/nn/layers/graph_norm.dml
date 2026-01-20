@@ -1,0 +1,66 @@
+#-------------------------------------------------------------
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+#-------------------------------------------------------------
+
+/*
+ * Graph normalization layer (per-graph mean/variance over nodes).
+ *
+ * For a single graph, this is equivalent to batch normalization
+ * across all nodes without running averages.
+ */
+
+forward = function(matrix[double] X, matrix[double] gamma, matrix[double] beta,
+                   double epsilon = 1e-5)
+    return (matrix[double] out, matrix[double] cache_mean,
+            matrix[double] cache_var, matrix[double] cache_norm) {
+  N = nrow(X)
+  mean = colMeans(X)
+  var = colVars(X) * ((N-1) / N)
+  norm = (X-mean) / sqrt(var + epsilon)
+  out = norm * gamma + beta
+
+  cache_mean = mean
+  cache_var = var
+  cache_norm = norm
+}
+
+backward = function(matrix[double] dout, matrix[double] X, matrix[double] gamma,
+                    matrix[double] cache_mean, matrix[double] cache_var,
+                    matrix[double] cache_norm, double epsilon = 1e-5)
+    return (matrix[double] dX, matrix[double] dgamma, matrix[double] dbeta) {
+  N = nrow(X)
+  mean = cache_mean
+  var = cache_var
+  norm = cache_norm
+  centered = X - mean
+
+  dgamma = colSums(dout * norm)
+  dbeta = colSums(dout)
+  dnorm = dout * gamma
+  dvar = (-1/2) * colSums(centered * (var + epsilon)^(-3/2) * dnorm)
+  dmean = colSums((-dnorm / sqrt(var + epsilon)) + ((-2 / N) * centered * dvar))
+  dX = (dnorm / sqrt(var + epsilon)) + ((2 / N) * centered * dvar) + ((1 / N) * dmean)
+}
+
+init = function(int D)
+    return (matrix[double] gamma, matrix[double] beta) {
+  gamma = matrix(1, rows=1, cols=D)
+  beta = matrix(0, rows=1, cols=D)
+}

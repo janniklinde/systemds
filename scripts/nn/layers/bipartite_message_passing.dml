@@ -1,0 +1,178 @@
+#-------------------------------------------------------------
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+#-------------------------------------------------------------
+
+/*
+ * Bipartite message passing layer with mean aggregation (blocked).
+ *
+ * This variant avoids building global E x N selectors and cbinds,
+ * and is suitable for large graphs.
+ */
+
+source("nn/layers/relu.dml") as relu
+
+forward = function(matrix[double] left_features, matrix[double] right_features,
+                   matrix[double] edge_src, matrix[double] edge_dst,
+                   matrix[double] edge_features,
+                   matrix[double] Wm_left1, matrix[double] Wm_right1,
+                   matrix[double] Wm_edge1, matrix[double] bm1,
+                   matrix[double] Wm2, matrix[double] bm2,
+                   matrix[double] Wo_agg1, matrix[double] Wo_right1,
+                   matrix[double] bo1, matrix[double] Wo2, matrix[double] bo2,
+                   int blockE = 200000)
+    return (matrix[double] out, matrix[double] agg,
+            matrix[double] out_z1, matrix[double] out_h1,
+            matrix[double] deg_safe) {
+  /*
+   * Forward pass for bipartite message passing:
+   * 1) edge-wise message MLP
+   * 2) mean aggregation to right nodes
+   * 3) output MLP on [agg, right_features]
+   */
+  Nl = nrow(left_features)
+  Nr = nrow(right_features)
+  E = nrow(edge_src)
+  He = ncol(right_features)
+
+  onesE = matrix(1, rows=E, cols=1)
+  deg = table(edge_dst, onesE, onesE, Nr, 1)
+  deg_safe = ifelse(deg == 0, 1, deg)
+  onesHe = matrix(1, rows=1, cols=He)
+
+  agg_sum = matrix(0, rows=Nr, cols=He)
+  for (bs in 1:ceiling(E / blockE)) {
+    e_start = (bs-1)*blockE + 1
+    e_end = min(bs*blockE, E)
+    nb = e_end - e_start + 1
+    edge_src_b = edge_src[e_start:e_end, ]
+    edge_dst_b = edge_dst[e_start:e_end, ]
+    edge_feat_b = edge_features[e_start:e_end, ]
+    S_src_b = table(seq(1, nb), edge_src_b, 1, nb, Nl)
+    S_dst_b = table(seq(1, nb), edge_dst_b, 1, nb, Nr)
+    left_sel = S_src_b %*% left_features
+    right_sel = S_dst_b %*% right_features
+    msg_z1 = left_sel %*% Wm_left1 + right_sel %*% Wm_right1 + edge_feat_b %*% Wm_edge1 + bm1
+    msg_h1 = relu::forward(msg_z1)
+    messages = msg_h1 %*% Wm2 + bm2
+    agg_sum = agg_sum + t(S_dst_b) %*% messages
+  }
+  agg = agg_sum / (deg_safe %*% onesHe)
+  out_z1 = agg %*% Wo_agg1 + right_features %*% Wo_right1 + bo1
+  out_h1 = relu::forward(out_z1)
+  out = out_h1 %*% Wo2 + bo2
+}
+
+backward = function(matrix[double] dout,
+                    matrix[double] left_features, matrix[double] right_features,
+                    matrix[double] edge_src, matrix[double] edge_dst,
+                    matrix[double] edge_features,
+                    matrix[double] Wm_left1, matrix[double] Wm_right1,
+                    matrix[double] Wm_edge1, matrix[double] bm1,
+                    matrix[double] Wm2, matrix[double] bm2,
+                    matrix[double] Wo_agg1, matrix[double] Wo_right1,
+                    matrix[double] bo1, matrix[double] Wo2, matrix[double] bo2,
+                    matrix[double] agg, matrix[double] out_z1,
+                    matrix[double] out_h1, matrix[double] deg_safe,
+                    int blockE = 200000)
+    return (matrix[double] dleft_features, matrix[double] dright_features,
+            matrix[double] dWm_left1, matrix[double] dWm_right1,
+            matrix[double] dWm_edge1, matrix[double] dbm1,
+            matrix[double] dWm2, matrix[double] dbm2,
+            matrix[double] dWo_agg1, matrix[double] dWo_right1,
+            matrix[double] dbo1, matrix[double] dWo2, matrix[double] dbo2) {
+  /*
+   * Backward pass for bipartite message passing.
+   */
+  Nl = nrow(left_features)
+  Nr = nrow(right_features)
+  E = nrow(edge_src)
+  He = ncol(right_features)
+  onesHe = matrix(1, rows=1, cols=He)
+
+  dWo2 = t(out_h1) %*% dout
+  dbo2 = colSums(dout)
+  dout_h1 = dout %*% t(Wo2)
+  dout_z1 = relu::backward(dout_h1, out_z1)
+  dWo_agg1 = t(agg) %*% dout_z1
+  dWo_right1 = t(right_features) %*% dout_z1
+  dbo1 = colSums(dout_z1)
+  dagg = dout_z1 %*% t(Wo_agg1)
+  dright_from_out = dout_z1 %*% t(Wo_right1)
+
+  dAggSum = dagg / (deg_safe %*% onesHe)
+  dleft_features = matrix(0, rows=Nl, cols=He)
+  dright_from_msg = matrix(0, rows=Nr, cols=He)
+  dWm_left1 = matrix(0, rows=nrow(Wm_left1), cols=ncol(Wm_left1))
+  dWm_right1 = matrix(0, rows=nrow(Wm_right1), cols=ncol(Wm_right1))
+  dWm_edge1 = matrix(0, rows=nrow(Wm_edge1), cols=ncol(Wm_edge1))
+  dbm1 = matrix(0, rows=1, cols=ncol(bm1))
+  dWm2 = matrix(0, rows=nrow(Wm2), cols=ncol(Wm2))
+  dbm2 = matrix(0, rows=1, cols=ncol(bm2))
+  for (bs in 1:ceiling(E / blockE)) {
+    e_start = (bs-1)*blockE + 1
+    e_end = min(bs*blockE, E)
+    nb = e_end - e_start + 1
+    edge_src_b = edge_src[e_start:e_end, ]
+    edge_dst_b = edge_dst[e_start:e_end, ]
+    edge_feat_b = edge_features[e_start:e_end, ]
+    S_src_b = table(seq(1, nb), edge_src_b, 1, nb, Nl)
+    S_dst_b = table(seq(1, nb), edge_dst_b, 1, nb, Nr)
+    left_sel = S_src_b %*% left_features
+    right_sel = S_dst_b %*% right_features
+    msg_z1 = left_sel %*% Wm_left1 + right_sel %*% Wm_right1 + edge_feat_b %*% Wm_edge1 + bm1
+    msg_h1 = relu::forward(msg_z1)
+    dmsg = S_dst_b %*% dAggSum
+    dWm2 = dWm2 + t(msg_h1) %*% dmsg
+    dbm2 = dbm2 + colSums(dmsg)
+    dmsg_h1 = dmsg %*% t(Wm2)
+    dmsg_z1 = relu::backward(dmsg_h1, msg_z1)
+    dWm_left1 = dWm_left1 + t(left_sel) %*% dmsg_z1
+    dWm_right1 = dWm_right1 + t(right_sel) %*% dmsg_z1
+    dWm_edge1 = dWm_edge1 + t(edge_feat_b) %*% dmsg_z1
+    dbm1 = dbm1 + colSums(dmsg_z1)
+    dleft_sel = dmsg_z1 %*% t(Wm_left1)
+    dright_sel = dmsg_z1 %*% t(Wm_right1)
+    dleft_features = dleft_features + t(S_src_b) %*% dleft_sel
+    dright_from_msg = dright_from_msg + t(S_dst_b) %*% dright_sel
+  }
+  dright_features = dright_from_out + dright_from_msg
+}
+
+init = function(int d, int f, int h_msg, int h_out, int seed = -1)
+    return (matrix[double] Wm_left1, matrix[double] Wm_right1,
+            matrix[double] Wm_edge1, matrix[double] bm1,
+            matrix[double] Wm2, matrix[double] bm2,
+            matrix[double] Wo_agg1, matrix[double] Wo_right1,
+            matrix[double] bo1, matrix[double] Wo2, matrix[double] bo2) {
+  /*
+   * Initialize weights for bipartite message passing (split weights).
+   */
+  Wm_left1 = rand(rows=d, cols=h_msg, pdf="normal", seed=seed) * sqrt(2.0/d)
+  Wm_right1 = rand(rows=d, cols=h_msg, pdf="normal", seed=seed+1) * sqrt(2.0/d)
+  Wm_edge1 = rand(rows=f, cols=h_msg, pdf="normal", seed=seed+2) * sqrt(2.0/f)
+  bm1 = matrix(0, rows=1, cols=h_msg)
+  Wm2 = rand(rows=h_msg, cols=d, pdf="normal", seed=seed+3) * sqrt(2.0/h_msg)
+  bm2 = matrix(0, rows=1, cols=d)
+  Wo_agg1 = rand(rows=d, cols=h_out, pdf="normal", seed=seed+4) * sqrt(2.0/d)
+  Wo_right1 = rand(rows=d, cols=h_out, pdf="normal", seed=seed+5) * sqrt(2.0/d)
+  bo1 = matrix(0, rows=1, cols=h_out)
+  Wo2 = rand(rows=h_out, cols=d, pdf="normal", seed=seed+6) * sqrt(2.0/h_out)
+  bo2 = matrix(0, rows=1, cols=d)
+}
