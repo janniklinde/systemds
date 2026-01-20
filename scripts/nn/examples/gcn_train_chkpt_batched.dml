@@ -1,0 +1,347 @@
+#-------------------------------------------------------------
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+#-------------------------------------------------------------
+
+#-------------------------------------------------------------
+# Efficient bipartite GNN training (SystemDS DML)
+# Closer to the PyG implementation: separate var/cons embeddings,
+# mean-aggregated bipartite message passing, and MLP head.
+#-------------------------------------------------------------
+
+source("scripts/nn/layers/affine.dml") as affine
+source("scripts/nn/layers/relu.dml") as relu
+source("nn/layers/bipartite_message_passing.dml") as bmp
+## Grouped GraphNorm helpers for batched graphs.
+gnorm_grp_init = function(int D)
+    return (matrix[double] gamma, matrix[double] beta) {
+  gamma = matrix(1, rows=1, cols=D)
+  beta = matrix(0, rows=1, cols=D)
+}
+
+gnorm_grp_forward = function(matrix[double] X, matrix[double] graph_id,
+                             matrix[double] gamma, matrix[double] beta,
+                             double epsilon = 1e-5)
+    return (matrix[double] out, matrix[double] mean_g, matrix[double] var_g) {
+  N = nrow(X)
+  D = ncol(X)
+  G = as.integer(max(graph_id))
+  S = table(seq(1, N), graph_id, 1, N, G)
+  onesN = matrix(1, rows=N, cols=1)
+  onesD = matrix(1, rows=1, cols=D)
+  count_g = t(S) %*% onesN
+  count_g_rep = count_g %*% onesD
+  sum_g = t(S) %*% X
+  mean_g = sum_g / count_g_rep
+  mean_per = S %*% mean_g
+  centered = X - mean_per
+  var_g = (t(S) %*% (centered * centered)) / count_g_rep
+  var_per = S %*% var_g
+  norm = centered / sqrt(var_per + epsilon)
+  out = norm * gamma + beta
+}
+
+gnorm_grp_backward = function(matrix[double] dout, matrix[double] X, matrix[double] graph_id,
+                              matrix[double] gamma, matrix[double] mean_g,
+                              matrix[double] var_g, double epsilon = 1e-5)
+    return (matrix[double] dX, matrix[double] dgamma, matrix[double] dbeta) {
+  N = nrow(X)
+  D = ncol(X)
+  G = as.integer(max(graph_id))
+  S = table(seq(1, N), graph_id, 1, N, G)
+  onesN = matrix(1, rows=N, cols=1)
+  onesD = matrix(1, rows=1, cols=D)
+  count_g = t(S) %*% onesN
+  count_g_rep = count_g %*% onesD
+  mean_per = S %*% mean_g
+  var_per = S %*% var_g
+  centered = X - mean_per
+  norm = centered / sqrt(var_per + epsilon)
+
+  dgamma = colSums(dout * norm)
+  dbeta = colSums(dout)
+  dnorm = dout * gamma
+
+  sum_dnorm_g = t(S) %*% dnorm
+  sum_dnorm_norm_g = t(S) %*% (dnorm * norm)
+  sum_dnorm = S %*% sum_dnorm_g
+  sum_dnorm_norm = S %*% sum_dnorm_norm_g
+  count_per = S %*% count_g
+  count_per_rep = count_per %*% onesD
+  count_per_rep = count_per_rep + (norm - norm)
+  inv_std = 1 / sqrt(var_per + epsilon)
+  dX = (inv_std * (dnorm * count_per_rep - sum_dnorm - norm * sum_dnorm_norm)) / count_per_rep
+}
+
+# Dataset paths (SystemDS format).
+data_dir1 = "gnn_examples/examples/systemds/case13659pegase-2017-09-02"
+data_dir2 = "gnn_examples/examples/systemds/case9241pegase-2017-05-07"
+
+# Graph 1.
+cons1 = read(data_dir1 + "/node_features")
+var1 = read(data_dir1 + "/node_features")
+edge_index1 = t(read(data_dir1 + "/edge_index"))
+edge_feat1 = read(data_dir1 + "/edge_features")
+min_idx1 = min(edge_index1)
+if (min_idx1 == 0) {
+  edge_index1 = edge_index1 + 1
+}
+
+# Graph 2.
+cons2 = read(data_dir2 + "/node_features")
+var2 = read(data_dir2 + "/node_features")
+edge_index2 = t(read(data_dir2 + "/edge_index"))
+edge_feat2 = read(data_dir2 + "/edge_features")
+min_idx2 = min(edge_index2)
+if (min_idx2 == 0) {
+  edge_index2 = edge_index2 + 1
+}
+
+# Batched features.
+constraint_features = rbind(cons1, cons2)
+variable_features = rbind(var1, var2)
+
+Ncons1 = nrow(cons1)
+Nvars1 = nrow(var1)
+Ncons2 = nrow(cons2)
+Nvars2 = nrow(var2)
+
+edge_src1 = edge_index1[, 1]
+edge_dst1 = edge_index1[, 2]
+edge_src2 = edge_index2[, 1] + Nvars1
+edge_dst2 = edge_index2[, 2] + Ncons1
+
+edge_src = rbind(edge_src1, edge_src2)
+edge_dst = rbind(edge_dst1, edge_dst2)
+edge_features = rbind(edge_feat1, edge_feat2)
+
+Ncons = nrow(constraint_features)
+Nvars = nrow(variable_features)
+E = nrow(edge_src)
+Dc = ncol(constraint_features)
+Dv = ncol(variable_features)
+Fe = ncol(edge_features)
+
+# Graph id vectors for grouped normalization.
+var_graph_id = rbind(matrix(1, rows=Nvars1, cols=1), matrix(2, rows=Nvars2, cols=1))
+cons_graph_id = rbind(matrix(1, rows=Ncons1, cols=1), matrix(2, rows=Ncons2, cols=1))
+
+# Model hyperparams.
+He = 16
+hidden1 = 32
+hidden2 = 16
+lr = 0.001
+epochs = 2
+
+# Edge lists (1-based indexing) already built from batched graphs.
+
+# Streaming parameters.
+blockE = 50000
+debug_checks = TRUE
+debug_epoch = 1
+debug_bs = 1
+debug_print_blocks = 3
+
+# Random regression targets (replace with real labels).
+y = rand(rows=Nvars, cols=1, seed=7)
+
+# Embedding MLPs (2-layer).
+[Wv1, bv1] = affine::init(Dv, He, 3)
+[Wv2, bv2] = affine::init(He, He, 4)
+[Wc1, bc1] = affine::init(Dc, He, 5)
+[Wc2, bc2] = affine::init(He, He, 6)
+
+# v->c message MLP (split weights to avoid cbind).
+[Wm_vc_v1, tmp] = affine::init(He, He, 7)
+[Wm_vc_c1, tmp] = affine::init(He, He, 8)
+[Wm_vc_e1, bm_vc1] = affine::init(Fe, He, 9)
+[Wm_vc2, bm_vc2] = affine::init(He, He, 10)
+
+# v->c output MLP (split weights).
+[Wo_vc_a1, tmp] = affine::init(He, He, 11)
+[Wo_vc_c1, bo_vc1] = affine::init(He, He, 12)
+[Wo_vc2, bo_vc2] = affine::init(He, He, 13)
+
+# c->v message MLP (split weights).
+[Wm_cv_v1, tmp] = affine::init(He, He, 14)
+[Wm_cv_c1, tmp] = affine::init(He, He, 15)
+[Wm_cv_e1, bm_cv1] = affine::init(Fe, He, 16)
+[Wm_cv2, bm_cv2] = affine::init(He, He, 17)
+
+# c->v output MLP (split weights).
+[Wo_cv_a1, tmp] = affine::init(He, He, 18)
+[Wo_cv_v1, bo_cv1] = affine::init(He, He, 19)
+[Wo_cv2, bo_cv2] = affine::init(He, He, 20)
+
+# Output head (regression).
+[Wout1, bout1] = affine::init(He, hidden1, 21)
+[Wout2, bout2] = affine::init(hidden1, hidden2, 22)
+[Wout3, bout3] = affine::init(hidden2, 1, 23)
+
+# GraphNorm parameters (one per feature dimension).
+[gn_c_gamma, gn_c_beta] = gnorm_grp_init(He)
+[gn_v_gamma, gn_v_beta] = gnorm_grp_init(He)
+gn_eps = 1e-5
+
+print("Starting training " + epochs)
+for (epoch in 1:epochs) {
+  print("Epoch " + epoch + " start")
+  print("VarShape: " + nrow(variable_features) + "x" + ncol(variable_features) + " nnz: " + sum(variable_features!=0))
+  print("ConstShape: " + nrow(constraint_features) + "x" + ncol(constraint_features) + " nnz: " + sum(constraint_features!=0))
+  print("Edges: " + E + " blockE: " + blockE + " blocks: " + ceiling(E / blockE))
+
+  # Forward pass for loss (checkpointed; activations are recomputed for backward).
+  var_lin1 = affine::forward(variable_features, Wv1, bv1)
+  var_h1 = relu::forward(var_lin1)
+  var_lin2 = affine::forward(var_h1, Wv2, bv2)
+  var_emb = relu::forward(var_lin2)
+
+  cons_lin1 = affine::forward(constraint_features, Wc1, bc1)
+  cons_h1 = relu::forward(cons_lin1)
+  cons_lin2 = affine::forward(cons_h1, Wc2, bc2)
+  cons_emb = relu::forward(cons_lin2)
+
+  [cons_up_raw, agg_vc, cons_up_z1, cons_up_h1, deg_vc_safe] = bmp::forward(
+    var_emb, cons_emb, edge_src, edge_dst, edge_features,
+    Wm_vc_v1, Wm_vc_c1, Wm_vc_e1, bm_vc1, Wm_vc2, bm_vc2,
+    Wo_vc_a1, Wo_vc_c1, bo_vc1, Wo_vc2, bo_vc2, blockE)
+  [cons_up, gn_c_mean, gn_c_var] = gnorm_grp_forward(
+    cons_up_raw, cons_graph_id, gn_c_gamma, gn_c_beta, gn_eps)
+
+  [var_up_raw, agg_cv, var_up_z1, var_up_h1, deg_cv_safe] = bmp::forward(
+    cons_up, var_emb, edge_dst, edge_src, edge_features,
+    Wm_cv_c1, Wm_cv_v1, Wm_cv_e1, bm_cv1, Wm_cv2, bm_cv2,
+    Wo_cv_a1, Wo_cv_v1, bo_cv1, Wo_cv2, bo_cv2, blockE)
+  [var_up, gn_v_mean, gn_v_var] = gnorm_grp_forward(
+    var_up_raw, var_graph_id, gn_v_gamma, gn_v_beta, gn_eps)
+
+  head_z1 = affine::forward(var_up, Wout1, bout1)
+  head_h1 = relu::forward(head_z1)
+  head_z2 = affine::forward(head_h1, Wout2, bout2)
+  head_h2 = relu::forward(head_z2)
+  pred = affine::forward(head_h2, Wout3, bout3)
+  diff = pred - y
+  loss = sum(diff * diff) / Nvars
+  if (epoch %% 1 == 0) {
+    print("epoch " + epoch + " | loss " + loss)
+  }
+
+  # Recompute activations for backward pass (checkpointing).
+  var_lin1 = affine::forward(variable_features, Wv1, bv1)
+  var_h1 = relu::forward(var_lin1)
+  var_lin2 = affine::forward(var_h1, Wv2, bv2)
+  var_emb = relu::forward(var_lin2)
+
+  cons_lin1 = affine::forward(constraint_features, Wc1, bc1)
+  cons_h1 = relu::forward(cons_lin1)
+  cons_lin2 = affine::forward(cons_h1, Wc2, bc2)
+  cons_emb = relu::forward(cons_lin2)
+
+  [cons_up_raw, agg_vc, cons_up_z1, cons_up_h1, deg_vc_safe] = bmp::forward(
+    var_emb, cons_emb, edge_src, edge_dst, edge_features,
+    Wm_vc_v1, Wm_vc_c1, Wm_vc_e1, bm_vc1, Wm_vc2, bm_vc2,
+    Wo_vc_a1, Wo_vc_c1, bo_vc1, Wo_vc2, bo_vc2, blockE)
+  [cons_up, gn_c_mean, gn_c_var] = gnorm_grp_forward(
+    cons_up_raw, cons_graph_id, gn_c_gamma, gn_c_beta, gn_eps)
+
+  [var_up_raw, agg_cv, var_up_z1, var_up_h1, deg_cv_safe] = bmp::forward(
+    cons_up, var_emb, edge_dst, edge_src, edge_features,
+    Wm_cv_c1, Wm_cv_v1, Wm_cv_e1, bm_cv1, Wm_cv2, bm_cv2,
+    Wo_cv_a1, Wo_cv_v1, bo_cv1, Wo_cv2, bo_cv2, blockE)
+  [var_up, gn_v_mean, gn_v_var] = gnorm_grp_forward(
+    var_up_raw, var_graph_id, gn_v_gamma, gn_v_beta, gn_eps)
+
+  head_z1 = affine::forward(var_up, Wout1, bout1)
+  head_h1 = relu::forward(head_z1)
+  head_z2 = affine::forward(head_h1, Wout2, bout2)
+  head_h2 = relu::forward(head_z2)
+  pred = affine::forward(head_h2, Wout3, bout3)
+  diff = pred - y
+
+  # Backward: output head.
+  dpred = (2 / Nvars) * diff
+  [dhead_h2, dWout3, dbout3] = affine::backward(dpred, head_h2, Wout3, bout3)
+  dhead_z2 = relu::backward(dhead_h2, head_z2)
+  [dhead_h1, dWout2, dbout2] = affine::backward(dhead_z2, head_h1, Wout2, bout2)
+  dhead_z1 = relu::backward(dhead_h1, head_z1)
+  [dvar_up, dWout1, dbout1] = affine::backward(dhead_z1, var_up, Wout1, bout1)
+
+  # Backward: GraphNorm for var_up.
+  [dvar_up_raw, dgn_v_gamma, dgn_v_beta] = gnorm_grp_backward(
+    dvar_up, var_up_raw, var_graph_id, gn_v_gamma, gn_v_mean, gn_v_var, gn_eps)
+
+  # Backward: c->v message passing (blocked layer).
+  [dcons_up_norm, dvar_emb_from_msg, dWm_cv_c1, dWm_cv_v1, dWm_cv_e1, dbm_cv1,
+   dWm_cv2, dbm_cv2, dWo_cv_a1, dWo_cv_v1, dbo_cv1, dWo_cv2, dbo_cv2] = bmp::backward(
+    dvar_up_raw, cons_up, var_emb, edge_dst, edge_src, edge_features,
+    Wm_cv_c1, Wm_cv_v1, Wm_cv_e1, bm_cv1, Wm_cv2, bm_cv2,
+    Wo_cv_a1, Wo_cv_v1, bo_cv1, Wo_cv2, bo_cv2,
+    agg_cv, var_up_z1, var_up_h1, deg_cv_safe, blockE)
+
+  [dcons_up, dgn_c_gamma, dgn_c_beta] = gnorm_grp_backward(
+    dcons_up_norm, cons_up_raw, cons_graph_id, gn_c_gamma, gn_c_mean, gn_c_var, gn_eps)
+
+  # Backward: v->c message passing (blocked layer).
+  [dvar_emb_from_msg2, dcons_emb_from_msg, dWm_vc_v1, dWm_vc_c1, dWm_vc_e1, dbm_vc1,
+   dWm_vc2, dbm_vc2, dWo_vc_a1, dWo_vc_c1, dbo_vc1, dWo_vc2, dbo_vc2] = bmp::backward(
+    dcons_up, var_emb, cons_emb, edge_src, edge_dst, edge_features,
+    Wm_vc_v1, Wm_vc_c1, Wm_vc_e1, bm_vc1, Wm_vc2, bm_vc2,
+    Wo_vc_a1, Wo_vc_c1, bo_vc1, Wo_vc2, bo_vc2,
+    agg_vc, cons_up_z1, cons_up_h1, deg_vc_safe, blockE)
+
+
+  # Backward: embeddings.
+  dvar_emb_total = dvar_emb_from_msg + dvar_emb_from_msg2
+  dcons_emb_total = dcons_emb_from_msg
+
+  dvar_lin2 = relu::backward(dvar_emb_total, var_lin2)
+  [dvar_h1, dWv2, dbv2] = affine::backward(dvar_lin2, var_h1, Wv2, bv2)
+  dvar_lin1 = relu::backward(dvar_h1, var_lin1)
+  [dvar0, dWv1, dbv1] = affine::backward(dvar_lin1, variable_features, Wv1, bv1)
+
+  dcons_lin2 = relu::backward(dcons_emb_total, cons_lin2)
+  [dcons_h1, dWc2, dbc2] = affine::backward(dcons_lin2, cons_h1, Wc2, bc2)
+  dcons_lin1 = relu::backward(dcons_h1, cons_lin1)
+  [dcons0, dWc1, dbc1] = affine::backward(dcons_lin1, constraint_features, Wc1, bc1)
+
+  # SGD update.
+  Wout1 = Wout1 - lr * dWout1; bout1 = bout1 - lr * dbout1
+  Wout2 = Wout2 - lr * dWout2; bout2 = bout2 - lr * dbout2
+  Wout3 = Wout3 - lr * dWout3; bout3 = bout3 - lr * dbout3
+
+  Wo_cv2 = Wo_cv2 - lr * dWo_cv2; bo_cv2 = bo_cv2 - lr * dbo_cv2
+  Wo_cv_a1 = Wo_cv_a1 - lr * dWo_cv_a1; Wo_cv_v1 = Wo_cv_v1 - lr * dWo_cv_v1; bo_cv1 = bo_cv1 - lr * dbo_cv1
+  Wm_cv2 = Wm_cv2 - lr * dWm_cv2; bm_cv2 = bm_cv2 - lr * dbm_cv2
+  Wm_cv_v1 = Wm_cv_v1 - lr * dWm_cv_v1; Wm_cv_c1 = Wm_cv_c1 - lr * dWm_cv_c1; Wm_cv_e1 = Wm_cv_e1 - lr * dWm_cv_e1; bm_cv1 = bm_cv1 - lr * dbm_cv1
+
+  Wo_vc2 = Wo_vc2 - lr * dWo_vc2; bo_vc2 = bo_vc2 - lr * dbo_vc2
+  Wo_vc_a1 = Wo_vc_a1 - lr * dWo_vc_a1; Wo_vc_c1 = Wo_vc_c1 - lr * dWo_vc_c1; bo_vc1 = bo_vc1 - lr * dbo_vc1
+  Wm_vc2 = Wm_vc2 - lr * dWm_vc2; bm_vc2 = bm_vc2 - lr * dbm_vc2
+  Wm_vc_v1 = Wm_vc_v1 - lr * dWm_vc_v1; Wm_vc_c1 = Wm_vc_c1 - lr * dWm_vc_c1; Wm_vc_e1 = Wm_vc_e1 - lr * dWm_vc_e1; bm_vc1 = bm_vc1 - lr * dbm_vc1
+
+  Wv1 = Wv1 - lr * dWv1; bv1 = bv1 - lr * dbv1
+  Wv2 = Wv2 - lr * dWv2; bv2 = bv2 - lr * dbv2
+  Wc1 = Wc1 - lr * dWc1; bc1 = bc1 - lr * dbc1
+  Wc2 = Wc2 - lr * dWc2; bc2 = bc2 - lr * dbc2
+
+  gn_c_gamma = gn_c_gamma - lr * dgn_c_gamma
+  gn_c_beta = gn_c_beta - lr * dgn_c_beta
+  gn_v_gamma = gn_v_gamma - lr * dgn_v_gamma
+  gn_v_beta = gn_v_beta - lr * dgn_v_beta
+}
