@@ -269,6 +269,18 @@ public class LibMatrixCuMatMult extends LibMatrixCUDA {
 	static void sparseDenseMatMult(GPUContext gCtx, String instName, Pointer C, CSRPointer A, Pointer B,
 			long leftNumRows, long leftNumColumns, long rightNumRows, long rightNumColumns, long outRLen, long outCLen,
 			boolean isLeftTransposed, boolean isRightTransposed) {
+		// Direct sparse-dense SpMM for the common non-transpose case (row-major dense layout).
+		if(!isLeftTransposed && !isRightTransposed) {
+			int m = toInt(leftNumRows);
+			int k = toInt(leftNumColumns);
+			int n = toInt(rightNumColumns);
+			int transa = cusparseOp(false);
+			int transb = cusparseOp(false);
+			int ld = n; // row-major dense leading dimension
+			cudaSupportFunctions.cusparsecsrmm2(getCusparseHandle(gCtx), transa, transb, m, n, k, toInt(A.nnz), one(),
+				A.descr, A.spMatDescr, A.val, A.rowPtr, A.colInd, B, ld, zero(), C, ld);
+			return;
+		}
 		// t(C) = t(B) %*% t(A)
 		Pointer output = null;
 		if (outRLen != 1 && outCLen != 1) {

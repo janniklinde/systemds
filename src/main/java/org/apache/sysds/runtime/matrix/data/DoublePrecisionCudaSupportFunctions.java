@@ -20,6 +20,8 @@ package org.apache.sysds.runtime.matrix.data;
 
 import static jcuda.jcusparse.JCusparse.*;
 import static jcuda.jcusparse.JCusparse.cusparseGetMatIndexBase;
+import static jcuda.jcusparse.cusparseOperation.CUSPARSE_OPERATION_TRANSPOSE;
+import static jcuda.jcusparse.cusparseOrder.CUSPARSE_ORDER_ROW;
 import static jcuda.runtime.JCuda.*;
 import static jcuda.runtime.cudaMemcpyKind.cudaMemcpyDeviceToHost;
 import static jcuda.runtime.cudaMemcpyKind.cudaMemcpyHostToDevice;
@@ -114,15 +116,25 @@ public class DoublePrecisionCudaSupportFunctions implements CudaSupportFunctions
 
 		int dataType = CUDA_R_64F;
 		int idxBase = cusparseGetMatIndexBase(descrA);
-		// Create sparse matrix A in CSR format
-		cusparseCreateCsr(spMatDescrA, m, n, nnz, csrRowPtrA, csrColIndA, csrValA, CUSPARSE_INDEX_32I,
+		// Create sparse matrix A in CSR format (shape depends on op(A)).
+		int aRows = (transA == CUSPARSE_OPERATION_TRANSPOSE) ? k : m;
+		int aCols = (transA == CUSPARSE_OPERATION_TRANSPOSE) ? m : k;
+		cusparseCreateCsr(spMatDescrA, aRows, aCols, nnz, csrRowPtrA, csrColIndA, csrValA, CUSPARSE_INDEX_32I,
 			CUSPARSE_INDEX_32I, idxBase, dataType);
+		// Fall back to row-major dense descriptors if col-major LD would be invalid.
+		boolean rowMajorFallback = (ldb < k) || (ldc < m);
+		int denseOrder = rowMajorFallback ? CUSPARSE_ORDER_ROW : CUSPARSE_ORDER_COL;
+		// Respect transB when defining the dense descriptor shape (B is k x n before op).
+		int bRows = (transB == CUSPARSE_OPERATION_TRANSPOSE) ? n : k;
+		int bCols = (transB == CUSPARSE_OPERATION_TRANSPOSE) ? k : n;
+		int ldB = rowMajorFallback ? bCols : bRows;
+		int ldC = rowMajorFallback ? n : ldc;
 		// Create dense matrix B
 		cusparseDnMatDescr dnMatB = new cusparseDnMatDescr();
-		cusparseCreateDnMat(dnMatB, k, n, ldb, B, dataType, CUSPARSE_ORDER_COL);
+		cusparseCreateDnMat(dnMatB, bRows, bCols, ldB, B, dataType, denseOrder);
 		// Create dense matrix C
 		cusparseDnMatDescr dnMatC = new cusparseDnMatDescr();
-		cusparseCreateDnMat(dnMatC, m, n, ldc, C, dataType, CUSPARSE_ORDER_COL);
+		cusparseCreateDnMat(dnMatC, m, n, ldC, C, dataType, denseOrder);
 		// allocate an external buffer if needed
 		long[] bufferSize = {0};
 		int alg = CUSPARSE_SPMM_ALG_DEFAULT;
