@@ -39,12 +39,15 @@ import org.apache.sysds.runtime.transform.encode.EncoderFactory;
 import org.apache.sysds.runtime.transform.encode.MultiColumnEncoder;
 
 public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPInstruction {
+	protected final ArrayList<CPOperand> _inputs;
 	protected final ArrayList<CPOperand> _outputs;
 	protected final boolean _metaReturn;
 	
-	private MultiReturnParameterizedBuiltinCPInstruction(Operator op, CPOperand input1, CPOperand input2,
+	private MultiReturnParameterizedBuiltinCPInstruction(Operator op, ArrayList<CPOperand> inputs,
 		boolean metaReturn, ArrayList<CPOperand> outputs, String opcode, String istr) {
-		super(CPType.MultiReturnBuiltin, op, input1, input2, outputs.get(0), opcode, istr);
+		super(CPType.MultiReturnBuiltin, op, inputs.size() > 0 ? inputs.get(0) : null,
+			inputs.size() > 1 ? inputs.get(1) : null, outputs.get(0), opcode, istr);
+		_inputs = inputs;
 		_outputs = outputs;
 		_metaReturn = metaReturn;
 	}
@@ -70,6 +73,9 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 			// one input and two outputs
 			CPOperand in1 = new CPOperand(parts[1]);
 			CPOperand in2 = new CPOperand(parts[2]);
+			ArrayList<CPOperand> inputs = new ArrayList<>();
+			inputs.add(in1);
+			inputs.add(in2);
 			int pos = 3;
 			boolean metaReturn = true;
 			if( parts.length == 7 ) //no need for meta data
@@ -77,7 +83,27 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 			outputs.add(new CPOperand(parts[pos], ValueType.FP64, DataType.MATRIX));
 			outputs.add(new CPOperand(parts[pos+1], ValueType.STRING, DataType.FRAME));
 			return new MultiReturnParameterizedBuiltinCPInstruction(
-				null, in1, in2, metaReturn, outputs, opcode, str);
+				null, inputs, metaReturn, outputs, opcode, str);
+		}
+		else if(opcode.equalsIgnoreCase(Opcodes.MESSAGE_PASSING_BIPARTITE.toString())) {
+			final int numInputs = 17;
+			final int numOutputs = 4;
+			final int minParts = 1 + numInputs + numOutputs;
+			if(parts.length < minParts)
+				throw new DMLRuntimeException("Invalid number of operands in MultiReturnParameterizedBuiltin instruction: " + opcode);
+
+			int pos = 1;
+			ArrayList<CPOperand> inputs = new ArrayList<>(numInputs);
+			for(int i = 0; i < numInputs; i++)
+				inputs.add(new CPOperand(parts[pos++]));
+
+			outputs.add(new CPOperand(parts[pos++], ValueType.FP64, DataType.MATRIX));
+			outputs.add(new CPOperand(parts[pos++], ValueType.FP64, DataType.MATRIX));
+			outputs.add(new CPOperand(parts[pos++], ValueType.FP64, DataType.MATRIX));
+			outputs.add(new CPOperand(parts[pos++], ValueType.FP64, DataType.MATRIX));
+
+			return new MultiReturnParameterizedBuiltinCPInstruction(
+				null, inputs, false, outputs, opcode, str);
 		}
 		else {
 			throw new DMLRuntimeException("Invalid opcode in MultiReturnBuiltin instruction: " + opcode);
@@ -87,6 +113,9 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 
 	@Override
 	public void processInstruction(ExecutionContext ec) {
+		if(getOpcode().equalsIgnoreCase(Opcodes.MESSAGE_PASSING_BIPARTITE.toString()))
+			throw new DMLRuntimeException("message_passing_bipartite: CP instruction not implemented yet.");
+
 		// obtain and pin input frame
 		FrameBlock fin = ec.getFrameInput(input1.getName());
 		String spec = ec.getScalarInput(input2).getStringValue();
@@ -120,7 +149,7 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 	@Override
 	@SuppressWarnings("unchecked")
 	public Pair<String, LineageItem>[] getLineageItems(ExecutionContext ec) {
-		LineageItem[] inputLineage = LineageItemUtils.getLineage(ec, input1, input2, input3);
+		LineageItem[] inputLineage = LineageItemUtils.getLineage(ec, _inputs.toArray(new CPOperand[0]));
 		final Pair<String, LineageItem>[] ret = new Pair[_outputs.size()];
 		for(int i = 0; i < _outputs.size(); i++){
 			CPOperand out = _outputs.get(i);

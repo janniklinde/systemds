@@ -1940,6 +1940,39 @@ public class DMLTranslator
 				currBuiltinOp = new FunctionOp(ftype, nameSpace, source.getOpCode().toString(), null, inputs, outputNames, outputs);
 				break;
 
+			case MESSAGE_PASSING_BIPARTITE:
+				ArrayList<Hop> mpInputs = new ArrayList<>();
+				mpInputs.add(processExpression(source.getVarParam("V"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("C"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("E"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("W_v_vc"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("W_c_vc"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("W_e_vc"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("b_vc"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("W_v_cv"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("W_c_cv"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("b_cv"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("W_v"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("b_v"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("W_c"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("b_c"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("v"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("c"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("e"), null, hops));
+
+				String[] mpOutputNames = new String[targetList.size()];
+				mpOutputNames[0] = targetList.get(0).getName();
+				mpOutputNames[1] = targetList.get(1).getName();
+				mpOutputNames[2] = targetList.get(2).getName();
+				mpOutputNames[3] = targetList.get(3).getName();
+				outputs.add(new DataOp(mpOutputNames[0], DataType.MATRIX, ValueType.FP64, mpInputs.get(0), OpOpData.FUNCTIONOUTPUT, mpInputs.get(0).getFilename()));
+				outputs.add(new DataOp(mpOutputNames[1], DataType.MATRIX, ValueType.FP64, mpInputs.get(0), OpOpData.FUNCTIONOUTPUT, mpInputs.get(0).getFilename()));
+				outputs.add(new DataOp(mpOutputNames[2], DataType.MATRIX, ValueType.FP64, mpInputs.get(0), OpOpData.FUNCTIONOUTPUT, mpInputs.get(0).getFilename()));
+				outputs.add(new DataOp(mpOutputNames[3], DataType.MATRIX, ValueType.FP64, mpInputs.get(0), OpOpData.FUNCTIONOUTPUT, mpInputs.get(0).getFilename()));
+
+				currBuiltinOp = new FunctionOp(ftype, nameSpace, source.getOpCode().toString(), null, mpInputs, mpOutputNames, outputs);
+				break;
+
 			default:
 				throw new ParseException("Invaid Opcode in DMLTranslator:processMultipleReturnParameterizedBuiltinFunctionExpression(): " + source.getOpCode());
 		}

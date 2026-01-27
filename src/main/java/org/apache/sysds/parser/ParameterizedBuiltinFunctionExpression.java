@@ -270,9 +270,9 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 
 		default: //always unconditional (because unsupported operation)
 			//handle common issue of transformencode
-			if( getOpCode()==Builtins.TRANSFORMENCODE )
+			if( getOpCode()==Builtins.TRANSFORMENCODE || getOpCode()==Builtins.MESSAGE_PASSING_BIPARTITE )
 				raiseValidateError("Parameterized function "+ getOpCode() +" requires a multi-assignment statement "
-						+ "for data and metadata.", false, LanguageErrorCodes.UNSUPPORTED_EXPRESSION);
+						+ "for multiple outputs.", false, LanguageErrorCodes.UNSUPPORTED_EXPRESSION);
 			else
 				raiseValidateError("Unsupported parameterized function "+ getOpCode(), 
 						false, LanguageErrorCodes.UNSUPPORTED_EXPRESSION);
@@ -321,6 +321,14 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 				
 				validateTransformEncode(out1, out2, conditional);
 				break;	
+			case MESSAGE_PASSING_BIPARTITE:
+				DataIdentifier vOut = (DataIdentifier) getOutputs()[0];
+				DataIdentifier cOut = (DataIdentifier) getOutputs()[1];
+				DataIdentifier vAct = (DataIdentifier) getOutputs()[2];
+				DataIdentifier cAct = (DataIdentifier) getOutputs()[3];
+				
+				validateMessagePassingBipartite(vOut, cOut, vAct, cAct, conditional);
+				break;
 			default: //always unconditional (because unsupported operation)
 				raiseValidateError("Unsupported parameterized function "+ getOpCode(), false, LanguageErrorCodes.INVALID_PARAMETERS);
 		}
@@ -697,6 +705,54 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 		output2.setDataType(DataType.FRAME);
 		output2.setValueType(ValueType.STRING);
 		output2.setDimensions(-1, -1);
+	}
+
+	private void validateMessagePassingBipartite(DataIdentifier vOut, DataIdentifier cOut, DataIdentifier vAct,
+		DataIdentifier cAct, boolean conditional)
+	{
+		String fname = getOpCode().name();
+		Set<String> valid = CollectionUtils.asSet(
+			"V", "C", "E",
+			"W_v_vc", "W_c_vc", "W_e_vc", "b_vc",
+			"W_v_cv", "W_c_cv", "b_cv",
+			"W_v", "b_v", "W_c", "b_c",
+			"v", "c", "e");
+		checkInvalidParameters(getOpCode(), getVarParams(), valid);
+
+		checkDataValueType(false, fname, "V", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "C", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "E", DataType.MATRIX, ValueType.FP64, conditional);
+
+		checkDataValueType(false, fname, "W_v_vc", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "W_c_vc", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "W_e_vc", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "b_vc", DataType.MATRIX, ValueType.FP64, conditional);
+
+		checkDataValueType(false, fname, "W_v_cv", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "W_c_cv", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "b_cv", DataType.MATRIX, ValueType.FP64, conditional);
+
+		checkDataValueType(false, fname, "W_v", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "b_v", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "W_c", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "b_c", DataType.MATRIX, ValueType.FP64, conditional);
+
+		checkDataValueType(false, fname, "v", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "c", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "e", DataType.MATRIX, ValueType.FP64, conditional);
+
+		vOut.setDataType(DataType.MATRIX);
+		vOut.setValueType(ValueType.FP64);
+		vOut.setDimensions(-1, -1);
+		cOut.setDataType(DataType.MATRIX);
+		cOut.setValueType(ValueType.FP64);
+		cOut.setDimensions(-1, -1);
+		vAct.setDataType(DataType.MATRIX);
+		vAct.setValueType(ValueType.FP64);
+		vAct.setDimensions(-1, -1);
+		cAct.setDataType(DataType.MATRIX);
+		cAct.setValueType(ValueType.FP64);
+		cAct.setDimensions(-1, -1);
 	}
 	
 	private void validateTransformSpec(String pname, boolean conditional) {
@@ -1191,6 +1247,6 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 
 	@Override
 	public boolean multipleReturns() {
-		return (_opcode == Builtins.TRANSFORMENCODE);
+		return (_opcode == Builtins.TRANSFORMENCODE || _opcode == Builtins.MESSAGE_PASSING_BIPARTITE);
 	}
 }

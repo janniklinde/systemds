@@ -214,6 +214,7 @@ public enum Opcodes {
 	TRANSFORMCOLMAP("transformcolmap", InstructionType.ParameterizedBuiltin),
 	TRANSFORMMETA("transformmeta", InstructionType.ParameterizedBuiltin),
 	TRANSFORMENCODE("transformencode", InstructionType.MultiReturnParameterizedBuiltin,  InstructionType.MultiReturnBuiltin),
+	MESSAGE_PASSING_BIPARTITE("message_passing_bipartite", InstructionType.MultiReturnParameterizedBuiltin),
 
 	//Ternary instruction opcodes
 	PM("+*", InstructionType.Ternary),

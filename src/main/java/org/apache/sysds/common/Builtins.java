@@ -388,6 +388,7 @@ public enum Builtins {
 	QF("qf", false, true),
 	QNORM("qnorm", false, true),
 	QT("qt", false, true),
+	MESSAGE_PASSING_BIPARTITE("message_passing_bipartite", null, false, true, ReturnType.MULTI_RETURN),
 	REPLACE("replace", false, true),
 	RMEMPTY("removeEmpty", false, true),
 	SCALE("scale", true, false),
