@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.frame.data.FrameBlock;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.lineage.LineageItem;
 import org.apache.sysds.runtime.lineage.LineageItemUtils;
+import org.apache.sysds.runtime.matrix.data.LibMatrixMult;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.transform.encode.EncoderFactory;
@@ -86,7 +87,7 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 				null, inputs, metaReturn, outputs, opcode, str);
 		}
 		else if(opcode.equalsIgnoreCase(Opcodes.MESSAGE_PASSING_BIPARTITE.toString())) {
-			final int numInputs = 17;
+			final int numInputs = 10;
 			final int numOutputs = 4;
 			final int minParts = 1 + numInputs + numOutputs;
 			if(parts.length < minParts)
@@ -113,8 +114,10 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 
 	@Override
 	public void processInstruction(ExecutionContext ec) {
-		if(getOpcode().equalsIgnoreCase(Opcodes.MESSAGE_PASSING_BIPARTITE.toString()))
-			throw new DMLRuntimeException("message_passing_bipartite: CP instruction not implemented yet.");
+		if(getOpcode().equalsIgnoreCase(Opcodes.MESSAGE_PASSING_BIPARTITE.toString())) {
+			processMessagePassingBipartite(ec);
+			return;
+		}
 
 		// obtain and pin input frame
 		FrameBlock fin = ec.getFrameInput(input1.getName());
@@ -160,5 +163,28 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 
 	public boolean getMetaReturn() {
 		return _metaReturn;
+	}
+	@SuppressWarnings("unused")
+	private void processMessagePassingBipartite(ExecutionContext ec) {
+		// Input order (see DMLTranslator): V, C, E, W_v_vccv, W_c_vccv, W_e_vccv, b_vccv, v, c, e
+		int k = OptimizerUtils.getTransformNumThreads();
+		MatrixBlock V = ec.getMatrixInput(_inputs.get(0).getName());
+		MatrixBlock C = ec.getMatrixInput(_inputs.get(1).getName());
+		MatrixBlock E = ec.getMatrixInput(_inputs.get(2).getName());
+		MatrixBlock W_v_vccv = ec.getMatrixInput(_inputs.get(3).getName());
+		MatrixBlock W_c_vccv = ec.getMatrixInput(_inputs.get(4).getName());
+		MatrixBlock W_e_vccv = ec.getMatrixInput(_inputs.get(5).getName());
+		MatrixBlock b_vccv = ec.getMatrixInput(_inputs.get(6).getName());
+		MatrixBlock v = ec.getMatrixInput(_inputs.get(7).getName());
+		MatrixBlock c = ec.getMatrixInput(_inputs.get(8).getName());
+		MatrixBlock e = ec.getMatrixInput(_inputs.get(9).getName());
+
+		MatrixBlock vWfused = LibMatrixMult.matrixMult(V, W_v_vccv, k);
+		MatrixBlock cWfused = LibMatrixMult.matrixMult(C, W_c_vccv, k);
+		MatrixBlock eWpb = LibMatrixMult.matrixMult(E,  W_e_vccv, k);
+
+
+
+		throw new DMLRuntimeException("message_passing_bipartite: CP instruction not implemented yet.");
 	}
 }

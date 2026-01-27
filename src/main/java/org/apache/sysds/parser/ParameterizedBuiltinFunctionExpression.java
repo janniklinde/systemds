@@ -713,9 +713,7 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 		String fname = getOpCode().name();
 		Set<String> valid = CollectionUtils.asSet(
 			"V", "C", "E",
-			"W_v_vc", "W_c_vc", "W_e_vc", "b_vc",
-			"W_v_cv", "W_c_cv", "b_cv",
-			"W_v", "b_v", "W_c", "b_c",
+			"W_v_vccv", "W_c_vccv", "W_e_vccv", "b_vccv",
 			"v", "c", "e");
 		checkInvalidParameters(getOpCode(), getVarParams(), valid);
 
@@ -723,23 +721,35 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 		checkDataValueType(false, fname, "C", DataType.MATRIX, ValueType.FP64, conditional);
 		checkDataValueType(false, fname, "E", DataType.MATRIX, ValueType.FP64, conditional);
 
-		checkDataValueType(false, fname, "W_v_vc", DataType.MATRIX, ValueType.FP64, conditional);
-		checkDataValueType(false, fname, "W_c_vc", DataType.MATRIX, ValueType.FP64, conditional);
-		checkDataValueType(false, fname, "W_e_vc", DataType.MATRIX, ValueType.FP64, conditional);
-		checkDataValueType(false, fname, "b_vc", DataType.MATRIX, ValueType.FP64, conditional);
-
-		checkDataValueType(false, fname, "W_v_cv", DataType.MATRIX, ValueType.FP64, conditional);
-		checkDataValueType(false, fname, "W_c_cv", DataType.MATRIX, ValueType.FP64, conditional);
-		checkDataValueType(false, fname, "b_cv", DataType.MATRIX, ValueType.FP64, conditional);
-
-		checkDataValueType(false, fname, "W_v", DataType.MATRIX, ValueType.FP64, conditional);
-		checkDataValueType(false, fname, "b_v", DataType.MATRIX, ValueType.FP64, conditional);
-		checkDataValueType(false, fname, "W_c", DataType.MATRIX, ValueType.FP64, conditional);
-		checkDataValueType(false, fname, "b_c", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "W_v_vccv", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "W_c_vccv", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "W_e_vccv", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "b_vccv", DataType.MATRIX, ValueType.FP64, conditional);
 
 		checkDataValueType(false, fname, "v", DataType.MATRIX, ValueType.FP64, conditional);
 		checkDataValueType(false, fname, "c", DataType.MATRIX, ValueType.FP64, conditional);
 		checkDataValueType(false, fname, "e", DataType.MATRIX, ValueType.FP64, conditional);
+
+		Identifier vIn = getVarParam("v").getOutput();
+		Identifier cIn = getVarParam("c").getOutput();
+		Identifier eIn = getVarParam("e").getOutput();
+		Identifier wV = getVarParam("W_v_vccv").getOutput();
+		Identifier wC = getVarParam("W_c_vccv").getOutput();
+		Identifier wE = getVarParam("W_e_vccv").getOutput();
+		Identifier b = getVarParam("b_vccv").getOutput();
+
+		if(vIn.getDim2() != -1 && wV.getDim1() != -1 && vIn.getDim2() != wV.getDim1())
+			raiseValidateError("Dimension mismatch: ncol(v) must match nrow(W_v_vccv).",
+				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		if(cIn.getDim2() != -1 && wC.getDim1() != -1 && cIn.getDim2() != wC.getDim1())
+			raiseValidateError("Dimension mismatch: ncol(c) must match nrow(W_c_vccv).",
+				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		if(eIn.getDim2() != -1 && wE.getDim1() != -1 && eIn.getDim2() != wE.getDim1())
+			raiseValidateError("Dimension mismatch: ncol(e) must match nrow(W_e_vccv).",
+				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		if(b.getDim2() != -1 && wV.getDim2() != -1 && b.getDim2() != wV.getDim2())
+			raiseValidateError("Dimension mismatch: ncol(b_vccv) must match ncol(W_v_vccv).",
+				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
 
 		vOut.setDataType(DataType.MATRIX);
 		vOut.setValueType(ValueType.FP64);
