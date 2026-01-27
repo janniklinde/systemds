@@ -744,30 +744,30 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 		Identifier bCmlp = getVarParam("b_c").getOutput();
 		Identifier b = getVarParam("b_vccv").getOutput();
 
-		if(wV.getDim1() != -1 && wV.getDim1() % 2 != 0)
-			raiseValidateError("Dimension mismatch: nrow(W_v_vccv) must be even for vertical stacking.",
+		if(wV.getDim2() != -1 && wV.getDim2() % 2 != 0)
+			raiseValidateError("Dimension mismatch: ncol(W_v_vccv) must be even for vertical stacking.",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
-		if(wC.getDim1() != -1 && wC.getDim1() % 2 != 0)
-			raiseValidateError("Dimension mismatch: nrow(W_c_vccv) must be even for vertical stacking.",
+		if(wC.getDim2() != -1 && wC.getDim2() % 2 != 0)
+			raiseValidateError("Dimension mismatch: ncol(W_c_vccv) must be even for vertical stacking.",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
-		if(wE.getDim1() != -1 && wE.getDim1() % 2 != 0)
-			raiseValidateError("Dimension mismatch: nrow(W_e_vccv) must be even for vertical stacking.",
+		if(wE.getDim2() != -1 && wE.getDim2() % 2 != 0)
+			raiseValidateError("Dimension mismatch: ncol(W_e_vccv) must be even for vertical stacking.",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
 		if(b.getDim2() != -1 && b.getDim2() % 2 != 0)
 			raiseValidateError("Dimension mismatch: ncol(b_vccv) must be even for vertical stacking.",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
 
-		if(vIn.getDim2() != -1 && wV.getDim2() != -1 && vIn.getDim2() != wV.getDim2())
-			raiseValidateError("Dimension mismatch: ncol(v) must match ncol(W_v_vccv).",
+		if(vIn.getDim2() != -1 && wV.getDim1() != -1 && vIn.getDim2() != wV.getDim1())
+			raiseValidateError("Dimension mismatch: ncol(v) must match nrow(W_v_vccv).",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
-		if(cIn.getDim2() != -1 && wC.getDim2() != -1 && cIn.getDim2() != wC.getDim2())
-			raiseValidateError("Dimension mismatch: ncol(c) must match ncol(W_c_vccv).",
+		if(cIn.getDim2() != -1 && wC.getDim1() != -1 && cIn.getDim2() != wC.getDim1())
+			raiseValidateError("Dimension mismatch: ncol(c) must match nrow(W_c_vccv).",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
-		if(eIn.getDim2() != -1 && wE.getDim2() != -1 && eIn.getDim2() != wE.getDim2())
-			raiseValidateError("Dimension mismatch: ncol(e) must match ncol(W_e_vccv).",
+		if(eIn.getDim2() != -1 && wE.getDim1() != -1 && eIn.getDim2() != wE.getDim1())
+			raiseValidateError("Dimension mismatch: ncol(e) must match nrow(W_e_vccv).",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
-		if(b.getDim2() != -1 && wV.getDim1() != -1 && b.getDim2() != wV.getDim1())
-			raiseValidateError("Dimension mismatch: ncol(b_vccv) must match nrow(W_v_vccv).",
+		if(b.getDim2() != -1 && wV.getDim2() != -1 && b.getDim2() != wV.getDim2())
+			raiseValidateError("Dimension mismatch: ncol(b_vccv) must match ncol(W_v_vccv).",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
 		if(vIn.getDim2() != -1 && wVmlp.getDim1() != -1 && vIn.getDim2() != wVmlp.getDim1())
 			raiseValidateError("Dimension mismatch: ncol(v) must match nrow(W_v).",

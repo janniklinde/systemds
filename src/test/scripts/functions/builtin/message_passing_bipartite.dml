@@ -19,35 +19,38 @@
 #
 #-------------------------------------------------------------
 
-W_v = matrix("1 0 0 1", 2, 2);
-W_c = matrix("1 0 0 1", 2, 2);
-b_v = matrix("2 1", 1, 2);
-b_c = matrix("1 2", 1, 2);
-
-W_v_vccv = matrix("1 0 0 1 1 0 0 1", 4, 2);
-W_c_vccv = matrix("1 0 0 1 1 0 0 1", 4, 2);
-W_e_vccv = matrix("1 0 1 0", 4, 1);
-b_vccv = matrix("0 0 0 0", 1, 4);
-
-v = matrix("1 2 3 4", 2, 2);
-c = matrix("1 1 1 1", 2, 2);
-e = matrix("2 0", 2, 1);
-Ex2 = floor(matrix("1 2 1 2", 2, 2));
+W_v_agg = read($1);
+W_v_in = read($2);
+W_c_agg = read($3);
+W_c_in = read($4);
+b_v = read($5);
+b_c = read($6);
+W_v_vccv = read($7);
+W_c_vccv = read($8);
+W_e_vccv = read($9);
+b_vccv = read($10);
+v = read($11);
+c = read($12);
+e = read($13);
+Ex2 = read($14);
 
 [v_out, c_out, v_act, c_act] = message_passing_bipartite(
-  W_v=W_v, W_c=W_c, b_v=b_v, b_c=b_c,
+  W_v=W_v_agg, W_c=W_c_agg, b_v=b_v, b_c=b_c,
   W_v_vccv=W_v_vccv, W_c_vccv=W_c_vccv, W_e_vccv=W_e_vccv, b_vccv=b_vccv,
   v=v, c=c, e=e, Ex2=Ex2
 );
 
+# output module (feedforward + relu) on concatenated features
+v_z = v_out %*% W_v_agg + v %*% W_v_in + b_v;
+c_z = c_out %*% W_c_agg + c %*% W_c_in + b_c;
+v_out = pmax(v_z, 0);
+c_out = pmax(c_z, 0);
+
 # reference validation
-d = as.integer(nrow(W_v_vccv) / 2);
-W_v_vccv_t = t(W_v_vccv);
-W_c_vccv_t = t(W_c_vccv);
-W_e_vccv_t = t(W_e_vccv);
-vW = v %*% W_v_vccv_t;
-cW = c %*% W_c_vccv_t;
-eW = e %*% W_e_vccv_t;
+d = as.integer(ncol(W_v_vccv) / 2);
+vW = v %*% W_v_vccv;
+cW = c %*% W_c_vccv;
+eW = e %*% W_e_vccv;
 
 vWc = vW[,1:d];
 cWc = cW[,1:d];
@@ -82,6 +85,11 @@ v_act_ref = (t(S_v) %*% msgV) / (degV_safe %*% onesD);
 
 c_out_ref = pmax(c_act_ref, 0);
 v_out_ref = pmax(v_act_ref, 0);
+
+v_z_ref = v_out_ref %*% W_v_agg + v %*% W_v_in + b_v;
+c_z_ref = c_out_ref %*% W_c_agg + c %*% W_c_in + b_c;
+v_out_ref = pmax(v_z_ref, 0);
+c_out_ref = pmax(c_z_ref, 0);
 
 eps = 1e-8;
 if (sum(abs(c_out - c_out_ref)) > eps) stop("c_out mismatch");

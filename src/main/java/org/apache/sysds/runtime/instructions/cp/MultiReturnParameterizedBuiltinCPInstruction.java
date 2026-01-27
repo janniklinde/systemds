@@ -36,7 +36,6 @@ import org.apache.sysds.runtime.lineage.LineageItem;
 import org.apache.sysds.runtime.lineage.LineageItemUtils;
 import org.apache.sysds.runtime.matrix.data.LibMatrixMult;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
-import org.apache.sysds.runtime.matrix.data.LibMatrixReorg;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.transform.encode.EncoderFactory;
 import org.apache.sysds.runtime.transform.encode.MultiColumnEncoder;
@@ -183,18 +182,17 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 		MatrixBlock e = ec.getMatrixInput(_inputs.get(10).getName());
 		MatrixBlock Ex2 = ec.getMatrixInput(_inputs.get(11).getName());
 
-		MatrixBlock W_v_vccv_t = LibMatrixReorg.transpose(W_v_vccv, k);
-		MatrixBlock W_c_vccv_t = LibMatrixReorg.transpose(W_c_vccv, k);
-		MatrixBlock W_e_vccv_t = LibMatrixReorg.transpose(W_e_vccv, k);
-
-		MatrixBlock vW = LibMatrixMult.matrixMult(v, W_v_vccv_t, k);
-		MatrixBlock cW = LibMatrixMult.matrixMult(c, W_c_vccv_t, k);
-		MatrixBlock eW = LibMatrixMult.matrixMult(e, W_e_vccv_t, k);
+		MatrixBlock vW = LibMatrixMult.matrixMult(v, W_v_vccv, k);
+		MatrixBlock cW = LibMatrixMult.matrixMult(c, W_c_vccv, k);
+		MatrixBlock eW = LibMatrixMult.matrixMult(e, W_e_vccv, k);
 
 		final int nV = v.getNumRows();
 		final int nC = c.getNumRows();
 		final int nE = Ex2.getNumRows();
-		final int twoD = W_v_vccv.getNumRows();
+		final int ex2Cols = Ex2.getNumColumns();
+		if(ex2Cols != 2)
+			throw new DMLRuntimeException("message_passing_bipartite: Ex2 must have 2 columns [c_idx, v_idx] but has " + ex2Cols);
+		final int twoD = W_v_vccv.getNumColumns();
 		final int d = twoD / 2;
 
 		MatrixBlock vAct = new MatrixBlock(nV, d, false);
