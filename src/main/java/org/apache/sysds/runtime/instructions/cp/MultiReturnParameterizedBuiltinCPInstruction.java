@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.instructions.cp;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import org.apache.commons.lang3.tuple.Pair;
@@ -35,6 +36,7 @@ import org.apache.sysds.runtime.lineage.LineageItem;
 import org.apache.sysds.runtime.lineage.LineageItemUtils;
 import org.apache.sysds.runtime.matrix.data.LibMatrixMult;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.matrix.data.LibMatrixReorg;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.transform.encode.EncoderFactory;
 import org.apache.sysds.runtime.transform.encode.MultiColumnEncoder;
@@ -181,6 +183,130 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 		MatrixBlock e = ec.getMatrixInput(_inputs.get(10).getName());
 		MatrixBlock Ex2 = ec.getMatrixInput(_inputs.get(11).getName());
 
-		throw new DMLRuntimeException("message_passing_bipartite: CP instruction not implemented yet.");
+		MatrixBlock W_v_vccv_t = LibMatrixReorg.transpose(W_v_vccv, k);
+		MatrixBlock W_c_vccv_t = LibMatrixReorg.transpose(W_c_vccv, k);
+		MatrixBlock W_e_vccv_t = LibMatrixReorg.transpose(W_e_vccv, k);
+
+		MatrixBlock vW = LibMatrixMult.matrixMult(v, W_v_vccv_t, k);
+		MatrixBlock cW = LibMatrixMult.matrixMult(c, W_c_vccv_t, k);
+		MatrixBlock eW = LibMatrixMult.matrixMult(e, W_e_vccv_t, k);
+
+		final int nV = v.getNumRows();
+		final int nC = c.getNumRows();
+		final int nE = Ex2.getNumRows();
+		final int twoD = W_v_vccv.getNumRows();
+		final int d = twoD / 2;
+
+		MatrixBlock vAct = new MatrixBlock(nV, d, false);
+		MatrixBlock vOut = new MatrixBlock(nV, d, false);
+		MatrixBlock cAct = new MatrixBlock(nC, d, false);
+		MatrixBlock cOut = new MatrixBlock(nC, d, false);
+		vAct.allocateDenseBlock();
+		vOut.allocateDenseBlock();
+		cAct.allocateDenseBlock();
+		cOut.allocateDenseBlock();
+
+		if(vW.isInSparseFormat()) vW.sparseToDense();
+		if(cW.isInSparseFormat()) cW.sparseToDense();
+		if(eW.isInSparseFormat()) eW.sparseToDense();
+		if(b_vccv.isInSparseFormat()) b_vccv.sparseToDense();
+		if(Ex2.isInSparseFormat()) Ex2.sparseToDense();
+
+		double[] vWArr = vW.getDenseBlockValues();
+		double[] cWArr = cW.getDenseBlockValues();
+		double[] eWArr = eW.getDenseBlockValues();
+		double[] bArr = b_vccv.getDenseBlockValues();
+		double[] ex2Arr = Ex2.getDenseBlockValues();
+		if(bArr == null)
+			bArr = new double[twoD];
+		double[] vActArr = vAct.getDenseBlockValues();
+		double[] vOutArr = vOut.getDenseBlockValues();
+		double[] cActArr = cAct.getDenseBlockValues();
+		double[] cOutArr = cOut.getDenseBlockValues();
+
+		double[] sumV = new double[nV * d];
+		int[] countV = new int[nV];
+		double[] sumC = new double[d];
+		int countC = 0;
+		int currentC = -1;
+
+		for(int ei = 0; ei < nE; ei++) {
+			int base = ei * 2;
+			int cIdx = (int) ex2Arr[base] - 1;
+			int vIdx = (int) ex2Arr[base + 1] - 1;
+
+			if(currentC != -1 && cIdx != currentC) {
+				int cOff = currentC * d;
+				double inv = 1.0 / countC;
+				for(int k2 = 0; k2 < d; k2++) {
+					double mean = sumC[k2] * inv;
+					cActArr[cOff + k2] = mean;
+					cOutArr[cOff + k2] = (mean > 0) ? mean : 0.0;
+				}
+				Arrays.fill(sumC, 0.0);
+				countC = 0;
+			}
+			if(currentC != cIdx) {
+				currentC = cIdx;
+			}
+
+			int vOff = vIdx * twoD;
+			int cOff2 = cIdx * twoD;
+			int eOff = ei * twoD;
+			for(int k2 = 0; k2 < d; k2++) {
+				double msgC = vWArr[vOff + k2] + cWArr[cOff2 + k2] + eWArr[eOff + k2] + bArr[k2];
+				sumC[k2] += msgC;
+				double msgV = vWArr[vOff + d + k2] + cWArr[cOff2 + d + k2] + eWArr[eOff + d + k2] + bArr[d + k2];
+				sumV[vIdx * d + k2] += msgV;
+			}
+			countC++;
+			countV[vIdx]++;
+		}
+
+		if(currentC != -1 && countC > 0) {
+			int cOff = currentC * d;
+			double inv = 1.0 / countC;
+			for(int k2 = 0; k2 < d; k2++) {
+				double mean = sumC[k2] * inv;
+				cActArr[cOff + k2] = mean;
+				cOutArr[cOff + k2] = (mean > 0) ? mean : 0.0;
+			}
+		}
+
+		for(int vi = 0; vi < nV; vi++) {
+			int cnt = countV[vi];
+			if(cnt == 0)
+				continue;
+			double inv = 1.0 / cnt;
+			int off = vi * d;
+			for(int k2 = 0; k2 < d; k2++) {
+				double mean = sumV[off + k2] * inv;
+				vActArr[off + k2] = mean;
+				vOutArr[off + k2] = (mean > 0) ? mean : 0.0;
+			}
+		}
+
+		vAct.recomputeNonZeros();
+		vOut.recomputeNonZeros();
+		cAct.recomputeNonZeros();
+		cOut.recomputeNonZeros();
+
+		ec.setMatrixOutput(getOutput(0).getName(), vOut);
+		ec.setMatrixOutput(getOutput(1).getName(), cOut);
+		ec.setMatrixOutput(getOutput(2).getName(), vAct);
+		ec.setMatrixOutput(getOutput(3).getName(), cAct);
+
+		ec.releaseMatrixInput(_inputs.get(0).getName());
+		ec.releaseMatrixInput(_inputs.get(1).getName());
+		ec.releaseMatrixInput(_inputs.get(2).getName());
+		ec.releaseMatrixInput(_inputs.get(3).getName());
+		ec.releaseMatrixInput(_inputs.get(4).getName());
+		ec.releaseMatrixInput(_inputs.get(5).getName());
+		ec.releaseMatrixInput(_inputs.get(6).getName());
+		ec.releaseMatrixInput(_inputs.get(7).getName());
+		ec.releaseMatrixInput(_inputs.get(8).getName());
+		ec.releaseMatrixInput(_inputs.get(9).getName());
+		ec.releaseMatrixInput(_inputs.get(10).getName());
+		ec.releaseMatrixInput(_inputs.get(11).getName());
 	}
 }

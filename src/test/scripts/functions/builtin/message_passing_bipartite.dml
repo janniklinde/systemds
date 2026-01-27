@@ -21,18 +21,18 @@
 
 W_v = matrix("1 0 0 1", 2, 2);
 W_c = matrix("1 0 0 1", 2, 2);
-b_v = matrix("0 0", 1, 2);
-b_c = matrix("0 0", 1, 2);
+b_v = matrix("2 1", 1, 2);
+b_c = matrix("1 2", 1, 2);
 
 W_v_vccv = matrix("1 0 0 1 1 0 0 1", 4, 2);
 W_c_vccv = matrix("1 0 0 1 1 0 0 1", 4, 2);
-W_e_vccv = matrix("1 0 1 0", 2, 2);
+W_e_vccv = matrix("1 0 1 0", 4, 1);
 b_vccv = matrix("0 0 0 0", 1, 4);
 
 v = matrix("1 2 3 4", 2, 2);
 c = matrix("1 1 1 1", 2, 2);
 e = matrix("2 0", 2, 1);
-Ex2 = matrix("1 2 1 2", 2, 2);
+Ex2 = floor(matrix("1 2 1 2", 2, 2));
 
 [v_out, c_out, v_act, c_act] = message_passing_bipartite(
   W_v=W_v, W_c=W_c, b_v=b_v, b_c=b_c,
