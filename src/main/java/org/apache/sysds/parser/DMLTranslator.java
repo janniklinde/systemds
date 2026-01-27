@@ -1942,9 +1942,10 @@ public class DMLTranslator
 
 			case MESSAGE_PASSING_BIPARTITE:
 				ArrayList<Hop> mpInputs = new ArrayList<>();
-				mpInputs.add(processExpression(source.getVarParam("V"), null, hops));
-				mpInputs.add(processExpression(source.getVarParam("C"), null, hops));
-				mpInputs.add(processExpression(source.getVarParam("E"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("W_v"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("W_c"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("b_v"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("b_c"), null, hops));
 				mpInputs.add(processExpression(source.getVarParam("W_v_vccv"), null, hops));
 				mpInputs.add(processExpression(source.getVarParam("W_c_vccv"), null, hops));
 				mpInputs.add(processExpression(source.getVarParam("W_e_vccv"), null, hops));
@@ -1952,6 +1953,7 @@ public class DMLTranslator
 				mpInputs.add(processExpression(source.getVarParam("v"), null, hops));
 				mpInputs.add(processExpression(source.getVarParam("c"), null, hops));
 				mpInputs.add(processExpression(source.getVarParam("e"), null, hops));
+				mpInputs.add(processExpression(source.getVarParam("Ex2"), null, hops));
 
 				String[] mpOutputNames = new String[targetList.size()];
 				mpOutputNames[0] = targetList.get(0).getName();

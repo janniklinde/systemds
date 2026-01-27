@@ -712,14 +712,15 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 	{
 		String fname = getOpCode().name();
 		Set<String> valid = CollectionUtils.asSet(
-			"V", "C", "E",
+			"W_v", "W_c", "b_v", "b_c",
 			"W_v_vccv", "W_c_vccv", "W_e_vccv", "b_vccv",
-			"v", "c", "e");
+			"v", "c", "e", "Ex2");
 		checkInvalidParameters(getOpCode(), getVarParams(), valid);
 
-		checkDataValueType(false, fname, "V", DataType.MATRIX, ValueType.FP64, conditional);
-		checkDataValueType(false, fname, "C", DataType.MATRIX, ValueType.FP64, conditional);
-		checkDataValueType(false, fname, "E", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "W_v", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "W_c", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "b_v", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataValueType(false, fname, "b_c", DataType.MATRIX, ValueType.FP64, conditional);
 
 		checkDataValueType(false, fname, "W_v_vccv", DataType.MATRIX, ValueType.FP64, conditional);
 		checkDataValueType(false, fname, "W_c_vccv", DataType.MATRIX, ValueType.FP64, conditional);
@@ -728,7 +729,8 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 
 		checkDataValueType(false, fname, "v", DataType.MATRIX, ValueType.FP64, conditional);
 		checkDataValueType(false, fname, "c", DataType.MATRIX, ValueType.FP64, conditional);
-		checkDataValueType(false, fname, "e", DataType.MATRIX, ValueType.FP64, conditional);
+		checkDataType(false, fname, "e", DataType.MATRIX, conditional);
+		checkDataValueType(false, fname, "Ex2", DataType.MATRIX, ValueType.INT64, conditional);
 
 		Identifier vIn = getVarParam("v").getOutput();
 		Identifier cIn = getVarParam("c").getOutput();
@@ -736,19 +738,48 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 		Identifier wV = getVarParam("W_v_vccv").getOutput();
 		Identifier wC = getVarParam("W_c_vccv").getOutput();
 		Identifier wE = getVarParam("W_e_vccv").getOutput();
+		Identifier wVmlp = getVarParam("W_v").getOutput();
+		Identifier wCmlp = getVarParam("W_c").getOutput();
+		Identifier bVmlp = getVarParam("b_v").getOutput();
+		Identifier bCmlp = getVarParam("b_c").getOutput();
 		Identifier b = getVarParam("b_vccv").getOutput();
 
-		if(vIn.getDim2() != -1 && wV.getDim1() != -1 && vIn.getDim2() != wV.getDim1())
-			raiseValidateError("Dimension mismatch: ncol(v) must match nrow(W_v_vccv).",
+		if(wV.getDim1() != -1 && wV.getDim1() % 2 != 0)
+			raiseValidateError("Dimension mismatch: nrow(W_v_vccv) must be even for vertical stacking.",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
-		if(cIn.getDim2() != -1 && wC.getDim1() != -1 && cIn.getDim2() != wC.getDim1())
-			raiseValidateError("Dimension mismatch: ncol(c) must match nrow(W_c_vccv).",
+		if(wC.getDim1() != -1 && wC.getDim1() % 2 != 0)
+			raiseValidateError("Dimension mismatch: nrow(W_c_vccv) must be even for vertical stacking.",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
-		if(eIn.getDim2() != -1 && wE.getDim1() != -1 && eIn.getDim2() != wE.getDim1())
-			raiseValidateError("Dimension mismatch: ncol(e) must match nrow(W_e_vccv).",
+		if(wE.getDim1() != -1 && wE.getDim1() % 2 != 0)
+			raiseValidateError("Dimension mismatch: nrow(W_e_vccv) must be even for vertical stacking.",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
-		if(b.getDim2() != -1 && wV.getDim2() != -1 && b.getDim2() != wV.getDim2())
-			raiseValidateError("Dimension mismatch: ncol(b_vccv) must match ncol(W_v_vccv).",
+		if(b.getDim2() != -1 && b.getDim2() % 2 != 0)
+			raiseValidateError("Dimension mismatch: ncol(b_vccv) must be even for vertical stacking.",
+				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+
+		if(vIn.getDim2() != -1 && wV.getDim1() != -1 && vIn.getDim2()*2 != wV.getDim1())
+			raiseValidateError("Dimension mismatch: ncol(v) must match nrow(W_v_vccv)/2 for vertical stacking.",
+				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		if(cIn.getDim2() != -1 && wC.getDim1() != -1 && cIn.getDim2()*2 != wC.getDim1())
+			raiseValidateError("Dimension mismatch: ncol(c) must match nrow(W_c_vccv)/2 for vertical stacking.",
+				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		if(eIn.getDim2() != -1 && wE.getDim1() != -1 && eIn.getDim2()*2 != wE.getDim1())
+			raiseValidateError("Dimension mismatch: ncol(e) must match nrow(W_e_vccv)/2 for vertical stacking.",
+				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		if(b.getDim2() != -1 && wV.getDim1() != -1 && b.getDim2() != wV.getDim1())
+			raiseValidateError("Dimension mismatch: ncol(b_vccv) must match nrow(W_v_vccv).",
+				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		if(vIn.getDim2() != -1 && wVmlp.getDim1() != -1 && vIn.getDim2() != wVmlp.getDim1())
+			raiseValidateError("Dimension mismatch: ncol(v) must match nrow(W_v).",
+				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		if(cIn.getDim2() != -1 && wCmlp.getDim1() != -1 && cIn.getDim2() != wCmlp.getDim1())
+			raiseValidateError("Dimension mismatch: ncol(c) must match nrow(W_c).",
+				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		if(bVmlp.getDim2() != -1 && wVmlp.getDim2() != -1 && bVmlp.getDim2() != wVmlp.getDim2())
+			raiseValidateError("Dimension mismatch: ncol(b_v) must match ncol(W_v).",
+				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		if(bCmlp.getDim2() != -1 && wCmlp.getDim2() != -1 && bCmlp.getDim2() != wCmlp.getDim2())
+			raiseValidateError("Dimension mismatch: ncol(b_c) must match ncol(W_c).",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
 
 		vOut.setDataType(DataType.MATRIX);
