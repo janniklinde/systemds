@@ -286,11 +286,6 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 			}
 		}
 
-		vAct.recomputeNonZeros();
-		vOut.recomputeNonZeros();
-		cAct.recomputeNonZeros();
-		cOut.recomputeNonZeros();
-
 		ec.setMatrixOutput(getOutput(0).getName(), vOut);
 		ec.setMatrixOutput(getOutput(1).getName(), cOut);
 		ec.setMatrixOutput(getOutput(2).getName(), vAct);
