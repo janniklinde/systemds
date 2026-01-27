@@ -39,3 +39,52 @@ Ex2 = floor(matrix("1 2 1 2", 2, 2));
   W_v_vccv=W_v_vccv, W_c_vccv=W_c_vccv, W_e_vccv=W_e_vccv, b_vccv=b_vccv,
   v=v, c=c, e=e, Ex2=Ex2
 );
+
+# reference validation
+d = as.integer(nrow(W_v_vccv) / 2);
+W_v_vccv_t = t(W_v_vccv);
+W_c_vccv_t = t(W_c_vccv);
+W_e_vccv_t = t(W_e_vccv);
+vW = v %*% W_v_vccv_t;
+cW = c %*% W_c_vccv_t;
+eW = e %*% W_e_vccv_t;
+
+vWc = vW[,1:d];
+cWc = cW[,1:d];
+eWc = eW[,1:d];
+vWv = vW[,(d+1):(2*d)];
+cWv = cW[,(d+1):(2*d)];
+eWv = eW[,(d+1):(2*d)];
+bTop = b_vccv[,1:d];
+bBot = b_vccv[,(d+1):(2*d)];
+
+E = nrow(Ex2);
+nC = nrow(c);
+nV = nrow(v);
+edge_c = Ex2[,1];
+edge_v = Ex2[,2];
+S_c = table(seq(1, E, 1), edge_c, 1, E, nC);
+S_v = table(seq(1, E, 1), edge_v, 1, E, nV);
+
+onesE = matrix(1, rows=E, cols=1);
+onesD = matrix(1, rows=1, cols=d);
+
+msgC = S_v %*% vWc + S_c %*% cWc + eWc + onesE %*% bTop;
+msgV = S_v %*% vWv + S_c %*% cWv + eWv + onesE %*% bBot;
+
+degC = table(edge_c, onesE, onesE, nC, 1);
+degV = table(edge_v, onesE, onesE, nV, 1);
+degC_safe = ifelse(degC == 0, 1, degC);
+degV_safe = ifelse(degV == 0, 1, degV);
+
+c_act_ref = (t(S_c) %*% msgC) / (degC_safe %*% onesD);
+v_act_ref = (t(S_v) %*% msgV) / (degV_safe %*% onesD);
+
+c_out_ref = pmax(c_act_ref, 0);
+v_out_ref = pmax(v_act_ref, 0);
+
+eps = 1e-8;
+if (sum(abs(c_out - c_out_ref)) > eps) stop("c_out mismatch");
+if (sum(abs(v_out - v_out_ref)) > eps) stop("v_out mismatch");
+if (sum(abs(c_act - c_act_ref)) > eps) stop("c_act mismatch");
+if (sum(abs(v_act - v_act_ref)) > eps) stop("v_act mismatch");
