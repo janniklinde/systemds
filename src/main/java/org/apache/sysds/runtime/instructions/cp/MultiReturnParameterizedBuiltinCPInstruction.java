@@ -222,7 +222,6 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 		double[] cActArr = cAct.getDenseBlockValues();
 		double[] cOutArr = cOut.getDenseBlockValues();
 
-		double[] sumV = new double[nV * d];
 		int[] countV = new int[nV];
 		double[] sumC = new double[d];
 		int countC = 0;
@@ -244,9 +243,7 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 				Arrays.fill(sumC, 0.0);
 				countC = 0;
 			}
-			if(currentC != cIdx) {
-				currentC = cIdx;
-			}
+			currentC = cIdx;
 
 			int vOff = vIdx * twoD;
 			int cOff2 = cIdx * twoD;
@@ -255,7 +252,7 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 				double msgC = vWArr[vOff + k2] + cWArr[cOff2 + k2] + eWArr[eOff + k2] + bArr[k2];
 				sumC[k2] += msgC;
 				double msgV = vWArr[vOff + d + k2] + cWArr[cOff2 + d + k2] + eWArr[eOff + d + k2] + bArr[d + k2];
-				sumV[vIdx * d + k2] += msgV;
+				vActArr[vIdx * d + k2] += msgV;
 			}
 			countC++;
 			countV[vIdx]++;
@@ -267,7 +264,7 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 			for(int k2 = 0; k2 < d; k2++) {
 				double mean = sumC[k2] * inv;
 				cActArr[cOff + k2] = mean;
-				cOutArr[cOff + k2] = (mean > 0) ? mean : 0.0;
+				//cOutArr[cOff + k2] = (mean > 0) ? mean : 0.0;
 			}
 		}
 
@@ -278,9 +275,9 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 			double inv = 1.0 / cnt;
 			int off = vi * d;
 			for(int k2 = 0; k2 < d; k2++) {
-				double mean = sumV[off + k2] * inv;
+				double mean = vActArr[off + k2] * inv;
 				vActArr[off + k2] = mean;
-				vOutArr[off + k2] = (mean > 0) ? mean : 0.0;
+				//vOutArr[off + k2] = (mean > 0) ? mean : 0.0;
 			}
 		}
 
