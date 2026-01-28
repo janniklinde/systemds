@@ -1958,12 +1958,8 @@ public class DMLTranslator
 				String[] mpOutputNames = new String[targetList.size()];
 				mpOutputNames[0] = targetList.get(0).getName();
 				mpOutputNames[1] = targetList.get(1).getName();
-				mpOutputNames[2] = targetList.get(2).getName();
-				mpOutputNames[3] = targetList.get(3).getName();
 				outputs.add(new DataOp(mpOutputNames[0], DataType.MATRIX, ValueType.FP64, mpInputs.get(0), OpOpData.FUNCTIONOUTPUT, mpInputs.get(0).getFilename()));
 				outputs.add(new DataOp(mpOutputNames[1], DataType.MATRIX, ValueType.FP64, mpInputs.get(0), OpOpData.FUNCTIONOUTPUT, mpInputs.get(0).getFilename()));
-				outputs.add(new DataOp(mpOutputNames[2], DataType.MATRIX, ValueType.FP64, mpInputs.get(0), OpOpData.FUNCTIONOUTPUT, mpInputs.get(0).getFilename()));
-				outputs.add(new DataOp(mpOutputNames[3], DataType.MATRIX, ValueType.FP64, mpInputs.get(0), OpOpData.FUNCTIONOUTPUT, mpInputs.get(0).getFilename()));
 
 				currBuiltinOp = new FunctionOp(ftype, nameSpace, source.getOpCode().toString(), null, mpInputs, mpOutputNames, outputs);
 				break;

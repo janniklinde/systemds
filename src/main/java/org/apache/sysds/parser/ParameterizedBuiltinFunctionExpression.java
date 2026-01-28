@@ -322,12 +322,10 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 				validateTransformEncode(out1, out2, conditional);
 				break;	
 			case MESSAGE_PASSING_BIPARTITE:
-				DataIdentifier vOut = (DataIdentifier) getOutputs()[0];
-				DataIdentifier cOut = (DataIdentifier) getOutputs()[1];
-				DataIdentifier vAct = (DataIdentifier) getOutputs()[2];
-				DataIdentifier cAct = (DataIdentifier) getOutputs()[3];
+				DataIdentifier vAct = (DataIdentifier) getOutputs()[0];
+				DataIdentifier cAct = (DataIdentifier) getOutputs()[1];
 				
-				validateMessagePassingBipartite(vOut, cOut, vAct, cAct, conditional);
+				validateMessagePassingBipartite(vAct, cAct, conditional);
 				break;
 			default: //always unconditional (because unsupported operation)
 				raiseValidateError("Unsupported parameterized function "+ getOpCode(), false, LanguageErrorCodes.INVALID_PARAMETERS);
@@ -707,8 +705,7 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 		output2.setDimensions(-1, -1);
 	}
 
-	private void validateMessagePassingBipartite(DataIdentifier vOut, DataIdentifier cOut, DataIdentifier vAct,
-		DataIdentifier cAct, boolean conditional)
+	private void validateMessagePassingBipartite(DataIdentifier vAct, DataIdentifier cAct, boolean conditional)
 	{
 		String fname = getOpCode().name();
 		Set<String> valid = CollectionUtils.asSet(
@@ -782,12 +779,6 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 			raiseValidateError("Dimension mismatch: ncol(b_c) must match ncol(W_c).",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
 
-		vOut.setDataType(DataType.MATRIX);
-		vOut.setValueType(ValueType.FP64);
-		vOut.setDimensions(-1, -1);
-		cOut.setDataType(DataType.MATRIX);
-		cOut.setValueType(ValueType.FP64);
-		cOut.setDimensions(-1, -1);
 		vAct.setDataType(DataType.MATRIX);
 		vAct.setValueType(ValueType.FP64);
 		vAct.setDimensions(-1, -1);

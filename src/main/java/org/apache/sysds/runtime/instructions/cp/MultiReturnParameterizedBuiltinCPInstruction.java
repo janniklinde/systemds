@@ -89,7 +89,7 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 		}
 		else if(opcode.equalsIgnoreCase(Opcodes.MESSAGE_PASSING_BIPARTITE.toString())) {
 			final int numInputs = 12;
-			final int numOutputs = 4;
+			final int numOutputs = 2;
 			final int minParts = 1 + numInputs + numOutputs;
 			if(parts.length < minParts)
 				throw new DMLRuntimeException("Invalid number of operands in MultiReturnParameterizedBuiltin instruction: " + opcode);
@@ -99,8 +99,6 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 			for(int i = 0; i < numInputs; i++)
 				inputs.add(new CPOperand(parts[pos++]));
 
-			outputs.add(new CPOperand(parts[pos++], ValueType.FP64, DataType.MATRIX));
-			outputs.add(new CPOperand(parts[pos++], ValueType.FP64, DataType.MATRIX));
 			outputs.add(new CPOperand(parts[pos++], ValueType.FP64, DataType.MATRIX));
 			outputs.add(new CPOperand(parts[pos++], ValueType.FP64, DataType.MATRIX));
 
@@ -196,13 +194,9 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 		final int d = twoD / 2;
 
 		MatrixBlock vAct = new MatrixBlock(nV, d, false);
-		MatrixBlock vOut = new MatrixBlock(nV, d, false);
 		MatrixBlock cAct = new MatrixBlock(nC, d, false);
-		MatrixBlock cOut = new MatrixBlock(nC, d, false);
 		vAct.allocateDenseBlock();
-		vOut.allocateDenseBlock();
 		cAct.allocateDenseBlock();
-		cOut.allocateDenseBlock();
 
 		if(vW.isInSparseFormat()) vW.sparseToDense();
 		if(cW.isInSparseFormat()) cW.sparseToDense();
@@ -218,9 +212,7 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 		if(bArr == null)
 			bArr = new double[twoD];
 		double[] vActArr = vAct.getDenseBlockValues();
-		double[] vOutArr = vOut.getDenseBlockValues();
 		double[] cActArr = cAct.getDenseBlockValues();
-		double[] cOutArr = cOut.getDenseBlockValues();
 
 		int[] countV = new int[nV];
 		double[] sumC = new double[d];
@@ -238,7 +230,6 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 				for(int k2 = 0; k2 < d; k2++) {
 					double mean = sumC[k2] * inv;
 					cActArr[cOff + k2] = mean;
-					cOutArr[cOff + k2] = (mean > 0) ? mean : 0.0;
 				}
 				Arrays.fill(sumC, 0.0);
 				countC = 0;
@@ -264,7 +255,6 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 			for(int k2 = 0; k2 < d; k2++) {
 				double mean = sumC[k2] * inv;
 				cActArr[cOff + k2] = mean;
-				//cOutArr[cOff + k2] = (mean > 0) ? mean : 0.0;
 			}
 		}
 
@@ -277,14 +267,11 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 			for(int k2 = 0; k2 < d; k2++) {
 				double mean = vActArr[off + k2] * inv;
 				vActArr[off + k2] = mean;
-				//vOutArr[off + k2] = (mean > 0) ? mean : 0.0;
 			}
 		}
 
-		ec.setMatrixOutput(getOutput(0).getName(), vOut);
-		ec.setMatrixOutput(getOutput(1).getName(), cOut);
-		ec.setMatrixOutput(getOutput(2).getName(), vAct);
-		ec.setMatrixOutput(getOutput(3).getName(), cAct);
+		ec.setMatrixOutput(getOutput(0).getName(), vAct);
+		ec.setMatrixOutput(getOutput(1).getName(), cAct);
 
 		ec.releaseMatrixInput(_inputs.get(0).getName());
 		ec.releaseMatrixInput(_inputs.get(1).getName());
