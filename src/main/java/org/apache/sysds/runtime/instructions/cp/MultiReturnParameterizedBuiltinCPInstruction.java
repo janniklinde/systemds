@@ -30,6 +30,9 @@ import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.hops.OptimizerUtils;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
+import org.apache.sysds.runtime.data.DenseBlock;
+import org.apache.sysds.runtime.data.DenseBlockFactory;
+import org.apache.sysds.runtime.data.DenseBlockFP32;
 import org.apache.sysds.runtime.frame.data.FrameBlock;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.lineage.LineageItem;
@@ -163,10 +166,33 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 	public boolean getMetaReturn() {
 		return _metaReturn;
 	}
+
+	private static float[] toFloatArray(MatrixBlock mb) {
+		DenseBlock db = mb.getDenseBlock();
+		if(db instanceof DenseBlockFP32)
+			return ((DenseBlockFP32) db).getData();
+		double[] vals = mb.getDenseBlockValues();
+		if(vals == null)
+			return null;
+		float[] ret = new float[vals.length];
+		for(int i = 0; i < vals.length; i++)
+			ret[i] = (float) vals[i];
+		return ret;
+	}
+
+	private static float[] getFloatDenseBlockValues(MatrixBlock mb) {
+		DenseBlock db = mb.getDenseBlock();
+		if(db instanceof DenseBlockFP32)
+			return ((DenseBlockFP32) db).getData();
+		throw new DMLRuntimeException("Expected FP32 dense block for output but found: " +
+			(db != null ? db.getClass().getSimpleName() : "null"));
+	}
+
 	@SuppressWarnings("unused")
 	private void processMessagePassingBipartite(ExecutionContext ec) {
 		// Input order (see DMLTranslator): W_v, W_c, b_v, b_c, W_v_vccv, W_c_vccv, W_e_vccv, b_vccv, v, c, e, Ex2
 		int k = OptimizerUtils.getTransformNumThreads();
+		//k = 1;
 		MatrixBlock W_v = ec.getMatrixInput(_inputs.get(0).getName());
 		MatrixBlock W_c = ec.getMatrixInput(_inputs.get(1).getName());
 		MatrixBlock b_v = ec.getMatrixInput(_inputs.get(2).getName());
@@ -180,9 +206,9 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 		MatrixBlock e = ec.getMatrixInput(_inputs.get(10).getName());
 		MatrixBlock Ex2 = ec.getMatrixInput(_inputs.get(11).getName());
 
-		MatrixBlock vW = LibMatrixMult.matrixMult(v, W_v_vccv, k);
-		MatrixBlock cW = LibMatrixMult.matrixMult(c, W_c_vccv, k);
-		MatrixBlock eW = LibMatrixMult.matrixMult(e, W_e_vccv, k);
+		MatrixBlock vW = LibMatrixMult.matrixMultFP32(v, W_v_vccv);
+		MatrixBlock cW = LibMatrixMult.matrixMultFP32(c, W_c_vccv);
+		MatrixBlock eW = LibMatrixMult.matrixMultFP32(e, W_e_vccv);
 
 		final int nV = v.getNumRows();
 		final int nC = c.getNumRows();
@@ -195,8 +221,8 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 
 		MatrixBlock vAct = new MatrixBlock(nV, d, false);
 		MatrixBlock cAct = new MatrixBlock(nC, d, false);
-		vAct.allocateDenseBlock();
-		cAct.allocateDenseBlock();
+		vAct.setDenseBlock(DenseBlockFactory.createDenseBlock(ValueType.FP32, new int[]{nV, d}));
+		cAct.setDenseBlock(DenseBlockFactory.createDenseBlock(ValueType.FP32, new int[]{nC, d}));
 
 		if(vW.isInSparseFormat()) vW.sparseToDense();
 		if(cW.isInSparseFormat()) cW.sparseToDense();
@@ -204,18 +230,18 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 		if(b_vccv.isInSparseFormat()) b_vccv.sparseToDense();
 		if(Ex2.isInSparseFormat()) Ex2.sparseToDense();
 
-		double[] vWArr = vW.getDenseBlockValues();
-		double[] cWArr = cW.getDenseBlockValues();
-		double[] eWArr = eW.getDenseBlockValues();
-		double[] bArr = b_vccv.getDenseBlockValues();
-		double[] ex2Arr = Ex2.getDenseBlockValues();
+		float[] vWArr = toFloatArray(vW);
+		float[] cWArr = toFloatArray(cW);
+		float[] eWArr = toFloatArray(eW);
+		float[] bArr = toFloatArray(b_vccv);
+		float[] ex2Arr = toFloatArray(Ex2);
 		if(bArr == null)
-			bArr = new double[twoD];
-		double[] vActArr = vAct.getDenseBlockValues();
-		double[] cActArr = cAct.getDenseBlockValues();
+			bArr = new float[twoD];
+		float[] vActArr = getFloatDenseBlockValues(vAct);
+		float[] cActArr = getFloatDenseBlockValues(cAct);
 
 		int[] countV = new int[nV];
-		double[] sumC = new double[d];
+		float[] sumC = new float[d];
 		int countC = 0;
 		int currentC = -1;
 
@@ -226,12 +252,12 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 
 			if(currentC != -1 && cIdx != currentC) {
 				int cOff = currentC * d;
-				double inv = 1.0 / countC;
+				float inv = 1.0f / countC;
 				for(int k2 = 0; k2 < d; k2++) {
-					double mean = sumC[k2] * inv;
+					float mean = sumC[k2] * inv;
 					cActArr[cOff + k2] = mean;
 				}
-				Arrays.fill(sumC, 0.0);
+				Arrays.fill(sumC, 0.0f);
 				countC = 0;
 			}
 			currentC = cIdx;
@@ -240,9 +266,9 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 			int cOff2 = cIdx * twoD;
 			int eOff = ei * twoD;
 			for(int k2 = 0; k2 < d; k2++) {
-				double msgC = vWArr[vOff + k2] + cWArr[cOff2 + k2] + eWArr[eOff + k2] + bArr[k2];
+				float msgC = vWArr[vOff + k2] + cWArr[cOff2 + k2] + eWArr[eOff + k2] + bArr[k2];
 				sumC[k2] += msgC;
-				double msgV = vWArr[vOff + d + k2] + cWArr[cOff2 + d + k2] + eWArr[eOff + d + k2] + bArr[d + k2];
+				float msgV = vWArr[vOff + d + k2] + cWArr[cOff2 + d + k2] + eWArr[eOff + d + k2] + bArr[d + k2];
 				vActArr[vIdx * d + k2] += msgV;
 			}
 			countC++;
@@ -251,9 +277,9 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 
 		if(currentC != -1 && countC > 0) {
 			int cOff = currentC * d;
-			double inv = 1.0 / countC;
+			float inv = 1.0f / countC;
 			for(int k2 = 0; k2 < d; k2++) {
-				double mean = sumC[k2] * inv;
+				float mean = sumC[k2] * inv;
 				cActArr[cOff + k2] = mean;
 			}
 		}
@@ -262,10 +288,10 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 			int cnt = countV[vi];
 			if(cnt == 0)
 				continue;
-			double inv = 1.0 / cnt;
+			float inv = 1.0f / cnt;
 			int off = vi * d;
 			for(int k2 = 0; k2 < d; k2++) {
-				double mean = vActArr[off + k2] * inv;
+				float mean = vActArr[off + k2] * inv;
 				vActArr[off + k2] = mean;
 			}
 		}

@@ -31,6 +31,7 @@ import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.lineage.LineageItem;
 import org.apache.sysds.runtime.lineage.LineageItemUtils;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.data.DenseBlockFP32;
 import org.apache.sysds.runtime.util.IndexRange;
 import org.apache.sysds.utils.Statistics;
 
@@ -59,8 +60,15 @@ public final class MatrixIndexingCPInstruction extends IndexingCPInstruction {
 		{
 			if( output.isScalar() && inRange ) { //SCALAR out
 				MatrixBlock matBlock = mo.acquireReadAndRelease();
-				ec.setScalarOutput(output.getName(),
-					new DoubleObject(matBlock.get((int)ix.rowStart, (int)ix.colStart)));
+				if(!matBlock.isInSparseFormat() && matBlock.getDenseBlock() instanceof DenseBlockFP32) {
+					float[] vals = ((DenseBlockFP32) matBlock.getDenseBlock()).getData();
+					int idx = (int)ix.rowStart * matBlock.getNumColumns() + (int)ix.colStart;
+					ec.setScalarOutput(output.getName(), new DoubleObject(vals[idx]));
+				}
+				else {
+					ec.setScalarOutput(output.getName(),
+						new DoubleObject(matBlock.get((int)ix.rowStart, (int)ix.colStart)));
+				}
 			}
 			else { //MATRIX out
 				MatrixBlock resultBlock = null;

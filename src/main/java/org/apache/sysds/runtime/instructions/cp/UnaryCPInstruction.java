@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.instructions.cp;
 
+import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.common.Types;
 import org.apache.sysds.common.Types.DataType;
 import org.apache.sysds.common.Types.ValueType;
@@ -74,10 +75,13 @@ public abstract class UnaryCPInstruction extends ComputationCPInstruction {
 			int k = Integer.parseInt(parts[3]);
 			if(in.getDataType() == DataType.SCALAR)
 				return new UnaryScalarCPInstruction(InstructionUtils.parseUnaryOperator(opcode, k), in, out, opcode, str);
-			else if(in.getDataType() == DataType.MATRIX)
+			else if(in.getDataType() == DataType.MATRIX) {
+				if(opcode.equals(Opcodes.CAST_AS_FP32.toString()) || opcode.equals(Opcodes.CAST_AS_FP64.toString()))
+					return new UnaryMatrixCPInstruction(null, in, out, opcode, str);
 				return new UnaryMatrixCPInstruction(
 					LibCommonsMath.isSupportedUnaryOperation(opcode) ? null : InstructionUtils.parseUnaryOperator(opcode, k),
 					in, out, opcode, str);
+			}
 			else if(in.getDataType() == DataType.FRAME)
 				return new UnaryFrameCPInstruction(InstructionUtils.parseUnaryOperator(opcode, k), in, out, opcode, str);
 		}
@@ -86,9 +90,12 @@ public abstract class UnaryCPInstruction extends ComputationCPInstruction {
 			
 			if(in.getDataType() == DataType.SCALAR)
 				return new UnaryScalarCPInstruction(InstructionUtils.parseUnaryOperator(opcode), in, out, opcode, str);
-			else if(in.getDataType() == DataType.MATRIX)
+			else if(in.getDataType() == DataType.MATRIX) {
+				if(opcode.equals(Opcodes.CAST_AS_FP32.toString()) || opcode.equals(Opcodes.CAST_AS_FP64.toString()))
+					return new UnaryMatrixCPInstruction(null, in, out, opcode, str);
 				return new UnaryMatrixCPInstruction(LibCommonsMath.isSupportedUnaryOperation(opcode) ?
 					null : InstructionUtils.parseUnaryOperator(opcode), in, out, opcode, str);
+			}
 			else if(in.getDataType() == DataType.FRAME)
 				return new UnaryFrameCPInstruction(InstructionUtils.parseUnaryOperator(opcode), in, out, opcode, str);
 		}

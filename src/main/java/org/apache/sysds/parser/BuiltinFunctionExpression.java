@@ -1132,6 +1132,22 @@ public class BuiltinFunctionExpression extends DataIdentifier {
 			output.setBlocksize(0);
 			output.setValueType(ValueType.FP64);
 			break;
+		case CAST_AS_FP32:
+			checkNumParameters(1);
+			checkDataTypeParam(getFirstExpr(), DataType.MATRIX);
+			output.setDataType(DataType.MATRIX);
+			output.setDimensions(id.getDim1(), id.getDim2());
+			output.setBlocksize(id.getBlocksize());
+			output.setValueType(ValueType.FP32);
+			break;
+		case CAST_AS_FP64:
+			checkNumParameters(1);
+			checkDataTypeParam(getFirstExpr(), DataType.MATRIX);
+			output.setDataType(DataType.MATRIX);
+			output.setDimensions(id.getDim1(), id.getDim2());
+			output.setBlocksize(id.getBlocksize());
+			output.setValueType(ValueType.FP64);
+			break;
 		case CAST_AS_INT:
 			checkNumParameters(1);
 			checkScalarParam(getFirstExpr());

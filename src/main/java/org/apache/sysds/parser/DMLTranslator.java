@@ -2597,6 +2597,12 @@ public class DMLTranslator
 		case CAST_AS_DOUBLE:
 			currBuiltinOp = new UnaryOp(target.getName(), target.getDataType(), ValueType.FP64, OpOp1.CAST_AS_DOUBLE, expr);
 			break;
+		case CAST_AS_FP32:
+			currBuiltinOp = new UnaryOp(target.getName(), target.getDataType(), ValueType.FP32, OpOp1.CAST_AS_FP32, expr);
+			break;
+		case CAST_AS_FP64:
+			currBuiltinOp = new UnaryOp(target.getName(), target.getDataType(), ValueType.FP64, OpOp1.CAST_AS_FP64, expr);
+			break;
 		case CAST_AS_INT:
 			currBuiltinOp = new UnaryOp(target.getName(), target.getDataType(), ValueType.INT64, OpOp1.CAST_AS_INT, expr);
 			break;

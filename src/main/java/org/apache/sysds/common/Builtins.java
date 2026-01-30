@@ -70,6 +70,8 @@ public enum Builtins {
 	BIVAR("bivar", true),
 	CAST_AS_BOOLEAN("as.logical", "as.boolean", false),
 	CAST_AS_DOUBLE("as.double", false),
+	CAST_AS_FP32("as_fp32", "as.float", false),
+	CAST_AS_FP64("as_fp64", false),
 	CAST_AS_FRAME("as.frame", false),
 	CAST_AS_INT("as.integer", false),
 	CAST_AS_LIST("as.list", false),

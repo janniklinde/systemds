@@ -313,6 +313,10 @@ public abstract class Expression implements ParseInfo
 				return ValueType.FP64;
 			if (v2 == ValueType.FP64 && v1 == ValueType.INT64)
 				return ValueType.FP64;
+			if (v1 == ValueType.FP32 && (v2 == ValueType.FP64 || v2 == ValueType.INT64))
+				return ValueType.FP32;
+			if (v2 == ValueType.FP32 && (v1 == ValueType.FP64 || v1 == ValueType.INT64))
+				return ValueType.FP32;
 			
 			// String value type will override others
 			// Primary operation involving strings is concatenation (+)

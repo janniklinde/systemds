@@ -30,6 +30,7 @@ import java.util.concurrent.Future;
 import java.util.stream.IntStream;
 
 import jdk.incubator.vector.DoubleVector;
+import jdk.incubator.vector.FloatVector;
 import jdk.incubator.vector.VectorOperators;
 import jdk.incubator.vector.VectorSpecies;
 import org.apache.commons.lang3.NotImplementedException;
@@ -47,6 +48,7 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.data.DenseBlock;
 import org.apache.sysds.runtime.data.DenseBlockFP64DEDUP;
 import org.apache.sysds.runtime.data.DenseBlockFactory;
+import org.apache.sysds.runtime.data.DenseBlockFP32;
 import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.data.SparseBlock.Type;
 import org.apache.sysds.runtime.data.SparseBlockCSR;
@@ -104,6 +106,75 @@ public class LibMatrixMult
 	 */
 	public static MatrixBlock matrixMult(MatrixBlock m1, MatrixBlock m2) {
 		return matrixMult(m1, m2, null, false, 1);
+	}
+
+	/**
+	 * Experimental FP32 dense-dense matrix multiplication with vector intrinsics.
+	 * This path ignores sparse formats and always computes a dense FP32 output.
+	 */
+	public static MatrixBlock matrixMultFP32(MatrixBlock m1, MatrixBlock m2) {
+		if(m1.isInSparseFormat()) {
+			m1 = new MatrixBlock(m1);
+			m1.sparseToDense();
+		}
+		if(m2.isInSparseFormat()) {
+			m2 = new MatrixBlock(m2);
+			m2.sparseToDense();
+		}
+		int m = m1.getNumRows();
+		int k = m1.getNumColumns();
+		int n = m2.getNumColumns();
+		if(k != m2.getNumRows())
+			throw new DMLRuntimeException("matrixMultFP32: dimension mismatch: \" + m + \"x\" + k + \" %*% \" + m2.getNumRows() + \"x\" + n");
+
+		float[] aVals = getFloatValues(m1);
+		float[] bVals = getFloatValues(m2);
+		if(aVals == null || bVals == null)
+			return new MatrixBlock(m, n, true);
+
+		float[] cVals = new float[m * n];
+		final int vl = FloatVector.SPECIES_PREFERRED.length();
+		for(int i = 0; i < m; i++) {
+			int aBase = i * k;
+			int cBase = i * n;
+			for(int kk = 0; kk < k; kk++) {
+				float aVal = aVals[aBase + kk];
+				if(aVal == 0f)
+					continue;
+				int bBase = kk * n;
+				int j = 0;
+				for(; j + vl <= n; j += vl) {
+					FloatVector bv = FloatVector.fromArray(FloatVector.SPECIES_PREFERRED, bVals, bBase + j);
+					FloatVector cv = FloatVector.fromArray(FloatVector.SPECIES_PREFERRED, cVals, cBase + j);
+					cv = bv.mul(aVal).add(cv);
+					cv.intoArray(cVals, cBase + j);
+				}
+				for(; j < n; j++)
+					cVals[cBase + j] += aVal * bVals[bBase + j];
+			}
+		}
+
+		MatrixBlock out = new MatrixBlock(m, n, false);
+		out.setDenseBlock(DenseBlockFactory.createDenseBlock(cVals, new int[]{m, n}));
+		long nnz = 0;
+		for(float v : cVals)
+			if(v != 0f)
+				nnz++;
+		out.setNonZeros(nnz);
+		return out;
+	}
+
+	private static float[] getFloatValues(MatrixBlock mb) {
+		DenseBlock db = mb.getDenseBlock();
+		if(db instanceof DenseBlockFP32)
+			return ((DenseBlockFP32) db).getData();
+		double[] vals = mb.getDenseBlockValues();
+		if(vals == null)
+			return null;
+		float[] ret = new float[vals.length];
+		for(int i = 0; i < vals.length; i++)
+			ret[i] = (float) vals[i];
+		return ret;
 	}
 
 	/**

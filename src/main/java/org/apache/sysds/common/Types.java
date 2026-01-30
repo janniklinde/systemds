@@ -543,7 +543,7 @@ public interface Types {
 	public enum OpOp1 {
 		ABS, ACOS, ASIN, ASSERT, ATAN, BROADCAST,
 		CAST_AS_FRAME, CAST_AS_LIST, CAST_AS_MATRIX, CAST_AS_SCALAR,
-		CAST_AS_BOOLEAN, CAST_AS_DOUBLE, CAST_AS_INT,
+		CAST_AS_BOOLEAN, CAST_AS_DOUBLE, CAST_AS_INT, CAST_AS_FP32, CAST_AS_FP64,
 		CEIL, CHOLESKY, COS, COSH, CUMMAX, CUMMIN, CUMPROD, CUMSUM,
 		CUMSUMPROD, DET, DETECTSCHEMA, COLNAMES, EIGEN, EXISTS, EXP, FLOOR, INVERSE,
 		IQM, ISNA, ISNAN, ISINF, LENGTH, LINEAGE, LOG, NCOL, NOT, NROW,
@@ -581,6 +581,8 @@ public interface Types {
 				case CAST_AS_DOUBLE:  return "castvtd";
 				case CAST_AS_INT:     return "castvti";
 				case CAST_AS_BOOLEAN: return "castvtb";
+				case CAST_AS_FP32:    return "castvtf32";
+				case CAST_AS_FP64:    return "castvtf64";
 				case CUMMAX:          return Opcodes.UCUMMAX.toString();
 				case CUMMIN:          return Opcodes.UCUMMIN.toString();
 				case CUMPROD:         return Opcodes.UCUMM.toString();
@@ -607,6 +609,8 @@ public interface Types {
 				case "castvtd": return CAST_AS_DOUBLE;
 				case "castvti": return CAST_AS_INT;
 				case "castvtb": return CAST_AS_BOOLEAN;
+				case "castvtf32": return CAST_AS_FP32;
+				case "castvtf64": return CAST_AS_FP64;
 				case "ucummax": return CUMMAX;
 				case "ucummin": return CUMMIN;
 				case "ucum*":   return CUMPROD;

@@ -235,6 +235,8 @@ public enum Opcodes {
 	CAST_AS_DOUBLE(OpOp1.CAST_AS_DOUBLE.toString(), InstructionType.Variable),
 	CAST_AS_INT(OpOp1.CAST_AS_INT.toString(), InstructionType.Variable),
 	CAST_AS_BOOLEAN(OpOp1.CAST_AS_BOOLEAN.toString(), InstructionType.Variable),
+	CAST_AS_FP32(OpOp1.CAST_AS_FP32.toString(), InstructionType.Unary),
+	CAST_AS_FP64(OpOp1.CAST_AS_FP64.toString(), InstructionType.Unary),
 	ATTACHFILETOVAR("attachfiletovar", InstructionType.Variable),
 	READ("read", InstructionType.Variable),
 	WRITE("write", InstructionType.Variable, InstructionType.Write),

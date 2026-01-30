@@ -33,6 +33,8 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.sysds.hops.OptimizerUtils;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.data.DenseBlock;
+import org.apache.sysds.runtime.data.DenseBlockFactory;
+import org.apache.sysds.runtime.data.DenseBlockFP32;
 import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.data.SparseBlockCSR;
 import org.apache.sysds.runtime.data.SparseBlockFactory;
@@ -61,6 +63,7 @@ import org.apache.sysds.runtime.functionobjects.ValueFunction;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.ScalarOperator;
 import org.apache.sysds.runtime.matrix.operators.UnaryOperator;
+import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.runtime.util.CommonThreadPool;
 import org.apache.sysds.runtime.util.DataConverter;
 import org.apache.sysds.runtime.util.SortUtils;
@@ -152,6 +155,9 @@ public class LibMatrixBincell {
 	}
 	
 	public static MatrixBlock bincellOpScalar(MatrixBlock m1, MatrixBlock ret, ScalarOperator op, int k) {
+		if(!m1.sparse && m1.getDenseBlock() instanceof DenseBlockFP32) {
+			return bincellOpScalarFP32(m1, ret, op);
+		}
 		// estimate the sparsity structure of result matrix
 		boolean sp = m1.sparse; // by default, we guess result.sparsity=input.sparsity
 		if (!op.sparseSafe)
@@ -187,6 +193,12 @@ public class LibMatrixBincell {
 			//Timing time = new Timing(true);
 			isValidDimensionsBinary(m1, m2);
 			op = replaceOpWithSparseSafeIfApplicable(m1, m2, op);
+
+			if(!m1.sparse && !m2.sparse
+				&& m1.getDenseBlock() instanceof DenseBlockFP32
+				&& m2.getDenseBlock() instanceof DenseBlockFP32) {
+				return bincellOpFP32(m1, m2, ret, op);
+			}
 			
 			//compute output dimensions
 			final BinaryAccessType atype = getBinaryAccessType(m1, m2);
@@ -535,6 +547,100 @@ public class LibMatrixBincell {
 		long nnz = 0;
 		nnz = binCellOpExecute(m1, m2, ret, op, atype,0, m1.rlen);
 		ret.setNonZeros(nnz);
+	}
+
+	private static MatrixBlock bincellOpScalarFP32(MatrixBlock m1, MatrixBlock ret, ScalarOperator op) {
+		int rlen = m1.getNumRows();
+		int clen = m1.getNumColumns();
+		MatrixBlock out = new MatrixBlock(rlen, clen, false);
+		out.setDenseBlock(DenseBlockFactory.createDenseBlock(ValueType.FP32, new int[]{rlen, clen}));
+		float[] a = ((DenseBlockFP32) m1.getDenseBlock()).getData();
+		float[] c = ((DenseBlockFP32) out.getDenseBlock()).getData();
+		long nnz = 0;
+		if(a != null) {
+			for(int i = 0; i < a.length; i++) {
+				float v = (float) op.executeScalar(a[i]);
+				if(v != 0f)
+					nnz++;
+				c[i] = v;
+			}
+		}
+		out.setNonZeros(nnz);
+		return out;
+	}
+
+	private static MatrixBlock bincellOpFP32(MatrixBlock m1, MatrixBlock m2, MatrixBlock ret, BinaryOperator op) {
+		BinaryAccessType atype = getBinaryAccessType(m1, m2);
+		if(atype == BinaryAccessType.INVALID)
+			throw new DMLRuntimeException("Dimension mismatch for binary operation.");
+
+		int rlen = m1.getNumRows();
+		int clen = (atype == BinaryAccessType.OUTER_VECTOR_VECTOR) ? m2.getNumColumns() : m1.getNumColumns();
+		MatrixBlock out = new MatrixBlock(rlen, clen, false);
+		out.setDenseBlock(DenseBlockFactory.createDenseBlock(ValueType.FP32, new int[]{rlen, clen}));
+		float[] a = ((DenseBlockFP32) m1.getDenseBlock()).getData();
+		float[] b = ((DenseBlockFP32) m2.getDenseBlock()).getData();
+		float[] c = ((DenseBlockFP32) out.getDenseBlock()).getData();
+		long nnz = 0;
+
+		switch(atype) {
+			case MATRIX_MATRIX: {
+				int len = rlen * clen;
+				for(int i = 0; i < len; i++) {
+					float v = (float) op.fn.execute(a[i], b[i]);
+					if(v != 0f)
+						nnz++;
+					c[i] = v;
+				}
+				break;
+			}
+			case MATRIX_COL_VECTOR: { // m2 is col vector
+				int n = m1.clen;
+				for(int i = 0; i < rlen; i++) {
+					float bv = b[i];
+					int off = i * n;
+					for(int j = 0; j < n; j++) {
+						float v = (float) op.fn.execute(a[off + j], bv);
+						if(v != 0f)
+							nnz++;
+						c[off + j] = v;
+					}
+				}
+				break;
+			}
+			case MATRIX_ROW_VECTOR: { // m2 is row vector
+				int n = m1.clen;
+				for(int i = 0; i < rlen; i++) {
+					int off = i * n;
+					for(int j = 0; j < n; j++) {
+						float v = (float) op.fn.execute(a[off + j], b[j]);
+						if(v != 0f)
+							nnz++;
+						c[off + j] = v;
+					}
+				}
+				break;
+			}
+			case OUTER_VECTOR_VECTOR: { // m1 is col vector, m2 is row vector
+				int n = m2.clen;
+				for(int i = 0; i < rlen; i++) {
+					float av = a[i];
+					int off = i * n;
+					for(int j = 0; j < n; j++) {
+						float v = (float) op.fn.execute(av, b[j]);
+						if(v != 0f)
+							nnz++;
+						c[off + j] = v;
+					}
+				}
+				break;
+			}
+			default:
+				throw new DMLRuntimeException("Unsupported binary access type: " + atype);
+		}
+
+		out.setNonZeros(nnz);
+		return out;
 	}
 
 	private static long binCellOpExecute(MatrixBlock m1, MatrixBlock m2, MatrixBlock ret, BinaryOperator op,

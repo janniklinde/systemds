@@ -23,14 +23,17 @@ import org.apache.sysds.common.Types;
 import org.apache.sysds.common.Types.ExecMode;
 import org.apache.sysds.runtime.io.MatrixWriter;
 import org.apache.sysds.runtime.io.MatrixWriterFactory;
-import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.util.DataConverter;
 import org.apache.sysds.runtime.util.HDFSTool;
+import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.test.AutomatedTestBase;
 import org.apache.sysds.test.TestConfiguration;
 import org.apache.sysds.test.TestUtils;
 import org.junit.Test;
+
+import java.io.File;
 
 public class MessagePassingBipartiteTest extends AutomatedTestBase {
 	private static final String TEST_NAME = "message_passing_bipartite";
@@ -48,6 +51,11 @@ public class MessagePassingBipartiteTest extends AutomatedTestBase {
 		addTestConfiguration(TEST_NAME, new TestConfiguration(TEST_CLASS_DIR, TEST_NAME, new String[]{}));
 	}
 
+	@Override
+	protected File getConfigTemplateFile() {
+		return new File(CONFIG_DIR, "SystemDS-config-single.xml");
+	}
+
 	@Test
 	public void testMessagePassingBipartite() throws Exception {
 		ExecMode old = setExecMode(ExecMode.SINGLE_NODE);
@@ -55,6 +63,8 @@ public class MessagePassingBipartiteTest extends AutomatedTestBase {
 			getAndLoadTestConfiguration(TEST_NAME);
 			String HOME = SCRIPT_DIR + TEST_DIR;
 			fullDMLScriptName = HOME + TEST_NAME + ".dml";
+			System.out.println("FLOATING_POINT_PRECISION_CONFIG_FILE=" + new DMLConfig(getCurConfigFile().getPath())
+				.getTextValue(DMLConfig.FLOATING_POINT_PRECISION));
 
 			double[][] W_v_agg = getRandomMatrix(d, d, -1, 1, sparsity, 1);
 			double[][] W_v_in = getRandomMatrix(d, d, -1, 1, sparsity, 2);
@@ -113,7 +123,7 @@ public class MessagePassingBipartiteTest extends AutomatedTestBase {
 				input("W_v_agg"), input("W_v_in"), input("W_c_agg"), input("W_c_in"), input("b_v"), input("b_c"),
 				input("W_v_vccv"), input("W_c_vccv"), input("W_e_vccv"), input("b_vccv"),
 				input("v"), input("c"), input("e"), input("Ex2")};
-			runTest(true, false, null, -1);
+			runTest(true, true, org.apache.sysds.runtime.DMLRuntimeException.class, "expected FP32 dense block", -1);
 		}
 		finally {
 			resetExecMode(old);
@@ -123,7 +133,7 @@ public class MessagePassingBipartiteTest extends AutomatedTestBase {
 	private void writeMatrix(MatrixWriter writer, String name, double[][] data) throws Exception {
 		MatrixBlock mb = DataConverter.convertToMatrixBlock(data);
 		writer.writeMatrixToHDFS(mb, input(name), data.length, data[0].length, 1000, mb.getNonZeros());
-		HDFSTool.writeMetaDataFile(input(name + ".mtd"), Types.ValueType.FP64,
+		HDFSTool.writeMetaDataFile(input(name + ".mtd"), Types.ValueType.FP32,
 			new MatrixCharacteristics(data.length, data[0].length, 1000, mb.getNonZeros()), Types.FileFormat.BINARY);
 	}
 }

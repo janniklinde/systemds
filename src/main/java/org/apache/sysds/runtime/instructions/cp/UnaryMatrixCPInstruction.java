@@ -24,6 +24,8 @@ import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
+import org.apache.sysds.runtime.data.DenseBlockFP32;
+import org.apache.sysds.runtime.data.DenseBlockFactory;
 import org.apache.sysds.runtime.lineage.LineageItem;
 import org.apache.sysds.runtime.matrix.data.LibCommonsMath;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
@@ -41,7 +43,32 @@ public class UnaryMatrixCPInstruction extends UnaryCPInstruction {
 		MatrixBlock inBlock = inObj.acquireRead();
 		MatrixBlock retBlock = null;
 		
-		if(LibCommonsMath.isSupportedUnaryOperation(getOpcode())) {
+		if(getOpcode().equals(Opcodes.CAST_AS_FP32.toString())) {
+			MatrixBlock denseIn = inBlock;
+			if(denseIn.isInSparseFormat()) {
+				denseIn = new MatrixBlock(inBlock);
+				denseIn.sparseToDense();
+			}
+			int rlen = denseIn.getNumRows();
+			int clen = denseIn.getNumColumns();
+			MatrixBlock out = new MatrixBlock(rlen, clen, false);
+			out.setDenseBlock(DenseBlockFactory.createDenseBlock(ValueType.FP32, new int[]{rlen, clen}));
+			double[] inVals = denseIn.getDenseBlockValues();
+			float[] outVals = ((DenseBlockFP32) out.getDenseBlock()).getData();
+			if(inVals != null) {
+				for(int i = 0; i < inVals.length; i++)
+					outVals[i] = (float) inVals[i];
+			}
+			long nnz = denseIn.getNonZeros();
+			out.setNonZeros(nnz >= 0 ? nnz : out.recomputeNonZeros());
+			retBlock = out;
+			ec.releaseMatrixInput(input1.getName());
+		}
+		else if(getOpcode().equals(Opcodes.CAST_AS_FP64.toString())) {
+			retBlock = new MatrixBlock(inBlock);
+			ec.releaseMatrixInput(input1.getName());
+		}
+		else if(LibCommonsMath.isSupportedUnaryOperation(getOpcode())) {
 			retBlock = LibCommonsMath.unaryOperations(inBlock, getOpcode());
 			ec.releaseMatrixInput(input1.getName());
 		}

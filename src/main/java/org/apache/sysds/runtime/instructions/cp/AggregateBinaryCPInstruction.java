@@ -24,6 +24,7 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.compress.CompressedMatrixBlock;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
+import org.apache.sysds.runtime.matrix.data.LibMatrixMult;
 import org.apache.sysds.runtime.matrix.data.LibMatrixReorg;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.operators.AggregateBinaryOperator;
@@ -91,7 +92,15 @@ public class AggregateBinaryCPInstruction extends BinaryCPInstruction {
 	private void processNormal(ExecutionContext ec, MatrixBlock matBlock1, MatrixBlock matBlock2) {
 		// compute matrix multiplication
 		AggregateBinaryOperator ab_op = (AggregateBinaryOperator) _optr;
-		MatrixBlock ret = matBlock1.aggregateBinaryOperations(matBlock1, matBlock2, new MatrixBlock(), ab_op);
+		MatrixBlock ret;
+		if(!matBlock1.isInSparseFormat() && !matBlock2.isInSparseFormat()
+			&& matBlock1.getDenseBlock() instanceof org.apache.sysds.runtime.data.DenseBlockFP32
+			&& matBlock2.getDenseBlock() instanceof org.apache.sysds.runtime.data.DenseBlockFP32) {
+			ret = LibMatrixMult.matrixMultFP32(matBlock1, matBlock2);
+		}
+		else {
+			ret = matBlock1.aggregateBinaryOperations(matBlock1, matBlock2, new MatrixBlock(), ab_op);
+		}
 
 		// release inputs/outputs
 		ec.releaseMatrixInput(input1.getName());
@@ -116,7 +125,14 @@ public class AggregateBinaryCPInstruction extends BinaryCPInstruction {
 			ec.releaseMatrixInput(input2.getName());
 		}
 
-		ret = matBlock1.aggregateBinaryOperations(matBlock1, matBlock2, new MatrixBlock(), ab_op);
+		if(!matBlock1.isInSparseFormat() && !matBlock2.isInSparseFormat()
+			&& matBlock1.getDenseBlock() instanceof org.apache.sysds.runtime.data.DenseBlockFP32
+			&& matBlock2.getDenseBlock() instanceof org.apache.sysds.runtime.data.DenseBlockFP32) {
+			ret = LibMatrixMult.matrixMultFP32(matBlock1, matBlock2);
+		}
+		else {
+			ret = matBlock1.aggregateBinaryOperations(matBlock1, matBlock2, new MatrixBlock(), ab_op);
+		}
 
 		if(!transposeLeft)
 			ec.releaseMatrixInput(input1.getName());

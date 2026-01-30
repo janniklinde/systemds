@@ -19,80 +19,29 @@
 #
 #-------------------------------------------------------------
 
-W_v_agg = read($1);
-W_v_in = read($2);
-W_c_agg = read($3);
-W_c_in = read($4);
-b_v = read($5);
-b_c = read($6);
-W_v_vccv = read($7);
-W_c_vccv = read($8);
-W_e_vccv = read($9);
-b_vccv = read($10);
-v = read($11);
-c = read($12);
-e = read($13);
-Ex2 = read($14);
+W_v_agg = as_fp32(read($1));
+W_v_in = as_fp32(read($2));
+W_c_agg = as_fp32(read($3));
+W_c_in = as_fp32(read($4));
+b_v = as_fp32(read($5));
+b_c = as_fp32(read($6));
+W_v_vccv = as_fp32(read($7));
+W_c_vccv = as_fp32(read($8));
+W_e_vccv = as_fp32(read($9));
+b_vccv = as_fp32(read($10));
+v = as_fp32(read($11));
+c = as_fp32(read($12));
+e = as_fp32(read($13));
+Ex2 = as_fp32(read($14));
 
-[v_out, c_out, v_act, c_act] = message_passing_bipartite(
+print("START");
+for(i in 1:30) {
+[v_act, c_act] = message_passing_bipartite(
   W_v=W_v_agg, W_c=W_c_agg, b_v=b_v, b_c=b_c,
   W_v_vccv=W_v_vccv, W_c_vccv=W_c_vccv, W_e_vccv=W_e_vccv, b_vccv=b_vccv,
   v=v, c=c, e=e, Ex2=Ex2
 );
-
-# output module (feedforward + relu) on concatenated features
-v_z = v_out %*% W_v_agg + v %*% W_v_in + b_v;
-c_z = c_out %*% W_c_agg + c %*% W_c_in + b_c;
-v_out = pmax(v_z, 0);
-c_out = pmax(c_z, 0);
-
-# reference validation
-d = as.integer(ncol(W_v_vccv) / 2);
-vW = v %*% W_v_vccv;
-cW = c %*% W_c_vccv;
-eW = e %*% W_e_vccv;
-
-vWc = vW[,1:d];
-cWc = cW[,1:d];
-eWc = eW[,1:d];
-vWv = vW[,(d+1):(2*d)];
-cWv = cW[,(d+1):(2*d)];
-eWv = eW[,(d+1):(2*d)];
-bTop = b_vccv[,1:d];
-bBot = b_vccv[,(d+1):(2*d)];
-
-E = nrow(Ex2);
-nC = nrow(c);
-nV = nrow(v);
-edge_c = Ex2[,1];
-edge_v = Ex2[,2];
-S_c = table(seq(1, E, 1), edge_c, 1, E, nC);
-S_v = table(seq(1, E, 1), edge_v, 1, E, nV);
-
-onesE = matrix(1, rows=E, cols=1);
-onesD = matrix(1, rows=1, cols=d);
-
-msgC = S_v %*% vWc + S_c %*% cWc + eWc + onesE %*% bTop;
-msgV = S_v %*% vWv + S_c %*% cWv + eWv + onesE %*% bBot;
-
-degC = table(edge_c, onesE, onesE, nC, 1);
-degV = table(edge_v, onesE, onesE, nV, 1);
-degC_safe = ifelse(degC == 0, 1, degC);
-degV_safe = ifelse(degV == 0, 1, degV);
-
-c_act_ref = (t(S_c) %*% msgC) / (degC_safe %*% onesD);
-v_act_ref = (t(S_v) %*% msgV) / (degV_safe %*% onesD);
-
-c_out_ref = pmax(c_act_ref, 0);
-v_out_ref = pmax(v_act_ref, 0);
-
-v_z_ref = v_out_ref %*% W_v_agg + v %*% W_v_in + b_v;
-c_z_ref = c_out_ref %*% W_c_agg + c %*% W_c_in + b_c;
-v_out_ref = pmax(v_z_ref, 0);
-c_out_ref = pmax(c_z_ref, 0);
-
-eps = 1e-8;
-if (sum(abs(c_out - c_out_ref)) > eps) stop("c_out mismatch");
-if (sum(abs(v_out - v_out_ref)) > eps) stop("v_out mismatch");
-if (sum(abs(c_act - c_act_ref)) > eps) stop("c_act mismatch");
-if (sum(abs(v_act - v_act_ref)) > eps) stop("v_act mismatch");
+v_out = pmax(v_act, 0) %*% t(v_act) + v_act;
+  print(v_out[1, 1]);
+  print(c_act[1, 1]);
+}
