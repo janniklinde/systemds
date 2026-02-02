@@ -91,25 +91,62 @@ W_e_vccv = rand(rows=Fe, cols=2*d, min=-0.1, max=0.1, sparsity=1.0, seed=7);
 b_vccv = rand(rows=1, cols=2*d, min=-0.1, max=0.1, sparsity=1.0, seed=8);
 d = as.integer(ncol(W_v_vccv) / 2);
 
+W_v_agg = as_fp32(W_v_agg);
+W_v_in = as_fp32(W_v_in);
+W_c_agg = as_fp32(W_c_agg);
+W_c_in = as_fp32(W_c_in);
+b_v = as_fp32(b_v);
+b_c = as_fp32(b_c);
+W_v_vccv = as_fp32(W_v_vccv);
+W_c_vccv = as_fp32(W_c_vccv);
+W_e_vccv = as_fp32(W_e_vccv);
+b_vccv = as_fp32(b_vccv);
+variable_features = as_fp32(variable_features);
+constraint_features = as_fp32(constraint_features);
+edge_features = as_fp32(edge_features);
+edge_index = as_fp32(edge_index);
+
+v_act_list = list();
+c_act_list = list();
+v_out_list = list();
+c_out_list = list();
+v_in = variable_features;
+c_in = constraint_features;
 for(i in 1:10) {
-  [t1, t2, t3, t4] = message_passing_bipartite(
+  [t3, t4, t1, t2] = message_passing_bipartite(
     W_v=W_v_agg, W_c=W_c_agg, b_v=b_v, b_c=b_c,
+    W_v_in=W_v_in, W_c_in=W_c_in,
     W_v_vccv=W_v_vccv, W_c_vccv=W_c_vccv, W_e_vccv=W_e_vccv, b_vccv=b_vccv,
-    v=variable_features, c=constraint_features, e=edge_features, Ex2=edge_index
+    v=v_in, c=c_in, e=edge_features, Ex2=edge_index
   );
-  t1 = pmax(t1 %*% W_v_agg + variable_features %*% W_v_in + b_v, 0);
-  t2 = pmax(t2 %*% W_c_agg + constraint_features %*% W_c_in + b_c, 0);
+  v_act_list = append(v_act_list, t3);
+  c_act_list = append(c_act_list, t4);
+  v_out_list = append(v_out_list, t1);
+  c_out_list = append(c_out_list, t2);
+  v_in = t1;
+  c_in = t2;
 }
 
 t = time();
+v_act_list = list();
+c_act_list = list();
+v_out_list = list();
+c_out_list = list();
+v_in = variable_features;
+c_in = constraint_features;
 for(i in 1:10) {
-  [v_out, c_out, v_act, c_act] = message_passing_bipartite(
+  [v_act, c_act, v_out, c_out] = message_passing_bipartite(
     W_v=W_v_agg, W_c=W_c_agg, b_v=b_v, b_c=b_c,
+    W_v_in=W_v_in, W_c_in=W_c_in,
     W_v_vccv=W_v_vccv, W_c_vccv=W_c_vccv, W_e_vccv=W_e_vccv, b_vccv=b_vccv,
-    v=variable_features, c=constraint_features, e=edge_features, Ex2=edge_index
+    v=v_in, c=c_in, e=edge_features, Ex2=edge_index
   );
-  v_out = pmax(v_out %*% W_v_agg + variable_features %*% W_v_in + b_v, 0);
-  c_out = pmax(c_out %*% W_c_agg + constraint_features %*% W_c_in + b_c, 0);
+  v_act_list = append(v_act_list, v_act);
+  c_act_list = append(c_act_list, c_act);
+  v_out_list = append(v_out_list, v_out);
+  c_out_list = append(c_out_list, c_out);
+  v_in = v_out;
+  c_in = c_out;
   print(v_out[1, 1]);
 }
 delta = (time() - t)/1000000;

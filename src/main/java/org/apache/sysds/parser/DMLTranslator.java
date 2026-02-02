@@ -1946,6 +1946,12 @@ public class DMLTranslator
 				mpInputs.add(processExpression(source.getVarParam("W_c"), null, hops));
 				mpInputs.add(processExpression(source.getVarParam("b_v"), null, hops));
 				mpInputs.add(processExpression(source.getVarParam("b_c"), null, hops));
+				boolean hasVIn = source.getVarParam("W_v_in") != null;
+				boolean hasCIn = source.getVarParam("W_c_in") != null;
+				if(hasVIn || hasCIn) {
+					mpInputs.add(processExpression(source.getVarParam("W_v_in"), null, hops));
+					mpInputs.add(processExpression(source.getVarParam("W_c_in"), null, hops));
+				}
 				mpInputs.add(processExpression(source.getVarParam("W_v_vccv"), null, hops));
 				mpInputs.add(processExpression(source.getVarParam("W_c_vccv"), null, hops));
 				mpInputs.add(processExpression(source.getVarParam("W_e_vccv"), null, hops));
@@ -1956,10 +1962,11 @@ public class DMLTranslator
 				mpInputs.add(processExpression(source.getVarParam("Ex2"), null, hops));
 
 				String[] mpOutputNames = new String[targetList.size()];
-				mpOutputNames[0] = targetList.get(0).getName();
-				mpOutputNames[1] = targetList.get(1).getName();
-				outputs.add(new DataOp(mpOutputNames[0], DataType.MATRIX, ValueType.FP64, mpInputs.get(0), OpOpData.FUNCTIONOUTPUT, mpInputs.get(0).getFilename()));
-				outputs.add(new DataOp(mpOutputNames[1], DataType.MATRIX, ValueType.FP64, mpInputs.get(0), OpOpData.FUNCTIONOUTPUT, mpInputs.get(0).getFilename()));
+				for(int i = 0; i < targetList.size(); i++) {
+					mpOutputNames[i] = targetList.get(i).getName();
+					outputs.add(new DataOp(mpOutputNames[i], DataType.MATRIX, ValueType.FP64, mpInputs.get(0),
+						OpOpData.FUNCTIONOUTPUT, mpInputs.get(0).getFilename()));
+				}
 
 				currBuiltinOp = new FunctionOp(ftype, nameSpace, source.getOpCode().toString(), null, mpInputs, mpOutputNames, outputs);
 				break;

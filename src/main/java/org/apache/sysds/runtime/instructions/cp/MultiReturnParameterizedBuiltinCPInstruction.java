@@ -91,19 +91,27 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 				null, inputs, metaReturn, outputs, opcode, str);
 		}
 		else if(opcode.equalsIgnoreCase(Opcodes.MESSAGE_PASSING_BIPARTITE.toString())) {
-			final int numInputs = 12;
-			final int numOutputs = 2;
-			final int minParts = 1 + numInputs + numOutputs;
-			if(parts.length < minParts)
+			final int baseInputs = 12;
+			final int extendedInputs = 14;
+			final int baseOutputs = 2;
+			final int extendedOutputs = 4;
+			final int baseParts = 1 + baseInputs + baseOutputs;
+			final int extendedParts = 1 + extendedInputs + extendedOutputs;
+			final int basePartsWithK = baseParts + 1;
+			final int extendedPartsWithK = extendedParts + 1;
+			if(parts.length != baseParts && parts.length != extendedParts
+				&& parts.length != basePartsWithK && parts.length != extendedPartsWithK)
 				throw new DMLRuntimeException("Invalid number of operands in MultiReturnParameterizedBuiltin instruction: " + opcode);
 
+			final int numInputs = (parts.length == baseParts || parts.length == basePartsWithK) ? baseInputs : extendedInputs;
+			final int numOutputs = (parts.length == baseParts || parts.length == basePartsWithK) ? baseOutputs : extendedOutputs;
 			int pos = 1;
 			ArrayList<CPOperand> inputs = new ArrayList<>(numInputs);
 			for(int i = 0; i < numInputs; i++)
 				inputs.add(new CPOperand(parts[pos++]));
 
-			outputs.add(new CPOperand(parts[pos++], ValueType.FP64, DataType.MATRIX));
-			outputs.add(new CPOperand(parts[pos++], ValueType.FP64, DataType.MATRIX));
+			for(int i = 0; i < numOutputs; i++)
+				outputs.add(new CPOperand(parts[pos++], ValueType.FP64, DataType.MATRIX));
 
 			return new MultiReturnParameterizedBuiltinCPInstruction(
 				null, inputs, false, outputs, opcode, str);
@@ -190,21 +198,33 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 
 	@SuppressWarnings("unused")
 	private void processMessagePassingBipartite(ExecutionContext ec) {
-		// Input order (see DMLTranslator): W_v, W_c, b_v, b_c, W_v_vccv, W_c_vccv, W_e_vccv, b_vccv, v, c, e, Ex2
+		// Input order (see DMLTranslator):
+		// base: W_v, W_c, b_v, b_c, W_v_vccv, W_c_vccv, W_e_vccv, b_vccv, v, c, e, Ex2
+		// extended: W_v, W_c, b_v, b_c, W_v_in, W_c_in, W_v_vccv, W_c_vccv, W_e_vccv, b_vccv, v, c, e, Ex2
 		int k = OptimizerUtils.getTransformNumThreads();
 		//k = 1;
-		MatrixBlock W_v = ec.getMatrixInput(_inputs.get(0).getName());
-		MatrixBlock W_c = ec.getMatrixInput(_inputs.get(1).getName());
-		MatrixBlock b_v = ec.getMatrixInput(_inputs.get(2).getName());
-		MatrixBlock b_c = ec.getMatrixInput(_inputs.get(3).getName());
-		MatrixBlock W_v_vccv = ec.getMatrixInput(_inputs.get(4).getName());
-		MatrixBlock W_c_vccv = ec.getMatrixInput(_inputs.get(5).getName());
-		MatrixBlock W_e_vccv = ec.getMatrixInput(_inputs.get(6).getName());
-		MatrixBlock b_vccv = ec.getMatrixInput(_inputs.get(7).getName());
-		MatrixBlock v = ec.getMatrixInput(_inputs.get(8).getName());
-		MatrixBlock c = ec.getMatrixInput(_inputs.get(9).getName());
-		MatrixBlock e = ec.getMatrixInput(_inputs.get(10).getName());
-		MatrixBlock Ex2 = ec.getMatrixInput(_inputs.get(11).getName());
+		boolean extended = (_inputs.size() == 14);
+		if(_outputs.size() > 2 && !extended)
+			throw new DMLRuntimeException("message_passing_bipartite: W_v_in and W_c_in are required when returning v_out/c_out.");
+		int pos = 0;
+		MatrixBlock W_v = ec.getMatrixInput(_inputs.get(pos++).getName());
+		MatrixBlock W_c = ec.getMatrixInput(_inputs.get(pos++).getName());
+		MatrixBlock b_v = ec.getMatrixInput(_inputs.get(pos++).getName());
+		MatrixBlock b_c = ec.getMatrixInput(_inputs.get(pos++).getName());
+		MatrixBlock W_v_in = null;
+		MatrixBlock W_c_in = null;
+		if(extended) {
+			W_v_in = ec.getMatrixInput(_inputs.get(pos++).getName());
+			W_c_in = ec.getMatrixInput(_inputs.get(pos++).getName());
+		}
+		MatrixBlock W_v_vccv = ec.getMatrixInput(_inputs.get(pos++).getName());
+		MatrixBlock W_c_vccv = ec.getMatrixInput(_inputs.get(pos++).getName());
+		MatrixBlock W_e_vccv = ec.getMatrixInput(_inputs.get(pos++).getName());
+		MatrixBlock b_vccv = ec.getMatrixInput(_inputs.get(pos++).getName());
+		MatrixBlock v = ec.getMatrixInput(_inputs.get(pos++).getName());
+		MatrixBlock c = ec.getMatrixInput(_inputs.get(pos++).getName());
+		MatrixBlock e = ec.getMatrixInput(_inputs.get(pos++).getName());
+		MatrixBlock Ex2 = ec.getMatrixInput(_inputs.get(pos++).getName());
 
 		MatrixBlock vW = LibMatrixMult.matrixMultFP32(v, W_v_vccv);
 		MatrixBlock cW = LibMatrixMult.matrixMultFP32(c, W_c_vccv);
@@ -296,20 +316,77 @@ public class MultiReturnParameterizedBuiltinCPInstruction extends ComputationCPI
 			}
 		}
 
+		vAct.setNonZeros((long) nV * d);
+		cAct.setNonZeros((long) nC * d);
+
 		ec.setMatrixOutput(getOutput(0).getName(), vAct);
 		ec.setMatrixOutput(getOutput(1).getName(), cAct);
 
-		ec.releaseMatrixInput(_inputs.get(0).getName());
-		ec.releaseMatrixInput(_inputs.get(1).getName());
-		ec.releaseMatrixInput(_inputs.get(2).getName());
-		ec.releaseMatrixInput(_inputs.get(3).getName());
-		ec.releaseMatrixInput(_inputs.get(4).getName());
-		ec.releaseMatrixInput(_inputs.get(5).getName());
-		ec.releaseMatrixInput(_inputs.get(6).getName());
-		ec.releaseMatrixInput(_inputs.get(7).getName());
-		ec.releaseMatrixInput(_inputs.get(8).getName());
-		ec.releaseMatrixInput(_inputs.get(9).getName());
-		ec.releaseMatrixInput(_inputs.get(10).getName());
-		ec.releaseMatrixInput(_inputs.get(11).getName());
+		if(_outputs.size() > 2) {
+			if(b_v.isInSparseFormat()) b_v.sparseToDense();
+			if(b_c.isInSparseFormat()) b_c.sparseToDense();
+			MatrixBlock vActRelu = new MatrixBlock(nV, d, false);
+			MatrixBlock cActRelu = new MatrixBlock(nC, d, false);
+			vActRelu.setDenseBlock(DenseBlockFactory.createDenseBlock(ValueType.FP32, new int[]{nV, d}));
+			cActRelu.setDenseBlock(DenseBlockFactory.createDenseBlock(ValueType.FP32, new int[]{nC, d}));
+			float[] vActReluArr = getFloatDenseBlockValues(vActRelu);
+			float[] cActReluArr = getFloatDenseBlockValues(cActRelu);
+			for(int i = 0; i < vActArr.length; i++)
+				vActReluArr[i] = (vActArr[i] > 0.0f) ? vActArr[i] : 0.0f;
+			for(int i = 0; i < cActArr.length; i++)
+				cActReluArr[i] = (cActArr[i] > 0.0f) ? cActArr[i] : 0.0f;
+
+			MatrixBlock vActW = LibMatrixMult.matrixMultFP32(vActRelu, W_v);
+			MatrixBlock vInW = LibMatrixMult.matrixMultFP32(v, W_v_in);
+			MatrixBlock cActW = LibMatrixMult.matrixMultFP32(cActRelu, W_c);
+			MatrixBlock cInW = LibMatrixMult.matrixMultFP32(c, W_c_in);
+
+			if(vActW.isInSparseFormat()) vActW.sparseToDense();
+			if(vInW.isInSparseFormat()) vInW.sparseToDense();
+			if(cActW.isInSparseFormat()) cActW.sparseToDense();
+			if(cInW.isInSparseFormat()) cInW.sparseToDense();
+
+			float[] vActWArr = toFloatArray(vActW);
+			float[] vInWArr = toFloatArray(vInW);
+			float[] cActWArr = toFloatArray(cActW);
+			float[] cInWArr = toFloatArray(cInW);
+			float[] bVArr = toFloatArray(b_v);
+			float[] bCArr = toFloatArray(b_c);
+			if(bVArr == null)
+				bVArr = new float[d];
+			if(bCArr == null)
+				bCArr = new float[d];
+
+			MatrixBlock vOut = new MatrixBlock(nV, d, false);
+			MatrixBlock cOut = new MatrixBlock(nC, d, false);
+			vOut.setDenseBlock(DenseBlockFactory.createDenseBlock(ValueType.FP32, new int[]{nV, d}));
+			cOut.setDenseBlock(DenseBlockFactory.createDenseBlock(ValueType.FP32, new int[]{nC, d}));
+			float[] vOutArr = getFloatDenseBlockValues(vOut);
+			float[] cOutArr = getFloatDenseBlockValues(cOut);
+
+			for(int i = 0; i < nV; i++) {
+				int off = i * d;
+				for(int k2 = 0; k2 < d; k2++) {
+					float val = vActWArr[off + k2] + vInWArr[off + k2] + bVArr[k2];
+					vOutArr[off + k2] = (val > 0.0f) ? val : 0.0f;
+				}
+			}
+			for(int i = 0; i < nC; i++) {
+				int off = i * d;
+				for(int k2 = 0; k2 < d; k2++) {
+					float val = cActWArr[off + k2] + cInWArr[off + k2] + bCArr[k2];
+					cOutArr[off + k2] = (val > 0.0f) ? val : 0.0f;
+				}
+			}
+
+			vOut.setNonZeros((long) nV * d);
+			cOut.setNonZeros((long) nC * d);
+
+			ec.setMatrixOutput(getOutput(2).getName(), vOut);
+			ec.setMatrixOutput(getOutput(3).getName(), cOut);
+		}
+
+		for(CPOperand input : _inputs)
+			ec.releaseMatrixInput(input.getName());
 	}
 }

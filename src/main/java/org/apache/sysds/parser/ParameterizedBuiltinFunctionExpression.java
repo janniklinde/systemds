@@ -322,10 +322,15 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 				validateTransformEncode(out1, out2, conditional);
 				break;	
 			case MESSAGE_PASSING_BIPARTITE:
+				if(getOutputs().length != 2 && getOutputs().length != 4)
+					raiseValidateError("message_passing_bipartite must return either 2 or 4 outputs.", false,
+						LanguageErrorCodes.INVALID_PARAMETERS);
 				DataIdentifier vAct = (DataIdentifier) getOutputs()[0];
 				DataIdentifier cAct = (DataIdentifier) getOutputs()[1];
+				DataIdentifier vOut = (getOutputs().length == 4) ? (DataIdentifier) getOutputs()[2] : null;
+				DataIdentifier cOut = (getOutputs().length == 4) ? (DataIdentifier) getOutputs()[3] : null;
 				
-				validateMessagePassingBipartite(vAct, cAct, conditional);
+				validateMessagePassingBipartite(vAct, cAct, vOut, cOut, conditional);
 				break;
 			default: //always unconditional (because unsupported operation)
 				raiseValidateError("Unsupported parameterized function "+ getOpCode(), false, LanguageErrorCodes.INVALID_PARAMETERS);
@@ -705,11 +710,12 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 		output2.setDimensions(-1, -1);
 	}
 
-	private void validateMessagePassingBipartite(DataIdentifier vAct, DataIdentifier cAct, boolean conditional)
+	private void validateMessagePassingBipartite(DataIdentifier vAct, DataIdentifier cAct,
+		DataIdentifier vOut, DataIdentifier cOut, boolean conditional)
 	{
 		String fname = getOpCode().name();
 		Set<String> valid = CollectionUtils.asSet(
-			"W_v", "W_c", "b_v", "b_c",
+			"W_v", "W_c", "b_v", "b_c", "W_v_in", "W_c_in",
 			"W_v_vccv", "W_c_vccv", "W_e_vccv", "b_vccv",
 			"v", "c", "e", "Ex2");
 		checkInvalidParameters(getOpCode(), getVarParams(), valid);
@@ -718,6 +724,10 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 		checkDataValueType(false, fname, "W_c", DataType.MATRIX, ValueType.FP64, conditional);
 		checkDataValueType(false, fname, "b_v", DataType.MATRIX, ValueType.FP64, conditional);
 		checkDataValueType(false, fname, "b_c", DataType.MATRIX, ValueType.FP64, conditional);
+		if(getVarParam("W_v_in") != null || getVarParam("W_c_in") != null) {
+			checkDataValueType(false, fname, "W_v_in", DataType.MATRIX, ValueType.FP64, conditional);
+			checkDataValueType(false, fname, "W_c_in", DataType.MATRIX, ValueType.FP64, conditional);
+		}
 
 		checkDataValueType(false, fname, "W_v_vccv", DataType.MATRIX, ValueType.FP64, conditional);
 		checkDataValueType(false, fname, "W_c_vccv", DataType.MATRIX, ValueType.FP64, conditional);
@@ -737,6 +747,8 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 		Identifier wE = getVarParam("W_e_vccv").getOutput();
 		Identifier wVmlp = getVarParam("W_v").getOutput();
 		Identifier wCmlp = getVarParam("W_c").getOutput();
+		Identifier wVIn = (getVarParam("W_v_in") != null) ? getVarParam("W_v_in").getOutput() : null;
+		Identifier wCIn = (getVarParam("W_c_in") != null) ? getVarParam("W_c_in").getOutput() : null;
 		Identifier bVmlp = getVarParam("b_v").getOutput();
 		Identifier bCmlp = getVarParam("b_c").getOutput();
 		Identifier b = getVarParam("b_vccv").getOutput();
@@ -778,6 +790,29 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 		if(bCmlp.getDim2() != -1 && wCmlp.getDim2() != -1 && bCmlp.getDim2() != wCmlp.getDim2())
 			raiseValidateError("Dimension mismatch: ncol(b_c) must match ncol(W_c).",
 				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		if(wVIn != null && wCIn != null) {
+			if(vIn.getDim2() != -1 && wVIn.getDim1() != -1 && vIn.getDim2() != wVIn.getDim1())
+				raiseValidateError("Dimension mismatch: ncol(v) must match nrow(W_v_in).",
+					conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+			if(cIn.getDim2() != -1 && wCIn.getDim1() != -1 && cIn.getDim2() != wCIn.getDim1())
+				raiseValidateError("Dimension mismatch: ncol(c) must match nrow(W_c_in).",
+					conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+			if(wVIn.getDim2() != -1 && wVmlp.getDim2() != -1 && wVIn.getDim2() != wVmlp.getDim2())
+				raiseValidateError("Dimension mismatch: ncol(W_v_in) must match ncol(W_v).",
+					conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+			if(wCIn.getDim2() != -1 && wCmlp.getDim2() != -1 && wCIn.getDim2() != wCmlp.getDim2())
+				raiseValidateError("Dimension mismatch: ncol(W_c_in) must match ncol(W_c).",
+					conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		}
+		if(vOut != null || cOut != null) {
+			if(wVIn == null || wCIn == null)
+				raiseValidateError("W_v_in and W_c_in must be provided when returning v_out/c_out.",
+					conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		}
+		else if(wVIn != null || wCIn != null) {
+			raiseValidateError("W_v_in and W_c_in are only allowed when returning 4 outputs.",
+				conditional, LanguageErrorCodes.INVALID_PARAMETERS);
+		}
 
 		vAct.setDataType(DataType.MATRIX);
 		vAct.setValueType(ValueType.FP64);
@@ -785,6 +820,16 @@ public class ParameterizedBuiltinFunctionExpression extends DataIdentifier
 		cAct.setDataType(DataType.MATRIX);
 		cAct.setValueType(ValueType.FP64);
 		cAct.setDimensions(-1, -1);
+		if(vOut != null) {
+			vOut.setDataType(DataType.MATRIX);
+			vOut.setValueType(ValueType.FP64);
+			vOut.setDimensions(-1, -1);
+		}
+		if(cOut != null) {
+			cOut.setDataType(DataType.MATRIX);
+			cOut.setValueType(ValueType.FP64);
+			cOut.setDimensions(-1, -1);
+		}
 	}
 	
 	private void validateTransformSpec(String pname, boolean conditional) {

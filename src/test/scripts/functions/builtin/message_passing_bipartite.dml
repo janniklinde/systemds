@@ -19,29 +19,105 @@
 #
 #-------------------------------------------------------------
 
-W_v_agg = as_fp32(read($1));
-W_v_in = as_fp32(read($2));
-W_c_agg = as_fp32(read($3));
-W_c_in = as_fp32(read($4));
-b_v = as_fp32(read($5));
-b_c = as_fp32(read($6));
-W_v_vccv = as_fp32(read($7));
-W_c_vccv = as_fp32(read($8));
-W_e_vccv = as_fp32(read($9));
-b_vccv = as_fp32(read($10));
-v = as_fp32(read($11));
-c = as_fp32(read($12));
-e = as_fp32(read($13));
-Ex2 = as_fp32(read($14));
+# Dataset paths (SystemDS format).
+data_dir = "gnn_examples/examples/systemds/case13659pegase-2017-09-02";
 
-print("START");
-for(i in 1:30) {
-[v_act, c_act] = message_passing_bipartite(
-  W_v=W_v_agg, W_c=W_c_agg, b_v=b_v, b_c=b_c,
-  W_v_vccv=W_v_vccv, W_c_vccv=W_c_vccv, W_e_vccv=W_e_vccv, b_vccv=b_vccv,
-  v=v, c=c, e=e, Ex2=Ex2
-);
-v_out = pmax(v_act, 0) %*% t(v_act) + v_act;
-  print(v_out[1, 1]);
-  print(c_act[1, 1]);
+# Node features contain concatenated variables + constraints.
+node_features = read(data_dir + "/node_features");
+edge_index_raw = read(data_dir + "/edge_index");
+edge_features = read(data_dir + "/edge_features");
+
+print("node_features: " + nrow(node_features) + "x" + ncol(node_features));
+print("edge_index_raw: " + nrow(edge_index_raw) + "x" + ncol(edge_index_raw));
+print("edge_features: " + nrow(edge_features) + "x" + ncol(edge_features));
+
+print(nrow(edge_features) + "x" + ncol(edge_features));
+
+# edge_index is stored as 2 x E; transpose to E x 2 and fix indexing if needed.
+edge_index = edge_index_raw;
+if (nrow(edge_index_raw) == 2) {
+  edge_index = t(edge_index_raw);
 }
+if (ncol(edge_index) < 2) {
+  stop("edge_index has fewer than 2 columns after transpose check.");
+}
+min_idx = min(edge_index);
+if (min_idx == 0) {
+  edge_index = edge_index + 1;
+}
+
+# Split node_features into variables and constraints.
+# edge_index is [v_idx, c_idx] with c_idx offset by Nvars.
+Nvars = as.integer(max(edge_index[, 1]));
+variable_features = node_features[1:Nvars, ];
+constraint_features = node_features[(Nvars+1):nrow(node_features), ];
+
+# Swap to [c_idx, v_idx] and rebase constraints to 1..Ncons.
+edge_index = cbind(edge_index[,2], edge_index[,1]);
+edge_index[, 1] = edge_index[, 1] - Nvars;
+
+Ncons = nrow(constraint_features);
+Nvars = nrow(variable_features);
+E = nrow(edge_index);
+Dc = ncol(constraint_features);
+Dv = ncol(variable_features);
+Fe = ncol(edge_features);
+
+# Replace features with random 32-dim embeddings (for testing).
+embd = 32;
+variable_features = as_fp32(rand(rows=Nvars, cols=embd, min=-0.1, max=0.1, sparsity=1.0, seed=101));
+constraint_features = as_fp32(rand(rows=Ncons, cols=embd, min=-0.1, max=0.1, sparsity=1.0, seed=102));
+Dv = embd;
+Dc = embd;
+
+# Sort edges by constraint index, then variable index.
+by_cols = matrix("1 2", rows=1, cols=2);
+edge_all = cbind(edge_index, edge_features);
+edge_all = order(target=edge_all, by=by_cols, decreasing=FALSE, index.return=FALSE);
+edge_index = edge_all[, 1:2];
+edge_features = as_fp32(edge_all[, 3:ncol(edge_all)]);
+
+# Inference step: random weight init and fused message passing.
+d = min(Dv, Dc);
+W_v_agg = as_fp32(rand(rows=d, cols=d, min=-0.1, max=0.1, sparsity=1.0, seed=1));
+W_v_in = as_fp32(rand(rows=d, cols=d, min=-0.1, max=0.1, sparsity=1.0, seed=2));
+W_c_agg = as_fp32(rand(rows=d, cols=d, min=-0.1, max=0.1, sparsity=1.0, seed=3));
+W_c_in = as_fp32(rand(rows=d, cols=d, min=-0.1, max=0.1, sparsity=1.0, seed=4));
+b_v = as_fp32(rand(rows=1, cols=d, min=-0.1, max=0.1, sparsity=1.0, seed=5));
+b_c = as_fp32(rand(rows=1, cols=d, min=-0.1, max=0.1, sparsity=1.0, seed=6));
+W_v_vccv = as_fp32(rand(rows=Dv, cols=2*d, min=-0.1, max=0.1, sparsity=1.0, seed=5));
+W_c_vccv = as_fp32(rand(rows=Dc, cols=2*d, min=-0.1, max=0.1, sparsity=1.0, seed=6));
+W_e_vccv = as_fp32(rand(rows=Fe, cols=2*d, min=-0.1, max=0.1, sparsity=1.0, seed=7));
+b_vccv = as_fp32(rand(rows=1, cols=2*d, min=-0.1, max=0.1, sparsity=1.0, seed=8));
+d = as.integer(ncol(W_v_vccv) / 2);
+
+#parfor(j in 1:8) {
+for(i in 1:10) {
+  [t3, t4] = message_passing_bipartite(
+    W_v=W_v_agg, W_c=W_c_agg, b_v=b_v, b_c=b_c,
+    W_v_vccv=W_v_vccv, W_c_vccv=W_c_vccv, W_e_vccv=W_e_vccv, b_vccv=b_vccv,
+    v=variable_features, c=constraint_features, e=edge_features, Ex2=edge_index
+  );
+  t1 = pmax(pmax(t3, 0) %*% W_v_agg + variable_features %*% W_v_in + b_v, 0);
+  t2 = pmax(pmax(t4, 0) %*% W_c_agg + constraint_features %*% W_c_in + b_c, 0);
+  print(t1[1, 1]);
+  print(t2[1, 1]);
+}
+#}
+
+t = time();
+#parfor(j in 1:8) {
+for(i in 1:10) {
+  [v_act, c_act] = message_passing_bipartite(
+    W_v=W_v_agg, W_c=W_c_agg, b_v=b_v, b_c=b_c,
+    W_v_vccv=W_v_vccv, W_c_vccv=W_c_vccv, W_e_vccv=W_e_vccv, b_vccv=b_vccv,
+    v=variable_features, c=constraint_features, e=edge_features, Ex2=edge_index
+  );
+  v_out = pmax(pmax(v_act, 0) %*% W_v_agg + variable_features %*% W_v_in + b_v, 0);
+  c_out = pmax(pmax(c_act, 0) %*% W_c_agg + constraint_features %*% W_c_in + b_c, 0);
+  print(v_out[1, 1]);
+  print(c_out[1, 1]);
+}
+#}
+delta = (time() - t)/1000000;
+print(delta + "ms");
