@@ -624,7 +624,6 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 					}
 					else {
 						LOG.error("Uncaught CacheError", t);
-						t.printStackTrace();
 					}
 					return;
 				}

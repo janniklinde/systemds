@@ -34,6 +34,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class OOCCacheManager {
@@ -135,9 +136,24 @@ public class OOCCacheManager {
 		getCache().putSourceBacked(key, value, ((MatrixBlock) value.getValue()).getExactSerializedSize(), descriptor);
 	}
 
+	public static void putRawSourceBacked(BlockKey key, Object data, long size, OOCIOHandler.SourceBlockDescriptor descriptor) {
+		getCache().putSourceBacked(key, data, size, descriptor);
+	}
+
 	public static OOCStream.QueueCallback<IndexedMatrixValue> putAndPin(long streamId, int blockId, IndexedMatrixValue value) {
 		BlockKey key = new BlockKey(streamId, blockId);
 		return new CachedQueueCallback<>(getCache().putAndPin(key, value, ((MatrixBlock)value.getValue()).getExactSerializedSize()), null);
+	}
+
+	public static void putRaw(BlockKey key, Object data, long size) {
+		getCache().put(key, data, size);
+	}
+
+	public static OOCStream.QueueCallback<IndexedMatrixValue> putAndPinRaw(BlockKey key, Object data, long size) {
+		BlockEntry entry = getCache().putAndPin(key, data, size);
+		if (data instanceof List)
+			return new CachedGroupCallback<>(entry, null);
+		return new CachedQueueCallback<>(entry, null);
 	}
 
 	public static OOCStream.QueueCallback<IndexedMatrixValue> putAndPinSourceBacked(long streamId, int blockId,
@@ -148,31 +164,70 @@ public class OOCCacheManager {
 				descriptor), null);
 	}
 
+	public static OOCStream.QueueCallback<IndexedMatrixValue> putAndPinRawSourceBacked(BlockKey key, Object data, long size,
+		OOCIOHandler.SourceBlockDescriptor descriptor) {
+		BlockEntry entry = getCache().putAndPinSourceBacked(key, data, size, descriptor);
+		if (data instanceof List)
+			return new CachedGroupCallback<>(entry, null);
+		return new CachedQueueCallback<>(entry, null);
+	}
+
 	public static void prioritize(BlockKey key, int priority) {
 		getCache().prioritize(key, priority);
 	}
 
 	public static CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> requestBlock(long streamId, long blockId) {
-		BlockKey key = new BlockKey(streamId, blockId);
-		return getCache().request(key).thenApply(e -> new CachedQueueCallback<>(e, null));
+		return requestBlock(new BlockKey(streamId, (int)blockId));
+	}
+
+	public static CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> requestBlock(BlockKey key) {
+		return getCache().request(key).thenApply(e -> toCallback(e, key, null));
 	}
 
 	public static CompletableFuture<List<OOCStream.QueueCallback<IndexedMatrixValue>>> requestManyBlocks(List<BlockKey> keys) {
 		return getCache().request(keys).thenApply(
-			l -> l.stream().map(e -> (OOCStream.QueueCallback<IndexedMatrixValue>)new CachedQueueCallback<IndexedMatrixValue>(e, null)).toList());
+			l -> {
+				List<OOCStream.QueueCallback<IndexedMatrixValue>> out = new java.util.ArrayList<>(l.size());
+				for (int i = 0; i < l.size(); i++)
+					out.add(toCallback(l.get(i), keys.get(i), null));
+				return out;
+			});
 	}
 
 	public static List<OOCStream.QueueCallback<IndexedMatrixValue>> tryRequestManyBlocks(List<BlockKey> keys) {
 		List<BlockEntry> entries = getCache().tryRequest(keys);
 		if(entries == null)
 			return null;
-		return entries.stream().map(e -> (OOCStream.QueueCallback<IndexedMatrixValue>)new CachedQueueCallback<IndexedMatrixValue>(e, null)).toList();
+		List<OOCStream.QueueCallback<IndexedMatrixValue>> out = new java.util.ArrayList<>(entries.size());
+		for (int i = 0; i < entries.size(); i++)
+			out.add(toCallback(entries.get(i), keys.get(i), null));
+		return out;
 	}
 
 	public static CompletableFuture<List<OOCStream.QueueCallback<IndexedMatrixValue>>> requestAnyOf(List<BlockKey> keys, int n, List<BlockKey> sel) {
 		return getCache().requestAnyOf(keys, n, sel)
 			.thenApply(
-				l -> l.stream().map(e -> (OOCStream.QueueCallback<IndexedMatrixValue>)new CachedQueueCallback<IndexedMatrixValue>(e, null)).toList());
+				l -> {
+					List<OOCStream.QueueCallback<IndexedMatrixValue>> out = new java.util.ArrayList<>(l.size());
+					for (int i = 0; i < l.size(); i++) {
+						BlockKey key = sel.size() == l.size() ? sel.get(i) : keys.get(i);
+						out.add(toCallback(l.get(i), key, null));
+					}
+					return out;
+				});
+	}
+
+	private static OOCStream.QueueCallback<IndexedMatrixValue> toCallback(BlockEntry entry, BlockKey key, DMLRuntimeException failure) {
+		if (entry.getData() instanceof java.util.List<?>) {
+			CachedGroupCallback<IndexedMatrixValue> group = new CachedGroupCallback<>(entry, failure);
+			if (key instanceof GroupedBlockKey gk) {
+				OOCStream.QueueCallback<IndexedMatrixValue> sub = group.getCallback(gk.getGroupIndex());
+				group.close(); // drop the group-level pin, sub keeps it pinned
+				return sub;
+			}
+			return group;
+		}
+		return new CachedQueueCallback<>(entry, failure);
 	}
 
 	public static boolean canClaimMemory() {
@@ -195,7 +250,6 @@ public class OOCCacheManager {
 		private final AtomicBoolean _pinned;
 		private T _data;
 		private DMLRuntimeException _failure;
-		private CompletableFuture<Void> _future;
 
 		@SuppressWarnings("unchecked")
 		CachedQueueCallback(BlockEntry result, DMLRuntimeException failure) {
@@ -205,7 +259,6 @@ public class OOCCacheManager {
 			this._pinned = new AtomicBoolean(true);
 		}
 
-		@SuppressWarnings("unchecked")
 		@Override
 		public T get() {
 			if(_failure != null)
@@ -243,9 +296,128 @@ public class OOCCacheManager {
 			if(_pinned.compareAndSet(true, false)) {
 				_data = null;
 				unpin(_result);
-				if(_future != null)
-					_future.complete(null);
 			}
+		}
+	}
+
+	static class CachedSubCallback<T> implements OOCStream.QueueCallback<T> {
+		private final CachedGroupCallback<T> _parent;
+		private final AtomicBoolean _pinned;
+		private T _data;
+
+		CachedSubCallback(CachedGroupCallback<T> parent, T data) {
+			_parent = parent;
+			_data = data;
+			_pinned = new AtomicBoolean(true);
+		}
+
+		@Override
+		public T get() {
+			if(_parent.isFailure())
+				throw _parent._failure;
+			return _data;
+		}
+
+		@Override
+		public OOCStream.QueueCallback<T> keepOpen() {
+			_parent.registerQueueCallback();
+			return new CachedSubCallback<>(_parent, _data);
+		}
+
+		@Override
+		public void close() {
+			if(_pinned.compareAndSet(true, false)) {
+				_data = null;
+				_parent.close();
+			}
+		}
+
+		@Override
+		public void fail(DMLRuntimeException failure) {
+			_parent.fail(failure);
+		}
+
+		@Override
+		public boolean isEos() {
+			return false;
+		}
+
+		@Override
+		public boolean isFailure() {
+			return _parent.isFailure();
+		}
+	}
+
+	static class CachedGroupCallback<T> implements OOCStream.GroupQueueCallback<T> {
+		private final BlockEntry _result;
+		private final AtomicInteger _pinCounter;
+		private List<T> _data;
+		private DMLRuntimeException _failure;
+
+		@SuppressWarnings("unchecked")
+		CachedGroupCallback(BlockEntry result, DMLRuntimeException failure) {
+			this._result = result;
+			this._data = (List<T>)result.getData();
+			this._failure = failure;
+			this._pinCounter = new AtomicInteger(1);
+		}
+
+		public OOCStream.QueueCallback<T> getCallback(int idx) {
+			if(_pinCounter.get() <= 0)
+				throw new IllegalStateException("Cannot open sub-callback on a closed GroupCallback");
+			registerQueueCallback();
+			return new CachedSubCallback<>(this, _data.get(idx));
+		}
+
+		public void registerQueueCallback() {
+			if(_pinCounter.incrementAndGet() <= 1)
+				throw new IllegalStateException();
+		}
+
+		@Override
+		public T get() {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public int size() {
+			return _data.size();
+		}
+
+		public T get(int idx) {
+			return _data.get(idx);
+		}
+
+		@Override
+		public OOCStream.QueueCallback<T> keepOpen() {
+			if(_pinCounter.get() <= 0)
+				throw new IllegalStateException("Cannot keep open an already closed callback");
+			pin(_result);
+			return new CachedGroupCallback<>(_result, _failure);
+		}
+
+		@Override
+		public void close() {
+			int cnt = _pinCounter.decrementAndGet();
+			if(cnt == 0) {
+				_data = null;
+				unpin(_result);
+			}
+		}
+
+		@Override
+		public void fail(DMLRuntimeException failure) {
+			_failure = failure;
+		}
+
+		@Override
+		public boolean isEos() {
+			return false;
+		}
+
+		@Override
+		public boolean isFailure() {
+			return _failure != null;
 		}
 	}
 }

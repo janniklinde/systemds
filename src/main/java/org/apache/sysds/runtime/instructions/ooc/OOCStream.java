@@ -65,6 +65,12 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 		boolean isFailure();
 	}
 
+	interface GroupQueueCallback<T> extends QueueCallback<T> {
+		int size();
+
+		QueueCallback<T> getCallback(int idx);
+	}
+
 	class SimpleQueueCallback<T> implements QueueCallback<T> {
 		private final T _result;
 		private DMLRuntimeException _failure;
