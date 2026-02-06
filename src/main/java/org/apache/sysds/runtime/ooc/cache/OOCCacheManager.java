@@ -245,7 +245,7 @@ public class OOCCacheManager {
 
 
 
-	static class CachedQueueCallback<T> implements OOCStream.QueueCallback<T> {
+	public static class CachedQueueCallback<T> implements OOCStream.QueueCallback<T> {
 		private final BlockEntry _result;
 		private final AtomicBoolean _pinned;
 		private T _data;
@@ -298,16 +298,22 @@ public class OOCCacheManager {
 				unpin(_result);
 			}
 		}
+
+		public BlockKey getBlockKey() {
+			return _result.getKey();
+		}
 	}
 
-	static class CachedSubCallback<T> implements OOCStream.QueueCallback<T> {
+	public static class CachedSubCallback<T> implements OOCStream.QueueCallback<T> {
 		private final CachedGroupCallback<T> _parent;
 		private final AtomicBoolean _pinned;
 		private T _data;
+		private final int _groupIndex;
 
-		CachedSubCallback(CachedGroupCallback<T> parent, T data) {
+		CachedSubCallback(CachedGroupCallback<T> parent, T data, int groupIndex) {
 			_parent = parent;
 			_data = data;
+			_groupIndex = groupIndex;
 			_pinned = new AtomicBoolean(true);
 		}
 
@@ -321,7 +327,7 @@ public class OOCCacheManager {
 		@Override
 		public OOCStream.QueueCallback<T> keepOpen() {
 			_parent.registerQueueCallback();
-			return new CachedSubCallback<>(_parent, _data);
+			return new CachedSubCallback<>(_parent, _data, _groupIndex);
 		}
 
 		@Override
@@ -346,9 +352,17 @@ public class OOCCacheManager {
 		public boolean isFailure() {
 			return _parent.isFailure();
 		}
+
+		public CachedGroupCallback<T> getParent() {
+			return _parent;
+		}
+
+		public int getGroupIndex() {
+			return _groupIndex;
+		}
 	}
 
-	static class CachedGroupCallback<T> implements OOCStream.GroupQueueCallback<T> {
+	public static class CachedGroupCallback<T> implements OOCStream.GroupQueueCallback<T> {
 		private final BlockEntry _result;
 		private final AtomicInteger _pinCounter;
 		private List<T> _data;
@@ -366,7 +380,7 @@ public class OOCCacheManager {
 			if(_pinCounter.get() <= 0)
 				throw new IllegalStateException("Cannot open sub-callback on a closed GroupCallback");
 			registerQueueCallback();
-			return new CachedSubCallback<>(this, _data.get(idx));
+			return new CachedSubCallback<>(this, _data.get(idx), idx);
 		}
 
 		public void registerQueueCallback() {
@@ -418,6 +432,10 @@ public class OOCCacheManager {
 		@Override
 		public boolean isFailure() {
 			return _failure != null;
+		}
+
+		public BlockKey getBlockKey() {
+			return _result.getKey();
 		}
 	}
 }

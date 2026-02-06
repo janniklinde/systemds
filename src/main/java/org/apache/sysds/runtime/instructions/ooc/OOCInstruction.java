@@ -35,6 +35,8 @@ import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.stream.FilteredOOCStream;
+import org.apache.sysds.runtime.ooc.stream.MergedOOCStream;
+import org.apache.sysds.runtime.ooc.stream.SplittingOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.stream.TaskContext;
 import org.apache.sysds.runtime.util.CommonThreadPool;
@@ -182,6 +184,23 @@ public abstract class OOCInstruction extends Instruction {
 
 	protected <T> OOCStream<T> filteredOOCStream(OOCStream<T> qIn, Function<T, Boolean> predicate) {
 		return new FilteredOOCStream<>(qIn, predicate);
+	}
+
+	protected <T> OOCStream<T> mergeOOCStreams(List<OOCStream<T>> streams) {
+		return new MergedOOCStream<>(streams);
+	}
+
+	protected <T> OOCStream<T> mergeOOCStreams(OOCStream<T>... streams) {
+		return new MergedOOCStream<>(streams);
+	}
+
+	protected <T> List<OOCStream<T>> splitOOCStream(OOCStream<T> source, Function<T, Integer> partitionFunc,
+		int numPartitions) {
+		SplittingOOCStream<T> split = new SplittingOOCStream<>(source, partitionFunc, numPartitions);
+		List<OOCStream<T>> out = new ArrayList<>(numPartitions);
+		for(int i = 0; i < numPartitions; i++)
+			out.add(split.getSubStream(i));
+		return out;
 	}
 
 	protected <T, R> CompletableFuture<Void> mapOOC(OOCStream<T> qIn, OOCStream<R> qOut, Function<T, R> mapper) {
@@ -354,15 +373,17 @@ public abstract class OOCInstruction extends Instruction {
 			rightCache.scheduleDeletion();
 
 		CompletableFuture<Void> fut = CompletableFuture.allOf(fut1, fut2);
-		fut.whenComplete((res, t) -> {
+		final StreamContext context = _streamContext.copy();
+		return fut.thenRun(() -> {
 			availableBroadcastInput.forEach((k, v) -> {
 				rightCache.incrProcessingCount(rightCache.findCachedIndex(v.idx), 1);
 			});
 			availableBroadcastInput.clear();
 			qOut.closeInput();
+		}).exceptionally(t -> {
+			context.failAll(DMLRuntimeException.of(t));
+			return null;
 		});
-
-		return fut;
 	}
 
 	protected <R, P> CompletableFuture<Void> joinManyOOC(OOCStream<IndexedMatrixValue> left,
