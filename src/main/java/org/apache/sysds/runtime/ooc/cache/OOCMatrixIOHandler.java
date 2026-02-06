@@ -486,7 +486,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			for (IndexedMatrixValue v : values)
 				request.target.enqueue(v);
 		}
-		descriptors.add(group);
+		descriptors.addAll(group.blocks);
 	}
 
 	private void closeTarget(org.apache.sysds.runtime.instructions.ooc.OOCStream<IndexedMatrixValue> target, boolean close) {
