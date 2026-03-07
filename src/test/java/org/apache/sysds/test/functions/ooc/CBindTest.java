@@ -19,6 +19,7 @@
 
 package org.apache.sysds.test.functions.ooc;
 
+import net.jcip.annotations.NotThreadSafe;
 import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.common.Types;
 import org.apache.sysds.parser.LanguageException;
@@ -39,6 +40,7 @@ import org.junit.runners.Parameterized;
 
 import java.util.ArrayList;
 
+@NotThreadSafe
 @RunWith(Parameterized.class)
 public class CBindTest extends AutomatedTestBase {
 
