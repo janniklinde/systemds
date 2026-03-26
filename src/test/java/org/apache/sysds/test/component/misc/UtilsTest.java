@@ -124,4 +124,17 @@ public class UtilsTest {
 		dmlConfig.setTextValue("E", "a");
 		Assert.assertEquals("a", dmlConfig.getTextValue("E"));
 	}
+
+	@Test
+	public void testDMLConfigOocPipelineFromXml() throws IOException {
+		String testStr = "<root><" + DMLConfig.OOC_PIPELINE_PARALLELISM + ">false</"
+			+ DMLConfig.OOC_PIPELINE_PARALLELISM + "></root>";
+		File temp = File.createTempFile("tempfile", null);
+		try(BufferedWriter bw = new BufferedWriter(new FileWriter(temp))) {
+			bw.write(testStr);
+		}
+
+		DMLConfig dmlConfig = new DMLConfig(temp.getAbsolutePath());
+		Assert.assertFalse(dmlConfig.getBooleanValue(DMLConfig.OOC_PIPELINE_PARALLELISM));
+	}
 }

@@ -36,6 +36,9 @@
     <!-- enables multi-threaded read/write in singlenode control program -->
     <sysds.cp.parallel.io>true</sysds.cp.parallel.io>
 
+    <!-- prefer pipeline parallelism for out-of-core operators that support both pipeline and fan-out execution -->
+    <sysds.ooc.pipeline.parallelism>true</sysds.ooc.pipeline.parallelism>
+
     <!-- enalbe multi-threaded transformencode and apply -->
     <sysds.parallel.encode>true</sysds.parallel.encode>
 

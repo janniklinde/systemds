@@ -78,11 +78,24 @@ public class UnaryOOCInstruction extends ComputationOOCInstruction {
 		}
 		else {
 			qOut = createWritableStream();
-			mapOOC(qIn, qOut, tmp -> {
-				IndexedMatrixValue tmpOut = new IndexedMatrixValue();
-				tmpOut.set(tmp.getIndexes(), tmp.getValue().unaryOperations(uop, new MatrixBlock()));
-				return tmpOut;
-			});
+			if(preferPipelineParallelism()) {
+				new Thread(() -> {
+					IndexedMatrixValue tmp;
+					while((tmp = qIn.dequeue()) != null) {
+						IndexedMatrixValue tmpOut = new IndexedMatrixValue();
+						tmpOut.set(tmp.getIndexes(), tmp.getValue().unaryOperations(uop, new MatrixBlock()));
+						qOut.enqueue(tmpOut);
+					}
+					qOut.closeInput();
+				}).start();
+			}
+			else {
+				mapOOC(qIn, qOut, tmp -> {
+					IndexedMatrixValue tmpOut = new IndexedMatrixValue();
+					tmpOut.set(tmp.getIndexes(), tmp.getValue().unaryOperations(uop, new MatrixBlock()));
+					return tmpOut;
+				});
+			}
 		}
 
 		ec.getMatrixObject(output).setStreamHandle(qOut);

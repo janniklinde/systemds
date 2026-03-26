@@ -70,6 +70,7 @@ public class DMLConfig
 	public static final String DEFAULT_BLOCK_SIZE   = "sysds.defaultblocksize";
 	public static final String CP_PARALLEL_OPS      = "sysds.cp.parallel.ops";
 	public static final String CP_PARALLEL_IO       = "sysds.cp.parallel.io";
+	public static final String OOC_PIPELINE_PARALLELISM = "sysds.ooc.pipeline.parallelism"; // boolean: prefer pipeline parallelism for OOC operators that support it
 	public static final String IO_COMPRESSION_CODEC = "sysds.io.compression.encoding";
 	public static final String PARALLEL_ENCODE      = "sysds.parallel.encode";  // boolean: enable multi-threaded transformencode and apply
 	public static final String PARALLEL_ENCODE_STAGED = "sysds.parallel.encode.staged";
@@ -156,6 +157,7 @@ public class DMLConfig
 		_defaultVals.put(DEFAULT_BLOCK_SIZE,     String.valueOf(OptimizerUtils.DEFAULT_BLOCKSIZE) );
 		_defaultVals.put(CP_PARALLEL_OPS,        "true" );
 		_defaultVals.put(CP_PARALLEL_IO,         "true" );
+		_defaultVals.put(OOC_PIPELINE_PARALLELISM, "true" );
 		_defaultVals.put(IO_COMPRESSION_CODEC,   "none");
 		_defaultVals.put(PARALLEL_TOKENIZE,      "false");
 		_defaultVals.put(PARALLEL_TOKENIZE_NUM_BLOCKS, "64");
@@ -456,7 +458,7 @@ public class DMLConfig
 	public String getConfigInfo()  {
 		String[] tmpConfig = new String[] { 
 			LOCAL_TMP_DIR,SCRATCH_SPACE,OPTIMIZATION_LEVEL, DEFAULT_BLOCK_SIZE,
-			CP_PARALLEL_OPS, CP_PARALLEL_IO, PARALLEL_ENCODE, NATIVE_BLAS, NATIVE_BLAS_DIR,
+			CP_PARALLEL_OPS, CP_PARALLEL_IO, OOC_PIPELINE_PARALLELISM, PARALLEL_ENCODE, NATIVE_BLAS, NATIVE_BLAS_DIR,
 			COMPRESSED_LINALG, COMPRESSED_LOSSY, COMPRESSED_VALID_COMPRESSIONS, COMPRESSED_OVERLAPPING,
 			COMPRESSED_SAMPLING_RATIO, COMPRESSED_SOFT_REFERENCE_COUNT,
 			COMPRESSED_COCODE, COMPRESSED_TRANSPOSE, COMPRESSED_TRANSFORMENCODE, DAG_LINEARIZATION,

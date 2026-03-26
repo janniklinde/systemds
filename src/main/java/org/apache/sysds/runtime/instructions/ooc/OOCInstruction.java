@@ -23,6 +23,8 @@ import org.apache.commons.lang3.NotImplementedException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.sysds.api.DMLScript;
+import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.Instruction;
@@ -184,6 +186,10 @@ public abstract class OOCInstruction extends Instruction {
 
 	protected <T> OOCStream<T> createWritableStream() {
 		return new SubscribableTaskQueue<>();
+	}
+
+	protected boolean preferPipelineParallelism() {
+		return ConfigurationManager.getDMLConfig().getBooleanValue(DMLConfig.OOC_PIPELINE_PARALLELISM);
 	}
 
 	protected <T> CompletableFuture<Void> filterOOC(OOCStream<T> qIn, Consumer<T> processor, Function<T, Boolean> predicate) {
