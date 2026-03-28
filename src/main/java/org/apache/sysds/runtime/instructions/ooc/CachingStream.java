@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
+import org.apache.commons.lang3.NotImplementedException;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.parfor.util.IDSequence;
@@ -30,6 +31,7 @@ import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.GroupedBlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
@@ -602,6 +604,10 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		return this;
 	}
 
+	public boolean isFullyCached() {
+		return !_cacheInProgress;
+	}
+
 	@Override
 	public boolean isProcessed() {
 		return false;
@@ -690,6 +696,21 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	@Override
 	public void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
 		throw new UnsupportedOperationException();
+	}
+
+	@Override
+	public BiFunction<Boolean, IndexRange, IndexRange> getIXTransform() {
+		return _source.getIXTransform();
+	}
+
+	@Override
+	public OOCPrimitive getPrimitive() {
+		throw new NotImplementedException();
+	}
+
+	@Override
+	public void assignPrimitive(OOCPrimitive primitive) {
+		throw new NotImplementedException();
 	}
 
 	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers) {

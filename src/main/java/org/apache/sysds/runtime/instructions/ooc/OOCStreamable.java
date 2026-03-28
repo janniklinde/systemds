@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
@@ -61,4 +62,10 @@ public interface OOCStreamable<T> {
 	void clearDownstreamMessageRelays();
 
 	void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform);
+
+	BiFunction<Boolean, IndexRange, IndexRange> getIXTransform();
+
+	OOCPrimitive getPrimitive();
+
+	void assignPrimitive(OOCPrimitive primitive);
 }

@@ -35,6 +35,12 @@ import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
+import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
+import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.PlannableDataGenOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.PlannableOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.TransposeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.stream.FilteredOOCStream;
 import org.apache.sysds.runtime.ooc.stream.MergedOOCStream;
@@ -217,6 +223,27 @@ public abstract class OOCInstruction extends Instruction {
 		for(int i = 0; i < numPartitions; i++)
 			out.add(split.getSubStream(i));
 		return out;
+	}
+
+	protected <R> CompletableFuture<Void> plannableDataGenOOC(OOCStream<R> qOut, Function<MatrixIndexes, R> generator) {
+		PlannableDataGenOOCPrimitive primitive = new PlannableDataGenOOCPrimitive(qOut);
+		qOut.assignPrimitive(primitive);
+		return mapOOC(primitive.getRequestStream(), qOut, generator);
+	}
+
+	protected CompletableFuture<Void> equiMapOOC(OOCStream<IndexedMatrixValue> qIn, OOCStream<IndexedMatrixValue> qOut, Function<IndexedMatrixValue, MatrixBlock> mapper) {
+		MappingOOCPrimitive primitive = new MappingOOCPrimitive(qIn, qOut);
+		qOut.assignPrimitive(primitive);
+		return mapOOC(qIn, qOut, in -> new IndexedMatrixValue(in.getIndexes(), mapper.apply(in)));
+	}
+
+	protected CompletableFuture<Void> transposeMapOOC(OOCStream<IndexedMatrixValue> qIn, OOCStream<IndexedMatrixValue> qOut, Function<IndexedMatrixValue, MatrixBlock> mapper) {
+		TransposeOOCPrimitive primitive = new TransposeOOCPrimitive(qIn, qOut);
+		qOut.assignPrimitive(primitive);
+		return mapOOC(qIn, qOut, in -> {
+			MatrixIndexes ixOut = new MatrixIndexes(in.getIndexes().getColumnIndex(), in.getIndexes().getRowIndex());
+			return new IndexedMatrixValue(ixOut, mapper.apply(in));
+		});
 	}
 
 	protected <T, R> CompletableFuture<Void> mapOOC(OOCStream<T> qIn, OOCStream<R> qOut, Function<T, R> mapper) {
@@ -590,6 +617,14 @@ public abstract class OOCInstruction extends Instruction {
 		}
 	}
 
+	protected CompletableFuture<Void> joinZipOOC(OOCStream<IndexedMatrixValue> qIn1, OOCStream<IndexedMatrixValue> qIn2, OOCStream<IndexedMatrixValue> qOut, BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> zipper) {
+		JoinOOCPrimitive primitive = new JoinOOCPrimitive(List.of(qIn1, qIn2), qOut);
+		qOut.assignPrimitive(primitive);
+		return joinOOC(qIn1, qIn2, qOut, (l, r) -> {
+			return new IndexedMatrixValue(l.getIndexes(), zipper.apply(l, r));
+		}, IndexedMatrixValue::getIndexes);
+	}
+
 	protected <R> CompletableFuture<Void> joinOOC(OOCStream<IndexedMatrixValue> qIn1, OOCStream<IndexedMatrixValue> qIn2, OOCStream<R> qOut, BiFunction<IndexedMatrixValue, IndexedMatrixValue, R> mapper, Function<IndexedMatrixValue, MatrixIndexes> on) {
 		return joinOOC(List.of(qIn1, qIn2), qOut, t -> mapper.apply(t.get(0), t.get(1)), on);
 	}
@@ -599,7 +634,7 @@ public abstract class OOCInstruction extends Instruction {
 		return joinOOC(qIn, qOut, mapper, Collections.nCopies(inSize, on), t -> Collections.nCopies(inSize, t));
 	}
 
-	protected <R, P> CompletableFuture<Void> joinOOC(List<OOCStream<IndexedMatrixValue>> qIn, OOCStream<R> qOut, Function<List<IndexedMatrixValue>, R> mapper, List<Function<IndexedMatrixValue, P>> on, Function<P, List<MatrixIndexes>> invOn) {
+	protected <R> CompletableFuture<Void> joinOOC(List<OOCStream<IndexedMatrixValue>> qIn, OOCStream<R> qOut, Function<List<IndexedMatrixValue>, R> mapper, List<Function<IndexedMatrixValue, MatrixIndexes>> on, Function<MatrixIndexes, List<MatrixIndexes>> invOn) {
 		if(qIn == null || on == null || qIn.size() != on.size())
 			throw new DMLRuntimeException("joinOOC(list) requires the same number of streams and key functions.");
 
@@ -617,7 +652,7 @@ public abstract class OOCInstruction extends Instruction {
 			caches[i].incrSubscriberCount(1);
 		}
 
-		Map<P, MatrixIndexes[]> seen = new ConcurrentHashMap<>();
+		Map<MatrixIndexes, MatrixIndexes[]> seen = new ConcurrentHashMap<>();
 
 		OOCStream<List<OOCStream.QueueCallback<IndexedMatrixValue>>> materialized = createWritableStream();
 
@@ -631,8 +666,8 @@ public abstract class OOCInstruction extends Instruction {
 		addOutStream(qOut);
 
 		CompletableFuture<Void> future = pipeOOC(rStreams, (i, tmp) -> {
-			Function<IndexedMatrixValue, P> keyFn = on.get(i);
-			P key = keyFn.apply(tmp.get());
+			Function<IndexedMatrixValue, MatrixIndexes> keyFn = on.get(i);
+			MatrixIndexes key = keyFn.apply(tmp.get());
 			MatrixIndexes idx = tmp.get().getIndexes();
 
 			MatrixIndexes[] arr = seen.computeIfAbsent(key, k -> new MatrixIndexes[n]);

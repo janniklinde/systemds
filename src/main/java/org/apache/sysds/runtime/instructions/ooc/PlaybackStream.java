@@ -19,10 +19,12 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
+import org.apache.commons.lang3.NotImplementedException;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
@@ -191,5 +193,20 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	@Override
 	public void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
 		throw new UnsupportedOperationException();
+	}
+
+	@Override
+	public BiFunction<Boolean, IndexRange, IndexRange> getIXTransform() {
+		throw new NotImplementedException();
+	}
+
+	@Override
+	public OOCPrimitive getPrimitive() {
+		throw new NotImplementedException();
+	}
+
+	@Override
+	public void assignPrimitive(OOCPrimitive primitive) {
+		throw new NotImplementedException();
 	}
 }

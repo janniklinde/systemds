@@ -202,7 +202,7 @@ public class DataGenOOCInstruction extends UnaryOOCInstruction {
 			qIn.closeInput();
 
 			if(sparsity == 0.0 && lrows < Integer.MAX_VALUE && lcols < Integer.MAX_VALUE) {
-				mapOOC(qIn, qOut, idx -> {
+				plannableDataGenOOC(qOut, idx -> {
 					long rlen = Math.min(blen, lrows - (idx.getRowIndex()-1) * blen);
 					long clen =  Math.min(blen, lcols - (idx.getColumnIndex()-1) * blen);
 					return new IndexedMatrixValue(idx, new MatrixBlock((int)rlen, (int)clen, 0.0));
@@ -211,7 +211,7 @@ public class DataGenOOCInstruction extends UnaryOOCInstruction {
 			}
 
 			if(sparsity == 1.0 && minValue == maxValue) {
-				mapOOC(qIn, qOut, idx -> {
+				plannableDataGenOOC(qOut, idx -> {
 					long rlen = Math.min(blen, lrows - (idx.getRowIndex()-1) * blen);
 					long clen =  Math.min(blen, lcols - (idx.getColumnIndex()-1) * blen);
 					return new IndexedMatrixValue(idx, new MatrixBlock((int)rlen, (int)clen, minValue));

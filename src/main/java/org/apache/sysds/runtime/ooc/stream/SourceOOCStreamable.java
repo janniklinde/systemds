@@ -25,6 +25,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
@@ -120,6 +121,21 @@ public class SourceOOCStreamable implements OOCStreamable<IndexedMatrixValue> {
 
 	@Override
 	public void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
+
+	}
+
+	@Override
+	public BiFunction<Boolean, IndexRange, IndexRange> getIXTransform() {
+		return null;
+	}
+
+	@Override
+	public OOCPrimitive getPrimitive() {
+		return null;
+	}
+
+	@Override
+	public void assignPrimitive(OOCPrimitive primitive) {
 
 	}
 }

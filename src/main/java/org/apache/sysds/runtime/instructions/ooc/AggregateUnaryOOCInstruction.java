@@ -160,6 +160,7 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 			mapOOC(qIn, qLocal, tmp -> (MatrixBlock) tmp.getValue()
 				.aggregateUnaryOperations(aggun, new MatrixBlock(), blen, tmp.getIndexes()));
 
+			qIn.start(); // We now force input stream materialization
 			MatrixBlock ltmp;
 			int extra = _aop.correction.getNumRemovedRowsColumns();
 			MatrixBlock ret = new MatrixBlock(1, 1 + extra, _aop.initialValue);

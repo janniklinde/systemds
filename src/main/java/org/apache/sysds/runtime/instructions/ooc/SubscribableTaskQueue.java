@@ -23,6 +23,7 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -45,6 +46,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	private volatile CopyOnWriteArrayList<Consumer<OOCStreamMessage>> _upstreamMsgRelays = null;
 	private volatile CopyOnWriteArrayList<Consumer<OOCStreamMessage>> _downstreamMsgRelays = null;
 	private volatile BiFunction<Boolean, IndexRange, IndexRange> _ixTransform = null;
+	private OOCPrimitive _primitive = null;
 	private String _watchdogId;
 
 	public SubscribableTaskQueue() {
@@ -360,6 +362,23 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	@Override
 	public void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
 		_ixTransform = transform;
+	}
+
+	@Override
+	public BiFunction<Boolean, IndexRange, IndexRange> getIXTransform() {
+		return null;
+	}
+
+	@Override
+	public OOCPrimitive getPrimitive() {
+		return _primitive;
+	}
+
+	@Override
+	public void assignPrimitive(OOCPrimitive primitive) {
+		if(_primitive != null)
+			throw new IllegalArgumentException();
+		_primitive = primitive;
 	}
 
 	@Override

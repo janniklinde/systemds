@@ -19,12 +19,14 @@
 
 package org.apache.sysds.runtime.ooc.stream;
 
+import org.apache.commons.lang3.NotImplementedException;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
@@ -260,5 +262,20 @@ public class MergedOOCStream<T> implements OOCStream<T> {
 	@Override
 	public void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
 		_taskQueue.setIXTransform(transform);
+	}
+
+	@Override
+	public BiFunction<Boolean, IndexRange, IndexRange> getIXTransform() {
+		throw new NotImplementedException();
+	}
+
+	@Override
+	public OOCPrimitive getPrimitive() {
+		throw new NotImplementedException();
+	}
+
+	@Override
+	public void assignPrimitive(OOCPrimitive primitive) {
+		throw new NotImplementedException();
 	}
 }

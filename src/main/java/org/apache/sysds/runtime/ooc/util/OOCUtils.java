@@ -70,4 +70,22 @@ public class OOCUtils {
 		}
 		return -1;
 	}
+
+	public static long getNumRowBlocks(DataCharacteristics dc) {
+		if (dc != null && dc.dimsKnown() && dc.getBlocksize() > 0) {
+			if(dc.getRows() == 0)
+				return 0;
+			return dc.getNumRowBlocks();
+		}
+		return -1;
+	}
+
+	public static long getNumColBlocks(DataCharacteristics dc) {
+		if (dc != null && dc.dimsKnown() && dc.getBlocksize() > 0) {
+			if(dc.getCols() == 0)
+				return 0;
+			return dc.getNumColBlocks();
+		}
+		return -1;
+	}
 }
