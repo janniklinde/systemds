@@ -22,6 +22,7 @@ package org.apache.sysds.runtime.ooc.memory;
 public interface MemoryBroker {
 	long requestMemory(MemoryAllowance allowance, long minSize, long maxSize);
 	void freeMemory(MemoryAllowance allowance, long freedMemory);
+	void destroyAllowance(MemoryAllowance allowance, long freedMemory);
 	MemoryAllowance createAllowance(long initialGrant);
 
 	default MemoryAllowance createAllowance() {

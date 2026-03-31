@@ -282,11 +282,12 @@ public abstract class OOCInstruction extends Instruction {
 				future.completeExceptionally(err);
 				return null;
 			});
-		return future.thenRun(qOut::closeInput).exceptionally(err -> {
+		CompletableFuture<Void> result = future.thenRun(qOut::closeInput).exceptionally(err -> {
 			DMLRuntimeException dmlErr = DMLRuntimeException.of(err);
 			qOut.propagateFailure(dmlErr);
 			throw dmlErr;
 		});
+		return result.whenComplete((r, err) -> allowance.destroy());
 	}
 
 	protected CompletableFuture<Void> equiMapOOC(OOCStream<IndexedMatrixValue> qIn, OOCStream<IndexedMatrixValue> qOut, Function<IndexedMatrixValue, MatrixBlock> mapper) {
@@ -311,7 +312,8 @@ public abstract class OOCInstruction extends Instruction {
 		Function<T, Long> allocator,
 		Consumer<OOCStreamTask<T, IndexedMatrixValue>> mapper) {
 		final MemoryAllowance allowance = GlobalMemoryBroker.get().createAllowance();
-		return mapOOC(allowance, qIn, qOut, allocator, mapper);
+		return mapOOC(allowance, qIn, qOut, allocator, mapper)
+			.whenComplete((r, err) -> allowance.destroy());
 	}
 
 	protected <T> CompletableFuture<Void> mapOOC(MemoryAllowance allowance, OOCStream<T> qIn,
@@ -395,10 +397,10 @@ public abstract class OOCInstruction extends Instruction {
 
 		return future.thenRun(intermediateStream::closeInput).thenRun(qOut::closeInput)
 			.exceptionally(err -> {
-			DMLRuntimeException dmlErr = DMLRuntimeException.of(err);
-			qOut.propagateFailure(dmlErr);
-			throw dmlErr;
-		});
+				DMLRuntimeException dmlErr = DMLRuntimeException.of(err);
+				qOut.propagateFailure(dmlErr);
+				throw dmlErr;
+			});
 	}
 
 	protected <T, R> CompletableFuture<Void> mapOOC(OOCStream<T> qIn, OOCStream<R> qOut, Function<T, R> mapper) {
@@ -1037,7 +1039,11 @@ public abstract class OOCInstruction extends Instruction {
 			return null;
 		});
 
-		return outFuture;
+		return CompletableFuture.allOf(joinFuture, outFuture)
+			.whenComplete((r, err) -> {
+				cacheAllowance.destroy();
+				workerAllowance.destroy();
+			});
 	}
 
 	protected CompletableFuture<Void> joinZipOOC(OOCStream<IndexedMatrixValue> qIn1,

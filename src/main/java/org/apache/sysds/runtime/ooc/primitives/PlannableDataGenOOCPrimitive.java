@@ -103,7 +103,6 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	private void startRowMajor() {
 		long nTiles = numRowBlocks*numColBlocks;
 		for(long i = 0; i < nTiles; i++) {
-			System.out.println("RM: " + new MatrixIndexes(i / numRowBlocks + 1, i % numRowBlocks + 1));
 			_stream.enqueue(new MatrixIndexes(i / numRowBlocks + 1, i % numRowBlocks + 1));
 		}
 	}
@@ -111,7 +110,6 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	private void startColMajor() {
 		long nTiles = numRowBlocks*numColBlocks;
 		for(long i = 0; i < nTiles; i++) {
-			System.out.println("CM: " + new MatrixIndexes(i % numColBlocks + 1, i / numColBlocks + 1));
 			_stream.enqueue(new MatrixIndexes(i % numColBlocks + 1, i / numColBlocks + 1));
 		}
 	}

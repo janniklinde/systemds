@@ -111,7 +111,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 
 	@Override
 	public void freeMemory(MemoryAllowance allowance, long freedMemory) {
-		synchronized(this) {
+		 synchronized(this) {
 			if(freedMemory < 0)
 				throw new IllegalArgumentException();
 			_usedBytes -= freedMemory;
@@ -125,6 +125,20 @@ public class GlobalMemoryBroker implements MemoryBroker {
 				addOverconsumer(allowance);
 			}
 		}
+	}
+
+	@Override
+	public void destroyAllowance(MemoryAllowance allowance, long freedMemory) {
+		List<TargetUpdate> updates;
+		synchronized(this) {
+			if(freedMemory < 0)
+				throw new IllegalArgumentException();
+			_allowances.remove(allowance);
+			_overconsumers.remove(allowance);
+			_usedBytes -= freedMemory;
+			updates = rebalance(true);
+		}
+		applyTargetUpdates(updates);
 	}
 
 	@Override

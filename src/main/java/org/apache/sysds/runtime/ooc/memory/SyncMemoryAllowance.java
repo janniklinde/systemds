@@ -26,16 +26,20 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	protected long _usedBytes;
 	protected long _grantedBytes;
 	protected long _targetBytes;
+	protected boolean _destroyed;
 
 	protected SyncMemoryAllowance(MemoryBroker broker, long used, long granted, long target) {
 		_broker = broker;
 		_usedBytes = used;
 		_grantedBytes = granted;
 		_targetBytes = target;
+		_destroyed = false;
 	}
 
 	@Override
 	public synchronized boolean tryReserve(long bytes) {
+		if(_destroyed)
+			return false;
 		if(_usedBytes + bytes > _targetBytes)
 			return false;
 		if(_usedBytes + bytes <= _grantedBytes) {
@@ -53,6 +57,8 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 
 	@Override
 	public synchronized void reserveBlocking(long bytes) {
+		if(_destroyed)
+			throw new IllegalStateException("Cannot reserve memory on destroyed allowance.");
 		while(!tryReserve(bytes)) {
 			try {
 				wait();
@@ -60,18 +66,18 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				throw new DMLRuntimeException(e);
 			}
 		}
-		notify();
+		notifyAll();
 	}
 
 	@Override
 	public synchronized void release(long bytes) {
 		_usedBytes -= bytes;
-		if(_grantedBytes > _targetBytes) {
+		if(_destroyed || _grantedBytes > _targetBytes) {
 			long oldGrantedBytes = _grantedBytes;
-			_grantedBytes = Math.max(_usedBytes, _targetBytes);
+			_grantedBytes = _destroyed ? _usedBytes : Math.max(_usedBytes, _targetBytes);
 			_broker.freeMemory(this, oldGrantedBytes - _grantedBytes);
 		}
-		notify();
+		notifyAll();
 	}
 
 	@Override
@@ -91,7 +97,24 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 
 	@Override
 	public synchronized void setTargetMemory(long targetMemory) {
+		if(_destroyed)
+			return;
 		_targetBytes = targetMemory;
-		notify();
+		notifyAll();
+	}
+
+	@Override
+	public void destroy() {
+		long freedMemory;
+		synchronized(this) {
+			if(_destroyed)
+				return;
+			_destroyed = true;
+			freedMemory = _grantedBytes - _usedBytes;
+			_grantedBytes = _usedBytes;
+			_targetBytes = 0;
+			notifyAll();
+		}
+		_broker.destroyAllowance(this, freedMemory);
 	}
 }

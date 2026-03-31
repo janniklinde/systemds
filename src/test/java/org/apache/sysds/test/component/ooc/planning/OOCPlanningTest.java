@@ -31,6 +31,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.ReorgOperator;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
@@ -48,6 +49,31 @@ public class OOCPlanningTest extends OOCInstruction {
 
 	@Test
 	public void test() throws ExecutionException, InterruptedException {
+		for(int i = 0; i < 30; i++) {
+			runPlanningScenario(true);
+		}
+		long millis = System.currentTimeMillis();
+		for(int i = 0; i < 10; i++) {
+			runPlanningScenario(true);
+		}
+		millis = System.currentTimeMillis() - millis;
+		System.out.println("With Tracking: " + millis + "ms");
+	}
+
+	@Test
+	public void testWithoutTrackingPrimitives() throws ExecutionException, InterruptedException {
+		for(int i = 0; i < 30; i++) {
+			runPlanningScenario(false);
+		}
+		long millis = System.currentTimeMillis();
+		for(int i = 0; i < 10; i++) {
+			runPlanningScenario(false);
+		}
+		millis = System.currentTimeMillis() - millis;
+		System.out.println("Without Tracking: " + millis + "ms");
+	}
+
+	private void runPlanningScenario(boolean tracked) throws ExecutionException, InterruptedException {
 		DMLConfig oldConf = ConfigurationManager.getDMLConfig();
 		DMLConfig conf = new DMLConfig();
 		conf.setTextValue(DMLConfig.LOCAL_TMP_DIR, "testTemp/OOCPlanning");
@@ -56,26 +82,26 @@ public class OOCPlanningTest extends OOCInstruction {
 			LocalFileUtils.createWorkingDirectory();
 			OOCCacheManager.getCache();
 
-			OOCStream<IndexedMatrixValue> dGen1 = createWritableStream();
-			dGen1.setData(new MatrixObject(Types.ValueType.FP64, "null", new MetaData(new MatrixCharacteristics(100000, 100000, 1000))));
-			plannableDataGenOOC(dGen1, ix -> 8000152L, task -> {
-				task.setOutput(new IndexedMatrixValue(task.input(), new MatrixBlock(1000, 1000, 1.0)));
-			});
-			OOCStream<IndexedMatrixValue> dGen2 = createWritableStream();
-			dGen2.setData(new MatrixObject(Types.ValueType.FP64, "null", new MetaData(new MatrixCharacteristics(100000, 100000, 1000))));
-			plannableDataGenOOC(dGen2, ix -> 8000152L, task -> {
-				task.setOutput(new IndexedMatrixValue(task.input(), new MatrixBlock(1000, 1000, 2.0)));
-			});
-			OOCStream<IndexedMatrixValue> t2 = createWritableStream();
-			transposeMapOOC(dGen2, t2, imv -> ((MatrixBlock)imv.getValue()).getInMemorySize(), imv -> {
-				return (MatrixBlock)imv.getValue().reorgOperations(new ReorgOperator(SwapIndex.getSwapIndexFnObject()), new MatrixBlock(), -1, -1, -1);
-			});
-			OOCStream<IndexedMatrixValue> join = createWritableStream();
-			joinZipOOC(dGen1, t2, join, l -> 8000152L, (l, r) -> {
-				return (MatrixBlock)l.getValue().binaryOperations(new BinaryOperator(Plus.getPlusFnObject()), r.getValue(), new MatrixBlock());
-			});
+				OOCStream<IndexedMatrixValue> t2 = createWritableStream();
+				OOCStream<IndexedMatrixValue> join = createWritableStream();
+				OOCStream<IndexedMatrixValue> dGen1;
+				OOCStream<IndexedMatrixValue> dGen2;
 
-			join.start();
+				if(tracked) {
+					dGen1 = createTrackedDataGenStream(1.0);
+					dGen2 = createTrackedDataGenStream(2.0);
+					transposeMapOOC(dGen2, t2, imv -> ((MatrixBlock) imv.getValue()).getInMemorySize(), this::transposeBlock);
+					joinZipOOC(dGen1, t2, join, l -> 8000152L, this::addBlocks);
+				}
+				else {
+					dGen1 = createDataGenStream();
+					dGen2 = createDataGenStream();
+					addOutStream(t2, join);
+					mapOOC(dGen2, t2, imv -> new IndexedMatrixValue(transposeIndexes(imv), transposeBlock(imv)));
+					joinOOC(dGen1, t2, join,
+						(l, r) -> new IndexedMatrixValue(l.getIndexes(), addBlocks(l, r)),
+						IndexedMatrixValue::getIndexes);
+				}
 
 			CompletableFuture<Void> future = new CompletableFuture<>();
 			join.setSubscriber(cb -> {
@@ -85,15 +111,58 @@ public class OOCPlanningTest extends OOCInstruction {
 						future.complete(null);
 						return;
 					}
-					System.out.println("Received: " + cb.get().getIndexes());
+					//System.out.println("Received: " + cb.get().getIndexes());
 				}
-			});
-			future.get();
-		}
-		finally {
+				});
+				join.start();
+				if(!tracked) {
+					populateDataGenStream(dGen1, 1.0);
+					populateDataGenStream(dGen2, 2.0);
+				}
+				future.get();
+			}
+			finally {
 			OOCCacheManager.reset();
 			ConfigurationManager.setGlobalConfig(oldConf);
 		}
+	}
+
+	private OOCStream<IndexedMatrixValue> createDataGenStream() {
+		OOCStream<IndexedMatrixValue> out = createWritableStream();
+		out.setData(new MatrixObject(Types.ValueType.FP64, "null",
+			new MetaData(new MatrixCharacteristics(10000, 10000, 1000))));
+		return out;
+	}
+
+	private OOCStream<IndexedMatrixValue> createTrackedDataGenStream(double value) {
+		OOCStream<IndexedMatrixValue> out = createWritableStream();
+		out.setData(new MatrixObject(Types.ValueType.FP64, "null",
+			new MetaData(new MatrixCharacteristics(10000, 10000, 1000))));
+		plannableDataGenOOC(out, ix -> 8000152L, task ->
+			task.setOutput(new IndexedMatrixValue(task.input(), new MatrixBlock(1000, 1000, value))));
+		return out;
+	}
+
+	private void populateDataGenStream(OOCStream<IndexedMatrixValue> out, double value) {
+		for(int bi = 1; bi <= 10; bi++) {
+			for(int bj = 1; bj <= 10; bj++)
+				out.enqueue(new IndexedMatrixValue(new MatrixIndexes(bi, bj), new MatrixBlock(1000, 1000, value)));
+		}
+		out.closeInput();
+	}
+
+	private MatrixIndexes transposeIndexes(IndexedMatrixValue imv) {
+		return new MatrixIndexes(imv.getIndexes().getColumnIndex(), imv.getIndexes().getRowIndex());
+	}
+
+	private MatrixBlock transposeBlock(IndexedMatrixValue imv) {
+		return (MatrixBlock) imv.getValue().reorgOperations(
+			new ReorgOperator(SwapIndex.getSwapIndexFnObject()), new MatrixBlock(), -1, -1, -1);
+	}
+
+	private MatrixBlock addBlocks(IndexedMatrixValue l, IndexedMatrixValue r) {
+		return (MatrixBlock) l.getValue().binaryOperations(
+			new BinaryOperator(Plus.getPlusFnObject()), r.getValue(), new MatrixBlock());
 	}
 
 	@Override
