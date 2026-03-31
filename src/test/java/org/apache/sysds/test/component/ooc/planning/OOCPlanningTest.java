@@ -70,7 +70,7 @@ public class OOCPlanningTest extends OOCInstruction {
 		super(null, null, "");
 	}
 
-	//@Test
+	@Test
 	public void test() throws ExecutionException, InterruptedException {
 		for(int i = 0; i < 30; i++)
 			runPlanningScenario(true);
@@ -81,7 +81,7 @@ public class OOCPlanningTest extends OOCInstruction {
 		System.out.println("With Tracking: " + millis + "ms");
 	}
 
-	//@Test
+	@Test
 	public void testWithoutTrackingPrimitives() throws ExecutionException, InterruptedException {
 		for(int i = 0; i < 30; i++)
 			runPlanningScenario(false);

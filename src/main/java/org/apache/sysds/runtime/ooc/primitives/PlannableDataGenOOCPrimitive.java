@@ -88,7 +88,6 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 
 	@Override
 	public void start() {
-		System.out.println("Starting DataGen: " + _pattern);
 		switch(_pattern) {
 			case COL_MAJOR:
 				startColMajor();

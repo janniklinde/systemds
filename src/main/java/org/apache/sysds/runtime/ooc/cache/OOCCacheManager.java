@@ -60,10 +60,10 @@ public class OOCCacheManager {
 		TeeOOCInstruction.reset();
 		OOCIOHandler ioHandler = _ioHandler.getAndSet(null);
 		OOCCacheScheduler cacheScheduler = _scheduler.getAndSet(null);
-		if (ioHandler != null)
-			ioHandler.shutdown();
 		if (cacheScheduler != null)
 			cacheScheduler.shutdown();
+		if (ioHandler != null)
+			ioHandler.shutdown();
 
 		if (DMLScript.OOC_STATISTICS)
 			Statistics.resetOOCEvictionStats();

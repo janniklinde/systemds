@@ -23,11 +23,11 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 
 public class SyncMemoryAllowance implements MemoryAllowance {
 	protected final MemoryBroker _broker;
-	protected long _usedBytes;
-	protected long _grantedBytes;
-	protected long _targetBytes;
-	protected boolean _shutdown;
-	protected boolean _destroyed;
+	protected volatile long _usedBytes;
+	protected volatile long _grantedBytes;
+	protected volatile long _targetBytes;
+	protected volatile boolean _shutdown;
+	protected volatile boolean _destroyed;
 
 	protected SyncMemoryAllowance(MemoryBroker broker, long used, long granted, long target) {
 		_broker = broker;
@@ -161,7 +161,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	}
 
 	@Override
-	public synchronized boolean isShutdown() {
+	public boolean isShutdown() {
 		return _shutdown || _destroyed;
 	}
 }

@@ -92,6 +92,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 	private final CloseableQueue<Tuple2<BlockEntry, CompletableFuture<Void>>>[] _q;
 	private final AtomicLong _wCtr;
 	private final AtomicBoolean _started;
+	private final AtomicBoolean _shutdown;
 
 	private final int _evictCallerId = OOCEventLog.registerCaller("write");
 	private final int _readCallerId = OOCEventLog.registerCaller("read");
@@ -127,6 +128,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		_q = new CloseableQueue[WRITER_SIZE];
 		_wCtr = new AtomicLong(0);
 		_started = new  AtomicBoolean(false);
+		_shutdown = new AtomicBoolean(false);
 	}
 
 	private synchronized void start() {
@@ -141,6 +143,8 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 	@Override
 	public void shutdown() {
+		if (!_shutdown.compareAndSet(false, true))
+			return;
 		boolean started = _started.get();
 		if (started) {
 			try {
@@ -149,10 +153,12 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 				}
 			}
 			catch(InterruptedException ignored) {
+				Thread.currentThread().interrupt();
 			}
 		}
+		_writeExec.shutdown();
+		awaitTermination(_writeExec);
 		_writeExec.getQueue().clear();
-		_writeExec.shutdownNow();
 		_readExec.getQueue().clear();
 		_readExec.shutdownNow();
 		_srcReadExec.getQueue().clear();
@@ -167,14 +173,22 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 	@Override
 	public CompletableFuture<Void> scheduleEviction(BlockEntry block) {
+		if (_shutdown.get()) {
+			CompletableFuture<Void> failed = new CompletableFuture<>();
+			failed.completeExceptionally(new RejectedExecutionException("OOC IO handler is shut down."));
+			return failed;
+		}
 		start();
 		CompletableFuture<Void> future = new CompletableFuture<>();
 		try {
 			long q = _wCtr.getAndAdd(block.getSize()) / OVERFLOW;
 			int i = (int)(q % WRITER_SIZE);
-			_q[i].enqueueIfOpen(new Tuple2<>(block, future));
+			if (!_q[i].enqueueIfOpen(new Tuple2<>(block, future)))
+				future.completeExceptionally(new RejectedExecutionException("OOC IO handler is shut down."));
 		}
 		catch(InterruptedException ignored) {
+			Thread.currentThread().interrupt();
+			future.completeExceptionally(ignored);
 		}
 
 		return future;
@@ -665,9 +679,17 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 					}
 				}
 			}
-			catch(IOException | InterruptedException ex) {
-				ex.printStackTrace();
-				throw new DMLRuntimeException(ex);
+			catch(ClosedByInterruptException ignored) {
+				Thread.currentThread().interrupt();
+			}
+			catch(InterruptedException ignored) {
+				Thread.currentThread().interrupt();
+			}
+			catch(IOException ex) {
+				if (!_shutdown.get()) {
+					ex.printStackTrace();
+					throw new DMLRuntimeException(ex);
+				}
 			}
 			catch(Exception ignored) {
 			}
@@ -765,6 +787,18 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 				catch(RejectedExecutionException ignored) {
 				}
 			}
+		}
+	}
+
+	private void awaitTermination(ThreadPoolExecutor exec) {
+		try {
+			if (!exec.awaitTermination(5, TimeUnit.SECONDS))
+				exec.shutdownNow();
+			exec.awaitTermination(5, TimeUnit.SECONDS);
+		}
+		catch(InterruptedException ignored) {
+			exec.shutdownNow();
+			Thread.currentThread().interrupt();
 		}
 	}
 
