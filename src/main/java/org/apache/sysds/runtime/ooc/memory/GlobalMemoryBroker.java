@@ -20,7 +20,9 @@
 package org.apache.sysds.runtime.ooc.memory;
 
 import java.util.ArrayList;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.PriorityQueue;
 
 public class GlobalMemoryBroker implements MemoryBroker {
 	private enum BrokerMode {
@@ -35,6 +37,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 
 	private final long _allowedBytes;
 	private final List<MemoryAllowance> _allowances;
+	private final LinkedList<MemoryAllowance> _overconsumers;
 	private long _usedBytes;
 	private BrokerMode _brokerMode;
 
@@ -42,6 +45,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		_allowedBytes = allowedBytes;
 		_usedBytes = 0;
 		_allowances = new ArrayList<>();
+		_overconsumers = new LinkedList<>();
 	}
 
 	@Override
@@ -50,14 +54,43 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			throw new IllegalArgumentException();
 		long free = _allowedBytes - _usedBytes;
 		if(free < minSize) {
-			if(allowance.getGrantedMemory() > _allowedBytes / _allowances.size())
+			if(allowance.getGrantedMemory() > _allowedBytes / _allowances.size() && allowance.getTargetMemory() > allowance.getGrantedMemory())
 				allowance.setTargetMemory(allowance.getUsedMemory());
+			else {
+				// Not overconsuming --> try to free memory from overconsumers
+				MemoryAllowance largestConsumer = findAndRemoveLargestConsumer();
+				if(largestConsumer != null) {
+					long newTarget = (long)(largestConsumer.getGrantedMemory() * 0.8);
+					if(newTarget > _allowedBytes / _allowances.size()) {
+						_overconsumers.add(largestConsumer);
+					}
+					else {
+						newTarget = _allowedBytes / _allowances.size();
+					}
+					largestConsumer.setTargetMemory(newTarget);
+				}
+			}
 			return 0;
 		}
 		long allow = Math.min(free, maxSize);
 		_usedBytes += allow;
 		rebalance(false);
+		if(allowance.getGrantedMemory() <= _allowedBytes / _allowances.size()
+			&& allowance.getGrantedMemory() + allow > _allowedBytes / _allowances.size()) {
+			_overconsumers.add(allowance);
+		}
 		return allow;
+	}
+
+	private MemoryAllowance findAndRemoveLargestConsumer() {
+		long largest = Long.MIN_VALUE;
+		MemoryAllowance allowance = null;
+		for(MemoryAllowance largestConsumer : _overconsumers) {
+			if(largestConsumer.getGrantedMemory() > largest)
+				allowance = largestConsumer;
+		}
+		_overconsumers.remove(allowance);
+		return allowance;
 	}
 
 	@Override
@@ -65,6 +98,14 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		if(freedMemory < 0)
 			throw new IllegalArgumentException();
 		_usedBytes -= freedMemory;
+		if(allowance.getGrantedMemory() <= _allowedBytes / _allowances.size()
+			&& allowance.getGrantedMemory() + freedMemory > _allowedBytes / _allowances.size()) {
+			_overconsumers.remove(allowance);
+		}
+		else if(allowance.getGrantedMemory() <= allowance.getTargetMemory()
+			&& allowance.getGrantedMemory() > _allowedBytes / _allowances.size()) {
+			_overconsumers.add(allowance);
+		}
 	}
 
 	@Override

@@ -63,7 +63,7 @@ public class OOCPlanningTest extends OOCInstruction {
 			return (MatrixBlock)imv.getValue().reorgOperations(new ReorgOperator(SwapIndex.getSwapIndexFnObject()), new MatrixBlock(), -1, -1, -1);
 		});
 		OOCStream<IndexedMatrixValue> join = createWritableStream();
-		joinZipOOC(dGen1, t2, join, (l, r) -> {
+		joinZipOOC(dGen1, t2, join, l -> 8000152L, (l, r) -> {
 			return (MatrixBlock)l.getValue().binaryOperations(new BinaryOperator(Plus.getPlusFnObject()), r.getValue(), new MatrixBlock());
 		});
 
@@ -71,12 +71,14 @@ public class OOCPlanningTest extends OOCInstruction {
 
 		CompletableFuture<Void> future = new CompletableFuture<>();
 		join.setSubscriber(cb -> {
-			if(cb.isEos()) {
-				System.out.println("EOS");
-				future.complete(null);
-				return;
+			try(cb) {
+				if(cb.isEos()) {
+					System.out.println("EOS");
+					future.complete(null);
+					return;
+				}
+				System.out.println("Received: " + cb.get().getIndexes());
 			}
-			System.out.println("Received: " + cb.get().getIndexes());
 		});
 		future.get();
 	}

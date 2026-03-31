@@ -26,6 +26,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.ooc.memory.MemoryManagedQueueCallback;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.utils.Statistics;
 
@@ -243,6 +244,11 @@ public class OOCCacheManager {
 
 	public static boolean canClaimMemory() {
 		return getCache().isWithinLimits() && OOCInstruction.getComputeInFlight() <= OOCInstruction.getComputeBackpressureThreshold();
+	}
+
+	public static OOCCacheScheduler.HandoverHandle handover(BlockKey key,
+		MemoryManagedQueueCallback<IndexedMatrixValue> callback) {
+		return getCache().handover(key, callback);
 	}
 
 	private static void pin(BlockEntry entry) {

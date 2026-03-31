@@ -25,7 +25,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
+public class InMemoryQueueCallback implements MemoryManagedQueueCallback<IndexedMatrixValue> {
 	private CallbackHandle _handle;
 	private boolean _closed;
 
@@ -60,6 +60,39 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 	}
 
 	@Override
+	public long getManagedBytes() {
+		synchronized(_handle) {
+			return _handle._reservedBytes;
+		}
+	}
+
+	@Override
+	public boolean tryTransferOwnership(MemoryAllowance allowance) {
+		synchronized(_handle) {
+			long bytes = _handle._reservedBytes;
+			if(bytes <= 0 || _handle._allow == allowance)
+				return true;
+			if(!allowance.tryReserve(bytes))
+				return false;
+			_handle._allow.release(bytes);
+			_handle._allow = allowance;
+			return true;
+		}
+	}
+
+	@Override
+	public long releaseManagedMemory() {
+		synchronized(_handle) {
+			long bytes = _handle._reservedBytes;
+			if(bytes <= 0)
+				return 0;
+			_handle._reservedBytes = 0;
+			_handle._allow.release(bytes);
+			return bytes;
+		}
+	}
+
+	@Override
 	public synchronized void close() {
 		if(_closed)
 			return;
@@ -82,8 +115,8 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 	private static class CallbackHandle {
 		private final IndexedMatrixValue _result;
 		private final AtomicInteger _refCtr;
-		private final MemoryAllowance _allow;
-		private final long _reservedBytes;
+		private MemoryAllowance _allow;
+		private long _reservedBytes;
 		private DMLRuntimeException _failure;
 
 		private CallbackHandle(IndexedMatrixValue result, DMLRuntimeException failure, MemoryAllowance allow, long _reservedBytes) {

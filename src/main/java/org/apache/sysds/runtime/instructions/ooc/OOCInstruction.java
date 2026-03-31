@@ -35,7 +35,9 @@ import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheScheduler;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
+import org.apache.sysds.runtime.ooc.memory.MemoryManagedQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.OOCMatrixStreamTask;
 import org.apache.sysds.runtime.ooc.memory.OOCStreamTask;
@@ -66,7 +68,9 @@ import java.util.Optional;
 import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ForkJoinTask;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -307,6 +311,12 @@ public abstract class OOCInstruction extends Instruction {
 		Function<T, Long> allocator,
 		Consumer<OOCStreamTask<T, IndexedMatrixValue>> mapper) {
 		final MemoryAllowance allowance = GlobalMemoryBroker.get().createAllowance();
+		return mapOOC(allowance, qIn, qOut, allocator, mapper);
+	}
+
+	protected <T> CompletableFuture<Void> mapOOC(MemoryAllowance allowance, OOCStream<T> qIn,
+		OOCStream<IndexedMatrixValue> qOut, Function<T, Long> allocator,
+		Consumer<OOCStreamTask<T, IndexedMatrixValue>> mapper) {
 		final OOCStream<T> intermediateStream = createWritableStream();
 		final AtomicReference<LinkedBlockingQueue<OOCStream.QueueCallback<T>>> queueRef = new AtomicReference<>();
 		final Thread t = new Thread(() -> {
@@ -762,30 +772,280 @@ public abstract class OOCInstruction extends Instruction {
 		}
 	}
 
-	protected CompletableFuture<Void> joinZipOOC(List<OOCStream<IndexedMatrixValue>> qIn, OOCStream<IndexedMatrixValue> qOut, BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> zipper) {
-		JoinOOCPrimitive primitive = new JoinOOCPrimitive(new ArrayList<>(qIn), qOut);
-		qOut.assignPrimitive(primitive);
-		MemoryAllowance allowance = GlobalMemoryBroker.get().createAllowance();
+	private static final class JoinZipSlot {
+		private final JoinZipItem[] _items;
 
-		boolean[] cached = new boolean[qIn.size()];
-		final OOCStream<IndexedMatrixValue>[] cacheStreams = new  OOCStream[qIn.size()];
-		final CachingStream[] caches = new  CachingStream[qIn.size()];
-		final Map<MatrixIndexes, OOCStream.QueueCallback<IndexedMatrixValue>>[] maps = new Map[qIn.size()];
-
-		for(int i = 0; i < qIn.size(); i++) {
-			cached[i] = qIn.get(i).hasStreamCache();
-			cacheStreams[i] = createWritableStream();
-			caches[i] = cached[i] ? qIn.get(i).getStreamCache() : new CachingStream(cacheStreams[i]);
-			maps[i] = new ConcurrentHashMap<>();
+		private JoinZipSlot(int size) {
+			_items = new JoinZipItem[size];
 		}
 
-		submitOOCTasks(qIn, (i, cb) -> {
+		private synchronized List<JoinZipItem> put(int pos, JoinZipItem item) {
+			if(_items[pos] != null)
+				throw new DMLRuntimeException("Duplicate zip join block at position " + pos + " for " + item.getIndexes());
+			_items[pos] = item;
+			for(JoinZipItem cur : _items) {
+				if(cur == null)
+					return null;
+			}
+			JoinZipItem[] copy = _items.clone();
+			List<JoinZipItem> out = new ArrayList<>(copy.length);
+			Collections.addAll(out, copy);
+			return out;
+		}
 
-		}, (i, cb) -> {
+		private synchronized List<JoinZipItem> snapshot() {
+			List<JoinZipItem> out = new ArrayList<>(_items.length);
+			for(JoinZipItem item : _items) {
+				if(item != null)
+					out.add(item);
+			}
+			return out;
+		}
+	}
 
-		}, null);
+	private static final class JoinZipItem {
+		private final MatrixIndexes _indexes;
+		private OOCStream.QueueCallback<IndexedMatrixValue> _callback;
+		private OOCCacheScheduler.HandoverHandle _handover;
+		private BlockKey _spillKey;
 
-		return null;
+		private JoinZipItem(OOCStream.QueueCallback<IndexedMatrixValue> callback, MatrixIndexes indexes) {
+			_callback = callback;
+			_indexes = indexes;
+		}
+
+		private synchronized MatrixIndexes getIndexes() {
+			return _indexes;
+		}
+
+		private synchronized boolean canHandover() {
+			return _handover == null && _callback instanceof MemoryManagedQueueCallback<?>;
+		}
+
+		private synchronized boolean tryScheduleHandover(int spillStreamId, AtomicInteger spillBlockId) {
+			if(!canHandover())
+				return false;
+			@SuppressWarnings("unchecked")
+			MemoryManagedQueueCallback<IndexedMatrixValue> managed =
+				(MemoryManagedQueueCallback<IndexedMatrixValue>) _callback;
+			_spillKey = new BlockKey(spillStreamId, spillBlockId.getAndIncrement());
+			_handover = OOCCacheManager.handover(_spillKey, managed);
+			_callback = null;
+			return true;
+		}
+
+		private synchronized OOCStream.QueueCallback<IndexedMatrixValue> materialize() {
+			if(_callback != null) {
+				OOCStream.QueueCallback<IndexedMatrixValue> out = _callback;
+				_callback = null;
+				return out;
+			}
+			if(_handover == null)
+				throw new IllegalStateException("Zip join item has no callback or handover handle.");
+			if(!_handover.isCommitted()) {
+				OOCStream.QueueCallback<IndexedMatrixValue> reclaimed = _handover.reclaim();
+				_handover = null;
+				_spillKey = null;
+				if(reclaimed == null)
+					throw new IllegalStateException("Zip join handover was reclaimed concurrently.");
+				return reclaimed;
+			}
+			try {
+				return OOCCacheManager.requestBlock(_spillKey).get();
+			}
+			catch(InterruptedException e) {
+				Thread.currentThread().interrupt();
+				throw new DMLRuntimeException(e);
+			}
+			catch(ExecutionException e) {
+				throw DMLRuntimeException.of(e);
+			}
+		}
+
+		private synchronized void cleanupAfterUse() {
+			if(_spillKey != null && _handover != null && _handover.isCommitted()) {
+				OOCCacheManager.getCache().forget(_spillKey);
+				_handover = null;
+				_spillKey = null;
+			}
+		}
+
+		private synchronized void close() {
+			if(_callback != null) {
+				_callback.close();
+				_callback = null;
+				return;
+			}
+			if(_handover == null)
+				return;
+			OOCStream.QueueCallback<IndexedMatrixValue> reclaimed = _handover.reclaim();
+			if(reclaimed != null)
+				reclaimed.close();
+			else if(_spillKey != null && _handover.isCommitted())
+				OOCCacheManager.getCache().forget(_spillKey);
+			_handover = null;
+			_spillKey = null;
+		}
+	}
+
+	private static final class JoinZipInputs {
+		private final MatrixIndexes _indexes;
+		private final List<JoinZipItem> _items;
+		private List<OOCStream.QueueCallback<IndexedMatrixValue>> _callbacks;
+		private List<IndexedMatrixValue> _values;
+		private boolean _closed;
+
+		private JoinZipInputs(MatrixIndexes indexes, List<JoinZipItem> items) {
+			_indexes = indexes;
+			_items = items;
+		}
+
+		private MatrixIndexes getIndexes() {
+			return _indexes;
+		}
+
+		private synchronized List<IndexedMatrixValue> getValues() {
+			if(_closed)
+				throw new IllegalStateException("Join zip inputs already closed for " + _indexes);
+			if(_values != null)
+				return _values;
+			_callbacks = new ArrayList<>(_items.size());
+			_values = new ArrayList<>(_items.size());
+			try {
+				for(JoinZipItem item : _items) {
+					OOCStream.QueueCallback<IndexedMatrixValue> cb = item.materialize();
+					_callbacks.add(cb);
+					_values.add(cb.get());
+				}
+				return _values;
+			}
+			catch(Throwable t) {
+				close();
+				throw t;
+			}
+		}
+
+			private synchronized void close() {
+				if(_closed)
+					return;
+				_closed = true;
+				if(_callbacks != null) {
+					int i = 0;
+					for(; i < _callbacks.size(); i++) {
+						_callbacks.get(i).close();
+						_items.get(i).cleanupAfterUse();
+					}
+					for(; i < _items.size(); i++)
+						_items.get(i).close();
+				}
+				else {
+					_items.forEach(JoinZipItem::close);
+				}
+				_callbacks = null;
+				_values = null;
+			}
+	}
+
+	private static void closeJoinZipSlots(Map<MatrixIndexes, JoinZipSlot> slots) {
+		slots.values().forEach(slot -> slot.snapshot().forEach(JoinZipItem::close));
+		slots.clear();
+	}
+
+	private static void drainJoinZipHandovers(MemoryAllowance cacheAllowance,
+		ConcurrentLinkedQueue<JoinZipItem> spillCandidates, int spillStreamId, AtomicInteger spillBlockId) {
+		if(cacheAllowance.getUsedMemory() < cacheAllowance.getTargetMemory())
+			return;
+		while(true) {
+			JoinZipItem candidate = spillCandidates.poll();
+			if(candidate == null)
+				return;
+			candidate.tryScheduleHandover(spillStreamId, spillBlockId);
+		}
+	}
+
+	protected CompletableFuture<Void> joinZipOOC(List<OOCStream<IndexedMatrixValue>> qIn,
+		OOCStream<IndexedMatrixValue> qOut, Function<List<IndexedMatrixValue>, Long> allocator,
+		Function<List<IndexedMatrixValue>, MatrixBlock> zipper) {
+
+		JoinOOCPrimitive primitive = new JoinOOCPrimitive(new ArrayList<>(qIn), qOut);
+		qOut.assignPrimitive(primitive);
+		MemoryAllowance cacheAllowance = GlobalMemoryBroker.get().createAllowance();
+		MemoryAllowance workerAllowance = GlobalMemoryBroker.get().createAllowance(10000000);
+		Map<MatrixIndexes, JoinZipSlot> slots = new ConcurrentHashMap<>();
+		ConcurrentLinkedQueue<JoinZipItem> spillCandidates = new ConcurrentLinkedQueue<>();
+		OOCStream<JoinZipInputs> ready = createWritableStream();
+		int spillStreamId = nextStreamId.getAndIncrement();
+		AtomicInteger spillBlockId = new AtomicInteger(0);
+		addInStream(qIn.toArray(OOCStream[]::new));
+		addOutStream(ready);
+
+		CompletableFuture<Void> joinFuture = submitOOCTasks(qIn, (i, cb) -> {
+			IndexedMatrixValue value = cb.get();
+			MatrixIndexes idx = value.getIndexes();
+			OOCStream.QueueCallback<IndexedMatrixValue> retained = cb.keepOpen();
+			JoinZipItem item = new JoinZipItem(retained, idx);
+			if(retained instanceof MemoryManagedQueueCallback<?>)
+				((MemoryManagedQueueCallback<IndexedMatrixValue>) retained).tryTransferOwnership(cacheAllowance);
+
+			JoinZipSlot slot = slots.computeIfAbsent(idx, k -> new JoinZipSlot(qIn.size()));
+			List<JoinZipItem> readyItems = slot.put(i, item);
+			if(readyItems != null) {
+				if(!slots.remove(idx, slot))
+					throw new DMLRuntimeException("Join zip race detected for index " + idx);
+				ready.enqueue(new JoinZipInputs(idx, readyItems));
+			}
+			else if(item.canHandover())
+				spillCandidates.add(item);
+
+			drainJoinZipHandovers(cacheAllowance, spillCandidates, spillStreamId, spillBlockId);
+		});
+
+		CompletableFuture<Void> outFuture = mapOOC(workerAllowance, ready, qOut, inputs -> {
+			try {
+				return allocator.apply(inputs.getValues());
+			}
+			catch(Throwable t) {
+				inputs.close();
+				throw t;
+			}
+		}, task -> {
+			JoinZipInputs inputs = task.input();
+			try {
+				List<IndexedMatrixValue> values = inputs.getValues();
+				MatrixBlock out = zipper.apply(values);
+				task.setOutput(new IndexedMatrixValue(inputs.getIndexes(), out));
+			}
+			finally {
+				inputs.close();
+			}
+		});
+
+		joinFuture.handle((r, err) -> {
+			if(err != null) {
+				closeJoinZipSlots(slots);
+				ready.propagateFailure(DMLRuntimeException.of(err));
+				return null;
+			}
+			if(!slots.isEmpty()) {
+				DMLRuntimeException ex = new DMLRuntimeException(
+					"Incomplete zip join. Missing counterpart blocks for " + slots.size() + " index(es).");
+				closeJoinZipSlots(slots);
+				ready.propagateFailure(ex);
+				return null;
+			}
+			ready.closeInput();
+			return null;
+		});
+
+		return outFuture;
+	}
+
+	protected CompletableFuture<Void> joinZipOOC(OOCStream<IndexedMatrixValue> qIn1,
+		OOCStream<IndexedMatrixValue> qIn2, OOCStream<IndexedMatrixValue> qOut,
+		Function<List<IndexedMatrixValue>, Long> allocator,
+		BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> zipper) {
+		return joinZipOOC(List.of(qIn1, qIn2), qOut, allocator,
+			values -> zipper.apply(values.get(0), values.get(1)));
 	}
 
 	protected <R> CompletableFuture<Void> joinOOC(OOCStream<IndexedMatrixValue> qIn1, OOCStream<IndexedMatrixValue> qIn2, OOCStream<R> qOut, BiFunction<IndexedMatrixValue, IndexedMatrixValue, R> mapper, Function<IndexedMatrixValue, MatrixIndexes> on) {

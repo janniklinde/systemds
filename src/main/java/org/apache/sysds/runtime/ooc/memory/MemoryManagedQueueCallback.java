@@ -19,25 +19,10 @@
 
 package org.apache.sysds.runtime.ooc.memory;
 
-/**
- * Memory accounting abstraction for operator-local or hierarchical allowances.
- * Implementations may be thread-confined, globally synchronized, or broker-backed.
- */
-public interface MemoryAllowance {
-	boolean tryReserve(long bytes);
-	void reserveBlocking(long bytes);
-	void release(long bytes);
-	long getUsedMemory();
-	long getGrantedMemory();
-	long getTargetMemory();
-	void setTargetMemory(long targetMemory);
-	long getDeficit();
+import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 
-	default long getFreeMemory() {
-		return Math.max(0, getGrantedMemory() - getUsedMemory());
-	}
-
-	default boolean isUnderPressure() {
-		return getGrantedMemory() > getTargetMemory();
-	}
+public interface MemoryManagedQueueCallback<T> extends OOCStream.QueueCallback<T> {
+	long getManagedBytes();
+	boolean tryTransferOwnership(MemoryAllowance allowance);
+	long releaseManagedMemory();
 }

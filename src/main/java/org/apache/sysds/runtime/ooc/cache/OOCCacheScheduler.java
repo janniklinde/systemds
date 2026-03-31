@@ -19,6 +19,10 @@
 
 package org.apache.sysds.runtime.ooc.cache;
 
+import org.apache.sysds.runtime.instructions.ooc.OOCStream;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.ooc.memory.MemoryManagedQueueCallback;
+
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -80,6 +84,14 @@ public interface OOCCacheScheduler {
 	 * @param size the size of the data
 	 */
 	BlockEntry putAndPin(BlockKey key, Object data, long size);
+
+	interface HandoverHandle {
+		BlockKey getKey();
+		boolean isCommitted();
+		OOCStream.QueueCallback<IndexedMatrixValue> reclaim();
+	}
+
+	HandoverHandle handover(BlockKey key, MemoryManagedQueueCallback<IndexedMatrixValue> callback);
 
 	/**
 	 * Places a new source-backed block in the cache and registers the location with the IO handler. The entry is
