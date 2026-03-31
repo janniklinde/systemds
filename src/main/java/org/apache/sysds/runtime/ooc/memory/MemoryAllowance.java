@@ -31,7 +31,6 @@ public interface MemoryAllowance {
 	long getGrantedMemory();
 	long getTargetMemory();
 	void setTargetMemory(long targetMemory);
-	long getDeficit();
 
 	default long getFreeMemory() {
 		return Math.max(0, getGrantedMemory() - getUsedMemory());

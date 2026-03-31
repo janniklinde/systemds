@@ -26,6 +26,7 @@ import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.functionobjects.Plus;
 import org.apache.sysds.runtime.functionobjects.SwapIndex;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.instructions.ooc.OOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
@@ -34,6 +35,7 @@ import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.ReorgOperator;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaData;
+import org.apache.sysds.runtime.util.LocalFileUtils;
 import org.junit.Test;
 
 import java.util.concurrent.CompletableFuture;
@@ -46,41 +48,52 @@ public class OOCPlanningTest extends OOCInstruction {
 
 	@Test
 	public void test() throws ExecutionException, InterruptedException {
-		DMLConfig conf = ConfigurationManager.getDMLConfig();
+		DMLConfig oldConf = ConfigurationManager.getDMLConfig();
+		DMLConfig conf = new DMLConfig();
 		conf.setTextValue(DMLConfig.LOCAL_TMP_DIR, "testTemp/OOCPlanning");
-		OOCStream<IndexedMatrixValue> dGen1 = createWritableStream();
-		dGen1.setData(new MatrixObject(Types.ValueType.FP64, "null", new MetaData(new MatrixCharacteristics(100000, 100000, 1000))));
-		plannableDataGenOOC(dGen1, ix -> 8000152L, task -> {
-			task.setOutput(new IndexedMatrixValue(task.input(), new MatrixBlock(1000, 1000, 1.0)));
-		});
-		OOCStream<IndexedMatrixValue> dGen2 = createWritableStream();
-		dGen2.setData(new MatrixObject(Types.ValueType.FP64, "null", new MetaData(new MatrixCharacteristics(100000, 100000, 1000))));
-		plannableDataGenOOC(dGen2, ix -> 8000152L, task -> {
-			task.setOutput(new IndexedMatrixValue(task.input(), new MatrixBlock(1000, 1000, 2.0)));
-		});
-		OOCStream<IndexedMatrixValue> t2 = createWritableStream();
-		transposeMapOOC(dGen2, t2, imv -> ((MatrixBlock)imv.getValue()).getInMemorySize(), imv -> {
-			return (MatrixBlock)imv.getValue().reorgOperations(new ReorgOperator(SwapIndex.getSwapIndexFnObject()), new MatrixBlock(), -1, -1, -1);
-		});
-		OOCStream<IndexedMatrixValue> join = createWritableStream();
-		joinZipOOC(dGen1, t2, join, l -> 8000152L, (l, r) -> {
-			return (MatrixBlock)l.getValue().binaryOperations(new BinaryOperator(Plus.getPlusFnObject()), r.getValue(), new MatrixBlock());
-		});
+		ConfigurationManager.setGlobalConfig(conf);
+		try {
+			LocalFileUtils.createWorkingDirectory();
+			OOCCacheManager.getCache();
 
-		join.start();
+			OOCStream<IndexedMatrixValue> dGen1 = createWritableStream();
+			dGen1.setData(new MatrixObject(Types.ValueType.FP64, "null", new MetaData(new MatrixCharacteristics(100000, 100000, 1000))));
+			plannableDataGenOOC(dGen1, ix -> 8000152L, task -> {
+				task.setOutput(new IndexedMatrixValue(task.input(), new MatrixBlock(1000, 1000, 1.0)));
+			});
+			OOCStream<IndexedMatrixValue> dGen2 = createWritableStream();
+			dGen2.setData(new MatrixObject(Types.ValueType.FP64, "null", new MetaData(new MatrixCharacteristics(100000, 100000, 1000))));
+			plannableDataGenOOC(dGen2, ix -> 8000152L, task -> {
+				task.setOutput(new IndexedMatrixValue(task.input(), new MatrixBlock(1000, 1000, 2.0)));
+			});
+			OOCStream<IndexedMatrixValue> t2 = createWritableStream();
+			transposeMapOOC(dGen2, t2, imv -> ((MatrixBlock)imv.getValue()).getInMemorySize(), imv -> {
+				return (MatrixBlock)imv.getValue().reorgOperations(new ReorgOperator(SwapIndex.getSwapIndexFnObject()), new MatrixBlock(), -1, -1, -1);
+			});
+			OOCStream<IndexedMatrixValue> join = createWritableStream();
+			joinZipOOC(dGen1, t2, join, l -> 8000152L, (l, r) -> {
+				return (MatrixBlock)l.getValue().binaryOperations(new BinaryOperator(Plus.getPlusFnObject()), r.getValue(), new MatrixBlock());
+			});
 
-		CompletableFuture<Void> future = new CompletableFuture<>();
-		join.setSubscriber(cb -> {
-			try(cb) {
-				if(cb.isEos()) {
-					System.out.println("EOS");
-					future.complete(null);
-					return;
+			join.start();
+
+			CompletableFuture<Void> future = new CompletableFuture<>();
+			join.setSubscriber(cb -> {
+				try(cb) {
+					if(cb.isEos()) {
+						System.out.println("EOS");
+						future.complete(null);
+						return;
+					}
+					System.out.println("Received: " + cb.get().getIndexes());
 				}
-				System.out.println("Received: " + cb.get().getIndexes());
-			}
-		});
-		future.get();
+			});
+			future.get();
+		}
+		finally {
+			OOCCacheManager.reset();
+			ConfigurationManager.setGlobalConfig(oldConf);
+		}
 	}
 
 	@Override
