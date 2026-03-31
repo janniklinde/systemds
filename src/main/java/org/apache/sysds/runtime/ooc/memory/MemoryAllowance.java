@@ -31,7 +31,12 @@ public interface MemoryAllowance {
 	long getGrantedMemory();
 	long getTargetMemory();
 	void setTargetMemory(long targetMemory);
-	void destroy();
+	void shutdown();
+	boolean isShutdown();
+
+	default void destroy() {
+		shutdown();
+	}
 
 	default long getFreeMemory() {
 		return Math.max(0, getGrantedMemory() - getUsedMemory());

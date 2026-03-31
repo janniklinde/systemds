@@ -242,13 +242,28 @@ public abstract class OOCInstruction extends Instruction {
 		OOCStream<OOCMatrixStreamTask<MatrixIndexes>> allowedStream = createWritableStream();
 		new Thread(() -> {
 			MatrixIndexes current;
-			while((current = primitive.getRequestStream().dequeue()) != null) {
-				long requiredBytes = allocator.apply(current);
-				allowance.reserveBlocking(requiredBytes);
-				OOCMatrixStreamTask<MatrixIndexes> task = new OOCMatrixStreamTask<>(allowance, requiredBytes, new OOCStream.SimpleQueueCallback<>(current));
-				allowedStream.enqueue(task);
+			try {
+				while((current = primitive.getRequestStream().dequeue()) != null) {
+					long requiredBytes = allocator.apply(current);
+					try {
+						allowance.reserveBlocking(requiredBytes);
+					}
+					catch(IllegalStateException e) {
+						if(allowance.isShutdown())
+							break;
+						throw e;
+					}
+					OOCMatrixStreamTask<MatrixIndexes> task = new OOCMatrixStreamTask<>(allowance, requiredBytes,
+						new OOCStream.SimpleQueueCallback<>(current));
+					allowedStream.enqueue(task);
+				}
 			}
-			allowedStream.closeInput();
+			catch(Throwable t) {
+				allowedStream.propagateFailure(DMLRuntimeException.of(t));
+			}
+			finally {
+				allowedStream.closeInput();
+			}
 		}).start();
 
 		AtomicInteger deferredCtr = new AtomicInteger(1);
@@ -287,7 +302,7 @@ public abstract class OOCInstruction extends Instruction {
 			qOut.propagateFailure(dmlErr);
 			throw dmlErr;
 		});
-		return result.whenComplete((r, err) -> allowance.destroy());
+		return result.whenComplete((r, err) -> allowance.shutdown());
 	}
 
 	protected CompletableFuture<Void> equiMapOOC(OOCStream<IndexedMatrixValue> qIn, OOCStream<IndexedMatrixValue> qOut, Function<IndexedMatrixValue, MatrixBlock> mapper) {
@@ -313,7 +328,7 @@ public abstract class OOCInstruction extends Instruction {
 		Consumer<OOCStreamTask<T, IndexedMatrixValue>> mapper) {
 		final MemoryAllowance allowance = GlobalMemoryBroker.get().createAllowance();
 		return mapOOC(allowance, qIn, qOut, allocator, mapper)
-			.whenComplete((r, err) -> allowance.destroy());
+			.whenComplete((r, err) -> allowance.shutdown());
 	}
 
 	protected <T> CompletableFuture<Void> mapOOC(MemoryAllowance allowance, OOCStream<T> qIn,
@@ -327,12 +342,28 @@ public abstract class OOCInstruction extends Instruction {
 			try {
 				while(!(next = queue.take()).isEos()) {
 					long requiredBytes = allocator.apply(next.get());
-					allowance.reserveBlocking(requiredBytes);
+					try {
+						allowance.reserveBlocking(requiredBytes);
+					}
+					catch(IllegalStateException e) {
+						if(allowance.isShutdown()) {
+							next.close();
+							while((next = queue.poll()) != null)
+								next.close();
+							break;
+						}
+						throw e;
+					}
 					intermediateStream.enqueue(next);
 				}
-				intermediateStream.closeInput();
 			} catch(InterruptedException e) {
 				e.printStackTrace();
+			}
+			catch(Throwable t1) {
+				intermediateStream.propagateFailure(DMLRuntimeException.of(t1));
+			}
+			finally {
+				intermediateStream.closeInput();
 			}
 		});
 
@@ -1041,8 +1072,8 @@ public abstract class OOCInstruction extends Instruction {
 
 		return CompletableFuture.allOf(joinFuture, outFuture)
 			.whenComplete((r, err) -> {
-				cacheAllowance.destroy();
-				workerAllowance.destroy();
+				cacheAllowance.shutdown();
+				workerAllowance.shutdown();
 			});
 	}
 

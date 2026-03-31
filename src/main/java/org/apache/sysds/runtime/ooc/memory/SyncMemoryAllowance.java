@@ -26,6 +26,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	protected long _usedBytes;
 	protected long _grantedBytes;
 	protected long _targetBytes;
+	protected boolean _shutdown;
 	protected boolean _destroyed;
 
 	protected SyncMemoryAllowance(MemoryBroker broker, long used, long granted, long target) {
@@ -33,12 +34,13 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		_usedBytes = used;
 		_grantedBytes = granted;
 		_targetBytes = target;
+		_shutdown = false;
 		_destroyed = false;
 	}
 
 	@Override
 	public synchronized boolean tryReserve(long bytes) {
-		if(_destroyed)
+		if(_shutdown || _destroyed)
 			return false;
 		if(_usedBytes + bytes > _targetBytes)
 			return false;
@@ -57,27 +59,53 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 
 	@Override
 	public synchronized void reserveBlocking(long bytes) {
-		if(_destroyed)
-			throw new IllegalStateException("Cannot reserve memory on destroyed allowance.");
-		while(!tryReserve(bytes)) {
+		if(_shutdown || _destroyed)
+			throw new IllegalStateException("Cannot reserve memory on closed allowance.");
+		while(true) {
+			if(tryReserve(bytes)) {
+				notifyAll();
+				return;
+			}
+			if(_shutdown || _destroyed)
+				throw new IllegalStateException("Cannot reserve memory on closed allowance.");
 			try {
 				wait();
 			} catch(InterruptedException e) {
 				throw new DMLRuntimeException(e);
 			}
 		}
-		notifyAll();
 	}
 
 	@Override
-	public synchronized void release(long bytes) {
-		_usedBytes -= bytes;
-		if(_destroyed || _grantedBytes > _targetBytes) {
-			long oldGrantedBytes = _grantedBytes;
-			_grantedBytes = _destroyed ? _usedBytes : Math.max(_usedBytes, _targetBytes);
-			_broker.freeMemory(this, oldGrantedBytes - _grantedBytes);
+	public void release(long bytes) {
+		long freedMemory = 0;
+		long destroyFreedMemory = 0;
+		boolean destroy = false;
+		synchronized(this) {
+			_usedBytes -= bytes;
+			if(_shutdown) {
+				long oldGrantedBytes = _grantedBytes;
+				_grantedBytes = _usedBytes;
+				if(_usedBytes == 0) {
+					_destroyed = true;
+					destroy = true;
+					destroyFreedMemory = oldGrantedBytes;
+				}
+				else {
+					freedMemory = oldGrantedBytes - _grantedBytes;
+				}
+			}
+			else if(_grantedBytes > _targetBytes) {
+				long oldGrantedBytes = _grantedBytes;
+				_grantedBytes = Math.max(_usedBytes, _targetBytes);
+				freedMemory = oldGrantedBytes - _grantedBytes;
+			}
+			notifyAll();
 		}
-		notifyAll();
+		if(destroy)
+			_broker.destroyAllowance(this, destroyFreedMemory);
+		else if(freedMemory > 0)
+			_broker.freeMemory(this, freedMemory);
 	}
 
 	@Override
@@ -97,24 +125,43 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 
 	@Override
 	public synchronized void setTargetMemory(long targetMemory) {
-		if(_destroyed)
+		if(_shutdown || _destroyed)
 			return;
 		_targetBytes = targetMemory;
 		notifyAll();
 	}
 
 	@Override
-	public void destroy() {
-		long freedMemory;
+	public void shutdown() {
+		long freedMemory = 0;
+		long destroyFreedMemory = 0;
+		boolean destroy = false;
 		synchronized(this) {
-			if(_destroyed)
+			if(_shutdown || _destroyed)
 				return;
-			_destroyed = true;
-			freedMemory = _grantedBytes - _usedBytes;
+			_shutdown = true;
+			long oldGrantedBytes = _grantedBytes;
 			_grantedBytes = _usedBytes;
 			_targetBytes = 0;
+			if(_usedBytes == 0) {
+				_destroyed = true;
+				destroy = true;
+				destroyFreedMemory = oldGrantedBytes;
+			}
+			else {
+				freedMemory = oldGrantedBytes - _grantedBytes;
+			}
 			notifyAll();
 		}
-		_broker.destroyAllowance(this, freedMemory);
+		_broker.shutdownAllowance(this);
+		if(destroy)
+			_broker.destroyAllowance(this, destroyFreedMemory);
+		else if(freedMemory > 0)
+			_broker.freeMemory(this, freedMemory);
+	}
+
+	@Override
+	public synchronized boolean isShutdown() {
+		return _shutdown || _destroyed;
 	}
 }

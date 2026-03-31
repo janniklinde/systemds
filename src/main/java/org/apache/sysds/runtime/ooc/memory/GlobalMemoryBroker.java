@@ -111,10 +111,14 @@ public class GlobalMemoryBroker implements MemoryBroker {
 
 	@Override
 	public void freeMemory(MemoryAllowance allowance, long freedMemory) {
-		 synchronized(this) {
+		List<TargetUpdate> updates = List.of();
+		synchronized(this) {
 			if(freedMemory < 0)
 				throw new IllegalArgumentException();
 			_usedBytes -= freedMemory;
+			if(allowance.isShutdown()) {
+				updates = rebalance(false);
+			}
 			long share = getEqualShare();
 			if(allowance.getGrantedMemory() <= share
 				&& allowance.getGrantedMemory() + freedMemory > share) {
@@ -125,6 +129,17 @@ public class GlobalMemoryBroker implements MemoryBroker {
 				addOverconsumer(allowance);
 			}
 		}
+		applyTargetUpdates(updates);
+	}
+
+	@Override
+	public void shutdownAllowance(MemoryAllowance allowance) {
+		List<TargetUpdate> updates;
+		synchronized(this) {
+			_overconsumers.remove(allowance);
+			updates = rebalance(true);
+		}
+		applyTargetUpdates(updates);
 	}
 
 	@Override
@@ -191,6 +206,8 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		List<TargetUpdate> updates = new ArrayList<>();
 		long share = getEqualShare();
 		for(MemoryAllowance allowance : _allowances) {
+			if(allowance.isShutdown())
+				continue;
 			if(allowance.getUsedMemory() > share) {
 				updates.add(new TargetUpdate(allowance,
 					Math.min(allowance.getTargetMemory(), share + (long)((allowance.getUsedMemory() - share) * 0.9))));
@@ -203,14 +220,22 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	private List<TargetUpdate> rebalanceToRelaxed() {
 		List<TargetUpdate> updates = new ArrayList<>();
 		long free = _allowedBytes - _usedBytes;
-		for(MemoryAllowance allowance : _allowances)
+		for(MemoryAllowance allowance : _allowances) {
+			if(allowance.isShutdown())
+				continue;
 			updates.add(new TargetUpdate(allowance, allowance.getGrantedMemory() + free));
+		}
 		refreshOverconsumers(updates);
 		return updates;
 	}
 
 	private long getEqualShare() {
-		return _allowances.isEmpty() ? _allowedBytes : _allowedBytes / _allowances.size();
+		int active = 0;
+		for(MemoryAllowance allowance : _allowances) {
+			if(!allowance.isShutdown())
+				active++;
+		}
+		return active == 0 ? _allowedBytes : _allowedBytes / active;
 	}
 
 	private void addOverconsumer(MemoryAllowance allowance) {
@@ -222,6 +247,8 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		_overconsumers.clear();
 		long share = getEqualShare();
 		for(MemoryAllowance allowance : _allowances) {
+			if(allowance.isShutdown())
+				continue;
 			long target = allowance.getTargetMemory();
 			for(TargetUpdate update : updates) {
 				if(update._allowance == allowance) {
