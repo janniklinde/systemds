@@ -36,7 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
-public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCStream<T> {
+public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCallback<T>> implements OOCStream<T> {
 
 	private final AtomicInteger _availableCtr = new AtomicInteger(1);
 	private final AtomicBoolean _closed = new AtomicBoolean(false);
@@ -73,12 +73,17 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 
 	@Override
 	public void enqueue(T t) {
-		if (t == NO_MORE_TASKS)
+		enqueue(new SimpleQueueCallback<>(t, _failure));
+	}
+
+	@Override
+	public void enqueue(QueueCallback<T> cb) {
+		if(cb == NO_MORE_TASKS)
 			throw new DMLRuntimeException("Cannot enqueue NO_MORE_TASKS item");
 
 		int cnt = _availableCtr.incrementAndGet();
 
-		if (cnt <= 1) { // Then the queue was already closed and we disallow further enqueues
+		if(cnt <= 1) { // Then the queue was already closed and we disallow further enqueues
 			_availableCtr.decrementAndGet(); // Undo increment
 			throw new DMLRuntimeException("Cannot enqueue into closed SubscribableTaskQueue");
 		}
@@ -89,16 +94,16 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		final Consumer<QueueCallback<T>> fS = s;
 
 		if (fS != null) {
-			fS.accept(new SimpleQueueCallback<>(t, _failure));
+			fS.accept(cb);
 			onDeliveryFinished();
 			return;
 		}
 
-		synchronized (this) {
+		synchronized(this) {
 			// Re-check that subscriber is really null to avoid race conditions
 			if (_subscriber == null) {
 				try {
-					super.enqueueTask(t);
+					super.enqueueTask(cb);
 				}
 				catch(InterruptedException e) {
 					throw new DMLRuntimeException(e);
@@ -110,7 +115,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		}
 
 		// Last case if due to race a subscriber has been set
-		s.accept(new SimpleQueueCallback<>(t, _failure));
+		s.accept(cb);
 		onDeliveryFinished();
 	}
 
@@ -130,17 +135,34 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	}
 
 	@Override
-	public synchronized void enqueueTask(T t) {
+	public synchronized void enqueueTask(OOCStream.QueueCallback<T> t) {
 		enqueue(t);
 	}
 
 	@Override
 	public T dequeue() {
 		try {
-			if (OOCWatchdog.WATCH)
+			if(OOCWatchdog.WATCH)
 				OOCWatchdog.addEvent(_watchdogId, "dequeue -- " + getCtxMsg());
-			T deq = super.dequeueTask();
-			if (deq != NO_MORE_TASKS)
+			OOCStream.QueueCallback<T> deq = super.dequeueTask();
+			if(deq != NO_MORE_TASKS) {
+				onDeliveryFinished();
+				return deq.get();
+			}
+			return null;
+		}
+		catch(InterruptedException e) {
+			throw new DMLRuntimeException(e);
+		}
+	}
+
+	@Override
+	public OOCStream.QueueCallback<T> dequeueCB() {
+		try {
+			if(OOCWatchdog.WATCH)
+				OOCWatchdog.addEvent(_watchdogId, "dequeue -- " + getCtxMsg());
+			OOCStream.QueueCallback<T> deq = super.dequeueTask();
+			if(deq != NO_MORE_TASKS)
 				onDeliveryFinished();
 			return deq;
 		}
@@ -150,8 +172,8 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 	}
 
 	@Override
-	public synchronized T dequeueTask() {
-		return dequeue();
+	public synchronized OOCStream.QueueCallback<T> dequeueTask() {
+		return dequeueCB();
 	}
 
 	@Override
@@ -182,7 +204,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 		if(subscriber == null)
 			throw new IllegalArgumentException("Cannot set subscriber to null");
 
-		LinkedList<T> data;
+		LinkedList<QueueCallback<T>> data;
 		boolean needsEos;
 
 		synchronized(this) {
@@ -200,8 +222,8 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 				_availableCtr.incrementAndGet(); // route terminal emission via onDeliveryFinished
 		}
 
-		for (T t : data) {
-			subscriber.accept(new SimpleQueueCallback<>(t, _failure));
+		for (OOCStream.QueueCallback<T> t : data) {
+			subscriber.accept(t);
 			onDeliveryFinished();
 		}
 
@@ -209,7 +231,6 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 			onDeliveryFinished();
 	}
 
-	@SuppressWarnings("unchecked")
 	private void onDeliveryFinished() {
 		int ctr = _availableCtr.decrementAndGet();
 
@@ -217,7 +238,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<T> implements OOCSt
 			validateBlockCountOnClose();
 			Consumer<QueueCallback<T>> s = _subscriber;
 			if (s != null)
-				s.accept(new SimpleQueueCallback<>((T) LocalTaskQueue.NO_MORE_TASKS, _failure));
+				s.accept(OOCStream.eos(_failure));
 
 			if (OOCWatchdog.WATCH)
 				OOCWatchdog.registerClose(_watchdogId);

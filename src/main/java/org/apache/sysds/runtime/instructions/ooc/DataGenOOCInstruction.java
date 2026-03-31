@@ -38,6 +38,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.data.RandomMatrixGenerator;
 import org.apache.sysds.runtime.matrix.operators.UnaryOperator;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.runtime.util.UtilFunctions;
 
 public class DataGenOOCInstruction extends UnaryOOCInstruction {
@@ -202,7 +203,7 @@ public class DataGenOOCInstruction extends UnaryOOCInstruction {
 			qIn.closeInput();
 
 			if(sparsity == 0.0 && lrows < Integer.MAX_VALUE && lcols < Integer.MAX_VALUE) {
-				plannableDataGenOOC(qOut, idx -> {
+				mapOOC(qIn, qOut, idx -> {
 					long rlen = Math.min(blen, lrows - (idx.getRowIndex()-1) * blen);
 					long clen =  Math.min(blen, lcols - (idx.getColumnIndex()-1) * blen);
 					return new IndexedMatrixValue(idx, new MatrixBlock((int)rlen, (int)clen, 0.0));
@@ -211,7 +212,7 @@ public class DataGenOOCInstruction extends UnaryOOCInstruction {
 			}
 
 			if(sparsity == 1.0 && minValue == maxValue) {
-				plannableDataGenOOC(qOut, idx -> {
+				mapOOC(qIn, qOut, idx -> {
 					long rlen = Math.min(blen, lrows - (idx.getRowIndex()-1) * blen);
 					long clen =  Math.min(blen, lcols - (idx.getColumnIndex()-1) * blen);
 					return new IndexedMatrixValue(idx, new MatrixBlock((int)rlen, (int)clen, minValue));
@@ -291,8 +292,6 @@ public class DataGenOOCInstruction extends UnaryOOCInstruction {
 		else
 			throw new NotImplementedException();
 	}
-
-
 
 	private long generateSeed() {
 		// generate pseudo-random seed (because not specified)

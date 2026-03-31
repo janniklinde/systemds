@@ -20,6 +20,8 @@
 package org.apache.sysds.test.component.ooc.planning;
 
 import org.apache.sysds.common.Types;
+import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.functionobjects.Plus;
@@ -44,14 +46,22 @@ public class OOCPlanningTest extends OOCInstruction {
 
 	@Test
 	public void test() throws ExecutionException, InterruptedException {
+		DMLConfig conf = ConfigurationManager.getDMLConfig();
+		conf.setTextValue(DMLConfig.LOCAL_TMP_DIR, "testTemp/OOCPlanning");
 		OOCStream<IndexedMatrixValue> dGen1 = createWritableStream();
-		dGen1.setData(new MatrixObject(Types.ValueType.FP64, "null", new MetaData(new MatrixCharacteristics(10000, 10000, 1000))));
-		plannableDataGenOOC(dGen1, ix -> new IndexedMatrixValue(ix, new MatrixBlock(1000, 1000, 1.0)));
+		dGen1.setData(new MatrixObject(Types.ValueType.FP64, "null", new MetaData(new MatrixCharacteristics(100000, 100000, 1000))));
+		plannableDataGenOOC(dGen1, ix -> 8000152L, task -> {
+			task.setOutput(new IndexedMatrixValue(task.input(), new MatrixBlock(1000, 1000, 1.0)));
+		});
 		OOCStream<IndexedMatrixValue> dGen2 = createWritableStream();
-		dGen2.setData(new MatrixObject(Types.ValueType.FP64, "null", new MetaData(new MatrixCharacteristics(10000, 10000, 1000))));
-		plannableDataGenOOC(dGen2, ix -> new IndexedMatrixValue(ix, new MatrixBlock(1000, 1000, 1.0)));
+		dGen2.setData(new MatrixObject(Types.ValueType.FP64, "null", new MetaData(new MatrixCharacteristics(100000, 100000, 1000))));
+		plannableDataGenOOC(dGen2, ix -> 8000152L, task -> {
+			task.setOutput(new IndexedMatrixValue(task.input(), new MatrixBlock(1000, 1000, 2.0)));
+		});
 		OOCStream<IndexedMatrixValue> t2 = createWritableStream();
-		transposeMapOOC(dGen2, t2, imv -> (MatrixBlock)imv.getValue().reorgOperations(new ReorgOperator(SwapIndex.getSwapIndexFnObject()), new MatrixBlock(), -1, -1, -1));
+		transposeMapOOC(dGen2, t2, imv -> ((MatrixBlock)imv.getValue()).getInMemorySize(), imv -> {
+			return (MatrixBlock)imv.getValue().reorgOperations(new ReorgOperator(SwapIndex.getSwapIndexFnObject()), new MatrixBlock(), -1, -1, -1);
+		});
 		OOCStream<IndexedMatrixValue> join = createWritableStream();
 		joinZipOOC(dGen1, t2, join, (l, r) -> {
 			return (MatrixBlock)l.getValue().binaryOperations(new BinaryOperator(Plus.getPlusFnObject()), r.getValue(), new MatrixBlock());

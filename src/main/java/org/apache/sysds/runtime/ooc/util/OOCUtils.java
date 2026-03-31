@@ -88,4 +88,16 @@ public class OOCUtils {
 		}
 		return -1;
 	}
+
+	public static long getNumRowsOfTile(MatrixIndexes idx, long blen, long nrows) {
+		return Math.min(blen, nrows - ((idx.getRowIndex() - 1) * blen));
+	}
+
+	public static long getNumColsOfTile(MatrixIndexes idx, long blen, long ncols) {
+		return Math.min(blen, ncols - ((idx.getColumnIndex() - 1) * blen));
+	}
+
+	public static long getNumEntriesOfTile(MatrixIndexes idx, long blen, long nrows, long ncols) {
+		return getNumRowsOfTile(idx, blen, nrows) * getNumColsOfTile(idx, blen, ncols);
+	}
 }

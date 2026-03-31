@@ -35,7 +35,7 @@ import java.util.function.Consumer;
 
 public class SubOOCStream<T> implements OOCStream<T> {
 	private OOCStream<T> _sourceStream;
-	private SubscribableTaskQueue<QueueCallback<T>> _taskQueue;
+	private SubscribableTaskQueue<T> _taskQueue;
 	private QueueCallback<T> _last;
 
 	public SubOOCStream(OOCStream<T> sourceStream) {
@@ -57,10 +57,15 @@ public class SubOOCStream<T> implements OOCStream<T> {
 	public synchronized T dequeue() {
 		if(_last != null)
 			_last.close();
-		_last = _taskQueue.dequeue();
+		_last = _taskQueue.dequeueCB();
 		if(_last != null)
 			return _last.get();
 		return null;
+	}
+
+	@Override
+	public QueueCallback<T> dequeueCB() {
+		return _taskQueue.dequeueCB();
 	}
 
 	@Override
@@ -100,7 +105,7 @@ public class SubOOCStream<T> implements OOCStream<T> {
 				}
 			}
 			else
-				subscriber.accept(cb.get());
+				subscriber.accept(cb);
 		});
 	}
 

@@ -23,4 +23,8 @@ public interface MemoryBroker {
 	long requestMemory(MemoryAllowance allowance, long minSize, long maxSize);
 	void freeMemory(MemoryAllowance allowance, long freedMemory);
 	MemoryAllowance createAllowance(long initialGrant);
+
+	default MemoryAllowance createAllowance() {
+		return createAllowance(10000000); // 10MB default allowance
+	}
 }

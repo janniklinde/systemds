@@ -55,6 +55,11 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	}
 
 	@Override
+	public void enqueue(QueueCallback<IndexedMatrixValue> callback) {
+		throw new DMLRuntimeException("Cannot enqueue to a playback stream");
+	}
+
+	@Override
 	public void closeInput() {
 		throw new DMLRuntimeException("Cannot close a playback stream");
 	}
@@ -69,6 +74,21 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 				_lastDequeue.close();
 			_lastDequeue = _streamCache.get(_streamIdx.getAndIncrement()).get();
 			return _lastDequeue.get();
+		} catch (InterruptedException | ExecutionException e) {
+			throw new DMLRuntimeException(e);
+		}
+	}
+
+	@Override
+	public QueueCallback<IndexedMatrixValue> dequeueCB() {
+		if (_subscriberSet.get())
+			throw new IllegalStateException("Cannot dequeue from a playback stream if a subscriber has been set");
+
+		try {
+			if (_lastDequeue != null)
+				_lastDequeue.close();
+			_lastDequeue = _streamCache.get(_streamIdx.getAndIncrement()).get();
+			return _lastDequeue;
 		} catch (InterruptedException | ExecutionException e) {
 			throw new DMLRuntimeException(e);
 		}

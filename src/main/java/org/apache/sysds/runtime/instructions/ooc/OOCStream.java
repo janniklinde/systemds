@@ -31,7 +31,12 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 
 	void enqueue(T t);
 
+	void enqueue(QueueCallback<T> callback);
+
+	@Deprecated
 	T dequeue();
+
+	QueueCallback<T> dequeueCB();
 
 	void closeInput();
 
@@ -81,6 +86,10 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 	class SimpleQueueCallback<T> implements QueueCallback<T> {
 		private final T _result;
 		private DMLRuntimeException _failure;
+
+		public SimpleQueueCallback(T result) {
+			this(result, null);
+		}
 
 		public SimpleQueueCallback(T result, DMLRuntimeException failure) {
 			this._result = result;

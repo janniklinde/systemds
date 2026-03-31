@@ -19,6 +19,8 @@
 
 package org.apache.sysds.runtime.ooc.memory;
 
+import org.apache.sysds.runtime.DMLRuntimeException;
+
 public class SyncMemoryAllowance implements MemoryAllowance {
 	protected final MemoryBroker _broker;
 	protected long _usedBytes;
@@ -43,19 +45,33 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		_grantedBytes += _broker.requestMemory(this, _usedBytes + bytes - _grantedBytes, Math.min(_grantedBytes, bytes) * 2);
 		if(_usedBytes + bytes <= _grantedBytes) {
 			_usedBytes += bytes;
+			notify();
 			return true;
 		}
 		return false;
 	}
 
 	@Override
+	public synchronized void reserveBlocking(long bytes) {
+		while(!tryReserve(bytes)) {
+			try {
+				wait();
+			} catch(InterruptedException e) {
+				throw new DMLRuntimeException(e);
+			}
+		}
+		notify();
+	}
+
+	@Override
 	public synchronized void release(long bytes) {
 		_usedBytes -= bytes;
-		if(_grantedBytes < _targetBytes) {
+		if(_grantedBytes > _targetBytes) {
 			long oldGrantedBytes = _grantedBytes;
 			_grantedBytes = Math.max(_usedBytes, _targetBytes);
 			_broker.freeMemory(this, oldGrantedBytes - _grantedBytes);
 		}
+		notify();
 	}
 
 	@Override
@@ -74,9 +90,8 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	}
 
 	@Override
-	public void setTargetMemory(long targetMemory) {
+	public synchronized void setTargetMemory(long targetMemory) {
 		_targetBytes = targetMemory;
-		if(_grantedBytes < _targetBytes)
-			_grantedBytes = _broker.requestMemory(this, 0, _targetBytes - _grantedBytes);
+		notify();
 	}
 }

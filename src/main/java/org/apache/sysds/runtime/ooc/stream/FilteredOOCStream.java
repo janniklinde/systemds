@@ -49,6 +49,11 @@ public class FilteredOOCStream<T> implements OOCStream<T> {
 	}
 
 	@Override
+	public void enqueue(QueueCallback<T> callback) {
+		_sourceStream.enqueue(callback);
+	}
+
+	@Override
 	public synchronized T dequeue() {
 		T next;
 		while((next = _sourceStream.dequeue()) != null) {
@@ -56,6 +61,11 @@ public class FilteredOOCStream<T> implements OOCStream<T> {
 				return next;
 		}
 		return null;
+	}
+
+	@Override
+	public QueueCallback<T> dequeueCB() {
+		return _sourceStream.dequeueCB();
 	}
 
 	@Override

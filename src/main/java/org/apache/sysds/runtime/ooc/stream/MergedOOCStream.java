@@ -39,7 +39,7 @@ import java.util.function.Consumer;
 
 public class MergedOOCStream<T> implements OOCStream<T> {
 	private final List<OOCStream<T>> _sources;
-	private final SubscribableTaskQueue<QueueCallback<T>> _taskQueue;
+	private final SubscribableTaskQueue<T> _taskQueue;
 	private final AtomicInteger _openSources;
 	private final AtomicBoolean _failed;
 	private final CachingStream _sharedCache;
@@ -135,13 +135,28 @@ public class MergedOOCStream<T> implements OOCStream<T> {
 	}
 
 	@Override
+	public void enqueue(QueueCallback<T> callback) {
+		throw new UnsupportedOperationException();
+	}
+
+	@Override
 	public synchronized T dequeue() {
 		if(_last != null)
 			_last.close();
-		_last = _taskQueue.dequeue();
+		_last = _taskQueue.dequeueCB();
 		if(_last == null)
 			return null;
 		return _last.get();
+	}
+
+	@Override
+	public QueueCallback<T> dequeueCB() {
+		if(_last != null)
+			_last.close();
+		_last = _taskQueue.dequeueCB();
+		if(_last == null)
+			return null;
+		return _last;
 	}
 
 	@Override
@@ -185,7 +200,7 @@ public class MergedOOCStream<T> implements OOCStream<T> {
 				}
 				return;
 			}
-			subscriber.accept(cb.get());
+			subscriber.accept(cb);
 		});
 	}
 

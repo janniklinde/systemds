@@ -35,11 +35,13 @@ import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
-import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.memory.OOCMatrixStreamTask;
+import org.apache.sysds.runtime.ooc.memory.OOCStreamTask;
 import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.PlannableDataGenOOCPrimitive;
-import org.apache.sysds.runtime.ooc.primitives.PlannableOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TransposeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.stream.FilteredOOCStream;
@@ -66,9 +68,11 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ForkJoinTask;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
@@ -225,10 +229,60 @@ public abstract class OOCInstruction extends Instruction {
 		return out;
 	}
 
-	protected <R> CompletableFuture<Void> plannableDataGenOOC(OOCStream<R> qOut, Function<MatrixIndexes, R> generator) {
+	protected CompletableFuture<Void> plannableDataGenOOC(OOCStream<IndexedMatrixValue> qOut, Function<MatrixIndexes, Long> allocator, Consumer<OOCMatrixStreamTask<MatrixIndexes>> generator) {
+		addInStream();
+		addOutStream(qOut);
 		PlannableDataGenOOCPrimitive primitive = new PlannableDataGenOOCPrimitive(qOut);
 		qOut.assignPrimitive(primitive);
-		return mapOOC(primitive.getRequestStream(), qOut, generator);
+		final MemoryAllowance allowance = GlobalMemoryBroker.get().createAllowance();
+		OOCStream<OOCMatrixStreamTask<MatrixIndexes>> allowedStream = createWritableStream();
+		new Thread(() -> {
+			MatrixIndexes current;
+			while((current = primitive.getRequestStream().dequeue()) != null) {
+				long requiredBytes = allocator.apply(current);
+				allowance.reserveBlocking(requiredBytes);
+				OOCMatrixStreamTask<MatrixIndexes> task = new OOCMatrixStreamTask<>(allowance, requiredBytes, new OOCStream.SimpleQueueCallback<>(current));
+				allowedStream.enqueue(task);
+			}
+			allowedStream.closeInput();
+		}).start();
+
+		AtomicInteger deferredCtr = new AtomicInteger(1);
+		CompletableFuture<Void> future = new CompletableFuture<>();
+		submitOOCTasks(allowedStream, tmp -> {
+			var task = tmp.get();
+			OOCStream.QueueCallback<IndexedMatrixValue> out;
+			try(task) {
+				generator.accept(task);
+				out = task.output();
+			}
+			catch(Exception e) {
+				throw DMLRuntimeException.of(e);
+			}
+
+			if(out != null) {
+				deferredCtr.incrementAndGet();
+				// Defer to clean the stack of large objects
+				TaskContext.defer(() -> {
+					qOut.enqueue(out);
+					if(deferredCtr.decrementAndGet() == 0)
+						future.complete(null);
+				});
+			}
+		})
+			.thenRun(() -> {
+				if(deferredCtr.decrementAndGet() == 0)
+					future.complete(null);
+			})
+			.exceptionally(err -> {
+				future.completeExceptionally(err);
+				return null;
+			});
+		return future.thenRun(qOut::closeInput).exceptionally(err -> {
+			DMLRuntimeException dmlErr = DMLRuntimeException.of(err);
+			qOut.propagateFailure(dmlErr);
+			throw dmlErr;
+		});
 	}
 
 	protected CompletableFuture<Void> equiMapOOC(OOCStream<IndexedMatrixValue> qIn, OOCStream<IndexedMatrixValue> qOut, Function<IndexedMatrixValue, MatrixBlock> mapper) {
@@ -237,12 +291,103 @@ public abstract class OOCInstruction extends Instruction {
 		return mapOOC(qIn, qOut, in -> new IndexedMatrixValue(in.getIndexes(), mapper.apply(in)));
 	}
 
-	protected CompletableFuture<Void> transposeMapOOC(OOCStream<IndexedMatrixValue> qIn, OOCStream<IndexedMatrixValue> qOut, Function<IndexedMatrixValue, MatrixBlock> mapper) {
+	protected CompletableFuture<Void> transposeMapOOC(OOCStream<IndexedMatrixValue> qIn,
+		OOCStream<IndexedMatrixValue> qOut, Function<IndexedMatrixValue, Long> allocator,
+		Function<IndexedMatrixValue, MatrixBlock> mapper) {
 		TransposeOOCPrimitive primitive = new TransposeOOCPrimitive(qIn, qOut);
 		qOut.assignPrimitive(primitive);
-		return mapOOC(qIn, qOut, in -> {
+		return mapOOC(qIn, qOut, allocator, task -> {
+			IndexedMatrixValue in = task.input();
 			MatrixIndexes ixOut = new MatrixIndexes(in.getIndexes().getColumnIndex(), in.getIndexes().getRowIndex());
-			return new IndexedMatrixValue(ixOut, mapper.apply(in));
+			task.setOutput(new IndexedMatrixValue(ixOut, mapper.apply(in)));
+		});
+	}
+
+	protected <T> CompletableFuture<Void> mapOOC(OOCStream<T> qIn, OOCStream<IndexedMatrixValue> qOut,
+		Function<T, Long> allocator,
+		Consumer<OOCStreamTask<T, IndexedMatrixValue>> mapper) {
+		final MemoryAllowance allowance = GlobalMemoryBroker.get().createAllowance();
+		final OOCStream<T> intermediateStream = createWritableStream();
+		final AtomicReference<LinkedBlockingQueue<OOCStream.QueueCallback<T>>> queueRef = new AtomicReference<>();
+		final Thread t = new Thread(() -> {
+			var queue = queueRef.get();
+			OOCStream.QueueCallback<T> next;
+			try {
+				while(!(next = queue.take()).isEos()) {
+					long requiredBytes = allocator.apply(next.get());
+					allowance.reserveBlocking(requiredBytes);
+					intermediateStream.enqueue(next);
+				}
+				intermediateStream.closeInput();
+			} catch(InterruptedException e) {
+				e.printStackTrace();
+			}
+		});
+
+		AtomicInteger deferredCtr = new AtomicInteger(1);
+		CompletableFuture<Void> future = new CompletableFuture<>();
+
+		submitOOCTasks(qIn, tmp -> {
+			var in = tmp.get();
+			long requiredBytes = allocator.apply(in);
+			if(allowance.tryReserve(requiredBytes)) {
+				var task = new OOCMatrixStreamTask<>(allowance, requiredBytes, tmp);
+				OOCStream.QueueCallback<IndexedMatrixValue> out;
+				try(task) {
+					mapper.accept(task);
+					out = task.output();
+				}
+
+				if(out != null) {
+					deferredCtr.incrementAndGet();
+					// Defer to clean the stack of large objects
+					TaskContext.defer(() -> {
+						qOut.enqueue(out);
+						if(deferredCtr.decrementAndGet() == 0)
+							future.complete(null);
+					});
+				}
+			}
+			else {
+				deferredCtr.incrementAndGet();
+				var queue = queueRef.get();
+				if(queue != null) {
+					queue.add(tmp.keepOpen());
+					return;
+				}
+				if(queueRef.compareAndSet(null, new LinkedBlockingQueue<>()))
+					t.start();
+				queueRef.get().add(tmp.keepOpen());
+			}
+		})
+			.thenRun(() -> {
+				if(deferredCtr.decrementAndGet() == 0)
+					future.complete(null);
+			})
+			.exceptionally(err -> {
+				future.completeExceptionally(err);
+				return null;
+			});
+
+		submitOOCTasks(intermediateStream, tmp -> {
+			var task = new OOCMatrixStreamTask<>(allowance, allocator.apply(tmp.get()), tmp);
+			OOCStream.QueueCallback<IndexedMatrixValue> out;
+			try(task) {
+				mapper.accept(task);
+				out = task.output();
+			}
+
+			if(out != null)
+				qOut.enqueue(out);
+			if(deferredCtr.decrementAndGet() == 0)
+				future.complete(null);
+		});
+
+		return future.thenRun(intermediateStream::closeInput).thenRun(qOut::closeInput)
+			.exceptionally(err -> {
+			DMLRuntimeException dmlErr = DMLRuntimeException.of(err);
+			qOut.propagateFailure(dmlErr);
+			throw dmlErr;
 		});
 	}
 
@@ -617,12 +762,30 @@ public abstract class OOCInstruction extends Instruction {
 		}
 	}
 
-	protected CompletableFuture<Void> joinZipOOC(OOCStream<IndexedMatrixValue> qIn1, OOCStream<IndexedMatrixValue> qIn2, OOCStream<IndexedMatrixValue> qOut, BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> zipper) {
-		JoinOOCPrimitive primitive = new JoinOOCPrimitive(List.of(qIn1, qIn2), qOut);
+	protected CompletableFuture<Void> joinZipOOC(List<OOCStream<IndexedMatrixValue>> qIn, OOCStream<IndexedMatrixValue> qOut, BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> zipper) {
+		JoinOOCPrimitive primitive = new JoinOOCPrimitive(new ArrayList<>(qIn), qOut);
 		qOut.assignPrimitive(primitive);
-		return joinOOC(qIn1, qIn2, qOut, (l, r) -> {
-			return new IndexedMatrixValue(l.getIndexes(), zipper.apply(l, r));
-		}, IndexedMatrixValue::getIndexes);
+		MemoryAllowance allowance = GlobalMemoryBroker.get().createAllowance();
+
+		boolean[] cached = new boolean[qIn.size()];
+		final OOCStream<IndexedMatrixValue>[] cacheStreams = new  OOCStream[qIn.size()];
+		final CachingStream[] caches = new  CachingStream[qIn.size()];
+		final Map<MatrixIndexes, OOCStream.QueueCallback<IndexedMatrixValue>>[] maps = new Map[qIn.size()];
+
+		for(int i = 0; i < qIn.size(); i++) {
+			cached[i] = qIn.get(i).hasStreamCache();
+			cacheStreams[i] = createWritableStream();
+			caches[i] = cached[i] ? qIn.get(i).getStreamCache() : new CachingStream(cacheStreams[i]);
+			maps[i] = new ConcurrentHashMap<>();
+		}
+
+		submitOOCTasks(qIn, (i, cb) -> {
+
+		}, (i, cb) -> {
+
+		}, null);
+
+		return null;
 	}
 
 	protected <R> CompletableFuture<Void> joinOOC(OOCStream<IndexedMatrixValue> qIn1, OOCStream<IndexedMatrixValue> qIn2, OOCStream<R> qOut, BiFunction<IndexedMatrixValue, IndexedMatrixValue, R> mapper, Function<IndexedMatrixValue, MatrixIndexes> on) {
