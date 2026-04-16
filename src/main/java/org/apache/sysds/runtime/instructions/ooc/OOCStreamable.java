@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
@@ -61,4 +62,17 @@ public interface OOCStreamable<T> {
 	void clearDownstreamMessageRelays();
 
 	void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform);
+
+	default BiFunction<Boolean, IndexRange, IndexRange> getIXTransform() {
+		return null;
+	}
+
+	default OOCPrimitive getPrimitive() {
+		return null;
+	}
+
+	default void assignPrimitive(OOCPrimitive primitive) {
+		// No-op by default. Concrete stream implementations can override this
+		// once the planner is wired into execution.
+	}
 }

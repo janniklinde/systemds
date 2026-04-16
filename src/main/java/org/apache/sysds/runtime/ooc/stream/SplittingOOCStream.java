@@ -111,7 +111,17 @@ public class SplittingOOCStream<T> implements OOCStream<T> {
 	}
 
 	@Override
+	public void enqueue(QueueCallback<T> callback) {
+		throw new UnsupportedOperationException();
+	}
+
+	@Override
 	public T dequeue() {
+		throw new UnsupportedOperationException();
+	}
+
+	@Override
+	public QueueCallback<T> dequeueCB() {
 		throw new UnsupportedOperationException();
 	}
 
@@ -216,5 +226,10 @@ public class SplittingOOCStream<T> implements OOCStream<T> {
 	@Override
 	public void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
 		throw new UnsupportedOperationException();
+	}
+
+	@Override
+	public BiFunction<Boolean, IndexRange, IndexRange> getIXTransform() {
+		return _sourceStream.getIXTransform();
 	}
 }
