@@ -32,6 +32,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.test.AutomatedTestBase;
 import org.apache.sysds.test.TestUtils;
 import org.junit.Assert;
@@ -288,12 +289,12 @@ public class SplitMergeOOCStreamTest extends AutomatedTestBase {
 		private CompletableFuture<Void> collectToMap(OOCStream<IndexedMatrixValue> stream, Map<Long, IndexedMatrixValue> out) {
 			addInStream(stream);
 			addOutStream();
-			return submitOOCTasks(stream, cb -> {
+			return OOCInstructionUtils.submitOOCTasks(stream, cb -> {
 				IndexedMatrixValue item = cb.get();
 				long k = key(item);
 				IndexedMatrixValue prev = out.putIfAbsent(k, item);
 				Assert.assertNull("Duplicate output item for key " + k, prev);
-			});
+			}, getContext());
 		}
 	}
 }

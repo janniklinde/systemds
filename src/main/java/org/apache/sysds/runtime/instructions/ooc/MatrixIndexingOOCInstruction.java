@@ -36,6 +36,7 @@ import org.apache.sysds.runtime.matrix.data.OperationsOnMatrixValues;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.ooc.stream.FilteredOOCStream;
 import org.apache.sysds.runtime.ooc.stream.SubOOCStream;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.util.IndexRange;
 import org.apache.sysds.runtime.util.UtilFunctions;
 
@@ -239,7 +240,7 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 			cachedStream.incrSubscriberCount(1); // We may require re-consumption of blocks (up to 4 times)
 			OOCStream<IndexedMatrixValue> readStream = cachedStream.getReadStream();
 
-			submitOOCTasks(readStream, tmp -> {
+			OOCInstructionUtils.submitOOCTasks(readStream, tmp -> {
 				boolean completed = aligner.putNext(tmp.get().getIndexes(), tmp.get().getIndexes(), (idx, sector) -> {
 					int targetBlockRow = (int) (idx.getRowIndex() - 1);
 					int targetBlockCol = (int) (idx.getColumnIndex() - 1);
@@ -318,7 +319,7 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 
 				if(completed)
 					future.complete(null);
-			}).thenRun(() -> {
+			}, getContext()).thenRun(() -> {
 				aligner.close();
 				qOut.closeInput();
 			}).exceptionally(err -> {
@@ -357,7 +358,7 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 				addOutStream(qOut);
 				mOut.setStreamHandle(qOut);
 
-				submitOOCTasks(qLhs, cb -> {
+				OOCInstructionUtils.submitOOCTasks(qLhs, cb -> {
 					IndexedMatrixValue lhs = cb.get();
 					MatrixIndexes idx = lhs.getIndexes();
 					if(idx.getRowIndex() != targetBlockRow || idx.getColumnIndex() != targetBlockCol) {
@@ -370,7 +371,7 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 					updated.set(targetLocalRow, targetLocalCol, scalarValue);
 					updated.examSparsity();
 					qOut.enqueue(new IndexedMatrixValue(new MatrixIndexes(idx), updated));
-				}).thenRun(() -> {
+				}, getContext()).thenRun(() -> {
 					qOut.closeInput();
 					qOutRaw.closeInput();
 				}).exceptionally(err -> {
@@ -416,7 +417,7 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 			mOut.setStreamHandle(qOut);
 
 			final Map<MatrixIndexes, LeftIndexAccumulator> aggregators = new ConcurrentHashMap<>();
-			submitOOCTasks(List.of(qLhs, qRhs), (streamIdx, cb) -> {
+			OOCInstructionUtils.submitOOCTasks(List.of(qLhs, qRhs), (streamIdx, cb) -> {
 				if(streamIdx == 0) {
 					IndexedMatrixValue lhs = cb.get();
 					MatrixIndexes lhsIx = lhs.getIndexes();
@@ -463,7 +464,7 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 						}
 					}
 				}
-			}).thenRun(() -> {
+			}, getContext()).thenRun(() -> {
 				if(!aggregators.isEmpty())
 					throw new DMLRuntimeException(
 						"LEFT_INDEX finished with unfinished aggregators: " + aggregators.size());

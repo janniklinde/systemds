@@ -27,11 +27,32 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
 
 public class StreamContext {
+	private final int _callerId;
+	private final String _opcode;
+	private final LongAdder _localStatisticsLongAdder = new LongAdder();
 	private Set<OOCStream<?>> _inStreams;
 	private Set<OOCStream<?>> _outStreams;
 	private DMLRuntimeException _failure;
+
+	public StreamContext(int callerId, String opcode) {
+		this._callerId = callerId;
+		this._opcode = opcode;
+	}
+
+	public int getCallerId() {
+		return _callerId;
+	}
+
+	public String getExtendedOpcode() {
+		return _opcode;
+	}
+
+	public LongAdder getLocalStatisticsLongAdder() {
+		return _localStatisticsLongAdder;
+	}
 
 	public boolean inStreamsDefined() {
 		return _inStreams != null;
@@ -94,7 +115,7 @@ public class StreamContext {
 	}
 
 	public StreamContext copy() {
-		StreamContext cpy = new StreamContext();
+		StreamContext cpy = new StreamContext(_callerId, _opcode);
 		cpy._inStreams = _inStreams;
 		cpy._outStreams = _outStreams;
 		return cpy;
