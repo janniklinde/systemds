@@ -19,13 +19,17 @@
 
 package org.apache.sysds.runtime.ooc.util;
 
+import org.apache.commons.lang3.NotImplementedException;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.util.IndexRange;
+import org.jetbrains.annotations.NotNull;
 
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 
 public class OOCUtils {
@@ -69,5 +73,68 @@ public class OOCUtils {
 			return dc.getNumBlocks();
 		}
 		return -1;
+	}
+
+	public static Iterable<MatrixIndexes> getAccessPattern(DataCharacteristics dc, OOCAccessPattern pattern) {
+		long rows = dc.getNumRowBlocks();
+		long cols = dc.getNumColBlocks();
+		if(dc.getRows() == 0 || dc.getCols() == 0) {
+			rows = 0;
+			cols = 0;
+		}
+		return getAccessPattern(rows, cols, pattern);
+	}
+
+	public static Iterable<MatrixIndexes> getAccessPattern(long nRowTiles, long nColTiles, OOCAccessPattern pattern) {
+		return switch(pattern) {
+			case COL_MAJOR -> colMajorDriver(nRowTiles, nColTiles);
+			default -> rowMajorDriver(nRowTiles, nColTiles);
+		};
+	}
+
+	private static Iterable<MatrixIndexes> rowMajorDriver(long nRowTiles, long nColTiles) {
+		return new Iterable<>() {
+			@Override
+			public @NotNull Iterator<MatrixIndexes> iterator() {
+				return new Iterator<>() {
+					final long max = nRowTiles * nColTiles;
+					long i = 0;
+					@Override
+					public boolean hasNext() {
+						return i < max;
+					}
+
+					@Override
+					public MatrixIndexes next() {
+						MatrixIndexes idx = new MatrixIndexes(i / nColTiles + 1, i % nColTiles + 1);
+						i++;
+						return idx;
+					}
+				};
+			}
+		};
+	}
+
+	private static Iterable<MatrixIndexes> colMajorDriver(long nRowTiles, long nColTiles) {
+		return new Iterable<>() {
+			@Override
+			public @NotNull Iterator<MatrixIndexes> iterator() {
+				return new Iterator<>() {
+					final long max = nRowTiles * nColTiles;
+					long i = 0;
+					@Override
+					public boolean hasNext() {
+						return i < max;
+					}
+
+					@Override
+					public MatrixIndexes next() {
+						MatrixIndexes idx = new MatrixIndexes(i % nRowTiles + 1, i / nRowTiles + 1);
+						i++;
+						return idx;
+					}
+				};
+			}
+		};
 	}
 }

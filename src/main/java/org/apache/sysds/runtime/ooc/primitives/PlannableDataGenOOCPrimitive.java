@@ -19,18 +19,35 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
+import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
+import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.stream.StreamContext;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.function.Function;
+import java.util.function.ToLongFunction;
 
 public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
-	private final OOCStreamable<?> _outputStream;
+	private final OOCStreamable<IndexedMatrixValue> _outputStream;
+	private final StreamContext _sc;
+	private final Function<MatrixIndexes, MatrixBlock> _fn;
 
-	public PlannableDataGenOOCPrimitive(OOCStreamable<?> outputStream) {
+	public PlannableDataGenOOCPrimitive(OOCStreamable<IndexedMatrixValue> outputStream, Function<MatrixIndexes, MatrixBlock> fn, StreamContext sc) {
 		super(Collections.emptyList());
 		_outputStream = outputStream;
+		_sc = sc;
+		_fn = fn;
 	}
 
 	@Override
@@ -56,6 +73,35 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 
 	@Override
 	public void startExecution() {
-		// TODO
+		final OOCStream<MatrixIndexes> stream = new SubscribableTaskQueue<>();
+		final OOCStream<IndexedMatrixValue> out = _outputStream.getWriteStream();
+		new Thread(() -> {
+			for(MatrixIndexes ix : OOCUtils.getAccessPattern(_outputStream.getDataCharacteristics(), _pattern)) {
+				_allowance.reserveBlocking(_allocFn.applyAsLong(ix));
+				stream.enqueue(ix);
+			}
+			stream.closeInput();
+		}).start();
+
+		if(_crossBoundaries) {
+			OOCInstructionUtils.submitOOCTasks(stream, cb -> {
+				var imv = new IndexedMatrixValue(cb.get(), _fn.apply(cb.get()));
+				var cbOut = new InMemoryQueueCallback(imv, null, _allowance, _allocFn.applyAsLong(cb.get()));
+				out.enqueue(cbOut);
+			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
+				out.propagateFailure(DMLRuntimeException.of(t));
+				return null;
+			});
+		}
+		else {
+			OOCInstructionUtils.submitOOCTasks(stream, cb -> {
+				var imv = new IndexedMatrixValue(cb.get(), _fn.apply(cb.get()));
+				var cbOut = new OOCStream.SimpleQueueCallback<>(imv, null);
+				out.enqueue(cbOut);
+			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
+				out.propagateFailure(DMLRuntimeException.of(t));
+				return null;
+			});
+		}
 	}
 }

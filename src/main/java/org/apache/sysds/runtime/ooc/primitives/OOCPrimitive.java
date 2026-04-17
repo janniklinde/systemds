@@ -20,16 +20,22 @@
 package org.apache.sysds.runtime.ooc.primitives;
 
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.ToLongFunction;
 
 public abstract class OOCPrimitive {
 	private final List<OOCPrimitive> _children;
 	private final List<OOCPrimitive> _parents;
 	protected OOCAccessPattern _pattern;
+	protected MemoryAllowance _allowance;
+	protected ToLongFunction<MatrixIndexes> _allocFn;
+	protected boolean _crossBoundaries;
 
 	public OOCPrimitive(List<OOCPrimitive> children) {
 		_children = new ArrayList<>();
@@ -43,6 +49,12 @@ public abstract class OOCPrimitive {
 		}
 		_parents = new ArrayList<>();
 		_pattern = OOCAccessPattern.UNSET;
+	}
+
+	public void inject(MemoryAllowance allowance, ToLongFunction<MatrixIndexes> allocFn, boolean crossBoundaries) {
+		_allowance = allowance;
+		_allocFn = allocFn;
+		_crossBoundaries = crossBoundaries;
 	}
 
 	public List<OOCPrimitive> getChildren() {

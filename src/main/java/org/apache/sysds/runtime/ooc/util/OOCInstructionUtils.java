@@ -22,6 +22,12 @@ package org.apache.sysds.runtime.ooc.util;
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.PlannableDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.stream.TaskContext;
@@ -38,11 +44,22 @@ import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.ToLongFunction;
 
 public class OOCInstructionUtils {
 	public static final ExecutorService COMPUTE_EXECUTOR = CommonThreadPool.get();
 	public static final AtomicInteger COMPUTE_IN_FLIGHT = new AtomicInteger(0);
 	public static final AtomicInteger NEXT_STREAM_ID = new AtomicInteger(0);
+
+	public static void dataGen(OOCStream<IndexedMatrixValue> out, Function<MatrixIndexes, MatrixBlock> fn, StreamContext sc) {
+		OOCPrimitive primitive = new PlannableDataGenOOCPrimitive(out, fn, sc);
+		out.assignPrimitive(primitive);
+	}
+
+	public static void equiMap(OOCStream<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
+		OOCPrimitive primitive = new MappingOOCPrimitive(in, out, fn, sc);
+		out.assignPrimitive(primitive);
+	}
 
 	public static <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues,
 		BiConsumer<Integer, OOCStream.QueueCallback<T>> consumer, StreamContext sc) {
