@@ -24,6 +24,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
+import org.apache.sysds.runtime.ooc.planning.OOCRegionBinding;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -51,10 +52,10 @@ public abstract class OOCPrimitive {
 		_pattern = OOCAccessPattern.UNSET;
 	}
 
-	public void inject(MemoryAllowance allowance, ToLongFunction<MatrixIndexes> allocFn, boolean crossBoundaries) {
-		_allowance = allowance;
-		_allocFn = allocFn;
-		_crossBoundaries = crossBoundaries;
+	public void bindRegion(OOCRegionBinding binding) {
+		_allowance = binding.allowance();
+		_allocFn = binding.allocFn();
+		_crossBoundaries = binding.crossesBoundary();
 	}
 
 	public List<OOCPrimitive> getChildren() {

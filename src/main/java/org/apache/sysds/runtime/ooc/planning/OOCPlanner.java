@@ -84,7 +84,7 @@ public class OOCPlanner {
 
 		for(int i = 0; i < region.size(); i++) {
 			boolean crossBoundaries = i == 0;
-			region.get(i).inject(allowance, allocFn, crossBoundaries);
+			region.get(i).bindRegion(new OOCRegionBinding(allowance, allocFn, crossBoundaries));
 		}
 	}
 
