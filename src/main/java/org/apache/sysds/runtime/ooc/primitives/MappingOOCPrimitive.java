@@ -63,6 +63,26 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	public boolean isTileLocal() {
+		return true;
+	}
+
+	@Override
+	public boolean isOneToOne() {
+		return true;
+	}
+
+	@Override
+	public boolean isIndexPreserving() {
+		return true;
+	}
+
+	@Override
+	public long getDenseTileMemoryFactor() {
+		return 2;
+	}
+
+	@Override
 	public void inferPatterns() {
 		_pattern = getPattern(_inputStreamable);
 		getParents().forEach(OOCPrimitive::inferPatterns);

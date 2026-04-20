@@ -25,9 +25,7 @@ import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
-import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
-import org.apache.sysds.runtime.ooc.primitives.PlannableDataGenOOCPrimitive;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -117,11 +115,14 @@ public class OOCPlanner {
 	}
 
 	private static boolean isFusiblePrimitive(OOCPrimitive primitive) {
-		return primitive instanceof PlannableDataGenOOCPrimitive || primitive instanceof MappingOOCPrimitive;
+		return primitive.isTileLocal() && !primitive.isMaterializationBoundary();
 	}
 
 	private static boolean canFuseDownstream(OOCPrimitive downstream, OOCPrimitive upstream) {
-		return downstream instanceof MappingOOCPrimitive
+		return downstream.isTileLocal()
+			&& downstream.isOneToOne()
+			&& downstream.isIndexPreserving()
+			&& !downstream.isMaterializationBoundary()
 			&& downstream.getChildren().size() == 1
 			&& upstream.getParents().size() == 1
 			&& isFusiblePrimitive(upstream);
@@ -150,10 +151,7 @@ public class OOCPlanner {
 		DataCharacteristics dc = null;
 
 		for(OOCPrimitive primitive : region) {
-			if(primitive instanceof MappingOOCPrimitive)
-				primitiveFactor = Math.max(primitiveFactor, 2);
-			else if(primitive instanceof PlannableDataGenOOCPrimitive)
-				primitiveFactor = Math.max(primitiveFactor, 1);
+			primitiveFactor = Math.max(primitiveFactor, primitive.getDenseTileMemoryFactor());
 
 			if(dc == null && !primitive.getOutputStreams().isEmpty())
 				dc = primitive.getOutputStreams().get(0).getDataCharacteristics();

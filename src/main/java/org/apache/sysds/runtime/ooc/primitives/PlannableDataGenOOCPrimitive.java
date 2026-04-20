@@ -27,7 +27,6 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
-import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
@@ -36,7 +35,6 @@ import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.Function;
-import java.util.function.ToLongFunction;
 
 public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _outputStream;
@@ -58,6 +56,21 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	@Override
 	public List<OOCStreamable<?>> getOutputStreams() {
 		return List.of(_outputStream);
+	}
+
+	@Override
+	public boolean isEmissionControlled() {
+		return true;
+	}
+
+	@Override
+	public boolean isTileLocal() {
+		return true;
+	}
+
+	@Override
+	public long getDenseTileMemoryFactor() {
+		return 1;
 	}
 
 	@Override

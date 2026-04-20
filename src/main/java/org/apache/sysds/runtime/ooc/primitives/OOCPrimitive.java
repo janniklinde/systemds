@@ -73,6 +73,30 @@ public abstract class OOCPrimitive {
 		return false;
 	}
 
+	public boolean isEmissionControlled() {
+		return false;
+	}
+
+	public boolean isTileLocal() {
+		return false;
+	}
+
+	public boolean isOneToOne() {
+		return false;
+	}
+
+	public boolean isIndexPreserving() {
+		return false;
+	}
+
+	public boolean isMaterializationBoundary() {
+		return false;
+	}
+
+	public long getDenseTileMemoryFactor() {
+		return 1;
+	}
+
 	public boolean isLeaf() {
 		return _children.isEmpty();
 	}
