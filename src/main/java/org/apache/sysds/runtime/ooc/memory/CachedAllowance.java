@@ -48,9 +48,13 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	private long _handoverSchedulingRequestedBytes;
 
 	public CachedAllowance(MemoryBroker broker) {
+		this(broker, INITIAL_SLOTS);
+	}
+
+	public CachedAllowance(MemoryBroker broker, int numTiles) {
 		super(broker);
 		_streamId = CachingStream._streamSeq.getNextID();
-		_slots = new AtomicReferenceArray<>(INITIAL_SLOTS);
+		_slots = new AtomicReferenceArray<>(numTiles);
 		_nextBlockId = new AtomicLong(0);
 		_pendingHandoverBytes = 0;
 		_highestPopulatedIndex = -1;
