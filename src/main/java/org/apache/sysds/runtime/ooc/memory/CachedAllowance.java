@@ -25,8 +25,8 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
-import org.apache.sysds.runtime.ooc.cache.SpillableObject;
 
+import java.lang.ref.SoftReference;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicLong;
@@ -97,13 +97,20 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			synchronized(entry) {
 				if(entry._local != null)
 					local = entry._local.keepOpen();
-				else if(entry._spillFuture != null) {
+				else if(entry._softLocal != null) {
+					IndexedMatrixValue softLocal = entry._softLocal.get();
+					if(softLocal != null)
+						local = new OOCStream.SimpleQueueCallback<>(softLocal, null);
+					else
+						entry._softLocal = null;
+				}
+				if(local == null && entry._spillFuture != null) {
 					spillFuture = entry._spillFuture;
 					cacheKey = entry._cacheKey;
 				}
-				else if(entry._cacheKey != null)
+				else if(local == null && entry._cacheKey != null)
 					cacheKey = entry._cacheKey;
-				else
+				else if(local == null)
 					return null;
 			}
 
@@ -141,6 +148,12 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		synchronized(entry) {
 			if(entry._local != null)
 				return CompletableFuture.completedFuture(entry._local.keepOpen());
+			if(entry._softLocal != null) {
+				IndexedMatrixValue softLocal = entry._softLocal.get();
+				if(softLocal != null)
+					return CompletableFuture.completedFuture(new OOCStream.SimpleQueueCallback<>(softLocal, null));
+				entry._softLocal = null;
+			}
 			spillFuture = entry._spillFuture;
 			cacheKey = entry._cacheKey;
 		}
@@ -150,16 +163,16 @@ public class CachedAllowance extends SyncMemoryAllowance {
 				if(ex != null)
 					throw DMLRuntimeException.of(ex.getCause() == null ? ex : ex.getCause());
 				return true;
-			}).thenCompose(ignored -> {
-				BlockKey key = finishSpill(entry, spillFuture);
-				if(key == null)
-					return get(index);
-				return readFromBackend(key);
-			});
-		}
+				}).thenCompose(ignored -> {
+					BlockKey key = finishSpill(entry, spillFuture);
+					if(key == null)
+						return get(index);
+					return readFromBackend(entry, key);
+				});
+			}
 
-		if(cacheKey != null)
-			return readFromBackend(cacheKey);
+			if(cacheKey != null)
+				return readFromBackend(entry, cacheKey);
 		return CompletableFuture.completedFuture(null);
 	}
 
@@ -181,6 +194,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			entry._spillFuture = null;
 			forgetKey = entry._cacheKey;
 			entry._cacheKey = null;
+			entry._softLocal = null;
 		}
 
 		if(spillFuture != null)
@@ -347,6 +361,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			pendingBytes = takePendingHandoverBytes(entry);
 			if(entry._spillFuture != null && entry._spillFuture.isDone() && !entry._spillFuture.isCompletedExceptionally()) {
 				localToClose = entry._local;
+				retainSoftLocal(entry, localToClose);
 				entry._local = null;
 				entry._spillFuture = null;
 			}
@@ -363,6 +378,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 				return null;
 			pendingBytes = takePendingHandoverBytes(entry);
 			localToClose = entry._local;
+			retainSoftLocal(entry, localToClose);
 			entry._local = null;
 			entry._spillFuture = null;
 			key = entry._cacheKey;
@@ -371,10 +387,23 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		return key;
 	}
 
-	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> readFromBackend(BlockKey key) {
+	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> readFromBackend(SlotEntry entry, BlockKey key) {
 		return OOCCacheManager.getTileStoreBackend().read(key)
-			.thenApply(imv -> imv == null ? null :
-				(OOCStream.QueueCallback<IndexedMatrixValue>) new OOCStream.SimpleQueueCallback<>(imv, null));
+			.thenApply(imv -> {
+				if(imv == null)
+					return null;
+				synchronized(entry) {
+					if(key.equals(entry._cacheKey))
+						entry._softLocal = new SoftReference<>(imv);
+				}
+				return new OOCStream.SimpleQueueCallback<>(imv, null);
+			});
+	}
+
+	private void retainSoftLocal(SlotEntry entry, InMemoryQueueCallback local) {
+		if(local == null)
+			return;
+		entry._softLocal = new SoftReference<>(local.get());
 	}
 
 	private long takePendingHandoverBytes(SlotEntry entry) {
@@ -448,6 +477,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 
 	private static final class SlotEntry {
 		private InMemoryQueueCallback _local;
+		private SoftReference<IndexedMatrixValue> _softLocal;
 		private BlockKey _cacheKey;
 		private CompletableFuture<Void> _spillFuture;
 		private long _pendingBytes;

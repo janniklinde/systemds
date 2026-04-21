@@ -173,7 +173,6 @@ public class OOCMemoryAllowanceTest {
 				}
 				InMemoryQueueCallback inner = cb.get();
 				try(cb; inner) {
-					System.out.println(inner.get().getIndexes());
 					ctr.incrementAndGet();
 					double checksum =((MatrixBlock)inner.get().getValue()).sum();
 					if(checksum < 10000.0 - 1e-9 || checksum > 10000.0 + 1e-9)
