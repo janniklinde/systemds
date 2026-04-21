@@ -25,7 +25,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
-import org.apache.sysds.runtime.ooc.cache.OOCCacheScheduler;
+import org.apache.sysds.runtime.ooc.cache.SpillableObject;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -36,6 +36,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	private static final int INITIAL_SLOTS = 64;
 	private static final long MIN_HANDOVER_SLACK = 1_000_000L;
 	private static final long MAX_HANDOVER_SLACK = 128_000_000L;
+	private static final long MIN_HANDOVER_BATCH = 1_000_000L;
 
 	private final long _streamId;
 	private final AtomicLong _nextBlockId;
@@ -44,6 +45,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	private int _highestPopulatedIndex;
 	private boolean _handoverScheduling;
 	private boolean _handoverSchedulingRequested;
+	private long _handoverSchedulingRequestedBytes;
 
 	public CachedAllowance(MemoryBroker broker) {
 		super(broker);
@@ -54,6 +56,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		_highestPopulatedIndex = -1;
 		_handoverScheduling = false;
 		_handoverSchedulingRequested = false;
+		_handoverSchedulingRequestedBytes = 0;
 	}
 
 	public void handover(InMemoryQueueCallback callback, int index) {
@@ -78,6 +81,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			if(index > _highestPopulatedIndex)
 				_highestPopulatedIndex = index;
 		}
+		maybeScheduleHandovers(MIN_HANDOVER_BATCH);
 	}
 
 	public OOCStream.QueueCallback<IndexedMatrixValue> tryGet(int index) {
@@ -87,14 +91,14 @@ public class CachedAllowance extends SyncMemoryAllowance {
 
 		while(true) {
 			BlockKey cacheKey = null;
-			OOCCacheScheduler.HandoverHandle handover = null;
-			InMemoryQueueCallback local = null;
+			CompletableFuture<Void> spillFuture = null;
+			OOCStream.QueueCallback<IndexedMatrixValue> local = null;
 
 			synchronized(entry) {
-				if(entry._local != null && entry._handover == null)
-					local = entry._local;
-				else if(entry._handover != null) {
-					handover = entry._handover;
+				if(entry._local != null)
+					local = entry._local.keepOpen();
+				else if(entry._spillFuture != null) {
+					spillFuture = entry._spillFuture;
 					cacheKey = entry._cacheKey;
 				}
 				else if(entry._cacheKey != null)
@@ -104,46 +108,22 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			}
 
 			if(local != null)
-				return local.keepOpen();
+				return local;
 
-			if(handover != null) {
-				OOCStream.QueueCallback<IndexedMatrixValue> reclaimed = handover.reclaim();
-				if(reclaimed != null) {
-					reclaimed.close();
-					synchronized(entry) {
-						if(entry._handover == handover) {
-							finishPendingHandover(entry);
-							entry._handover = null;
-							entry._cacheKey = null;
-						}
-					}
-					continue;
-				}
-
-				CompletableFuture<Boolean> future = handover.getCompletionFuture();
-				if(!future.isDone())
+			if(spillFuture != null) {
+				if(!spillFuture.isDone())
 					return null;
-				boolean committed = future.join();
-				InMemoryQueueCallback localToClose = null;
-				synchronized(entry) {
-					if(entry._handover != handover)
-						continue;
-					finishPendingHandover(entry);
-					entry._handover = null;
-					if(committed) {
-						localToClose = entry._local;
-						entry._local = null;
-					}
-					else {
-						entry._cacheKey = null;
-					}
+				try {
+					spillFuture.join();
 				}
-				if(localToClose != null)
-					closeRoot(localToClose);
+				catch(CompletionException ex) {
+					throw DMLRuntimeException.of(ex.getCause() == null ? ex : ex.getCause());
+				}
+				finishSpill(entry, spillFuture);
 				continue;
 			}
 
-			return OOCCacheManager.tryRequestBlock(cacheKey);
+			return null;
 		}
 	}
 
@@ -156,54 +136,30 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		if(entry == null)
 			return CompletableFuture.completedFuture(null);
 
-		OOCCacheScheduler.HandoverHandle handover;
+		CompletableFuture<Void> spillFuture;
 		BlockKey cacheKey;
 		synchronized(entry) {
-			if(entry._local != null && entry._handover == null)
+			if(entry._local != null)
 				return CompletableFuture.completedFuture(entry._local.keepOpen());
-			handover = entry._handover;
+			spillFuture = entry._spillFuture;
 			cacheKey = entry._cacheKey;
 		}
 
-		if(handover != null) {
-			return handover.getCompletionFuture().handle((committed, ex) -> {
+		if(spillFuture != null) {
+			return spillFuture.handle((ignored, ex) -> {
 				if(ex != null)
 					throw DMLRuntimeException.of(ex.getCause() == null ? ex : ex.getCause());
-				return committed == true;
-			}).thenCompose(committed -> {
-				InMemoryQueueCallback localToClose = null;
-				InMemoryQueueCallback local = null;
-				BlockKey key;
-
-				synchronized(entry) {
-					if(entry._handover != handover)
-						return get(index);
-
-					finishPendingHandover(entry);
-					entry._handover = null;
-					if(committed) {
-						key = entry._cacheKey;
-						localToClose = entry._local;
-						entry._local = null;
-					}
-					else {
-						entry._cacheKey = null;
-						local = entry._local;
-						key = null;
-					}
-				}
-
-				if(localToClose != null)
-					closeRoot(localToClose);
-
-				if(committed)
-					return OOCCacheManager.requestBlock(key);
-				return CompletableFuture.completedFuture(local == null ? null : local.keepOpen());
+				return true;
+			}).thenCompose(ignored -> {
+				BlockKey key = finishSpill(entry, spillFuture);
+				if(key == null)
+					return get(index);
+				return readFromBackend(key);
 			});
 		}
 
 		if(cacheKey != null)
-			return OOCCacheManager.requestBlock(cacheKey);
+			return readFromBackend(cacheKey);
 		return CompletableFuture.completedFuture(null);
 	}
 
@@ -212,79 +168,27 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		if(entry == null)
 			return;
 
-		while(true) {
-			OOCCacheScheduler.HandoverHandle handover = null;
-			BlockKey forgetKey = null;
-			InMemoryQueueCallback localToClose = null;
+		CompletableFuture<Void> spillFuture;
+		BlockKey forgetKey;
+		InMemoryQueueCallback localToClose;
+		long pendingBytes;
 
-			synchronized(entry) {
-				if(entry._local != null && entry._handover == null) {
-					localToClose = entry._local;
-					entry._local = null;
-				}
-				else if(entry._handover != null)
-					handover = entry._handover;
-				else if(entry._cacheKey != null) {
-					forgetKey = entry._cacheKey;
-					entry._cacheKey = null;
-				}
-				else
-					return;
-			}
-
-			if(localToClose != null) {
-				closeRoot(localToClose);
-				return;
-			}
-
-			if(forgetKey != null) {
-				OOCCacheManager.forget(forgetKey);
-				return;
-			}
-
-			OOCStream.QueueCallback<IndexedMatrixValue> reclaimed = handover.reclaim();
-			if(reclaimed != null) {
-				reclaimed.close();
-				synchronized(entry) {
-					if(entry._handover == handover) {
-						finishPendingHandover(entry);
-						localToClose = entry._local;
-						entry._local = null;
-						entry._handover = null;
-						entry._cacheKey = null;
-					}
-				}
-				if(localToClose != null)
-					closeRoot(localToClose);
-				return;
-			}
-
-			boolean committed;
-			try {
-				committed = handover.getCompletionFuture().join();
-			}
-			catch(CompletionException ex) {
-				throw DMLRuntimeException.of(ex.getCause() == null ? ex : ex.getCause());
-			}
-
-			synchronized(entry) {
-				if(entry._handover != handover)
-					continue;
-				finishPendingHandover(entry);
-				localToClose = entry._local;
-				entry._local = null;
-				entry._handover = null;
-				if(committed)
-					forgetKey = entry._cacheKey;
-				entry._cacheKey = null;
-			}
-
-			if(localToClose != null)
-				closeRoot(localToClose);
-			if(forgetKey != null)
-				OOCCacheManager.forget(forgetKey);
-			return;
+		synchronized(entry) {
+			pendingBytes = takePendingHandoverBytes(entry);
+			localToClose = entry._local;
+			entry._local = null;
+			spillFuture = entry._spillFuture;
+			entry._spillFuture = null;
+			forgetKey = entry._cacheKey;
+			entry._cacheKey = null;
 		}
+
+		if(spillFuture != null)
+			spillFuture.cancel(false);
+		discardPayload(localToClose);
+		closeRootAndFinishHandover(localToClose, pendingBytes);
+		if(forgetKey != null)
+			OOCCacheManager.getTileStoreBackend().delete(forgetKey);
 	}
 
 	@Override
@@ -314,10 +218,11 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	}
 
 	void admitBlocking(long bytes) {
+		long requestedBytes = Math.max(bytes, MIN_HANDOVER_BATCH);
 		while(true) {
 			if(super.tryReserve(bytes))
 				return;
-			maybeScheduleHandovers(bytes);
+			maybeScheduleHandovers(requestedBytes);
 			if(super.tryReserve(bytes))
 				return;
 			if(_shutdown || _destroyed)
@@ -338,21 +243,25 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	private void maybeScheduleHandovers(long requestedBytes) {
 		synchronized(this) {
 			_handoverSchedulingRequested = true;
+			_handoverSchedulingRequestedBytes = Math.max(_handoverSchedulingRequestedBytes, requestedBytes);
 			if(_handoverScheduling)
 				return;
 			_handoverScheduling = true;
 		}
 
-		boolean restart;
 		try {
 			while(true) {
 				long reclaimGoal;
+				long effectiveRequestedBytes;
 				int startIndex;
 				synchronized(this) {
 					_handoverSchedulingRequested = false;
+					effectiveRequestedBytes = Math.max(requestedBytes, _handoverSchedulingRequestedBytes);
+					_handoverSchedulingRequestedBytes = 0;
 					if(_shutdown || _destroyed)
 						return;
-					long excess = _usedBytes + requestedBytes - _targetBytes - _pendingHandoverBytes;
+					long capacity = Math.min(_targetBytes, _grantedBytes);
+					long excess = _usedBytes + effectiveRequestedBytes - capacity - _pendingHandoverBytes;
 					if(excess <= 0) {
 						if(!_handoverSchedulingRequested)
 							return;
@@ -360,7 +269,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 					}
 
 					long slack = Math.max(MIN_HANDOVER_SLACK, Math.min(MAX_HANDOVER_SLACK, _targetBytes / 16));
-					reclaimGoal = excess + slack;
+					reclaimGoal = Math.max(excess + slack, MIN_HANDOVER_BATCH);
 					startIndex = _highestPopulatedIndex;
 				}
 
@@ -392,10 +301,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		finally {
 			synchronized(this) {
 				_handoverScheduling = false;
-				restart = _handoverSchedulingRequested;
 			}
-			if(restart)
-				maybeScheduleHandovers(requestedBytes);
 		}
 	}
 
@@ -403,7 +309,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		if(entry == null)
 			return 0;
 		synchronized(entry) {
-			if(entry._local == null || entry._handover != null || !entry._local.getHandle().isExclusiveToRoot())
+			if(entry._local == null || entry._spillFuture != null || !entry._local.getHandle().isExclusiveToRoot())
 				return 0;
 
 			long bytes = entry._local.getManagedBytes();
@@ -411,19 +317,20 @@ public class CachedAllowance extends SyncMemoryAllowance {
 				return 0;
 
 			InMemoryQueueCallback retained = (InMemoryQueueCallback) entry._local.keepOpen();
-				try {
-					entry._cacheKey = new BlockKey(_streamId, _nextBlockId.getAndIncrement());
-					entry._handover = OOCCacheManager.handover(entry._cacheKey, retained);
-					entry._pendingBytes = bytes;
-					synchronized(this) {
-						_pendingHandoverBytes += bytes;
-					}
-					entry._handover.getCompletionFuture().whenComplete((committed, ex) -> onHandoverCompleted(entry));
-					return bytes;
+			try {
+				entry._cacheKey = new BlockKey(_streamId, _nextBlockId.getAndIncrement());
+				entry._spillFuture = OOCCacheManager.getTileStoreBackend().spill(entry._cacheKey, retained.get());
+				entry._pendingBytes = bytes;
+				synchronized(this) {
+					_pendingHandoverBytes += bytes;
 				}
+				retained.close();
+				entry._spillFuture.whenComplete((ignored, ex) -> onHandoverCompleted(entry));
+				return bytes;
+			}
 			catch(RuntimeException ex) {
 				entry._cacheKey = null;
-				entry._handover = null;
+				entry._spillFuture = null;
 				entry._pendingBytes = 0;
 				retained.close();
 				throw ex;
@@ -432,20 +339,74 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	}
 
 	private void onHandoverCompleted(SlotEntry entry) {
+		InMemoryQueueCallback localToClose = null;
+		long pendingBytes;
 		synchronized(entry) {
 			if(entry._pendingBytes <= 0)
 				return;
-			finishPendingHandover(entry);
+			pendingBytes = takePendingHandoverBytes(entry);
+			if(entry._spillFuture != null && entry._spillFuture.isDone() && !entry._spillFuture.isCompletedExceptionally()) {
+				localToClose = entry._local;
+				entry._local = null;
+				entry._spillFuture = null;
+			}
 		}
-		maybeScheduleHandovers(0);
+		closeRootAndFinishHandover(localToClose, pendingBytes);
 	}
 
-	private void finishPendingHandover(SlotEntry entry) {
+	private BlockKey finishSpill(SlotEntry entry, CompletableFuture<Void> spillFuture) {
+		InMemoryQueueCallback localToClose = null;
+		long pendingBytes;
+		BlockKey key;
+		synchronized(entry) {
+			if(entry._spillFuture != spillFuture)
+				return null;
+			pendingBytes = takePendingHandoverBytes(entry);
+			localToClose = entry._local;
+			entry._local = null;
+			entry._spillFuture = null;
+			key = entry._cacheKey;
+		}
+		closeRootAndFinishHandover(localToClose, pendingBytes);
+		return key;
+	}
+
+	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> readFromBackend(BlockKey key) {
+		return OOCCacheManager.getTileStoreBackend().read(key)
+			.thenApply(imv -> imv == null ? null :
+				(OOCStream.QueueCallback<IndexedMatrixValue>) new OOCStream.SimpleQueueCallback<>(imv, null));
+	}
+
+	private long takePendingHandoverBytes(SlotEntry entry) {
 		if(entry._pendingBytes <= 0)
-			return;
+			return 0;
 		long bytes = entry._pendingBytes;
 		entry._pendingBytes = 0;
-		onFinishedHandover(bytes);
+		return bytes;
+	}
+
+	private void closeRootAndFinishHandover(InMemoryQueueCallback localToClose, long pendingBytes) {
+		RuntimeException closeFailure = null;
+		try {
+			if(localToClose != null)
+				closeRoot(localToClose);
+		}
+		catch(RuntimeException ex) {
+			closeFailure = ex;
+		}
+		finally {
+			if(pendingBytes > 0)
+				onFinishedHandover(pendingBytes);
+		}
+		if(closeFailure != null)
+			throw closeFailure;
+	}
+
+	private void discardPayload(InMemoryQueueCallback local) {
+		if(local == null)
+			return;
+		IndexedMatrixValue imv = local.get();
+		imv.discard();
 	}
 
 	private void closeRoot(InMemoryQueueCallback local) {
@@ -488,7 +449,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	private static final class SlotEntry {
 		private InMemoryQueueCallback _local;
 		private BlockKey _cacheKey;
-		private OOCCacheScheduler.HandoverHandle _handover;
+		private CompletableFuture<Void> _spillFuture;
 		private long _pendingBytes;
 
 		private SlotEntry(InMemoryQueueCallback local) {

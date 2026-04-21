@@ -529,16 +529,14 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		String filename = partFile.filePath;
 
 		// Create an empty object to read data into.
-		MatrixIndexes ix = new  MatrixIndexes();
-		MatrixBlock mb = new  MatrixBlock();
+		IndexedMatrixValue imv = new IndexedMatrixValue();
 
 		try (RandomAccessFile raf = new RandomAccessFile(filename, "r")) {
 			raf.seek(sloc.offset);
 
 			DataInput dis = new FastBufferedDataInputStream(Channels.newInputStream(raf.getChannel()));
 			long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
-			ix.readFields(dis); // 1. Read Indexes
-			mb.readFields(dis); // 2. Read Block
+			imv.read(dis);
 			if (DMLScript.OOC_STATISTICS)
 				ioDuration = System.nanoTime() - ioStart;
 		} catch (ClosedByInterruptException ignored) {
@@ -546,7 +544,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			throw new RuntimeException(e);
 		}
 
-		block.setDataUnsafe(new IndexedMatrixValue(ix, mb));
+		block.setDataUnsafe(imv);
 
 		if (DMLScript.OOC_STATISTICS) {
 			Statistics.incrementOOCLoadFromDisk();
@@ -692,19 +690,28 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			//dos.flush();
 			long offsetBefore = fos.getChannel().position() + dos.getCount();
 
-			// 2. write indexes and block
-			IndexedMatrixValue imv = (IndexedMatrixValue) entry.getDataUnsafe(); // Get data without requiring pin
-			if(imv == null)
+			if(future.isCancelled())
 				return 0;
-			imv.getIndexes().write(dos); // write Indexes
-			imv.getValue().write(dos);
+
+			// 2. write indexes and block
+			SpillableObject so = (SpillableObject) entry.getDataUnsafe(); // Get data without requiring pin
+			if(so == null)
+				return 0;
+			if(!so.tryWrite(dos))
+				return 0;
 
 			long offsetAfter = fos.getChannel().position() + dos.getCount();
+			if(future.isCancelled())
+				return offsetAfter - offsetBefore;
 			flushQueue.offer(new Tuple3<>(offsetBefore, offsetAfter, future));
 
 			// 3. create the spillLocation
 			SpillLocation sloc = new SpillLocation(partitionId, offsetBefore);
 			addSpillLocation(key, sloc);
+			if(future.isCancelled()) {
+				removeSpillLocation(key);
+				return offsetAfter - offsetBefore;
+			}
 			flushQueue(fos.getChannel().position(), flushQueue);
 
 			return offsetAfter - offsetBefore;

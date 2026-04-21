@@ -51,6 +51,7 @@ import java.util.function.Function;
 
 public class OOCMemoryAllowanceTest {
 	private static final int TILES = 20000;
+	public static CachedAllowance cache;
 
 	@Test
 	public void testOptimal() {
@@ -98,6 +99,7 @@ public class OOCMemoryAllowanceTest {
 		MemoryAllowance rightAllowance = new SyncMemoryAllowance(broker);
 		MemoryAllowance joinAllowance = new SyncMemoryAllowance(broker);
 		CachedAllowance cache = new CachedAllowance(broker);
+		OOCMemoryAllowanceTest.cache = cache;
 
 		OOCStream<Integer> leftStream = new SubscribableTaskQueue<>();
 		OOCStream<Integer> rightStream = new SubscribableTaskQueue<>();
@@ -129,12 +131,18 @@ public class OOCMemoryAllowanceTest {
 		OOCStream<InMemoryQueueCallback> leftStreamOut = new SubscribableTaskQueue<>();
 		OOCStream<InMemoryQueueCallback> leftStreamOutOut = new SubscribableTaskQueue<>();
 		OOCStream<InMemoryQueueCallback> rightStreamOut = new SubscribableTaskQueue<>();
+		AtomicInteger i1 =  new AtomicInteger(0);
+		AtomicInteger i2 =  new AtomicInteger(0);
+		AtomicInteger i3 =  new AtomicInteger(0);
+		AtomicInteger i4 =  new AtomicInteger(0);
 
 		test.map(leftStream, leftStreamOut, i -> {
+			i1.incrementAndGet();
 			var imv = new IndexedMatrixValue(new MatrixIndexes(i.longValue(), 1L), new MatrixBlock(1000, 1, 5.0));
 			return new InMemoryQueueCallback(imv, null, leftAllowance, 8 * 1000);
 		});
 		test.map(leftStreamOut, leftStreamOutOut, cb -> {
+			i2.incrementAndGet();
 			try(cb) {
 				var imv = new IndexedMatrixValue(cb.get().getIndexes(), cb.get().getValue()
 					.scalarOperations(new RightScalarOperator(Plus.getPlusFnObject(), 2.0), new MatrixBlock()));
@@ -142,12 +150,14 @@ public class OOCMemoryAllowanceTest {
 			}
 		});
 		test.map(rightStream, rightStreamOut, i -> {
+			i3.incrementAndGet();
 			var imv = new IndexedMatrixValue(new MatrixIndexes(i.longValue(), 1L), new MatrixBlock(1000, 1, 3.0));
 			return new InMemoryQueueCallback(imv, null, rightAllowance, 8 * 1000);
 		});
 
 		test.join(leftStreamOutOut, rightStreamOut, outStream, () -> joinAllowance.reserveBlocking(8 * 1000), cache,
 			(l, r) -> {
+				i4.incrementAndGet();
 				var imv = new IndexedMatrixValue(l.getIndexes(), ((MatrixBlock)l.getValue()).binaryOperations(new BinaryOperator(
 					Plus.getPlusFnObject()), r.getValue()));
 				return new InMemoryQueueCallback(imv, null, joinAllowance, 8 * 1000);
@@ -163,6 +173,7 @@ public class OOCMemoryAllowanceTest {
 				}
 				InMemoryQueueCallback inner = cb.get();
 				try(cb; inner) {
+					System.out.println(inner.get().getIndexes());
 					ctr.incrementAndGet();
 					double checksum =((MatrixBlock)inner.get().getValue()).sum();
 					if(checksum < 10000.0 - 1e-9 || checksum > 10000.0 + 1e-9)
@@ -304,14 +315,15 @@ public class OOCMemoryAllowanceTest {
 						}
 						else {
 							pendingRequests.incrementAndGet();
-							final var pinned = next.keepOpen();
-							final boolean isLeft = nextLeft;
-							future.thenAccept(cb -> {
-								try(cb; pinned) {
-									intermediate.enqueue(
-										isLeft ? new Tuple3<>(pinned.keepOpen(), cb.keepOpen(), idx) :
-											new Tuple3<>(cb.keepOpen(), pinned.keepOpen(), idx));
-								}
+								final var pinned = next.keepOpen();
+								final boolean isLeft = nextLeft;
+								future.thenAccept(cb -> {
+									try(cb; pinned) {
+										memoryReserver.run(); // reserve memory for future pipeline
+										intermediate.enqueue(
+											isLeft ? new Tuple3<>(pinned.keepOpen(), cb.keepOpen(), idx) :
+												new Tuple3<>(cb.keepOpen(), pinned.keepOpen(), idx));
+									}
 								if(pendingRequests.decrementAndGet() == 0)
 									intermediate.closeInput();
 							});

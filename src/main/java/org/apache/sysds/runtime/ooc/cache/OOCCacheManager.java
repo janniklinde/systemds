@@ -48,12 +48,14 @@ public class OOCCacheManager {
 
 	private static final AtomicReference<OOCIOHandler> _ioHandler;
 	private static final AtomicReference<OOCCacheScheduler> _scheduler;
+	private static final TileStoreBackend _tileStoreBackend;
 
 	static {
 		_evictionLimit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE);
 		_hardLimit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE_HARD);
 		_ioHandler = new AtomicReference<>();
 		_scheduler = new AtomicReference<>();
+		_tileStoreBackend = new OOCIOHandlerTileStoreBackend();
 	}
 
 	public static void reset() {
@@ -121,6 +123,10 @@ public class OOCCacheManager {
 		// Ensure initialization happens
 		getCache();
 		return _ioHandler.get();
+	}
+
+	public static TileStoreBackend getTileStoreBackend() {
+		return _tileStoreBackend;
 	}
 
 	/**

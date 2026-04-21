@@ -20,12 +20,17 @@
 
 package org.apache.sysds.runtime.instructions.spark.data;
 
+import java.io.DataInput;
+import java.io.DataOutput;
+import java.io.IOException;
 import java.io.Serializable;
 
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.data.MatrixValue;
+import org.apache.sysds.runtime.ooc.cache.SpillableObject;
 
-public class IndexedMatrixValue implements Serializable
+public class IndexedMatrixValue implements SpillableObject, Serializable
 {
 	private static final long serialVersionUID = 6723389820806752110L;
 
@@ -79,5 +84,29 @@ public class IndexedMatrixValue implements Serializable
 	@Override
 	public String toString() {
 		return "("+_indexes.getRowIndex()+", "+_indexes.getColumnIndex()+"): \n"+_value;
+	}
+
+	@Override
+	public boolean tryWrite(DataOutput dataOutput) throws IOException {
+		MatrixIndexes ix = _indexes;
+		MatrixValue value = _value;
+		if(ix == null || value == null)
+			return false;
+		ix.write(dataOutput);
+		value.write(dataOutput);
+		return true;
+	}
+
+	@Override
+	public void discard() {
+		_value = null;
+	}
+
+	@Override
+	public void read(DataInput dataInput) throws IOException {
+		_indexes = new  MatrixIndexes();
+		_value = new  MatrixBlock();
+		_indexes.readFields(dataInput);
+		_value.readFields(dataInput);
 	}
 }

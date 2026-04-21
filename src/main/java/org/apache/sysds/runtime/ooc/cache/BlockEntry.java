@@ -32,6 +32,16 @@ public final class BlockEntry {
 	private int _retainHintCount;
 	private int _referenceCount; // The number of references from different managing instances (e.g. CachingStream)
 
+	BlockEntry(BlockKey key) {
+		this._key = key;
+		this._size = -1;
+		this._pinCount = 0;
+		this._state = BlockState.COLD;
+		this._data = null;
+		this._retainHintCount = 0;
+		this._referenceCount = 0;
+	}
+
 	BlockEntry(BlockKey key, long size, Object data) {
 		this._key = key;
 		this._size = size;
