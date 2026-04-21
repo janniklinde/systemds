@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
+import org.apache.commons.lang3.NotImplementedException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
@@ -68,11 +69,10 @@ public interface OOCStreamable<T> {
 	}
 
 	default OOCPrimitive getPrimitive() {
-		return null;
+		throw new NotImplementedException();
 	}
 
 	default void assignPrimitive(OOCPrimitive primitive) {
-		// No-op by default. Concrete stream implementations can override this
-		// once the planner is wired into execution.
+		throw new NotImplementedException();
 	}
 }

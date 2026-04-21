@@ -104,7 +104,7 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
 				out.propagateFailure(DMLRuntimeException.of(t));
 				return null;
-			});
+			}).thenRun(() -> out.getPrimitive().onComplete());
 		}
 		else {
 			OOCInstructionUtils.submitOOCTasks(stream, cb -> {
@@ -114,7 +114,7 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
 				out.propagateFailure(DMLRuntimeException.of(t));
 				return null;
-			});
+			}).thenRun(() -> out.getPrimitive().onComplete());
 		}
 	}
 }

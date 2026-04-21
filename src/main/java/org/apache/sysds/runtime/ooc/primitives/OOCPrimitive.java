@@ -34,6 +34,7 @@ public abstract class OOCPrimitive {
 	private final List<OOCPrimitive> _children;
 	private final List<OOCPrimitive> _parents;
 	protected OOCAccessPattern _pattern;
+	protected OOCRegionBinding _regionBinding;
 	protected MemoryAllowance _allowance;
 	protected ToLongFunction<MatrixIndexes> _allocFn;
 	protected boolean _crossBoundaries;
@@ -52,10 +53,11 @@ public abstract class OOCPrimitive {
 		_pattern = OOCAccessPattern.UNSET;
 	}
 
-	public void bindRegion(OOCRegionBinding binding) {
+	public void bindRegion(OOCRegionBinding binding, boolean crossBoundaries) {
+		_regionBinding = binding;
 		_allowance = binding.allowance();
 		_allocFn = binding.allocFn();
-		_crossBoundaries = binding.crossesBoundary();
+		_crossBoundaries = crossBoundaries;
 	}
 
 	public List<OOCPrimitive> getChildren() {
@@ -113,6 +115,10 @@ public abstract class OOCPrimitive {
 	public void startExecution() {
 		// Default no-op. Plannable leaf primitives can override this to emit
 		// work once the planner has assigned an access pattern.
+	}
+
+	public void onComplete() {
+		_regionBinding.dereference();
 	}
 
 	protected OOCAccessPattern getPattern(OOCStreamable<?> streamable) {

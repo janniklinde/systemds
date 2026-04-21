@@ -33,6 +33,7 @@ import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.ToLongFunction;
 
 public class OOCPlanner {
@@ -81,10 +82,11 @@ public class OOCPlanner {
 	private static void compileRegion(List<OOCPrimitive> region) {
 		MemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get());
 		ToLongFunction<MatrixIndexes> allocFn = buildAllocFn(region);
+		OOCRegionBinding binding = new OOCRegionBinding(allowance, allocFn, new AtomicInteger(region.size()));
 
 		for(int i = 0; i < region.size(); i++) {
 			boolean crossBoundaries = i == 0;
-			region.get(i).bindRegion(new OOCRegionBinding(allowance, allocFn, crossBoundaries));
+			region.get(i).bindRegion(binding, crossBoundaries);
 		}
 	}
 

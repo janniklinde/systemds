@@ -115,7 +115,7 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
 				out.propagateFailure(DMLRuntimeException.of(t));
 				return null;
-			});
+			}).thenRun(() -> out.getPrimitive().onComplete());
 		}
 		else {
 			OOCInstructionUtils.submitOOCTasks(in, cb -> {
@@ -129,7 +129,7 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
 				out.propagateFailure(DMLRuntimeException.of(t));
 				return null;
-			});
+			}).thenRun(() -> out.getPrimitive().onComplete());
 		}
 	}
 }

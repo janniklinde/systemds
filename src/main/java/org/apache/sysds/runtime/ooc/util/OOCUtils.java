@@ -75,6 +75,22 @@ public class OOCUtils {
 		return -1;
 	}
 
+	public static long getNumRowsOfTile(MatrixIndexes tileIdx, DataCharacteristics c) {
+		return getNumRowsOfTile(tileIdx, c.getRows(), c.getBlocksize());
+	}
+
+	public static long getNumColsOfTile(MatrixIndexes tileIdx, DataCharacteristics c) {
+		return getNumColsOfTile(tileIdx, c.getCols(), c.getBlocksize());
+	}
+
+	public static int getNumRowsOfTile(MatrixIndexes tileIdx, long numRows, int blen) {
+		return (int)Math.min(numRows - (tileIdx.getRowIndex() - 1) * blen, blen);
+	}
+
+	public static int getNumColsOfTile(MatrixIndexes tileIdx, long numCols, int blen) {
+		return (int)Math.min(numCols - (tileIdx.getColumnIndex() - 1) * blen, blen);
+	}
+
 	public static Iterable<MatrixIndexes> getAccessPattern(DataCharacteristics dc, OOCAccessPattern pattern) {
 		long rows = dc.getNumRowBlocks();
 		long cols = dc.getNumColBlocks();
