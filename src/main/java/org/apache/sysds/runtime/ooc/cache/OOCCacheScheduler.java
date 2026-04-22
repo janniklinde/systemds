@@ -22,6 +22,7 @@ package org.apache.sysds.runtime.ooc.cache;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.Collection;
 import java.util.List;
@@ -152,6 +153,42 @@ public interface OOCCacheScheduler {
 	 * @param entry the entry to be unpinned
 	 */
 	void unpin(BlockEntry entry);
+
+	/**
+	 * Pins a BlockEntry and adopts a pre-reserved logical memory claim.
+	 * The returned lease releases the logical bytes from the backing allowance
+	 * when its last reference is closed.
+	 */
+	AllowanceBackedPin pinBacked(BlockEntry entry, MemoryAllowance backingAllowance, long logicalBytes);
+
+	/**
+	 * Adopts an existing physical pin and backs it by a pre-reserved logical memory claim.
+	 * This is intended for entries returned by request/tryRequest/putAndPin.
+	 */
+	AllowanceBackedPin adoptPinnedBacked(BlockEntry entry, MemoryAllowance backingAllowance, long logicalBytes);
+
+	/**
+	 * Requests a block and returns an allowance-backed lease once resident. The caller must
+	 * pre-reserve logicalBytes before calling. If the request is accepted but fails, the
+	 * scheduler releases the logical claim.
+	 */
+	CompletableFuture<AllowanceBackedPin> requestBacked(BlockKey key, MemoryAllowance backingAllowance, long logicalBytes);
+
+	/**
+	 * Non-blocking backed request. If this returns null, the caller still owns the
+	 * pre-reserved logical claim and must release it.
+	 */
+	AllowanceBackedPin tryRequestBacked(BlockKey key, MemoryAllowance backingAllowance, long logicalBytes);
+
+	interface AllowanceBackedPin extends AutoCloseable {
+		BlockKey getKey();
+		BlockEntry getEntry();
+		MemoryAllowance getBackingAllowance();
+		long getLogicalBytes();
+		AllowanceBackedPin keepOpen();
+		@Override
+		void close();
+	}
 
 	/**
 	 * Returns the current cache size in bytes.

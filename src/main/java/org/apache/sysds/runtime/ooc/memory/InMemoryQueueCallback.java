@@ -64,22 +64,31 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 		}
 	}
 
-	public boolean tryTransferOwnership(MemoryAllowance allowance) {
+	@Override
+	public OOCStream.QueueCallback<IndexedMatrixValue> tryTransferOwnership(MemoryAllowance allowance) {
 		synchronized(_handle) {
 			long bytes = _handle._reservedBytes;
 			if(bytes <= 0 || _handle._allow == allowance)
-				return true;
+				return this;
 			if(_handle._cacheIdx >= 0)
-				return false;
+				return null;
+			if(allowance instanceof CachedAllowance)
+				return null;
 			if(!allowance.tryReserve(bytes))
-				return false;
+				return null;
 			_handle._allow.release(bytes);
 			_handle._allow = allowance;
-			return true;
+			return this;
 		}
 	}
 
-	public void transferOwnershipBlocking(MemoryAllowance allowance) {
+	@Override
+	public OOCStream.QueueCallback<IndexedMatrixValue> transferOwnershipBlocking(MemoryAllowance allowance) {
+		transferOwnershipBlockingInternal(allowance);
+		return this;
+	}
+
+	private void transferOwnershipBlockingInternal(MemoryAllowance allowance) {
 		synchronized(_handle) {
 			long bytes = _handle._reservedBytes;
 			if(bytes <= 0 || _handle._allow == allowance)

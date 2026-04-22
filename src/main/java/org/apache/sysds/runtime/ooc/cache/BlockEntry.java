@@ -27,6 +27,7 @@ public final class BlockEntry {
 	private final BlockKey _key;
 	private final long _size;
 	private volatile int _pinCount;
+	private int _backedPinCount;
 	private volatile BlockState _state;
 	private Object _data;
 	private int _retainHintCount;
@@ -36,6 +37,7 @@ public final class BlockEntry {
 		this._key = key;
 		this._size = -1;
 		this._pinCount = 0;
+		this._backedPinCount = 0;
 		this._state = BlockState.COLD;
 		this._data = null;
 		this._retainHintCount = 0;
@@ -46,6 +48,7 @@ public final class BlockEntry {
 		this._key = key;
 		this._size = size;
 		this._pinCount = 0;
+		this._backedPinCount = 0;
 		this._state = BlockState.HOT;
 		this._data = data;
 		this._retainHintCount = 0;
@@ -94,6 +97,22 @@ public final class BlockEntry {
 
 	public boolean isPinned() {
 		return _pinCount > 0;
+	}
+
+	synchronized boolean addBackedPin() {
+		_backedPinCount++;
+		return _backedPinCount == 1;
+	}
+
+	synchronized boolean removeBackedPin() {
+		if(_backedPinCount <= 0)
+			throw new IllegalStateException("Cannot remove backed pin if no backed pin is registered");
+		_backedPinCount--;
+		return _backedPinCount == 0;
+	}
+
+	synchronized boolean isBackedPinned() {
+		return _backedPinCount > 0;
 	}
 
 	synchronized int addReference() {

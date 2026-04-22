@@ -26,6 +26,7 @@ import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.utils.Statistics;
 import scala.Tuple2;
@@ -62,6 +63,9 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private long _bytesUpForEviction;
 	private long _pinnedBytes;
 	private long _pinnedEvictingBytes;
+	private long _backedCacheBytes;
+	private long _backedEvictingBytes;
+	private long _backedWarmPinnedBytes;
 	private long _readingReservedBytes;
 	private long _warmPinnedBytes;
 	private volatile boolean _running;
@@ -87,6 +91,9 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		this._bytesUpForEviction = 0;
 		this._pinnedEvictingBytes = 0;
 		this._pinnedBytes = 0;
+		this._backedCacheBytes = 0;
+		this._backedEvictingBytes = 0;
+		this._backedWarmPinnedBytes = 0;
 		this._readingReservedBytes = 0;
 		this._warmPinnedBytes = 0;
 		this._lastEvictRun = System.currentTimeMillis();
@@ -472,8 +479,108 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	}
 
 	@Override
+	public AllowanceBackedPin pinBacked(BlockEntry entry, MemoryAllowance backingAllowance, long logicalBytes) {
+		validateBackedPinArgs(entry, backingAllowance, logicalBytes);
+		boolean pinned = false;
+		try {
+			pin(entry);
+			pinned = true;
+			addBackedPinWithAccounting(entry);
+			return new AllowanceBackedPinImpl(this, entry, backingAllowance, logicalBytes);
+		}
+		catch(RuntimeException ex) {
+			if(pinned) {
+				try {
+					unpin(entry);
+				}
+				catch(RuntimeException ignored) {
+					// The original failure owns the error path.
+				}
+			}
+			backingAllowance.release(logicalBytes);
+			throw ex;
+		}
+	}
+
+	@Override
+	public AllowanceBackedPin adoptPinnedBacked(BlockEntry entry, MemoryAllowance backingAllowance, long logicalBytes) {
+		validateBackedPinArgs(entry, backingAllowance, logicalBytes);
+		if(!entry.isPinned()) {
+			backingAllowance.release(logicalBytes);
+			throw new IllegalStateException("Cannot adopt an unpinned entry: " + entry.getKey());
+		}
+		addBackedPinWithAccounting(entry);
+		return new AllowanceBackedPinImpl(this, entry, backingAllowance, logicalBytes);
+	}
+
+	@Override
+	public CompletableFuture<AllowanceBackedPin> requestBacked(BlockKey key, MemoryAllowance backingAllowance,
+		long logicalBytes) {
+		validateBackedPinArgs(key, backingAllowance, logicalBytes);
+		CompletableFuture<AllowanceBackedPin> out = new CompletableFuture<>();
+		try {
+			request(key).whenComplete((entry, ex) -> {
+				if(ex != null) {
+					backingAllowance.release(logicalBytes);
+					out.completeExceptionally(ex);
+					return;
+				}
+				if(out.isCancelled()) {
+					unpin(entry);
+					backingAllowance.release(logicalBytes);
+					return;
+				}
+				try {
+					AllowanceBackedPin pin = adoptPinnedBacked(entry, backingAllowance, logicalBytes);
+					if(!out.complete(pin))
+						pin.close();
+				}
+				catch(RuntimeException rex) {
+					out.completeExceptionally(rex);
+				}
+			});
+			return out;
+		}
+		catch(RuntimeException ex) {
+			backingAllowance.release(logicalBytes);
+			throw ex;
+		}
+	}
+
+	@Override
+	public AllowanceBackedPin tryRequestBacked(BlockKey key, MemoryAllowance backingAllowance, long logicalBytes) {
+		validateBackedPinArgs(key, backingAllowance, logicalBytes);
+		BlockEntry entry = tryRequest(key);
+		if(entry == null)
+			return null;
+		return adoptPinnedBacked(entry, backingAllowance, logicalBytes);
+	}
+
+	private void addBackedPinWithAccounting(BlockEntry entry) {
+		synchronized(this) {
+			synchronized(entry) {
+				if(!entry.addBackedPin())
+					return;
+				addBackedStateContribution(entry);
+			}
+		}
+		onCacheSizeChanged(false);
+	}
+
+	private void removeBackedPinWithAccounting(BlockEntry entry) {
+		synchronized(this) {
+			synchronized(entry) {
+				if(!entry.removeBackedPin())
+					return;
+				removeBackedStateContribution(entry);
+			}
+		}
+		onCacheSizeChanged(true);
+	}
+
+	@Override
 	public synchronized long getCacheSize() {
-		return _cacheSize;
+		return getChargedCacheSizeLocked();
 	}
 
 	@Override
@@ -488,12 +595,12 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	@Override
 	public boolean isWithinLimits() {
-		return _cacheSize < _hardLimit;
+		return getChargedCacheSize() < _hardLimit;
 	}
 
 	@Override
 	public boolean isWithinSoftLimits() {
-		return _cacheSize < (_evictionLimit + _hardLimit) / 2;
+		return getChargedCacheSize() < (_evictionLimit + _hardLimit) / 2;
 	}
 
 	@Override
@@ -526,6 +633,9 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		_bytesUpForEviction = 0;
 		_pinnedBytes = 0;
 		_pinnedEvictingBytes = 0;
+		_backedCacheBytes = 0;
+		_backedEvictingBytes = 0;
+		_backedWarmPinnedBytes = 0;
 		_readingReservedBytes = 0;
 		_warmPinnedBytes = 0;
 	}
@@ -543,6 +653,26 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		out.addAll(_cache.values());
 		out.addAll(_evictionCache.values());
 		return out;
+	}
+
+	private synchronized long getChargedCacheSize() {
+		return getChargedCacheSizeLocked();
+	}
+
+	private synchronized long getChargedEvictingBytes() {
+		return getChargedEvictingBytesLocked();
+	}
+
+	private long getChargedCacheSizeLocked() {
+		return _cacheSize - _backedCacheBytes;
+	}
+
+	private long getChargedEvictingBytesLocked() {
+		return _bytesUpForEviction - _backedEvictingBytes;
+	}
+
+	private long getChargedWarmPinnedBytesLocked() {
+		return _warmPinnedBytes - _backedWarmPinnedBytes;
 	}
 
 	/**
@@ -591,20 +721,21 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			onCacheSizeIncremented();
 		}
 		if(DMLScript.OOC_LOG_EVENTS)
-			OOCEventLog.onCacheSizeChangedEvent(_callerId, System.nanoTime(), _cacheSize, _bytesUpForEviction,
+			OOCEventLog.onCacheSizeChangedEvent(_callerId, System.nanoTime(), getChargedCacheSize(), getChargedEvictingBytes(),
 				_pinnedBytes, _readingReservedBytes);
 	}
 
 	private synchronized void sanityCheck() {
-		if (_cacheSize > _hardLimit * 1.1) {
+		long chargedCacheSize = getChargedCacheSizeLocked();
+		if (chargedCacheSize > _hardLimit * 1.1) {
 			if (!_warnThrottling) {
 				_warnThrottling = true;
-				System.out.println("[WARN] Cache hard limit exceeded by over 10%: " + String.format("%.2f", _cacheSize/1000000.0) + "MB (-" + String.format("%.2f", _bytesUpForEviction/1000000.0) + "MB) > " + String.format("%.2f", _hardLimit/1000000.0) + "MB");
+				System.out.println("[WARN] Cache hard limit exceeded by over 10%: " + String.format("%.2f", chargedCacheSize/1000000.0) + "MB (-" + String.format("%.2f", getChargedEvictingBytesLocked()/1000000.0) + "MB) > " + String.format("%.2f", _hardLimit/1000000.0) + "MB");
 			}
 		}
-		else if (_warnThrottling && _cacheSize < _hardLimit) {
+		else if (_warnThrottling && chargedCacheSize < _hardLimit) {
 			_warnThrottling = false;
-			System.out.println("[INFO] Cache within limit: " + String.format("%.2f", _cacheSize/1000000.0) + "MB (-" + String.format("%.2f", _bytesUpForEviction/1000000.0) + "MB) <= " + String.format("%.2f", _hardLimit/1000000.0) + "MB");
+			System.out.println("[INFO] Cache within limit: " + String.format("%.2f", chargedCacheSize/1000000.0) + "MB (-" + String.format("%.2f", getChargedEvictingBytesLocked()/1000000.0) + "MB) <= " + String.format("%.2f", _hardLimit/1000000.0) + "MB");
 		}
 
 		if (!SANITY_CHECKS)
@@ -619,6 +750,9 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		long actualPinnedBytes = 0;
 		long actualPinnedEvictingBytes = 0;
 		long actualWarmPinnedBytes = 0;
+		long actualBackedCacheBytes = 0;
+		long actualBackedEvictingBytes = 0;
+		long actualBackedWarmPinnedBytes = 0;
 		long actualReadingReservedBytes = 0;
 		for (BlockEntry entry : _cache.values()) {
 			if (entry.isPinned()) {
@@ -641,6 +775,23 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 				throw new IllegalStateException();
 			total++;
 			actualCacheSize += entry.getSize();
+			if(entry.isBackedPinned()) {
+				switch(entry.getState()) {
+					case HOT:
+					case WARM:
+					case EVICTING:
+					case READING:
+						actualBackedCacheBytes += entry.getSize();
+						break;
+					case COLD:
+					case REMOVED:
+						break;
+				}
+				if(entry.getState() == BlockState.EVICTING)
+					actualBackedEvictingBytes += entry.getSize();
+				if(entry.getState() == BlockState.WARM && entry.isPinned())
+					actualBackedWarmPinnedBytes += entry.getSize();
+			}
 		}
 		for (BlockEntry entry : _evictionCache.values()) {
 			if (entry.getState().isAvailable())
@@ -656,6 +807,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 				if(entry.getState() == BlockState.WARM)
 					actualWarmPinnedBytes += entry.getSize();
 			}
+			if(entry.isBackedPinned() && entry.getState() == BlockState.READING)
+				actualBackedCacheBytes += entry.getSize();
 		}
 		if (actualCacheSize != _cacheSize)
 			throw new IllegalStateException(actualCacheSize + " != " + _cacheSize);
@@ -669,11 +822,17 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			throw new IllegalStateException(_pinnedEvictingBytes + " > " + _bytesUpForEviction);
 		if(actualWarmPinnedBytes != _warmPinnedBytes)
 			throw new IllegalStateException(actualWarmPinnedBytes + " != " + _warmPinnedBytes);
+		if(actualBackedCacheBytes != _backedCacheBytes)
+			throw new IllegalStateException(actualBackedCacheBytes + " != " + _backedCacheBytes);
+		if(actualBackedEvictingBytes != _backedEvictingBytes)
+			throw new IllegalStateException(actualBackedEvictingBytes + " != " + _backedEvictingBytes);
+		if(actualBackedWarmPinnedBytes != _backedWarmPinnedBytes)
+			throw new IllegalStateException(actualBackedWarmPinnedBytes + " != " + _backedWarmPinnedBytes);
 		if (actualReadingReservedBytes != _readingReservedBytes)
 			throw new IllegalStateException(actualReadingReservedBytes + " != " + _readingReservedBytes);
 		System.out.println("==========");
 		System.out.println("Limit: " + _evictionLimit/1000 + "KB");
-		System.out.println("Memory: (" + _cacheSize/1000 + "KB - " + _bytesUpForEviction/1000 + "KB) / " + _hardLimit/1000 + "KB");
+		System.out.println("Memory: (" + getChargedCacheSizeLocked()/1000 + "KB - " + getChargedEvictingBytesLocked()/1000 + "KB) / " + _hardLimit/1000 + "KB");
 		System.out.println("Pinned: " + pinned + " / " + total);
 		System.out.println("Disk backed: " + backedByDisk + " / " + total);
 		System.out.println("Evicting: " + evicting + " / " + total);
@@ -686,7 +845,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		List<BlockEntry> upForEvictionNeedsWrite;
 		List<BlockEntry> upForEvictionNoWrite;
 		synchronized(this) {
-			long pressure = _cacheSize + _readBuffer - _bytesUpForEviction - _warmPinnedBytes;
+			long pressure = getChargedCacheSizeLocked() + _readBuffer - getChargedEvictingBytesLocked() -
+				getChargedWarmPinnedBytesLocked();
 			if(pressure <= _evictionLimit)
 				return; // Nothing to do
 
@@ -753,7 +913,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	}
 
 	private long getEvictionPressure() {
-		return _cacheSize + _readBuffer - _bytesUpForEviction;
+		return getChargedCacheSizeLocked() + _readBuffer - getChargedEvictingBytesLocked();
 	}
 
 	private boolean processPendingHandovers() {
@@ -783,14 +943,14 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	}
 
 	private boolean onCacheSizeDecremented() {
-		if(_cacheSize + 10000000 >= _hardLimit || _deferredReadCountHint == 0)
+		if(getChargedCacheSize() + 10000000 >= _hardLimit || _deferredReadCountHint == 0)
 			return false;
 		boolean allReserved = true;
 		boolean reading = false;
 		List<Tuple2<Integer, BlockEntry>> toRead;
 		DeferredReadRequest req;
 		synchronized(this) {
-			if(_cacheSize + 10000000 >= _hardLimit || _deferredReadRequests.isEmpty())
+			if(getChargedCacheSizeLocked() + 10000000 >= _hardLimit || _deferredReadRequests.isEmpty())
 				return false; // Nothing to do
 
 			// Try to schedule the next disk read
@@ -814,7 +974,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 						reading = true;
 					}
 					else {
-						if(_cacheSize + entry.getSize() <= _hardLimit) {
+						if(getChargedCacheSizeLocked() + entry.getSize() <= _hardLimit) {
 							transitionMemState(entry, BlockState.READING);
 							toRead.add(new Tuple2<>(idx, entry));
 							req.schedule(idx);
@@ -969,6 +1129,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		long sz = entry.getSize();
 		long oldCacheSize = _cacheSize;
 		boolean pinned = entry.isPinned();
+		boolean backed = entry.isBackedPinned();
 
 		// Remove old contribution
 		switch (oldState) {
@@ -1021,13 +1182,75 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			_pinnedEvictingBytes -= sz;
 		if(newState == BlockState.EVICTING && entry.isPinned())
 			_pinnedEvictingBytes += sz;
+		if(backed) {
+			removeBackedStateContribution(oldState, pinned, sz);
+			addBackedStateContribution(newState, pinned, sz);
+		}
 		if(_pinnedEvictingBytes < 0)
 			throw new IllegalStateException();
 		if(_pinnedEvictingBytes > _bytesUpForEviction)
 			throw new IllegalStateException(_pinnedEvictingBytes + " > " + _bytesUpForEviction);
+		checkBackedAccounting();
 
 		entry.setState(newState);
 		return _cacheSize - oldCacheSize;
+	}
+
+	private void addBackedStateContribution(BlockEntry entry) {
+		addBackedStateContribution(entry.getState(), entry.isPinned(), entry.getSize());
+	}
+
+	private void removeBackedStateContribution(BlockEntry entry) {
+		removeBackedStateContribution(entry.getState(), entry.isPinned(), entry.getSize());
+	}
+
+	private void addBackedStateContribution(BlockState state, boolean pinned, long size) {
+		switch(state) {
+			case HOT:
+			case WARM:
+			case EVICTING:
+			case READING:
+				_backedCacheBytes += size;
+				break;
+			case COLD:
+			case REMOVED:
+				break;
+		}
+		if(state == BlockState.EVICTING)
+			_backedEvictingBytes += size;
+		if(state == BlockState.WARM && pinned)
+			_backedWarmPinnedBytes += size;
+		checkBackedAccounting();
+	}
+
+	private void removeBackedStateContribution(BlockState state, boolean pinned, long size) {
+		switch(state) {
+			case HOT:
+			case WARM:
+			case EVICTING:
+			case READING:
+				_backedCacheBytes -= size;
+				break;
+			case COLD:
+			case REMOVED:
+				break;
+		}
+		if(state == BlockState.EVICTING)
+			_backedEvictingBytes -= size;
+		if(state == BlockState.WARM && pinned)
+			_backedWarmPinnedBytes -= size;
+		checkBackedAccounting();
+	}
+
+	private void checkBackedAccounting() {
+		if(_backedCacheBytes < 0 || _backedEvictingBytes < 0 || _backedWarmPinnedBytes < 0)
+			throw new IllegalStateException();
+		if(_backedCacheBytes > _cacheSize)
+			throw new IllegalStateException(_backedCacheBytes + " > " + _cacheSize);
+		if(_backedEvictingBytes > _bytesUpForEviction)
+			throw new IllegalStateException(_backedEvictingBytes + " > " + _bytesUpForEviction);
+		if(_backedWarmPinnedBytes > _warmPinnedBytes)
+			throw new IllegalStateException(_backedWarmPinnedBytes + " > " + _warmPinnedBytes);
 	}
 
 	/**
@@ -1104,7 +1327,137 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	}
 
 	private boolean canAcceptHandoverLocked(long bytes) {
-		return bytes >= 0 && _cacheSize + bytes <= _hardLimit;
+		return bytes >= 0 && getChargedCacheSizeLocked() + bytes <= _hardLimit;
+	}
+
+	private static void validateBackedPinArgs(BlockEntry entry, MemoryAllowance backingAllowance, long logicalBytes) {
+		if(entry == null)
+			throw new IllegalArgumentException("Cannot create allowance-backed pin for null entry.");
+		validateBackedPinArgs(entry.getKey(), backingAllowance, logicalBytes);
+	}
+
+	private static void validateBackedPinArgs(BlockKey key, MemoryAllowance backingAllowance, long logicalBytes) {
+		if(key == null)
+			throw new IllegalArgumentException("Cannot create allowance-backed pin for null key.");
+		if(backingAllowance == null)
+			throw new IllegalArgumentException("Cannot create allowance-backed pin without backing allowance.");
+		if(logicalBytes < 0)
+			throw new IllegalArgumentException("Logical bytes must not be negative.");
+	}
+
+	private static final class AllowanceBackedPinImpl implements AllowanceBackedPin {
+		private final BackedPinHandle _handle;
+		private boolean _closed;
+
+		private AllowanceBackedPinImpl(OOCLRUCacheScheduler scheduler, BlockEntry entry, MemoryAllowance allowance,
+			long logicalBytes) {
+			this(new BackedPinHandle(scheduler, entry, allowance, logicalBytes));
+		}
+
+		private AllowanceBackedPinImpl(BackedPinHandle handle) {
+			_handle = handle;
+			_closed = false;
+		}
+
+		@Override
+		public BlockKey getKey() {
+			return _handle._entry.getKey();
+		}
+
+		@Override
+		public BlockEntry getEntry() {
+			return _handle._entry;
+		}
+
+		@Override
+		public MemoryAllowance getBackingAllowance() {
+			return _handle._allowance;
+		}
+
+		@Override
+		public long getLogicalBytes() {
+			return _handle._logicalBytes;
+		}
+
+		@Override
+		public synchronized AllowanceBackedPin keepOpen() {
+			if(_closed)
+				throw new IllegalStateException("Cannot retain closed allowance-backed pin.");
+			_handle.retain();
+			return new AllowanceBackedPinImpl(_handle);
+		}
+
+		@Override
+		public void close() {
+			synchronized(this) {
+				if(_closed)
+					return;
+				_closed = true;
+			}
+			_handle.release();
+		}
+	}
+
+	private static final class BackedPinHandle {
+		private final OOCLRUCacheScheduler _scheduler;
+		private final BlockEntry _entry;
+		private final MemoryAllowance _allowance;
+		private final long _logicalBytes;
+		private int _refCount;
+		private boolean _released;
+
+		private BackedPinHandle(OOCLRUCacheScheduler scheduler, BlockEntry entry, MemoryAllowance allowance,
+			long logicalBytes) {
+			_scheduler = scheduler;
+			_entry = entry;
+			_allowance = allowance;
+			_logicalBytes = logicalBytes;
+			_refCount = 1;
+			_released = false;
+		}
+
+		private synchronized void retain() {
+			if(_released)
+				throw new IllegalStateException("Cannot retain released allowance-backed pin.");
+			_refCount++;
+		}
+
+		private void release() {
+			boolean finalRelease;
+			synchronized(this) {
+				if(_released)
+					return;
+				_refCount--;
+				if(_refCount < 0)
+					throw new IllegalStateException();
+				finalRelease = _refCount == 0;
+				if(finalRelease)
+					_released = true;
+			}
+
+			if(!finalRelease)
+				return;
+
+			RuntimeException releaseFailure = null;
+			try {
+				_scheduler.removeBackedPinWithAccounting(_entry);
+			}
+			catch(RuntimeException ex) {
+				releaseFailure = ex;
+			}
+			try {
+				_scheduler.unpin(_entry);
+			}
+			catch(RuntimeException ex) {
+				if(releaseFailure == null)
+					releaseFailure = ex;
+			}
+			finally {
+				_allowance.release(_logicalBytes);
+			}
+			if(releaseFailure != null)
+				throw releaseFailure;
+		}
 	}
 
 	private static class BlockReadState {

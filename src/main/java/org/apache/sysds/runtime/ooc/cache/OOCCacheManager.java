@@ -26,7 +26,9 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.utils.Statistics;
 
@@ -215,6 +217,34 @@ public class OOCCacheManager {
 		return entry == null ? null : toCallback(entry, key, null);
 	}
 
+	public static CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> requestBlockBacked(BlockKey key,
+		MemoryAllowance backingAllowance, long logicalBytes) {
+		return getCache().requestBacked(key, backingAllowance, logicalBytes)
+			.thenApply(pin -> {
+				try {
+					return toBackedCallback(pin, key, null);
+				}
+				catch(RuntimeException ex) {
+					pin.close();
+					throw ex;
+				}
+			});
+	}
+
+	public static OOCStream.QueueCallback<IndexedMatrixValue> tryRequestBlockBacked(BlockKey key,
+		MemoryAllowance backingAllowance, long logicalBytes) {
+		OOCCacheScheduler.AllowanceBackedPin pin = getCache().tryRequestBacked(key, backingAllowance, logicalBytes);
+		if(pin == null)
+			return null;
+		try {
+			return toBackedCallback(pin, key, null);
+		}
+		catch(RuntimeException ex) {
+			pin.close();
+			throw ex;
+		}
+	}
+
 	public static CompletableFuture<List<OOCStream.QueueCallback<IndexedMatrixValue>>> requestManyBlocks(List<BlockKey> keys) {
 		return getCache().request(keys).thenApply(
 			l -> {
@@ -261,6 +291,20 @@ public class OOCCacheManager {
 		return new CachedQueueCallback<>(entry, failure);
 	}
 
+	private static OOCStream.QueueCallback<IndexedMatrixValue> toBackedCallback(
+		OOCCacheScheduler.AllowanceBackedPin pin, BlockKey key, DMLRuntimeException failure) {
+		if(pin.getEntry().getData() instanceof List<?>) {
+			BackedCachedGroupCallback<IndexedMatrixValue> group = new BackedCachedGroupCallback<>(pin, failure);
+			if(key instanceof GroupedBlockKey gk) {
+				OOCStream.QueueCallback<IndexedMatrixValue> sub = group.getCallback(gk.getGroupIndex());
+				group.close(); // drop the group-level reference, sub keeps the backed lease alive
+				return sub;
+			}
+			return group;
+		}
+		return new BackedCachedQueueCallback<>(pin, failure);
+	}
+
 	public static boolean canClaimMemory() {
 		return getCache().isWithinLimits() && OOCInstruction.getComputeInFlight() <= OOCInstruction.getComputeBackpressureThreshold();
 	}
@@ -279,6 +323,239 @@ public class OOCCacheManager {
 
 
 
+
+	public static class BackedCachedQueueCallback<T> implements OOCStream.QueueCallback<T> {
+		private OOCCacheScheduler.AllowanceBackedPin _pin;
+		private final AtomicBoolean _pinned;
+		private T _data;
+		private DMLRuntimeException _failure;
+
+		@SuppressWarnings("unchecked")
+		BackedCachedQueueCallback(OOCCacheScheduler.AllowanceBackedPin pin, DMLRuntimeException failure) {
+			_pin = pin;
+			_data = (T)pin.getEntry().getData();
+			_failure = failure;
+			_pinned = new AtomicBoolean(true);
+		}
+
+		@Override
+		public T get() {
+			if(_failure != null)
+				throw _failure;
+			if(!_pinned.get())
+				throw new IllegalStateException("Cannot get cached item of a closed callback");
+			return _data;
+		}
+
+		@Override
+		public OOCStream.QueueCallback<T> keepOpen() {
+			if(!_pinned.get())
+				throw new IllegalStateException("Cannot keep open an already closed callback");
+			return new BackedCachedQueueCallback<>(_pin.keepOpen(), _failure);
+		}
+
+		@Override
+		public long getManagedBytes() {
+			return _pin.getLogicalBytes();
+		}
+
+		@Override
+		public OOCStream.QueueCallback<T> transferOwnershipBlocking(MemoryAllowance allowance) {
+			if(!_pinned.get())
+				throw new IllegalStateException("Cannot transfer ownership of an already closed callback");
+			long bytes = _pin.getLogicalBytes();
+			if(_pin.getBackingAllowance() == allowance)
+				return this;
+			if(allowance instanceof CachedAllowance cached)
+				cached.admitBlocking(bytes);
+			else
+				allowance.reserveBlocking(bytes);
+			OOCCacheScheduler.AllowanceBackedPin newPin = getCache().pinBacked(_pin.getEntry(), allowance, bytes);
+			OOCCacheScheduler.AllowanceBackedPin oldPin = _pin;
+			_pin = newPin;
+			oldPin.close();
+			return this;
+		}
+
+		@Override
+		public OOCStream.QueueCallback<T> tryTransferOwnership(MemoryAllowance allowance) {
+			if(!_pinned.get())
+				throw new IllegalStateException("Cannot transfer ownership of an already closed callback");
+			long bytes = _pin.getLogicalBytes();
+			if(_pin.getBackingAllowance() == allowance)
+				return this;
+			if(allowance instanceof CachedAllowance)
+				return null;
+			if(!allowance.tryReserve(bytes))
+				return null;
+			OOCCacheScheduler.AllowanceBackedPin newPin = getCache().pinBacked(_pin.getEntry(), allowance, bytes);
+			OOCCacheScheduler.AllowanceBackedPin oldPin = _pin;
+			_pin = newPin;
+			oldPin.close();
+			return this;
+		}
+
+		@Override
+		public void fail(DMLRuntimeException failure) {
+			_failure = failure;
+		}
+
+		@Override
+		public boolean isEos() {
+			return get() == null;
+		}
+
+		@Override
+		public boolean isFailure() {
+			return _failure != null;
+		}
+
+		@Override
+		public void close() {
+			if(_pinned.compareAndSet(true, false)) {
+				_data = null;
+				_pin.close();
+			}
+		}
+
+		public BlockKey getBlockKey() {
+			return _pin.getKey();
+		}
+	}
+
+	public static class BackedCachedSubCallback<T> implements OOCStream.QueueCallback<T> {
+		private final BackedCachedGroupCallback<T> _parent;
+		private final AtomicBoolean _pinned;
+		private T _data;
+		private final int _groupIndex;
+
+		BackedCachedSubCallback(BackedCachedGroupCallback<T> parent, T data, int groupIndex) {
+			_parent = parent;
+			_data = data;
+			_groupIndex = groupIndex;
+			_pinned = new AtomicBoolean(true);
+		}
+
+		@Override
+		public T get() {
+			if(_parent.isFailure())
+				throw _parent._failure;
+			return _data;
+		}
+
+		@Override
+		public OOCStream.QueueCallback<T> keepOpen() {
+			_parent.registerQueueCallback();
+			return new BackedCachedSubCallback<>(_parent, _data, _groupIndex);
+		}
+
+		@Override
+		public void close() {
+			if(_pinned.compareAndSet(true, false)) {
+				_data = null;
+				_parent.close();
+			}
+		}
+
+		@Override
+		public void fail(DMLRuntimeException failure) {
+			_parent.fail(failure);
+		}
+
+		@Override
+		public boolean isEos() {
+			return false;
+		}
+
+		@Override
+		public boolean isFailure() {
+			return _parent.isFailure();
+		}
+
+		public BackedCachedGroupCallback<T> getParent() {
+			return _parent;
+		}
+
+		public int getGroupIndex() {
+			return _groupIndex;
+		}
+	}
+
+	public static class BackedCachedGroupCallback<T> implements OOCStream.GroupQueueCallback<T> {
+		private final OOCCacheScheduler.AllowanceBackedPin _pin;
+		private final AtomicInteger _pinCounter;
+		private List<T> _data;
+		private DMLRuntimeException _failure;
+
+		@SuppressWarnings("unchecked")
+		BackedCachedGroupCallback(OOCCacheScheduler.AllowanceBackedPin pin, DMLRuntimeException failure) {
+			_pin = pin;
+			_data = (List<T>)pin.getEntry().getData();
+			_failure = failure;
+			_pinCounter = new AtomicInteger(1);
+		}
+
+		public OOCStream.QueueCallback<T> getCallback(int idx) {
+			if(_pinCounter.get() <= 0)
+				throw new IllegalStateException("Cannot open sub-callback on a closed GroupCallback");
+			registerQueueCallback();
+			return new BackedCachedSubCallback<>(this, _data.get(idx), idx);
+		}
+
+		public void registerQueueCallback() {
+			if(_pinCounter.incrementAndGet() <= 1)
+				throw new IllegalStateException();
+		}
+
+		@Override
+		public T get() {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public int size() {
+			return _data.size();
+		}
+
+		public T get(int idx) {
+			return _data.get(idx);
+		}
+
+		@Override
+		public OOCStream.QueueCallback<T> keepOpen() {
+			if(_pinCounter.get() <= 0)
+				throw new IllegalStateException("Cannot keep open an already closed callback");
+			return new BackedCachedGroupCallback<>(_pin.keepOpen(), _failure);
+		}
+
+		@Override
+		public void close() {
+			int cnt = _pinCounter.decrementAndGet();
+			if(cnt == 0) {
+				_data = null;
+				_pin.close();
+			}
+		}
+
+		@Override
+		public void fail(DMLRuntimeException failure) {
+			_failure = failure;
+		}
+
+		@Override
+		public boolean isEos() {
+			return false;
+		}
+
+		@Override
+		public boolean isFailure() {
+			return _failure != null;
+		}
+
+		public BlockKey getBlockKey() {
+			return _pin.getKey();
+		}
+	}
 
 	public static class CachedQueueCallback<T> implements OOCStream.QueueCallback<T> {
 		private final BlockEntry _result;
@@ -309,6 +586,59 @@ public class OOCCacheManager {
 				throw new IllegalStateException("Cannot keep open an already closed callback");
 			pin(_result);
 			return new CachedQueueCallback<>(_result, _failure);
+		}
+
+		@Override
+		public long getManagedBytes() {
+			return _result.getSize();
+		}
+
+		@Override
+		public OOCStream.QueueCallback<T> transferOwnershipBlocking(MemoryAllowance allowance) {
+			long bytes = _result.getSize();
+			if(allowance instanceof CachedAllowance cached)
+				cached.admitBlocking(bytes);
+			else
+				allowance.reserveBlocking(bytes);
+			if(!_pinned.compareAndSet(true, false)) {
+				allowance.release(bytes);
+				throw new IllegalStateException("Cannot transfer ownership of an already closed callback");
+			}
+			try {
+				OOCCacheScheduler.AllowanceBackedPin pin = getCache().adoptPinnedBacked(_result, allowance, bytes);
+				_data = null;
+				return new BackedCachedQueueCallback<>(pin, _failure);
+			}
+			catch(RuntimeException ex) {
+				allowance.release(bytes);
+				unpin(_result);
+				throw ex;
+			}
+		}
+
+		@Override
+		public OOCStream.QueueCallback<T> tryTransferOwnership(MemoryAllowance allowance) {
+			if(!_pinned.get())
+				throw new IllegalStateException("Cannot transfer ownership of an already closed callback");
+			long bytes = _result.getSize();
+			if(allowance instanceof CachedAllowance)
+				return null;
+			if(!allowance.tryReserve(bytes))
+				return null;
+			if(!_pinned.compareAndSet(true, false)) {
+				allowance.release(bytes);
+				throw new IllegalStateException("Cannot transfer ownership of an already closed callback");
+			}
+			try {
+				OOCCacheScheduler.AllowanceBackedPin pin = getCache().adoptPinnedBacked(_result, allowance, bytes);
+				_data = null;
+				return new BackedCachedQueueCallback<>(pin, _failure);
+			}
+			catch(RuntimeException ex) {
+				allowance.release(bytes);
+				unpin(_result);
+				throw ex;
+			}
 		}
 
 		@Override

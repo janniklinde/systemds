@@ -235,7 +235,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		maybeScheduleHandovers(0);
 	}
 
-	void admitBlocking(long bytes) {
+	public void admitBlocking(long bytes) {
 		long requestedBytes = Math.max(bytes, MIN_HANDOVER_BATCH);
 		while(true) {
 			if(super.tryReserve(bytes))

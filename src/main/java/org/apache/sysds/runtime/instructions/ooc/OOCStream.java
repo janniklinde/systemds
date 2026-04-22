@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 import java.util.function.Consumer;
@@ -70,6 +71,18 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 		boolean isEos();
 
 		boolean isFailure();
+
+		default long getManagedBytes() {
+			return 0;
+		}
+
+		default QueueCallback<T> transferOwnershipBlocking(MemoryAllowance allowance) {
+			throw new UnsupportedOperationException("Callback does not support ownership transfer.");
+		}
+
+		default QueueCallback<T> tryTransferOwnership(MemoryAllowance allowance) {
+			throw new UnsupportedOperationException("Callback does not support ownership transfer.");
+		}
 	}
 
 	interface GroupQueueCallback<T> extends QueueCallback<T> {
@@ -115,6 +128,16 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 		@Override
 		public boolean isFailure() {
 			return _failure != null;
+		}
+
+		@Override
+		public QueueCallback<T> transferOwnershipBlocking(MemoryAllowance allowance) {
+			return this;
+		}
+
+		@Override
+		public QueueCallback<T> tryTransferOwnership(MemoryAllowance allowance) {
+			return this;
 		}
 	}
 }
