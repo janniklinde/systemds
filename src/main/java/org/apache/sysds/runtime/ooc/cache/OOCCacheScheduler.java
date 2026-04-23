@@ -102,9 +102,16 @@ public interface OOCCacheScheduler {
 		boolean isCommitted();
 		CompletableFuture<Boolean> getCompletionFuture();
 		OOCStream.QueueCallback<IndexedMatrixValue> reclaim();
+		IndexedMatrixValue getCallbackData();
+		BlockEntry retainForCallback();
+		void releaseForCallback();
+		BlockEntry getCommittedEntry();
+		long getManagedBytes();
 	}
 
 	HandoverHandle handover(BlockKey key, InMemoryQueueCallback callback);
+
+	OOCStream.QueueCallback<IndexedMatrixValue> handoverAndPin(BlockKey key, InMemoryQueueCallback callback);
 
 	/**
 	 * Places a new source-backed block in the cache and registers the location with the IO handler. The entry is

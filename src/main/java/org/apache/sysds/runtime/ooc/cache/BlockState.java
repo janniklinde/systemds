@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.ooc.cache;
 
 public enum BlockState {
 	HOT,
+	HANDOVER_PENDING,
 	WARM,
 	EVICTING,
 	READING,
@@ -33,7 +34,7 @@ public enum BlockState {
 	}
 
 	public boolean isUnavailable() {
-		return this == COLD || this == READING;
+		return this == COLD || this == READING || this == HANDOVER_PENDING;
 	}
 
 	public boolean readScheduled() {

@@ -52,7 +52,6 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private final HashMap<BlockKey, BlockEntry> _cache;
 	private final HashMap<BlockKey, BlockEntry> _evictionCache;
 	private final DeferredReadQueue _deferredReadRequests;
-	private final Deque<DeferredReadRequest> _processingReadRequests;
 	private final Deque<PendingHandover> _pendingHandovers;
 	private final Deque<PendingBackingRelease> _pendingBackingReleases;
 	private final HashMap<BlockKey, BlockReadState> _blockReads;
@@ -82,7 +81,6 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		this._cache = new LinkedHashMap<>(1024, 0.75f, true);
 		this._evictionCache = new  HashMap<>();
 		this._deferredReadRequests = new DeferredReadQueue();
-		this._processingReadRequests = new ArrayDeque<>();
 		this._pendingHandovers = new ArrayDeque<>();
 		this._pendingBackingReleases = new ArrayDeque<>();
 		this._blockReads = new HashMap<>();
@@ -121,7 +119,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		Statistics.incrementOOCEvictionGet();
 
 		BlockEntry entry;
-		boolean couldPin = false;
+		PendingHandover pending = null;
 		synchronized(this) {
 			entry = _cache.get(key);
 			if (entry == null)
@@ -130,16 +128,19 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 				throw new IllegalArgumentException("Could not find requested block with key " + key);
 
 			synchronized(entry) {
-				if (entry.getState().isAvailable()) {
+				if(entry.getState() == BlockState.HANDOVER_PENDING) {
+					pending = (PendingHandover) entry.getDataUnsafe();
+				}
+				else if (entry.getState().isAvailable()) {
 					if (pinEntryWithAccounting(entry) == 0)
 						throw new IllegalStateException();
-					couldPin = true;
+					return CompletableFuture.completedFuture(entry);
 				}
 			}
 		}
 
-		if (couldPin) {
-			// Then we could pin the required entry and can terminate
+		if(pending != null) {
+			pending.retainForCallback();
 			return CompletableFuture.completedFuture(entry);
 		}
 
@@ -174,11 +175,11 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			if(l != null) {
 				present.add(l.get(0));
 				selectionOut.add(l.get(0).getKey());
-				if(l.size() == n)
-					return l;
+				if(present.size() == n)
+					return present;
 			}
 		}
-		present.forEach(this::unpin);
+		present.forEach(this::releaseRequestedEntry);
 		return null;
 	}
 
@@ -194,7 +195,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		Statistics.incrementOOCEvictionGet(keys.size());
 
 		List<BlockEntry> entries = new ArrayList<>(keys.size());
-		boolean allAvailable = true;
+		boolean allRequestable = true;
 
 		synchronized(this) {
 			for (BlockKey key : keys) {
@@ -205,23 +206,30 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 					throw new IllegalArgumentException("Could not find requested block with key " + key);
 
 				synchronized(entry) {
-					if(!entry.getState().isAvailable())
-						allAvailable = false;
+					if(entry.getState() == BlockState.HANDOVER_PENDING) {
+						// Pending handovers are requestable because the handover callback can serve the tile.
+					}
+					else if(!entry.getState().isAvailable())
+						allRequestable = false;
 				}
 				entries.add(entry);
 			}
 
-			if(allAvailable) {
+			if(allRequestable) {
 				for(BlockEntry entry : entries) {
 					synchronized(entry) {
-						if(pinEntryWithAccounting(entry) == 0)
+						if(entry.getState() == BlockState.HANDOVER_PENDING) {
+							PendingHandover pending = (PendingHandover) entry.getDataUnsafe();
+							pending.retainForCallback();
+						}
+						else if(pinEntryWithAccounting(entry) == 0)
 							throw new IllegalStateException();
 					}
 				}
 			}
 		}
 
-		if (allAvailable) {
+		if (allRequestable) {
 			// Then we could pin all entries
 			return CompletableFuture.completedFuture(entries);
 		}
@@ -298,21 +306,13 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	@Override
 	public HandoverHandle handover(BlockKey key, InMemoryQueueCallback callback) {
-		if(!this._running)
-			throw new IllegalStateException("Cache scheduler has been shut down.");
-		PendingHandover handover = new PendingHandover(key, callback);
-		boolean immediateCommit = false;
-		synchronized(this) {
-			if(canAcceptHandoverLocked(callback.getManagedBytes()))
-				immediateCommit = true;
-			else
-				_pendingHandovers.addLast(handover);
-		}
-		if(immediateCommit) {
-			if(commitHandover(handover))
-				onCacheSizeChanged(true);
-		}
-		return handover;
+		return registerHandover(key, callback, 0);
+	}
+
+	@Override
+	public OOCStream.QueueCallback<IndexedMatrixValue> handoverAndPin(BlockKey key, InMemoryQueueCallback callback) {
+		PendingHandover handover = registerHandover(key, callback, 1);
+		return new OOCCacheManager.HandoverCachedQueueCallback<>(handover, null);
 	}
 
 	@Override
@@ -335,6 +335,34 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 				throw new IllegalArgumentException("Could not find requested block with key " + key);
 			entry.addReference();
 		}
+	}
+
+	private PendingHandover registerHandover(BlockKey key, InMemoryQueueCallback callback, int callbackRefs) {
+		if(!this._running)
+			throw new IllegalStateException("Cache scheduler has been shut down.");
+		if(callback == null)
+			throw new IllegalArgumentException("Cannot hand over a null callback.");
+		Statistics.incrementOOCEvictionPut();
+		PendingHandover handover = new PendingHandover(this, key, callback, callbackRefs);
+		BlockEntry entry = new BlockEntry(key, callback.getManagedBytes(), handover, BlockState.HANDOVER_PENDING);
+		handover.attachEntry(entry);
+		boolean immediateCommit;
+		synchronized(this) {
+			if(_cache.containsKey(key) || _evictionCache.containsKey(key))
+				throw new IllegalStateException("Cannot overwrite existing entries: " + key);
+			_cache.put(key, entry);
+			immediateCommit = canAcceptHandoverLocked(callback.getManagedBytes());
+			if(!immediateCommit)
+				_pendingHandovers.addLast(handover);
+		}
+		if(immediateCommit) {
+			if(commitHandover(handover))
+				onCacheSizeChanged(true);
+		}
+		else {
+			onCacheSizeChanged(true);
+		}
+		return handover;
 	}
 
 	private BlockEntry put(BlockKey key, Object data, long size, boolean pin, OOCIOHandler.SourceBlockDescriptor descriptor) {
@@ -368,12 +396,13 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	@Override
 	public void forget(BlockKey key) {
-		if (!this._running)
+		if(!this._running)
 			return;
 		final MutableObject<BlockEntry> mEntry = new MutableObject<>();
 		BlockEntry entry;
 		boolean shouldScheduleDeletion = false;
 		long cacheSizeDelta = 0;
+		PendingHandover pendingHandover = null;
 		synchronized(this) {
 			_cache.compute(key, (k, e) -> {
 				if(e == null)
@@ -385,7 +414,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 				return e;
 			});
 
-			if (mEntry.getValue() == null) {
+			if(mEntry.getValue() == null) {
 				_evictionCache.compute(key, (k, e) -> {
 					if(e == null)
 						return null;
@@ -399,10 +428,12 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 			entry = mEntry.getValue();
 
-			if (entry != null) {
+			if(entry != null) {
 				synchronized(entry) {
-					shouldScheduleDeletion = entry.getState().isBackedByDisk()
-						|| entry.getState() == BlockState.EVICTING;
+					if(entry.getState() == BlockState.HANDOVER_PENDING)
+						pendingHandover = (PendingHandover) entry.getDataUnsafe();
+					shouldScheduleDeletion =
+						entry.getState().isBackedByDisk() || entry.getState() == BlockState.EVICTING;
 					cacheSizeDelta = transitionMemState(entry, BlockState.REMOVED);
 					if(entry.isPinned() && entry.getDataUnsafe() != null)
 						_pinnedBytes -= entry.getSize();
@@ -412,10 +443,15 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 				}
 			}
 		}
-		if (cacheSizeDelta != 0)
+		if(cacheSizeDelta != 0)
 			onCacheSizeChanged(cacheSizeDelta > 0);
-		if (shouldScheduleDeletion)
+		if(shouldScheduleDeletion)
 			_ioHandler.scheduleDeletion(entry);
+		if(pendingHandover != null) {
+			OOCStream.QueueCallback<IndexedMatrixValue> callback = pendingHandover.reclaim();
+			if(callback != null)
+				callback.close();
+		}
 	}
 
 	@Override
@@ -534,11 +570,40 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 					return;
 				}
 				if(out.isCancelled()) {
-					unpin(entry);
+					releaseRequestedEntry(entry);
 					backingAllowance.release(logicalBytes);
 					return;
 				}
 				try {
+					PendingHandover pending = null;
+					synchronized(entry) {
+						if(entry.getState() == BlockState.HANDOVER_PENDING)
+							pending = (PendingHandover) entry.getDataUnsafe();
+					}
+					if(pending != null) {
+						releaseRequestedEntry(entry);
+						pending.getCompletionFuture().whenComplete((committed, pendingEx) -> {
+							if(pendingEx != null) {
+								backingAllowance.release(logicalBytes);
+								out.completeExceptionally(pendingEx);
+							}
+							else if(!Boolean.TRUE.equals(committed)) {
+								backingAllowance.release(logicalBytes);
+								out.completeExceptionally(new IllegalStateException(
+									"Pending handover was cancelled: " + key));
+							}
+							else {
+								requestBacked(key, backingAllowance, logicalBytes)
+									.whenComplete((pin, pinEx) -> {
+										if(pinEx != null)
+											out.completeExceptionally(pinEx);
+										else if(!out.complete(pin))
+											pin.close();
+									});
+							}
+						});
+						return;
+					}
 					AllowanceBackedPin pin = adoptPinnedBacked(entry, backingAllowance, logicalBytes);
 					if(!out.complete(pin))
 						pin.close();
@@ -561,6 +626,12 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		BlockEntry entry = tryRequest(key);
 		if(entry == null)
 			return null;
+		synchronized(entry) {
+			if(entry.getState() == BlockState.HANDOVER_PENDING) {
+				releaseRequestedEntry(entry);
+				return null;
+			}
+		}
 		return adoptPinnedBacked(entry, backingAllowance, logicalBytes);
 	}
 
@@ -647,7 +718,6 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		}
 		_cache.clear();
 		_evictionCache.clear();
-		_processingReadRequests.clear();
 		while(!_pendingHandovers.isEmpty()) {
 			PendingHandover pending = _pendingHandovers.pollFirst();
 			if(pending == null)
@@ -799,6 +869,10 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		long actualBackedWarmPinnedBytes = 0;
 		long actualReadingReservedBytes = 0;
 		for (BlockEntry entry : _cache.values()) {
+			if(entry.getState() == BlockState.HANDOVER_PENDING) {
+				total++;
+				continue;
+			}
 			if (entry.isPinned()) {
 				pinned++;
 				actualPinnedBytes += entry.getSize();
@@ -916,7 +990,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 						//	continue;
 						if(!allowRetainHint && entry.getRetainHintCount() > 0)
 							continue;
-						if(entry.getState() == BlockState.COLD || entry.getState() == BlockState.EVICTING)
+						if(entry.getState() == BlockState.COLD || entry.getState() == BlockState.EVICTING ||
+							entry.getState() == BlockState.HANDOVER_PENDING)
 							continue;
 
 						if(entry.getState().isBackedByDisk() && !entry.isPinned()) {
@@ -1038,6 +1113,11 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 							throw new IllegalStateException();
 						req.setPinned(idx);
 					}
+					else if(entry.getState() == BlockState.HANDOVER_PENDING) {
+						PendingHandover pending = (PendingHandover) entry.getDataUnsafe();
+						pending.retainForCallback();
+						req.setPinned(idx);
+					}
 					else if (entry.getState() == BlockState.READING) {
 						req.schedule(idx);
 						registerWaiter(entry.getKey(), req, idx);
@@ -1061,8 +1141,6 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			if(allReserved) {
 				_deferredReadRequests.poll();
 				_deferredReadCountHint = _deferredReadRequests.size();
-				if (!toRead.isEmpty())
-					_processingReadRequests.add(req);
 			}
 
 			sanityCheck();
@@ -1076,7 +1154,6 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		else if(allReserved && reading && req.isComplete()) {
 			clearRetainHints(req);
 			synchronized(this) {
-				_processingReadRequests.remove(req);
 				_deferredReadRequests.remove(req);
 				_deferredReadCountHint = _deferredReadRequests.size();
 			}
@@ -1126,7 +1203,6 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 					for(DeferredReadRequest done : completedRequests) {
 						clearRetainHints(done);
-						_processingReadRequests.remove(done);
 						_deferredReadRequests.remove(done);
 					}
 					_deferredReadCountHint = _deferredReadRequests.size();
@@ -1221,6 +1297,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 				_cacheSize -= sz;
 				_readingReservedBytes -= sz;
 				break;
+			case HANDOVER_PENDING:
+				break;
 			case COLD:
 				break;
 		}
@@ -1245,6 +1323,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			case READING:
 				_cacheSize += sz;
 				_readingReservedBytes += sz;
+				break;
+			case HANDOVER_PENDING:
 				break;
 		}
 
@@ -1282,6 +1362,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			case READING:
 				_backedCacheBytes += size;
 				break;
+			case HANDOVER_PENDING:
 			case COLD:
 			case REMOVED:
 				break;
@@ -1301,6 +1382,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			case READING:
 				_backedCacheBytes -= size;
 				break;
+			case HANDOVER_PENDING:
 			case COLD:
 			case REMOVED:
 				break;
@@ -1372,25 +1454,55 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		state.waiters.add(new DeferredReadWaiter(request, index));
 	}
 
+	private void releaseRequestedEntry(BlockEntry entry) {
+		synchronized(entry) {
+			if(entry.getState() == BlockState.HANDOVER_PENDING) {
+				PendingHandover pending = (PendingHandover) entry.getDataUnsafe();
+				pending.releaseForCallback();
+				return;
+			}
+		}
+		unpin(entry);
+	}
+
 	private boolean commitHandover(PendingHandover pending) {
 		InMemoryQueueCallback callback = pending.takeForCommit();
 		if(callback == null)
 			return false;
 		try {
 			IndexedMatrixValue value = callback.takeManagedResultForHandover();
-			long size = callback.getManagedBytes();
+			BlockEntry entry = pending.getEntry();
+			boolean installed = false;
 			synchronized(this) {
-				BlockEntry entry = new BlockEntry(pending.getKey(), size, value);
-				_cache.put(pending.getKey(), entry);
-				_cacheSize += size;
+				synchronized(entry) {
+					synchronized(pending) {
+						if(entry.getState() == BlockState.HANDOVER_PENDING && entry.getDataUnsafe() == pending) {
+							entry.replaceDataUnsafe(pending, value);
+							transitionMemState(entry, BlockState.HOT);
+							int refs = pending.markCommittedLocked(entry);
+							for(int i = 0; i < refs; i++) {
+								if(pinEntryWithAccounting(entry) == 0)
+									throw new IllegalStateException();
+							}
+							installed = true;
+						}
+					}
+				}
+			}
+			if(!installed) {
+				callback.releaseManagedMemory();
+				callback.close();
+				pending.markCancelled();
+				return false;
 			}
 			callback.releaseManagedMemory();
 			callback.close();
-			pending.markCommitted();
+			pending.completeCommitted();
 			return true;
 		}
 		catch(Throwable t) {
 			pending.markCancelled();
+			callback.releaseManagedMemory();
 			callback.close();
 			throw t;
 		}
@@ -1623,17 +1735,29 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	}
 
 	private static class PendingHandover implements HandoverHandle {
+		private final OOCLRUCacheScheduler _scheduler;
 		private final BlockKey _key;
 		private final CompletableFuture<Boolean> _completionFuture;
+		private final long _bytes;
 		private InMemoryQueueCallback _callback;
+		private BlockEntry _entry;
+		private int _callbackRefs;
 		private boolean _committed;
 		private boolean _cancelled;
 		private boolean _committing;
 
-		private PendingHandover(BlockKey key, InMemoryQueueCallback callback) {
+		private PendingHandover(OOCLRUCacheScheduler scheduler, BlockKey key, InMemoryQueueCallback callback,
+			int callbackRefs) {
+			_scheduler = scheduler;
 			_key = key;
 			_completionFuture = new CompletableFuture<>();
+			_bytes = callback.getManagedBytes();
 			_callback = callback;
+			_callbackRefs = callbackRefs;
+		}
+
+		private synchronized void attachEntry(BlockEntry entry) {
+			_entry = entry;
 		}
 
 		@Override
@@ -1662,12 +1786,19 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			return callback;
 		}
 
-		private synchronized long getManagedBytes() {
-			return _callback == null ? 0 : _callback.getManagedBytes();
+		@Override
+		public synchronized long getManagedBytes() {
+			if(_committed && _entry != null)
+				return _entry.getSize();
+			return _bytes;
 		}
 
 		private synchronized boolean isCancelled() {
 			return _cancelled;
+		}
+
+		private synchronized BlockEntry getEntry() {
+			return _entry;
 		}
 
 		private synchronized InMemoryQueueCallback takeForCommit() {
@@ -1679,9 +1810,14 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			return callback;
 		}
 
-		private synchronized void markCommitted() {
+		private int markCommittedLocked(BlockEntry entry) {
 			_committing = false;
 			_committed = true;
+			_entry = entry;
+			return _callbackRefs;
+		}
+
+		private void completeCommitted() {
 			_completionFuture.complete(true);
 		}
 
@@ -1691,6 +1827,59 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			_committing = false;
 			_cancelled = true;
 			_completionFuture.complete(false);
+		}
+
+		@Override
+		public IndexedMatrixValue getCallbackData() {
+			while(true) {
+				CompletableFuture<Boolean> wait = null;
+				synchronized(this) {
+					if(_cancelled)
+						throw new IllegalStateException("Pending handover was cancelled: " + _key);
+					if(_committed)
+						return (IndexedMatrixValue) _entry.getData();
+					if(!_committing && _callback != null)
+						return _callback.get();
+					wait = _completionFuture;
+				}
+				wait.join();
+			}
+		}
+
+		@Override
+		public BlockEntry retainForCallback() {
+			synchronized(this) {
+				if(_cancelled)
+					throw new IllegalStateException("Pending handover was cancelled: " + _key);
+				if(!_committed) {
+					_callbackRefs++;
+					return null;
+				}
+			}
+			_scheduler.pin(_entry);
+			return _entry;
+		}
+
+		@Override
+		public void releaseForCallback() {
+			BlockEntry entry = null;
+			synchronized(this) {
+				if(!_committed) {
+					if(_callbackRefs <= 0)
+						throw new IllegalStateException("Cannot release unopened pending handover callback.");
+					_callbackRefs--;
+					return;
+				}
+				entry = _entry;
+			}
+			_scheduler.unpin(entry);
+		}
+
+		@Override
+		public synchronized BlockEntry getCommittedEntry() {
+			if(!_committed)
+				return null;
+			return _entry;
 		}
 	}
 }

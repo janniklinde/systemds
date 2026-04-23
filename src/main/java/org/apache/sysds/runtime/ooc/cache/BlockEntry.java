@@ -55,6 +55,17 @@ public final class BlockEntry {
 		this._referenceCount = 1;
 	}
 
+	BlockEntry(BlockKey key, long size, Object data, BlockState state) {
+		this._key = key;
+		this._size = size;
+		this._pinCount = 0;
+		this._backedPinCount = 0;
+		this._state = state;
+		this._data = data;
+		this._retainHintCount = 0;
+		this._referenceCount = 1;
+	}
+
 	public BlockKey getKey() {
 		return _key;
 	}
@@ -64,6 +75,8 @@ public final class BlockEntry {
 	}
 
 	public Object getData() {
+		if(_state == BlockState.HANDOVER_PENDING)
+			throw new IllegalStateException("Cannot get data for a pending handover entry");
 		if (_pinCount > 0)
 			return _data;
 		throw new IllegalStateException("Cannot get the data of an unpinned entry");
@@ -88,6 +101,12 @@ public final class BlockEntry {
 	void setDataUnsafe(Object data) {
 		if(data != null && _data != null)
 			throw new IllegalStateException("Cannot overwrite data");
+		_data = data;
+	}
+
+	void replaceDataUnsafe(Object expected, Object data) {
+		if(_data != expected)
+			throw new IllegalStateException("Cannot replace unexpected data");
 		_data = data;
 	}
 
@@ -156,7 +175,7 @@ public final class BlockEntry {
 	 * @return the number of cleared bytes (or 0 if could not clear or data was already cleared)
 	 */
 	synchronized long clear() {
-		if (_pinCount != 0 || _data == null)
+		if (_state == BlockState.HANDOVER_PENDING || _pinCount != 0 || _data == null)
 			return 0;
 		if (_data instanceof IndexedMatrixValue)
 			((IndexedMatrixValue)_data).setValue(null); // Explicitly clear
@@ -170,7 +189,7 @@ public final class BlockEntry {
 	 * @return the new number of pins (0 if pin was unsuccessful)
 	 */
 	synchronized int pin() {
-		if (_data == null)
+		if (_state == BlockState.HANDOVER_PENDING || _data == null)
 			return 0;
 		_pinCount++;
 		return _pinCount;
@@ -181,7 +200,7 @@ public final class BlockEntry {
 	 * by this operation. This allows bypassing the global cache lock.
 	 */
 	synchronized boolean fastPin() {
-		if(_pinCount == 0)
+		if(_state == BlockState.HANDOVER_PENDING || _pinCount == 0)
 			return false;
 		_pinCount++;
 		return true;

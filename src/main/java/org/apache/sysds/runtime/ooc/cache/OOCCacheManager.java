@@ -279,6 +279,10 @@ public class OOCCacheManager {
 	}
 
 	private static OOCStream.QueueCallback<IndexedMatrixValue> toCallback(BlockEntry entry, BlockKey key, DMLRuntimeException failure) {
+		synchronized(entry) {
+			if(entry.getState() == BlockState.HANDOVER_PENDING)
+				return new HandoverCachedQueueCallback<>((OOCCacheScheduler.HandoverHandle) entry.getDataUnsafe(), failure);
+		}
 		if (entry.getData() instanceof List<?>) {
 			CachedGroupCallback<IndexedMatrixValue> group = new CachedGroupCallback<>(entry, failure);
 			if (key instanceof GroupedBlockKey gk) {
@@ -311,6 +315,11 @@ public class OOCCacheManager {
 
 	public static OOCCacheScheduler.HandoverHandle handover(BlockKey key, InMemoryQueueCallback callback) {
 		return getCache().handover(key, callback);
+	}
+
+	public static OOCStream.QueueCallback<IndexedMatrixValue> handoverAndPin(BlockKey key,
+		InMemoryQueueCallback callback) {
+		return getCache().handoverAndPin(key, callback);
 	}
 
 	private static void pin(BlockEntry entry) {
@@ -671,6 +680,122 @@ public class OOCCacheManager {
 		@Override
 		public BlockKey getBlockKey() {
 			return _result.getKey();
+		}
+	}
+
+	public static class HandoverCachedQueueCallback<T> implements OOCStream.QueueCallback<T> {
+		private final OOCCacheScheduler.HandoverHandle _handover;
+		private final AtomicBoolean _pinned;
+		private DMLRuntimeException _failure;
+
+		HandoverCachedQueueCallback(OOCCacheScheduler.HandoverHandle handover, DMLRuntimeException failure) {
+			_handover = handover;
+			_failure = failure;
+			_pinned = new AtomicBoolean(true);
+		}
+
+		@SuppressWarnings("unchecked")
+		@Override
+		public T get() {
+			if(_failure != null)
+				throw _failure;
+			if(!_pinned.get())
+				throw new IllegalStateException("Cannot get cached item of a closed callback");
+			return (T) _handover.getCallbackData();
+		}
+
+		@Override
+		public OOCStream.QueueCallback<T> keepOpen() {
+			if(!_pinned.get())
+				throw new IllegalStateException("Cannot keep open an already closed callback");
+			BlockEntry entry = _handover.retainForCallback();
+			if(entry != null)
+				return new CachedQueueCallback<>(entry, _failure);
+			return new HandoverCachedQueueCallback<>(_handover, _failure);
+		}
+
+		@Override
+		public long getManagedBytes() {
+			return _handover.getManagedBytes();
+		}
+
+		@Override
+		public OOCStream.QueueCallback<T> transferOwnershipBlocking(MemoryAllowance allowance) {
+			if(!_pinned.get())
+				throw new IllegalStateException("Cannot transfer ownership of an already closed callback");
+			_handover.getCompletionFuture().join();
+			BlockEntry entry = _handover.getCommittedEntry();
+			if(entry == null)
+				throw new IllegalStateException("Pending handover was not committed: " + _handover.getKey());
+			long bytes = entry.getSize();
+			if(allowance instanceof CachedAllowance cached)
+				cached.admitBlocking(bytes);
+			else
+				allowance.reserveBlocking(bytes);
+			if(!_pinned.compareAndSet(true, false)) {
+				allowance.release(bytes);
+				throw new IllegalStateException("Cannot transfer ownership of an already closed callback");
+			}
+			try {
+				OOCCacheScheduler.AllowanceBackedPin pin = getCache().adoptPinnedBacked(entry, allowance, bytes);
+				return new BackedCachedQueueCallback<>(pin, _failure);
+			}
+			catch(RuntimeException ex) {
+				unpin(entry);
+				throw ex;
+			}
+		}
+
+		@Override
+		public OOCStream.QueueCallback<T> tryTransferOwnership(MemoryAllowance allowance) {
+			if(!_pinned.get())
+				throw new IllegalStateException("Cannot transfer ownership of an already closed callback");
+			if(!_handover.isCommitted())
+				return null;
+			BlockEntry entry = _handover.getCommittedEntry();
+			long bytes = entry.getSize();
+			if(allowance instanceof CachedAllowance)
+				return null;
+			if(!allowance.tryReserve(bytes))
+				return null;
+			if(!_pinned.compareAndSet(true, false)) {
+				allowance.release(bytes);
+				throw new IllegalStateException("Cannot transfer ownership of an already closed callback");
+			}
+			try {
+				OOCCacheScheduler.AllowanceBackedPin pin = getCache().adoptPinnedBacked(entry, allowance, bytes);
+				return new BackedCachedQueueCallback<>(pin, _failure);
+			}
+			catch(RuntimeException ex) {
+				unpin(entry);
+				throw ex;
+			}
+		}
+
+		@Override
+		public void fail(DMLRuntimeException failure) {
+			_failure = failure;
+		}
+
+		@Override
+		public boolean isEos() {
+			return get() == null;
+		}
+
+		@Override
+		public boolean isFailure() {
+			return _failure != null;
+		}
+
+		@Override
+		public void close() {
+			if(_pinned.compareAndSet(true, false))
+				_handover.releaseForCallback();
+		}
+
+		@Override
+		public BlockKey getBlockKey() {
+			return _handover.getKey();
 		}
 	}
 

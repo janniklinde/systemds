@@ -30,6 +30,7 @@ import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.GroupedBlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
+import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
@@ -206,7 +207,14 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 							if(blockKey == null) {
 								ownsEntry = true;
 								blockKey = new BlockKey(_streamId, _numBlocks);
-								if(descriptor == null) {
+								if(descriptor == null && tmp instanceof InMemoryQueueCallback inMemory) {
+									InMemoryQueueCallback handover = (InMemoryQueueCallback) inMemory.keepOpen();
+									if(mSubscribers == null || mSubscribers.length == 0)
+										OOCCacheManager.handover(blockKey, handover);
+									else
+										mCallback = OOCCacheManager.handoverAndPin(blockKey, handover);
+								}
+								else if(descriptor == null) {
 									if(mSubscribers == null || mSubscribers.length == 0)
 										OOCCacheManager.put(_streamId, _numBlocks, task);
 									else
