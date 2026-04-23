@@ -20,6 +20,8 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.ooc.cache.BlockKey;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheScheduler;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
@@ -82,6 +84,14 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 
 		default QueueCallback<T> tryTransferOwnership(MemoryAllowance allowance) {
 			throw new UnsupportedOperationException("Callback does not support ownership transfer.");
+		}
+
+		default BlockKey getBlockKey() {
+			return null;
+		}
+
+		default OOCCacheScheduler.AllowanceBackedPin getBackingPin() {
+			return null;
 		}
 	}
 

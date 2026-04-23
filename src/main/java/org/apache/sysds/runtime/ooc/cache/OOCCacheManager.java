@@ -418,8 +418,14 @@ public class OOCCacheManager {
 			}
 		}
 
+		@Override
 		public BlockKey getBlockKey() {
 			return _pin.getKey();
+		}
+
+		@Override
+		public OOCCacheScheduler.AllowanceBackedPin getBackingPin() {
+			return _pin;
 		}
 	}
 
@@ -610,7 +616,6 @@ public class OOCCacheManager {
 				return new BackedCachedQueueCallback<>(pin, _failure);
 			}
 			catch(RuntimeException ex) {
-				allowance.release(bytes);
 				unpin(_result);
 				throw ex;
 			}
@@ -635,7 +640,6 @@ public class OOCCacheManager {
 				return new BackedCachedQueueCallback<>(pin, _failure);
 			}
 			catch(RuntimeException ex) {
-				allowance.release(bytes);
 				unpin(_result);
 				throw ex;
 			}
@@ -664,6 +668,7 @@ public class OOCCacheManager {
 			}
 		}
 
+		@Override
 		public BlockKey getBlockKey() {
 			return _result.getKey();
 		}

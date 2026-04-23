@@ -54,6 +54,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private final DeferredReadQueue _deferredReadRequests;
 	private final Deque<DeferredReadRequest> _processingReadRequests;
 	private final Deque<PendingHandover> _pendingHandovers;
+	private final Deque<PendingBackingRelease> _pendingBackingReleases;
 	private final HashMap<BlockKey, BlockReadState> _blockReads;
 	private volatile long _hardLimit;
 	private long _evictionLimit;
@@ -83,6 +84,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		this._deferredReadRequests = new DeferredReadQueue();
 		this._processingReadRequests = new ArrayDeque<>();
 		this._pendingHandovers = new ArrayDeque<>();
+		this._pendingBackingReleases = new ArrayDeque<>();
 		this._blockReads = new HashMap<>();
 		this._hardLimit = hardLimit;
 		this._evictionLimit = evictionLimit;
@@ -509,8 +511,14 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			backingAllowance.release(logicalBytes);
 			throw new IllegalStateException("Cannot adopt an unpinned entry: " + entry.getKey());
 		}
-		addBackedPinWithAccounting(entry);
-		return new AllowanceBackedPinImpl(this, entry, backingAllowance, logicalBytes);
+		try {
+			addBackedPinWithAccounting(entry);
+			return new AllowanceBackedPinImpl(this, entry, backingAllowance, logicalBytes);
+		}
+		catch(RuntimeException ex) {
+			backingAllowance.release(logicalBytes);
+			throw ex;
+		}
 	}
 
 	@Override
@@ -554,6 +562,28 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		if(entry == null)
 			return null;
 		return adoptPinnedBacked(entry, backingAllowance, logicalBytes);
+	}
+
+	@Override
+	public BackingReleaseHandle releaseBacking(AllowanceBackedPin pin) {
+		if(!(pin instanceof AllowanceBackedPinImpl))
+			throw new IllegalArgumentException("Backing release requires a pin created by this scheduler.");
+		if(((AllowanceBackedPinImpl) pin)._handle._scheduler != this)
+			throw new IllegalArgumentException("Backing release pin belongs to a different scheduler.");
+		if(!this._running)
+			throw new IllegalStateException("Cache scheduler has been shut down.");
+		PendingBackingRelease release = new PendingBackingRelease(pin);
+		boolean commit;
+		synchronized(this) {
+			commit = canAcceptBackingReleaseLocked(pin.getLogicalBytes());
+			if(!commit)
+				_pendingBackingReleases.addLast(release);
+		}
+		if(commit)
+			release.commit();
+		else
+			onCacheSizeChanged(true);
+		return release;
 	}
 
 	private void addBackedPinWithAccounting(BlockEntry entry) {
@@ -625,6 +655,14 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			OOCStream.QueueCallback<IndexedMatrixValue> callback = pending.reclaim();
 			if(callback != null)
 				callback.close();
+		}
+		while(!_pendingBackingReleases.isEmpty()) {
+			PendingBackingRelease pending = _pendingBackingReleases.pollFirst();
+			if(pending == null)
+				continue;
+			AllowanceBackedPin pin = pending.reclaim();
+			if(pin != null)
+				pin.close();
 		}
 		_deferredReadRequests.clear();
 		_deferredReadCountHint = 0;
@@ -717,8 +755,14 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			onCacheSizeIncremented();
 		else
 			while(onCacheSizeDecremented()) {}
+		while(processPendingBackingReleases()) {
+			onCacheSizeIncremented();
+		}
 		while(processPendingHandovers()) {
 			onCacheSizeIncremented();
+			while(processPendingBackingReleases()) {
+				onCacheSizeIncremented();
+			}
 		}
 		if(DMLScript.OOC_LOG_EVENTS)
 			OOCEventLog.onCacheSizeChangedEvent(_callerId, System.nanoTime(), getChargedCacheSize(), getChargedEvictingBytes(),
@@ -937,6 +981,32 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		boolean progress = false;
 		for(PendingHandover pending : committed) {
 			if(commitHandover(pending))
+				progress = true;
+		}
+		return progress;
+	}
+
+	private boolean processPendingBackingReleases() {
+		List<PendingBackingRelease> committed = new ArrayList<>();
+		synchronized(this) {
+			while(!_pendingBackingReleases.isEmpty()) {
+				PendingBackingRelease pending = _pendingBackingReleases.peekFirst();
+				if(pending == null)
+					break;
+				if(pending.isCancelled()) {
+					_pendingBackingReleases.pollFirst();
+					continue;
+				}
+				long bytes = pending.getManagedBytes();
+				if(!canAcceptBackingReleaseLocked(bytes))
+					break;
+				_pendingBackingReleases.pollFirst();
+				committed.add(pending);
+			}
+		}
+		boolean progress = false;
+		for(PendingBackingRelease pending : committed) {
+			if(pending.commit())
 				progress = true;
 		}
 		return progress;
@@ -1330,6 +1400,10 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		return bytes >= 0 && getChargedCacheSizeLocked() + bytes <= _hardLimit;
 	}
 
+	private boolean canAcceptBackingReleaseLocked(long bytes) {
+		return bytes >= 0 && getChargedCacheSizeLocked() + bytes <= _hardLimit;
+	}
+
 	private static void validateBackedPinArgs(BlockEntry entry, MemoryAllowance backingAllowance, long logicalBytes) {
 		if(entry == null)
 			throw new IllegalArgumentException("Cannot create allowance-backed pin for null entry.");
@@ -1457,6 +1531,74 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			}
 			if(releaseFailure != null)
 				throw releaseFailure;
+		}
+	}
+
+	private static final class PendingBackingRelease implements BackingReleaseHandle {
+		private final BlockKey _key;
+		private final CompletableFuture<Boolean> _completionFuture;
+		private AllowanceBackedPin _pin;
+		private boolean _committed;
+		private boolean _cancelled;
+
+		private PendingBackingRelease(AllowanceBackedPin pin) {
+			_key = pin.getKey();
+			_completionFuture = new CompletableFuture<>();
+			_pin = pin;
+		}
+
+		@Override
+		public synchronized BlockKey getKey() {
+			return _key;
+		}
+
+		@Override
+		public synchronized boolean isCommitted() {
+			return _committed;
+		}
+
+		@Override
+		public synchronized CompletableFuture<Boolean> getCompletionFuture() {
+			return _completionFuture;
+		}
+
+		@Override
+		public synchronized AllowanceBackedPin reclaim() {
+			if(_committed || _cancelled)
+				return null;
+			_cancelled = true;
+			_completionFuture.complete(false);
+			AllowanceBackedPin pin = _pin;
+			_pin = null;
+			return pin;
+		}
+
+		private synchronized long getManagedBytes() {
+			return _pin == null ? 0 : _pin.getLogicalBytes();
+		}
+
+		private synchronized boolean isCancelled() {
+			return _cancelled;
+		}
+
+		private boolean commit() {
+			AllowanceBackedPin pin;
+			synchronized(this) {
+				if(_committed || _cancelled)
+					return false;
+				pin = _pin;
+				_pin = null;
+				_committed = true;
+			}
+			try {
+				pin.close();
+				_completionFuture.complete(true);
+				return true;
+			}
+			catch(RuntimeException ex) {
+				_completionFuture.completeExceptionally(ex);
+				throw ex;
+			}
 		}
 	}
 

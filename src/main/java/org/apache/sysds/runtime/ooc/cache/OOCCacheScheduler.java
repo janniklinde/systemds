@@ -180,6 +180,12 @@ public interface OOCCacheScheduler {
 	 */
 	AllowanceBackedPin tryRequestBacked(BlockKey key, MemoryAllowance backingAllowance, long logicalBytes);
 
+	/**
+	 * Attempts to convert an externally-backed resident pin back to scheduler-backed cache budget.
+	 * If not committed, the caller can reclaim the pin from the handle.
+	 */
+	BackingReleaseHandle releaseBacking(AllowanceBackedPin pin);
+
 	interface AllowanceBackedPin extends AutoCloseable {
 		BlockKey getKey();
 		BlockEntry getEntry();
@@ -188,6 +194,13 @@ public interface OOCCacheScheduler {
 		AllowanceBackedPin keepOpen();
 		@Override
 		void close();
+	}
+
+	interface BackingReleaseHandle {
+		BlockKey getKey();
+		boolean isCommitted();
+		CompletableFuture<Boolean> getCompletionFuture();
+		AllowanceBackedPin reclaim();
 	}
 
 	/**

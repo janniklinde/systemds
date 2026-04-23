@@ -58,6 +58,7 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 		_handle._failure = failure;
 	}
 
+	@Override
 	public long getManagedBytes() {
 		synchronized(_handle) {
 			return _handle._reservedBytes;
