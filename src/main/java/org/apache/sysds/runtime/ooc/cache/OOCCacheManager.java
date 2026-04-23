@@ -705,7 +705,7 @@ public class OOCCacheManager {
 		}
 
 		@Override
-		public OOCStream.QueueCallback<T> keepOpen() {
+		public synchronized OOCStream.QueueCallback<T> keepOpen() {
 			if(!_pinned.get())
 				throw new IllegalStateException("Cannot keep open an already closed callback");
 			BlockEntry entry = _handover.retainForCallback();
@@ -720,28 +720,14 @@ public class OOCCacheManager {
 		}
 
 		@Override
-		public OOCStream.QueueCallback<T> transferOwnershipBlocking(MemoryAllowance allowance) {
-			if(!_pinned.get())
+		public synchronized OOCStream.QueueCallback<T> transferOwnershipBlocking(MemoryAllowance allowance) {
+			if(!_pinned.compareAndSet(true, false))
 				throw new IllegalStateException("Cannot transfer ownership of an already closed callback");
-			_handover.getCompletionFuture().join();
-			BlockEntry entry = _handover.getCommittedEntry();
-			if(entry == null)
-				throw new IllegalStateException("Pending handover was not committed: " + _handover.getKey());
-			long bytes = entry.getSize();
-			if(allowance instanceof CachedAllowance cached)
-				cached.admitBlocking(bytes);
-			else
-				allowance.reserveBlocking(bytes);
-			if(!_pinned.compareAndSet(true, false)) {
-				allowance.release(bytes);
-				throw new IllegalStateException("Cannot transfer ownership of an already closed callback");
-			}
 			try {
-				OOCCacheScheduler.AllowanceBackedPin pin = getCache().adoptPinnedBacked(entry, allowance, bytes);
+				OOCCacheScheduler.AllowanceBackedPin pin = _handover.transferToBacked(allowance);
 				return new BackedCachedQueueCallback<>(pin, _failure);
 			}
 			catch(RuntimeException ex) {
-				unpin(entry);
 				throw ex;
 			}
 		}
@@ -788,7 +774,7 @@ public class OOCCacheManager {
 		}
 
 		@Override
-		public void close() {
+		public synchronized void close() {
 			if(_pinned.compareAndSet(true, false))
 				_handover.releaseForCallback();
 		}

@@ -107,6 +107,7 @@ public interface OOCCacheScheduler {
 		void releaseForCallback();
 		BlockEntry getCommittedEntry();
 		long getManagedBytes();
+		AllowanceBackedPin transferToBacked(MemoryAllowance allowance);
 	}
 
 	HandoverHandle handover(BlockKey key, InMemoryQueueCallback callback);

@@ -116,6 +116,16 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 		}
 	}
 
+	public long detachManagedMemoryForHandover(MemoryAllowance expectedAllowance) {
+		synchronized(_handle) {
+			if(_handle._allow != expectedAllowance)
+				throw new IllegalStateException("Unexpected memory owner for handover.");
+			long bytes = _handle._reservedBytes;
+			_handle._reservedBytes = 0;
+			return bytes;
+		}
+	}
+
 	@Override
 	public synchronized void close() {
 		if(_closed)

@@ -25,6 +25,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
@@ -1531,6 +1532,13 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			throw new IllegalArgumentException("Logical bytes must not be negative.");
 	}
 
+	private static void reserveBackedLogicalBytes(MemoryAllowance allowance, long logicalBytes) {
+		if(allowance instanceof CachedAllowance cached)
+			cached.admitBlocking(logicalBytes);
+		else
+			allowance.reserveBlocking(logicalBytes);
+	}
+
 	private static final class AllowanceBackedPinImpl implements AllowanceBackedPin {
 		private final BackedPinHandle _handle;
 		private boolean _closed;
@@ -1880,6 +1888,99 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			if(!_committed)
 				return null;
 			return _entry;
+		}
+
+		@Override
+		public AllowanceBackedPin transferToBacked(MemoryAllowance allowance) {
+			InMemoryQueueCallback callback = null;
+			BlockEntry entry;
+			boolean pendingTransfer = false;
+			CompletableFuture<Boolean> wait = null;
+
+			synchronized(this) {
+				if(_cancelled)
+					throw new IllegalStateException("Pending handover was cancelled: " + _key);
+				if(_committed) {
+					entry = _entry;
+				}
+				else if(_committing) {
+					wait = _completionFuture;
+					entry = null;
+				}
+				else {
+					if(_callbackRefs <= 0)
+						throw new IllegalStateException("Cannot transfer unopened pending handover callback.");
+					_callbackRefs--;
+					_committing = true;
+					callback = _callback;
+					_callback = null;
+					entry = _entry;
+					pendingTransfer = true;
+				}
+			}
+
+			if(wait != null) {
+				wait.join();
+				return transferToBacked(allowance);
+			}
+
+			if(!pendingTransfer) {
+				reserveBackedLogicalBytes(allowance, entry.getSize());
+				return _scheduler.adoptPinnedBacked(entry, allowance, entry.getSize());
+			}
+
+			long detachedBytes = 0;
+			boolean installed = false;
+			boolean reservationOwned = false;
+			try {
+				callback.transferOwnershipBlocking(allowance);
+				detachedBytes = callback.detachManagedMemoryForHandover(allowance);
+				reservationOwned = true;
+				IndexedMatrixValue value = callback.takeManagedResultForHandover();
+
+				synchronized(_scheduler) {
+					synchronized(entry) {
+						synchronized(this) {
+							if(entry.getState() == BlockState.HANDOVER_PENDING && entry.getDataUnsafe() == this) {
+								entry.replaceDataUnsafe(this, value);
+								_scheduler.transitionMemState(entry, BlockState.HOT);
+								for(int i = 0; i < _callbackRefs + 1; i++) {
+									if(_scheduler.pinEntryWithAccounting(entry) == 0)
+										throw new IllegalStateException();
+								}
+								_committing = false;
+								_committed = true;
+								installed = true;
+							}
+						}
+					}
+				}
+
+				if(!installed)
+					throw new IllegalStateException("Pending handover was already resolved: " + _key);
+
+				try {
+					reservationOwned = false; // adoptPinnedBacked owns release on success or failure.
+					AllowanceBackedPin pin = _scheduler.adoptPinnedBacked(entry, allowance, detachedBytes);
+					callback.close();
+					_completionFuture.complete(true);
+					return pin;
+				}
+				catch(RuntimeException ex) {
+					_scheduler.unpin(entry);
+					throw ex;
+				}
+			}
+			catch(RuntimeException ex) {
+				if(reservationOwned && detachedBytes > 0)
+					allowance.release(detachedBytes);
+				callback.close();
+				if(installed)
+					_completionFuture.completeExceptionally(ex);
+				else
+					markCancelled();
+				throw ex;
+			}
 		}
 	}
 }
