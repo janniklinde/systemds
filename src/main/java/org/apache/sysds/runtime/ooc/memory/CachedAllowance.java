@@ -26,6 +26,8 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheScheduler;
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.matrix.data.MatrixValue;
 
 import java.lang.ref.SoftReference;
 import java.util.concurrent.CompletableFuture;
@@ -92,23 +94,25 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			return null;
 
 		while(true) {
+			BlockKey backendKey = null;
 			BlockKey schedulerKey = null;
 			byte state;
 			CompletableFuture<Void> spillFuture = null;
 			OOCStream.QueueCallback<IndexedMatrixValue> local = null;
+			IndexedMatrixValue softLocal = null;
 			long bytes = 0;
 
 			synchronized(entry) {
 				if(entry._local != null)
 					local = entry._local.keepOpen();
 				else if(entry._softLocal != null) {
-					IndexedMatrixValue softLocal = entry._softLocal.get();
+					softLocal = entry._softLocal.get();
 					if(softLocal != null)
-						local = new OOCStream.SimpleQueueCallback<>(softLocal, null);
+						backendKey = entry._key;
 					else
 						entry._softLocal = null;
 				}
-				if(local == null) {
+				if(local == null && softLocal == null) {
 					state = entry._state;
 					if(state == SlotEntry.STATE_DIRECT_SPILLING) {
 						spillFuture = entry._spillFuture;
@@ -124,6 +128,8 @@ public class CachedAllowance extends SyncMemoryAllowance {
 
 			if(local != null)
 				return local;
+			if(softLocal != null)
+				return tryActivateLocal(entry, softLocal, backendKey, index);
 
 			if(spillFuture != null) {
 				if(!spillFuture.isDone())
@@ -174,21 +180,24 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		CompletableFuture<Void> spillFuture;
 		BlockKey key;
 		byte state;
+		IndexedMatrixValue softLocal = null;
 		long bytes;
 		synchronized(entry) {
 			if(entry._local != null)
 				return CompletableFuture.completedFuture(entry._local.keepOpen());
 			if(entry._softLocal != null) {
-				IndexedMatrixValue softLocal = entry._softLocal.get();
-				if(softLocal != null)
-					return CompletableFuture.completedFuture(new OOCStream.SimpleQueueCallback<>(softLocal, null));
-				entry._softLocal = null;
+				softLocal = entry._softLocal.get();
+				if(softLocal == null)
+					entry._softLocal = null;
 			}
 			state = entry._state;
 			spillFuture = entry._spillFuture;
 			key = entry._key;
 			bytes = entry._bytes;
 		}
+
+		if(softLocal != null)
+			return CompletableFuture.completedFuture(activateLocalBlocking(entry, softLocal, key, index));
 
 		if(state == SlotEntry.STATE_DIRECT_SPILLING && spillFuture != null) {
 			return spillFuture.handle((ignored, ex) -> {
@@ -199,12 +208,12 @@ public class CachedAllowance extends SyncMemoryAllowance {
 				BlockKey mKey = finishSpill(entry, spillFuture);
 				if(mKey == null)
 					return get(index);
-				return readFromBackend(entry, mKey);
+				return readFromBackend(entry, mKey, index);
 			});
 		}
 
 		if(state == SlotEntry.STATE_BACKEND_SPILLED && key != null)
-			return readFromBackend(entry, key);
+			return readFromBackend(entry, key, index);
 		if(state == SlotEntry.STATE_SCHEDULER_BACKED && key != null && bytes > 0)
 			return readFromScheduler(entry, key, bytes);
 		return CompletableFuture.completedFuture(null);
@@ -540,17 +549,50 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		return key;
 	}
 
-	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> readFromBackend(SlotEntry entry, BlockKey key) {
+	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> readFromBackend(SlotEntry entry, BlockKey key,
+		int index) {
 		return OOCCacheManager.getTileStoreBackend().read(key)
 			.thenApply(imv -> {
 				if(imv == null)
 					return null;
-				synchronized(entry) {
-					if(entry._state == SlotEntry.STATE_BACKEND_SPILLED && key.equals(entry._key))
-						entry._softLocal = new SoftReference<>(imv);
-				}
-				return new OOCStream.SimpleQueueCallback<>(imv, null);
+				return activateLocalBlocking(entry, imv, key, index);
 			});
+	}
+
+	private OOCStream.QueueCallback<IndexedMatrixValue> tryActivateLocal(SlotEntry entry, IndexedMatrixValue imv,
+		BlockKey key, int index) {
+		long bytes = estimateManagedBytes(imv);
+		if(!super.tryReserve(bytes))
+			return null;
+		return activateLocalReserved(entry, imv, key, bytes, index);
+	}
+
+	private OOCStream.QueueCallback<IndexedMatrixValue> activateLocalBlocking(SlotEntry entry, IndexedMatrixValue imv,
+		BlockKey key, int index) {
+		long bytes = estimateManagedBytes(imv);
+		admitBlocking(bytes);
+		return activateLocalReserved(entry, imv, key, bytes, index);
+	}
+
+	private OOCStream.QueueCallback<IndexedMatrixValue> activateLocalReserved(SlotEntry entry, IndexedMatrixValue imv,
+		BlockKey key, long bytes, int index) {
+		InMemoryQueueCallback root = new InMemoryQueueCallback(imv, null, this, bytes);
+		root.getHandle().attachCachedAllowance(this, index);
+		OOCStream.QueueCallback<IndexedMatrixValue> existing = null;
+		synchronized(entry) {
+			if(entry._state == SlotEntry.STATE_BACKEND_SPILLED && entry._local == null && key != null &&
+				key.equals(entry._key)) {
+				entry._local = root;
+				entry._state = SlotEntry.STATE_LOCAL;
+				entry._key = null;
+				entry._softLocal = null;
+				return root.keepOpen();
+			}
+			if(entry._local != null)
+				existing = entry._local.keepOpen();
+		}
+		closeRoot(root);
+		return existing;
 	}
 
 	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> readFromScheduler(SlotEntry entry,
@@ -576,6 +618,15 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		if(local == null)
 			return;
 		entry._softLocal = new SoftReference<>(local.get());
+	}
+
+	private long estimateManagedBytes(IndexedMatrixValue imv) {
+		if(imv == null || imv.getValue() == null)
+			throw new IllegalStateException("Cannot activate empty cached tile.");
+		MatrixValue value = imv.getValue();
+		if(value instanceof MatrixBlock block)
+			return block.getInMemorySize();
+		return Math.max(1L, (long)value.getNumRows() * value.getNumColumns() * Double.BYTES);
 	}
 
 	private long takePendingBytes(SlotEntry entry) {
