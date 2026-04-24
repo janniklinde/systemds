@@ -111,17 +111,11 @@ public class OOCPlanner {
 	}
 
 	private static boolean isRegionRoot(OOCPrimitive primitive) {
-		//if(!isFusiblePrimitive(primitive))
-		//	return false;
-		if(primitive.getParents().size() != 1 || primitive.isMaterializationBoundary())
+		if(primitive.getParents().size() != 1)
 			return true;
 
 		OOCPrimitive parent = primitive.getParents().get(0);
 		return !canFuseDownstream(parent, primitive);
-	}
-
-	private static boolean isFusiblePrimitive(OOCPrimitive primitive) {
-		return primitive.isTileLocal() && !primitive.isMaterializationBoundary();
 	}
 
 	private static boolean canFuseDownstream(OOCPrimitive downstream, OOCPrimitive upstream) {
@@ -131,21 +125,22 @@ public class OOCPlanner {
 			&& !downstream.isMaterializationBoundary()
 			&& downstream.getChildren().size() == 1
 			&& upstream.getParents().size() == 1
-			&& isFusiblePrimitive(upstream);
+			&& upstream.isTileLocal();
 	}
 
 	private static List<OOCPrimitive> buildRegionFromRoot(OOCPrimitive regionRoot, Set<OOCPrimitive> assigned) {
 		List<OOCPrimitive> region = new ArrayList<>();
 		OOCPrimitive current = regionRoot;
 
-		while(current != null && (isFusiblePrimitive(current) || region.isEmpty()) && assigned.add(current)) {
-			region.add(current);
-			if(current.getChildren().size() != 1)
-				break;
+		if(!assigned.add(current))
+			return region;
+		region.add(current);
 
+		while(current.getChildren().size() == 1) {
 			OOCPrimitive child = current.getChildren().get(0);
-			if(!canFuseDownstream(current, child))
+			if(!canFuseDownstream(current, child) || !assigned.add(child))
 				break;
+			region.add(child);
 			current = child;
 		}
 

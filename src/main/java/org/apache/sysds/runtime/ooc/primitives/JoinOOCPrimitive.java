@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
+import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
@@ -87,6 +88,17 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	public void onComplete() {
+		try {
+			if(_cache != null)
+				_cache.shutdown();
+		}
+		finally {
+			super.onComplete();
+		}
+	}
+
+	@Override
 	public void inferPatterns() {
 		_pattern = OOCAccessPattern.ANY;
 		for(OOCPrimitive p : getChildren()) {
@@ -120,58 +132,71 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 		OOCStream<Tuple3<OOCStream.QueueCallback<IndexedMatrixValue>, OOCStream.QueueCallback<IndexedMatrixValue>, Integer>> intermediate = new SubscribableTaskQueue<>();
 
 		new Thread(() -> {
-			long rows = OOCUtils.getNumRowBlocks(l.getDataCharacteristics());
-			long cols = OOCUtils.getNumColBlocks(r.getDataCharacteristics());
-			OOCStream.QueueCallback<IndexedMatrixValue> next;
-			IndexedMatrixValue nextValue;
-			boolean nextLeft = true;
-			AtomicInteger pendingRequests = new AtomicInteger(1);
+			try {
+				long cols = OOCUtils.getNumColBlocks(r.getDataCharacteristics());
+				OOCStream.QueueCallback<IndexedMatrixValue> next;
+				IndexedMatrixValue nextValue;
+				boolean nextLeft = true;
+				AtomicInteger pendingRequests = new AtomicInteger(1);
 
-			while((next = (nextLeft ? l : r).dequeueCB()) != null) {
-				try {
-					nextValue = next.get();
-					long rIdx = nextValue.getIndexes().getRowIndex()-1;
-					long cIdx =  nextValue.getIndexes().getColumnIndex()-1;
-					int idx = (int) (rIdx * cols + cIdx);
-					var future = _cache.get(idx);
-					if(future.isDone()) {
-						var cb = future.getNow(null);
-						if(cb == null) {
-							_cache.handover(next, idx);
+				while((next = (nextLeft ? l : r).dequeueCB()) != null) {
+					try {
+						nextValue = next.get();
+						long rIdx = nextValue.getIndexes().getRowIndex()-1;
+						long cIdx =  nextValue.getIndexes().getColumnIndex()-1;
+						int idx = (int) (rIdx * cols + cIdx);
+						var future = _cache.get(idx);
+						if(future.isDone()) {
+							var cb = future.getNow(null);
+							if(cb == null) {
+								_cache.handover(next, idx);
+							}
+							else {
+								try(cb) {
+									_allowance.reserveBlocking(_allocFn.applyAsLong(nextValue.getIndexes()));
+									intermediate.enqueue(nextLeft ? new Tuple3<>(next.keepOpen(), cb.keepOpen(), idx) :
+										new Tuple3<>(cb.keepOpen(), next.keepOpen(), idx));
+								}
+							}
 						}
 						else {
-							try(cb) {
-								_allowance.reserveBlocking(_allocFn.applyAsLong(nextValue.getIndexes()));
-								intermediate.enqueue(nextLeft ? new Tuple3<>(next.keepOpen(), cb.keepOpen(), idx) :
-									new Tuple3<>(cb.keepOpen(), next.keepOpen(), idx));
-							}
+							pendingRequests.incrementAndGet();
+							final var pinned = next.keepOpen();
+							final boolean isLeft = nextLeft;
+							future.whenComplete((cb, err) -> {
+								try {
+									if(err != null)
+										throw DMLRuntimeException.of(err);
+									try(cb; pinned) {
+										_allowance.reserveBlocking(_allocFn.applyAsLong(cb.get().getIndexes()));
+										intermediate.enqueue(
+											isLeft ? new Tuple3<>(pinned.keepOpen(), cb.keepOpen(), idx) :
+												new Tuple3<>(cb.keepOpen(), pinned.keepOpen(), idx));
+									}
+								}
+								catch(Throwable t) {
+									failJoin(t, intermediate, out);
+								}
+								finally {
+									if(pendingRequests.decrementAndGet() == 0)
+										intermediate.closeInput();
+								}
+							});
 						}
-					}
-					else {
-						pendingRequests.incrementAndGet();
-						final var pinned = next.keepOpen();
-						final boolean isLeft = nextLeft;
-						future.thenAccept(cb -> {
-							try(cb; pinned) {
-								_allowance.reserveBlocking(_allocFn.applyAsLong(cb.get().getIndexes()));
-								intermediate.enqueue(
-									isLeft ? new Tuple3<>(pinned.keepOpen(), cb.keepOpen(), idx) :
-										new Tuple3<>(cb.keepOpen(), pinned.keepOpen(), idx));
-							}
-							if(pendingRequests.decrementAndGet() == 0)
-								intermediate.closeInput();
-						});
-					}
 
-					nextLeft = !nextLeft;
+						nextLeft = !nextLeft;
+					}
+					finally {
+						next.close();
+					}
 				}
-				finally {
-					next.close();
-				}
+
+				if(pendingRequests.decrementAndGet() == 0)
+					intermediate.closeInput();
 			}
-
-			if(pendingRequests.decrementAndGet() == 0)
-				intermediate.closeInput();
+			catch(Throwable t) {
+				failJoin(t, intermediate, out);
+			}
 		}).start();
 
 		OOCInstructionUtils.submitOOCTasks(intermediate, cb -> {
@@ -179,12 +204,30 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 			var qL = t._1();
 			var qR = t._2();
 			try(qL; qR) {
-				var imv = new IndexedMatrixValue(qL.get().getIndexes(), _fn.apply(List.of((MatrixBlock)qL.get().getValue(), (MatrixBlock)qR.get().getValue())));
-				out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, _allocFn.applyAsLong(imv.getIndexes())));
+				var imv = new IndexedMatrixValue(qL.get().getIndexes(),
+					_fn.apply(List.of((MatrixBlock)qL.get().getValue(), (MatrixBlock)qR.get().getValue())));
+				if(_crossBoundaries)
+					out.enqueue(new InMemoryQueueCallback(imv, null, _allowance,
+						_allocFn.applyAsLong(imv.getIndexes())));
+				else
+					out.enqueue(new OOCStream.SimpleQueueCallback<>(imv, null));
 			}
 			finally {
 				_cache.clear(t._3());
 			}
-		}, _sc).thenRun(out::closeInput);
+		}, _sc).thenRun(out::closeInput).exceptionally(t -> {
+			out.propagateFailure(DMLRuntimeException.of(t));
+			return null;
+		}).thenRun(this::onComplete);
+	}
+
+	private void failJoin(Throwable t, OOCStream<?> intermediate, OOCStream<IndexedMatrixValue> out) {
+		DMLRuntimeException re = DMLRuntimeException.of(t);
+		if(_sc.inStreamsDefined() && _sc.outStreamsDefined())
+			_sc.failAll(re);
+		else {
+			intermediate.propagateFailure(re);
+			out.propagateFailure(re);
+		}
 	}
 }
