@@ -23,18 +23,32 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class OOCIOHandlerTileStoreBackend implements TileStoreBackend {
+	private final ConcurrentHashMap<BlockKey, IndexedMatrixValue> _pendingReadables = new ConcurrentHashMap<>();
+
 	@Override
 	public CompletableFuture<Void> spill(BlockKey key, IndexedMatrixValue imv) {
 		// Patch to avoid collisions with the OOCCacheScheduler
 		BlockKey patched = new BlockKey(Long.MAX_VALUE - key.getStreamId(), key.getSequenceNumber());
 		BlockEntry entry = new BlockEntry(patched, ((MatrixBlock)imv.getValue()).getExactSerializedSize(), imv);
-		return OOCCacheManager.getIOHandler().scheduleEviction(entry);
+		OOCIOHandler.SpillFuture future = OOCCacheManager.getIOHandler().scheduleEviction(entry);
+		var idx = imv.getIndexes();
+		var val = imv.getValue();
+		return future.serializedFuture().thenRun(() -> {
+			if(future.readFuture().isDone())
+				return;
+			_pendingReadables.put(key, new IndexedMatrixValue(idx, val));
+			future.readFuture().thenRun(() -> discard(_pendingReadables.remove(key)));
+		});
 	}
 
 	@Override
 	public CompletableFuture<IndexedMatrixValue> read(BlockKey key) {
+		var imv = _pendingReadables.get(key);
+		if(imv != null)
+			return CompletableFuture.completedFuture(imv);
 		// Patch to avoid collisions with the OOCCacheScheduler
 		BlockKey patched = new BlockKey(Long.MAX_VALUE - key.getStreamId(), key.getSequenceNumber());
 		BlockEntry entry = new BlockEntry(patched);
@@ -43,8 +57,14 @@ public class OOCIOHandlerTileStoreBackend implements TileStoreBackend {
 
 	@Override
 	public void delete(BlockKey key) {
+		discard(_pendingReadables.remove(key));
 		// Patch to avoid collisions with the OOCCacheScheduler
 		BlockKey patched = new BlockKey(Long.MAX_VALUE - key.getStreamId(), key.getSequenceNumber());
 		OOCCacheManager.getIOHandler().scheduleDeletion(new BlockEntry(patched));
+	}
+
+	private void discard(IndexedMatrixValue imv) {
+		if(imv != null)
+			imv.discard();
 	}
 }

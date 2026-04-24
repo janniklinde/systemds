@@ -30,7 +30,7 @@ import java.util.List;
 public interface OOCIOHandler {
 	void shutdown();
 
-	CompletableFuture<Void> scheduleEviction(BlockEntry block);
+	SpillFuture scheduleEviction(BlockEntry block);
 
 	CompletableFuture<BlockEntry> scheduleRead(BlockEntry block);
 
@@ -58,6 +58,8 @@ public interface OOCIOHandler {
 	 * Continue a previously throttled source read using the provided continuation token.
 	 */
 	CompletableFuture<SourceReadResult> continueSourceRead(SourceReadContinuation continuation, long maxBytesInFlight);
+
+	record SpillFuture(CompletableFuture<Void> serializedFuture, CompletableFuture<Void> readFuture) {}
 
 	interface SourceReadContinuation {}
 

@@ -314,8 +314,8 @@ public class OOCLRUCacheSchedulerTest {
 		}
 
 		@Override
-		public CompletableFuture<Void> scheduleEviction(BlockEntry block) {
-			return CompletableFuture.completedFuture(null);
+		public SpillFuture scheduleEviction(BlockEntry block) {
+			return new SpillFuture(CompletableFuture.completedFuture(null), CompletableFuture.completedFuture(null));
 		}
 
 		@Override

@@ -38,7 +38,6 @@ import org.apache.sysds.runtime.util.FastBufferedDataInputStream;
 import org.apache.sysds.runtime.util.FastBufferedDataOutputStream;
 import org.apache.sysds.runtime.util.LocalFileUtils;
 import org.apache.sysds.utils.Statistics;
-import scala.Tuple2;
 import scala.Tuple3;
 
 import java.io.DataInput;
@@ -89,7 +88,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 	private final ConcurrentHashMap<BlockKey, SourceBlockDescriptor> _sourceLocations = new ConcurrentHashMap<>();
 	private final AtomicInteger _partitionCounter = new AtomicInteger(0);
 	private final Object _spillLock = new Object();
-	private final CloseableQueue<Tuple2<BlockEntry, CompletableFuture<Void>>>[] _q;
+	private final CloseableQueue<Tuple3<BlockEntry, CompletableFuture<Void>, CompletableFuture<Void>>>[] _q;
 	private final AtomicLong _wCtr;
 	private final AtomicBoolean _started;
 
@@ -166,18 +165,19 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 	}
 
 	@Override
-	public CompletableFuture<Void> scheduleEviction(BlockEntry block) {
+	public SpillFuture scheduleEviction(BlockEntry block) {
 		start();
-		CompletableFuture<Void> future = new CompletableFuture<>();
+		CompletableFuture<Void> serializedFuture = new CompletableFuture<>();
+		CompletableFuture<Void> readableFuture = new CompletableFuture<>();
 		try {
 			long q = _wCtr.getAndAdd(block.getSize()) / OVERFLOW;
 			int i = (int)(q % WRITER_SIZE);
-			_q[i].enqueueIfOpen(new Tuple2<>(block, future));
+			_q[i].enqueueIfOpen(new Tuple3<>(block, serializedFuture, readableFuture));
 		}
 		catch(InterruptedException ignored) {
 		}
 
-		return future;
+		return new SpillFuture(serializedFuture, readableFuture);
 	}
 
 	@Override
@@ -595,7 +595,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		}
 	}
 
-	private void evictTask(CloseableQueue<Tuple2<BlockEntry, CompletableFuture<Void>>> q) {
+	private void evictTask(CloseableQueue<Tuple3<BlockEntry, CompletableFuture<Void>, CompletableFuture<Void>>> q) {
 		long byteCtr = 0;
 
 		while (!q.isFinished()) {
@@ -618,15 +618,16 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 				fos = new FileOutputStream(filename);
 				dos = new CountableFastBufferedDataOutputStream(fos);
 
-				Tuple2<BlockEntry, CompletableFuture<Void>> tpl;
+				Tuple3<BlockEntry, CompletableFuture<Void>, CompletableFuture<Void>> tpl;
 				waitingForFlush = new ConcurrentLinkedDeque<>();
 				boolean closePartition = false;
 
 				while((tpl = q.take()) != null) {
 					long ioStart = DMLScript.OOC_STATISTICS || DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
-					BlockEntry entry = tpl._1;
-					CompletableFuture<Void> future = tpl._2;
-					long wrote = writeOut(partitionId, entry, future, fos, dos, waitingForFlush);
+					BlockEntry entry = tpl._1();
+					CompletableFuture<Void> serializedFuture = tpl._2();
+					CompletableFuture<Void> readableFuture = tpl._3();
+					long wrote = writeOut(partitionId, entry, serializedFuture, readableFuture, fos, dos, waitingForFlush);
 
 					if(DMLScript.OOC_STATISTICS && wrote > 0) {
 						Statistics.incrementOOCEvictionWrite();
@@ -648,9 +649,10 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 				if (!closePartition && q.close()) {
 					while((tpl = q.take()) != null) {
 						long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
-						BlockEntry entry = tpl._1;
-						CompletableFuture<Void> future = tpl._2;
-						long wrote = writeOut(partitionId, entry, future, fos, dos, waitingForFlush);
+						BlockEntry entry = tpl._1();
+						CompletableFuture<Void> serializedFuture = tpl._2();
+						CompletableFuture<Void> readableFuture = tpl._3();
+						long wrote = writeOut(partitionId, entry, serializedFuture, readableFuture, fos, dos, waitingForFlush);
 						byteCtr += wrote;
 
 						if(DMLScript.OOC_STATISTICS && wrote > 0) {
@@ -679,8 +681,10 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		}
 	}
 
-	private long writeOut(int partitionId, BlockEntry entry, CompletableFuture<Void> future, FileOutputStream fos,
-		CountableFastBufferedDataOutputStream dos, ConcurrentLinkedDeque<Tuple3<Long, Long, CompletableFuture<Void>>> flushQueue) throws IOException {
+	private long writeOut(int partitionId, BlockEntry entry, CompletableFuture<Void> serializedFuture,
+		CompletableFuture<Void> readableFuture, FileOutputStream fos, CountableFastBufferedDataOutputStream dos,
+		ConcurrentLinkedDeque<Tuple3<Long, Long, CompletableFuture<Void>>> flushQueue) throws IOException {
+
 		String key = entry.getKey().toFileKey();
 		boolean alreadySpilled = _spillLocations.containsKey(key);
 
@@ -690,7 +694,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			//dos.flush();
 			long offsetBefore = fos.getChannel().position() + dos.getCount();
 
-			if(future.isCancelled())
+			if(serializedFuture.isCancelled())
 				return 0;
 
 			// 2. write indexes and block
@@ -701,18 +705,19 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 				return 0;
 
 			long offsetAfter = fos.getChannel().position() + dos.getCount();
-			if(future.isCancelled())
+			if(serializedFuture.isCancelled())
 				return offsetAfter - offsetBefore;
-			flushQueue.offer(new Tuple3<>(offsetBefore, offsetAfter, future));
+			flushQueue.offer(new Tuple3<>(offsetBefore, offsetAfter, readableFuture));
 
 			// 3. create the spillLocation
 			SpillLocation sloc = new SpillLocation(partitionId, offsetBefore);
 			addSpillLocation(key, sloc);
-			if(future.isCancelled()) {
+			if(serializedFuture.isCancelled()) {
 				removeSpillLocation(key);
 				return offsetAfter - offsetBefore;
 			}
 			flushQueue(fos.getChannel().position(), flushQueue);
+			serializedFuture.complete(null);
 
 			return offsetAfter - offsetBefore;
 		}
