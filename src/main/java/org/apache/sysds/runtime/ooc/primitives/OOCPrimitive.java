@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.ooc.primitives;
 
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
@@ -94,6 +95,14 @@ public abstract class OOCPrimitive {
 
 	public boolean isMaterializationBoundary() {
 		return false;
+	}
+
+	public boolean requiresCache() {
+		return false;
+	}
+
+	public void bindCache(CachedAllowance cache) {
+		throw new UnsupportedOperationException();
 	}
 
 	public long getDenseTileMemoryFactor() {

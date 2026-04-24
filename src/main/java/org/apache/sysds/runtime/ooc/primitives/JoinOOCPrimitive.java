@@ -19,33 +19,71 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
+import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
+import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
+import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.stream.StreamContext;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
+import scala.Tuple3;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 
-public class JoinOOCPrimitive extends PlannableOOCPrimitive {
-	private final List<OOCStreamable<?>> _inputStreamables;
-	private final OOCStreamable<?> _outputStreamable;
+public class JoinOOCPrimitive extends OOCPrimitive {
+	private final List<OOCStreamable<IndexedMatrixValue>> _inputStreamables;
+	private final OOCStreamable<IndexedMatrixValue> _outputStreamable;
+	private final Function<List<MatrixBlock>, MatrixBlock> _fn;
+	private final StreamContext _sc;
+	private CachedAllowance _cache;
 
-	private JoinOOCPrimitive(List<OOCPrimitive> inputPrimitives, List<OOCStreamable<?>> inputs, OOCStreamable<?> output) {
+	private JoinOOCPrimitive(List<OOCPrimitive> inputPrimitives, List<OOCStreamable<IndexedMatrixValue>> inputs, OOCStreamable<IndexedMatrixValue> output, Function<List<MatrixBlock>, MatrixBlock> fn, StreamContext sc) {
 		super(inputPrimitives);
 		_inputStreamables = inputs;
 		_outputStreamable = output;
+		_fn = fn;
+		_sc = sc;
 	}
 
-	public JoinOOCPrimitive(List<OOCStreamable<?>> inputs, OOCStreamable<?> output) {
-		this(inputs.stream().map(OOCStreamable::getPrimitive).toList(), inputs, output);
+	public JoinOOCPrimitive(List<OOCStreamable<IndexedMatrixValue>> inputs, OOCStreamable<IndexedMatrixValue> output, Function<List<MatrixBlock>, MatrixBlock> fn, StreamContext sc) {
+		this(inputs.stream().map(OOCStreamable::getPrimitive).toList(), inputs, output, fn, sc);
 	}
 
 	@Override
 	public List<OOCStreamable<?>> getInputStreams() {
-		return _inputStreamables;
+		return new ArrayList<>(_inputStreamables);
 	}
 
 	@Override
 	public List<OOCStreamable<?>> getOutputStreams() {
 		return List.of(_outputStreamable);
+	}
+
+	@Override
+	public boolean isMaterializationBoundary() {
+		return true;
+	}
+
+	@Override
+	public boolean isTileLocal() {
+		return true;
+	}
+
+	@Override
+	public boolean requiresCache() {
+		return true;
+	}
+
+	@Override
+	public void bindCache(CachedAllowance cache) {
+		_cache = cache;
 	}
 
 	@Override
@@ -70,5 +108,83 @@ public class JoinOOCPrimitive extends PlannableOOCPrimitive {
 		_pattern = accessPattern;
 		for(OOCPrimitive p : getChildren())
 			p.requestPattern(accessPattern);
+	}
+
+	@Override
+	public void startExecution() {
+		if(_inputStreamables.size() != 2)
+			throw new IllegalArgumentException();
+		OOCStream<IndexedMatrixValue> l = _inputStreamables.get(0).getReadStream();
+		OOCStream<IndexedMatrixValue> r = _inputStreamables.get(1).getReadStream();
+		OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
+		OOCStream<Tuple3<OOCStream.QueueCallback<IndexedMatrixValue>, OOCStream.QueueCallback<IndexedMatrixValue>, Integer>> intermediate = new SubscribableTaskQueue<>();
+
+		new Thread(() -> {
+			long rows = OOCUtils.getNumRowBlocks(l.getDataCharacteristics());
+			long cols = OOCUtils.getNumColBlocks(r.getDataCharacteristics());
+			OOCStream.QueueCallback<IndexedMatrixValue> next;
+			IndexedMatrixValue nextValue;
+			boolean nextLeft = true;
+			AtomicInteger pendingRequests = new AtomicInteger(1);
+
+			while((next = (nextLeft ? l : r).dequeueCB()) != null) {
+				try {
+					nextValue = next.get();
+					long rIdx = nextValue.getIndexes().getRowIndex()-1;
+					long cIdx =  nextValue.getIndexes().getColumnIndex()-1;
+					int idx = (int) (rIdx * cols + cIdx);
+					var future = _cache.get(idx);
+					if(future.isDone()) {
+						var cb = future.getNow(null);
+						if(cb == null) {
+							_cache.handover(next, idx);
+						}
+						else {
+							try(cb) {
+								_allowance.reserveBlocking(_allocFn.applyAsLong(nextValue.getIndexes()));
+								intermediate.enqueue(nextLeft ? new Tuple3<>(next.keepOpen(), cb.keepOpen(), idx) :
+									new Tuple3<>(cb.keepOpen(), next.keepOpen(), idx));
+							}
+						}
+					}
+					else {
+						pendingRequests.incrementAndGet();
+						final var pinned = next.keepOpen();
+						final boolean isLeft = nextLeft;
+						future.thenAccept(cb -> {
+							try(cb; pinned) {
+								_allowance.reserveBlocking(_allocFn.applyAsLong(cb.get().getIndexes()));
+								intermediate.enqueue(
+									isLeft ? new Tuple3<>(pinned.keepOpen(), cb.keepOpen(), idx) :
+										new Tuple3<>(cb.keepOpen(), pinned.keepOpen(), idx));
+							}
+							if(pendingRequests.decrementAndGet() == 0)
+								intermediate.closeInput();
+						});
+					}
+
+					nextLeft = !nextLeft;
+				}
+				finally {
+					next.close();
+				}
+			}
+
+			if(pendingRequests.decrementAndGet() == 0)
+				intermediate.closeInput();
+		}).start();
+
+		OOCInstructionUtils.submitOOCTasks(intermediate, cb -> {
+			var t = cb.get();
+			var qL = t._1();
+			var qR = t._2();
+			try(qL; qR) {
+				var imv = new IndexedMatrixValue(qL.get().getIndexes(), _fn.apply(List.of((MatrixBlock)qL.get().getValue(), (MatrixBlock)qR.get().getValue())));
+				out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, _allocFn.applyAsLong(imv.getIndexes())));
+			}
+			finally {
+				_cache.clear(t._3());
+			}
+		}, _sc).thenRun(out::closeInput);
 	}
 }

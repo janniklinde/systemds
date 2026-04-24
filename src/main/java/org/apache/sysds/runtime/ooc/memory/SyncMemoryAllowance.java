@@ -23,6 +23,7 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 
 public class SyncMemoryAllowance implements MemoryAllowance {
 	protected final MemoryBroker _broker;
+	protected final long _consumptionLimit;
 	protected volatile long _usedBytes;
 	protected volatile long _grantedBytes;
 	protected volatile long _targetBytes;
@@ -30,7 +31,12 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	protected volatile boolean _destroyed;
 
 	public SyncMemoryAllowance(MemoryBroker broker) {
+		this(broker, Long.MAX_VALUE);
+	}
+
+	public SyncMemoryAllowance(MemoryBroker broker, long consumptionLimit) {
 		_broker = broker;
+		_consumptionLimit = consumptionLimit;
 		_usedBytes = 0;
 		_grantedBytes = 0;
 		_targetBytes = 0;
@@ -151,7 +157,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	public synchronized void setTargetMemory(long targetMemory) {
 		if(_shutdown || _destroyed)
 			return;
-		_targetBytes = targetMemory;
+		_targetBytes = Math.min(targetMemory, _consumptionLimit);
 		notifyAll();
 	}
 

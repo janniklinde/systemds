@@ -40,7 +40,7 @@ public enum OOCAccessPattern {
 	}
 
 	public OOCAccessPattern preferred(OOCAccessPattern preferred) {
-		return this == ANY ? preferred : this;
+		return (this == ANY || this == UNSET) ? preferred : this;
 	}
 
 	public boolean isPlannable() {

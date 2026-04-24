@@ -75,6 +75,24 @@ public class OOCUtils {
 		return -1;
 	}
 
+	public static long getNumRowBlocks(DataCharacteristics dc) {
+		if (dc != null && dc.dimsKnown() && dc.getBlocksize() > 0) {
+			if(dc.getCols() == 0 || dc.getRows() == 0)
+				return 0;
+			return dc.getNumRowBlocks();
+		}
+		return -1;
+	}
+
+	public static long getNumColBlocks(DataCharacteristics dc) {
+		if (dc != null && dc.dimsKnown() && dc.getBlocksize() > 0) {
+			if(dc.getCols() == 0 || dc.getRows() == 0)
+				return 0;
+			return dc.getNumColBlocks();
+		}
+		return -1;
+	}
+
 	public static long getNumRowsOfTile(MatrixIndexes tileIdx, DataCharacteristics c) {
 		return getNumRowsOfTile(tileIdx, c.getRows(), c.getBlocksize());
 	}

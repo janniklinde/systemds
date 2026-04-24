@@ -75,7 +75,8 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 
 	@Override
 	public void inferPatterns() {
-		_pattern = OOCAccessPattern.ANY;
+		if(_pattern == OOCAccessPattern.UNSET)
+			_pattern = OOCAccessPattern.ANY;
 		getParents().forEach(OOCPrimitive::inferPatterns);
 	}
 

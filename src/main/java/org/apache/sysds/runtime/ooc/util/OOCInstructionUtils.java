@@ -22,9 +22,11 @@ package org.apache.sysds.runtime.ooc.util;
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
+import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.PlannableDataGenOOCPrimitive;
@@ -44,7 +46,6 @@ import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
-import java.util.function.ToLongFunction;
 
 public class OOCInstructionUtils {
 	public static final ExecutorService COMPUTE_EXECUTOR = CommonThreadPool.get();
@@ -58,6 +59,11 @@ public class OOCInstructionUtils {
 
 	public static void equiMap(OOCStream<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
 		OOCPrimitive primitive = new MappingOOCPrimitive(in, out, fn, sc);
+		out.assignPrimitive(primitive);
+	}
+
+	public static void equiJoin(List<OOCStreamable<IndexedMatrixValue>> l, OOCStream<IndexedMatrixValue> out, Function<List<MatrixBlock>, MatrixBlock> fn, StreamContext sc) {
+		OOCPrimitive primitive = new JoinOOCPrimitive(l, out, fn, sc);
 		out.assignPrimitive(primitive);
 	}
 

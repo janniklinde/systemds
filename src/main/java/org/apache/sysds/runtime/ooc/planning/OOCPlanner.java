@@ -22,6 +22,7 @@ package org.apache.sysds.runtime.ooc.planning;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
@@ -80,13 +81,16 @@ public class OOCPlanner {
 	}
 
 	private static void compileRegion(List<OOCPrimitive> region) {
-		MemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get());
+		MemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), 200_000_000);
 		ToLongFunction<MatrixIndexes> allocFn = buildAllocFn(region);
 		OOCRegionBinding binding = new OOCRegionBinding(allowance, allocFn, new AtomicInteger(region.size()));
 
 		for(int i = 0; i < region.size(); i++) {
 			boolean crossBoundaries = i == 0;
 			region.get(i).bindRegion(binding, crossBoundaries);
+			if(region.get(i).requiresCache()) {
+				region.get(i).bindCache(new CachedAllowance(GlobalMemoryBroker.get()));
+			}
 		}
 	}
 
@@ -107,9 +111,9 @@ public class OOCPlanner {
 	}
 
 	private static boolean isRegionRoot(OOCPrimitive primitive) {
-		if(!isFusiblePrimitive(primitive))
-			return false;
-		if(primitive.getParents().size() != 1)
+		//if(!isFusiblePrimitive(primitive))
+		//	return false;
+		if(primitive.getParents().size() != 1 || primitive.isMaterializationBoundary())
 			return true;
 
 		OOCPrimitive parent = primitive.getParents().get(0);
@@ -134,7 +138,7 @@ public class OOCPlanner {
 		List<OOCPrimitive> region = new ArrayList<>();
 		OOCPrimitive current = regionRoot;
 
-		while(current != null && isFusiblePrimitive(current) && assigned.add(current)) {
+		while(current != null && (isFusiblePrimitive(current) || region.isEmpty()) && assigned.add(current)) {
 			region.add(current);
 			if(current.getChildren().size() != 1)
 				break;
