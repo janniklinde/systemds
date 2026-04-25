@@ -140,6 +140,11 @@ public class OOCPrimitiveJoinTest {
 		var scMaps = scMapsList.get(2);
 		var l = streamsList.get(0);
 		var r = streamsList.get(1);
+		r.add(createMatrixStream());
+		scMapsList.get(1).add(new StreamContext(0, "op_transpose").addOutStream(r.get(r.size() - 1)));
+		OOCInstructionUtils.transposedMap(r.get(r.size() - 2), r.get(r.size() - 1), MatrixBlock::transpose,
+			scMapsList.get(1).get(scMapsList.get(1).size() - 1));
+
 		streams.add(createMatrixStream());
 		scMaps.add(new StreamContext(0, "op_join").addOutStream(streams.get(0)));
 		OOCInstructionUtils.equiJoin(List.of(l.get(l.size()-1), r.get(r.size()-1)), streams.get(0),
@@ -260,7 +265,7 @@ public class OOCPrimitiveJoinTest {
 			right += 2.0;
 		}
 		double out = left + right;
-		for(int k = 1; k < K; k++)
+		for(int k = 1; k < K + 1; k++)
 			out += 2.0;
 		return out;
 	}

@@ -30,6 +30,7 @@ import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.PlannableDataGenOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.TransposeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.stream.TaskContext;
@@ -60,6 +61,16 @@ public class OOCInstructionUtils {
 	public static void equiMap(OOCStream<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
 		OOCPrimitive primitive = new MappingOOCPrimitive(in, out, fn, sc);
 		out.assignPrimitive(primitive);
+	}
+
+	public static void transposedMap(OOCStream<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out,
+		Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
+		OOCPrimitive primitive = new TransposeOOCPrimitive(in, out, fn, sc);
+		out.assignPrimitive(primitive);
+	}
+
+	public static void transpose(OOCStream<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out, StreamContext sc) {
+		transposedMap(in, out, MatrixBlock::transpose, sc);
 	}
 
 	public static void equiJoin(List<OOCStreamable<IndexedMatrixValue>> l, OOCStream<IndexedMatrixValue> out, Function<List<MatrixBlock>, MatrixBlock> fn, StreamContext sc) {

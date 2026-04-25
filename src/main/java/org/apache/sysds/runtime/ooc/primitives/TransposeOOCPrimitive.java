@@ -19,23 +19,39 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
+import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.stream.StreamContext;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 import java.util.List;
+import java.util.function.Function;
 
 public class TransposeOOCPrimitive extends OOCPrimitive {
-	private final OOCStreamable<?> _inputStreamable;
-	private final OOCStreamable<?> _outputStreamable;
+	private final OOCStreamable<IndexedMatrixValue> _inputStreamable;
+	private final OOCStreamable<IndexedMatrixValue> _outputStreamable;
+	private final Function<MatrixBlock, MatrixBlock> _fn;
+	private final StreamContext _sc;
 
-	private TransposeOOCPrimitive(OOCPrimitive inputPrimitive, OOCStreamable<?> inputStreamable, OOCStreamable<?> outputStreamable) {
+	private TransposeOOCPrimitive(OOCPrimitive inputPrimitive, OOCStreamable<IndexedMatrixValue> inputStreamable,
+		OOCStreamable<IndexedMatrixValue> outputStreamable, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
 		super(inputPrimitive == null ? List.of() : List.of(inputPrimitive));
 		_inputStreamable = inputStreamable;
 		_outputStreamable = outputStreamable;
+		_fn = fn;
+		_sc = sc;
 	}
 
-	public TransposeOOCPrimitive(OOCStreamable<?> inputStreamable, OOCStreamable<?> outputStreamable) {
-		this(inputStreamable == null ? null : inputStreamable.getPrimitive(), inputStreamable, outputStreamable);
+	public TransposeOOCPrimitive(OOCStreamable<IndexedMatrixValue> inputStreamable,
+		OOCStreamable<IndexedMatrixValue> outputStreamable, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
+		this(inputStreamable == null ? null : inputStreamable.getPrimitive(), inputStreamable, outputStreamable, fn,
+			sc);
 	}
 
 	@Override
@@ -46,6 +62,21 @@ public class TransposeOOCPrimitive extends OOCPrimitive {
 	@Override
 	public List<OOCStreamable<?>> getOutputStreams() {
 		return List.of(_outputStreamable);
+	}
+
+	@Override
+	public boolean isTileLocal() {
+		return true;
+	}
+
+	@Override
+	public boolean isOneToOne() {
+		return true;
+	}
+
+	@Override
+	public long getDenseTileMemoryFactor() {
+		return 2;
 	}
 
 	@Override
@@ -61,5 +92,45 @@ public class TransposeOOCPrimitive extends OOCPrimitive {
 		_pattern = accessPattern;
 		if(!getChildren().isEmpty())
 			getChildren().get(0).requestPattern(accessPattern.transposed());
+	}
+
+	@Override
+	public void startExecution() {
+		final OOCStream<IndexedMatrixValue> in = _inputStreamable.getReadStream();
+		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
+
+		if(_crossBoundaries) {
+			OOCInstructionUtils.submitOOCTasks(in, cb -> {
+				InMemoryQueueCallback cbOut;
+				try(cb) {
+					IndexedMatrixValue input = cb.get();
+					MatrixIndexes inIx = input.getIndexes();
+					MatrixIndexes outIx = new MatrixIndexes(inIx.getColumnIndex(), inIx.getRowIndex());
+					MatrixBlock outBlock = _fn.apply((MatrixBlock) input.getValue());
+					cbOut = new InMemoryQueueCallback(new IndexedMatrixValue(outIx, outBlock), null, _allowance,
+						_allocFn.applyAsLong(outIx));
+				}
+				out.enqueue(cbOut);
+			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
+				out.propagateFailure(DMLRuntimeException.of(t));
+				return null;
+			}).thenRun(() -> out.getPrimitive().onComplete());
+		}
+		else {
+			OOCInstructionUtils.submitOOCTasks(in, cb -> {
+				OOCStream.QueueCallback<IndexedMatrixValue> cbOut;
+				try(cb) {
+					IndexedMatrixValue input = cb.get();
+					MatrixIndexes inIx = input.getIndexes();
+					MatrixIndexes outIx = new MatrixIndexes(inIx.getColumnIndex(), inIx.getRowIndex());
+					MatrixBlock outBlock = _fn.apply((MatrixBlock) input.getValue());
+					cbOut = new OOCStream.SimpleQueueCallback<>(new IndexedMatrixValue(outIx, outBlock), null);
+				}
+				out.enqueue(cbOut);
+			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
+				out.propagateFailure(DMLRuntimeException.of(t));
+				return null;
+			}).thenRun(() -> out.getPrimitive().onComplete());
+		}
 	}
 }
