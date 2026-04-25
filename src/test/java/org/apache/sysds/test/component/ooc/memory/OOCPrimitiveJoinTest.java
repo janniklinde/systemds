@@ -21,6 +21,7 @@ package org.apache.sysds.test.component.ooc.memory;
 
 import org.apache.sysds.common.Types.FileFormat;
 import org.apache.sysds.common.Types.ValueType;
+import org.apache.sysds.runtime.data.DenseBlock;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.functionobjects.Plus;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
@@ -31,25 +32,37 @@ import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.RightScalarOperator;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
-import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
+import org.apache.sysds.runtime.util.CommonThreadPool;
+import org.apache.sysds.utils.stats.InfrastructureAnalyzer;
 import org.junit.Assert;
 import org.junit.Test;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class OOCPrimitiveJoinTest {
-	private static final int ROWS = 16384*2;
-	private static final int COLS = 16384*2;
-	private static final int K = 5;
-	private static final int REPS = 15;
-	private static int BLEN = 256;
+	private static final int ROWS = 16384;//*2;
+	private static final int COLS = 16384;//*2;
+	private static final int K = 2;
+	private static final int REPS = 1;
+	private static int BLEN = 64;
 	private static int TILES = ((ROWS-1) / BLEN + 1) * ((COLS-1) / BLEN + 1);
+	private static volatile MatrixBlock _benchmarkSink;
 
 	@Test
 	public void test() {
@@ -67,10 +80,37 @@ public class OOCPrimitiveJoinTest {
 			}
 			System.out.println(BLEN + "," + (System.currentTimeMillis() - millis));
 		}*/
-		testDataGenEquiMapChain();
+		for(int i = 0; i < 3; i++)
+			testPrimitiveJoin();
+		long millis = System.currentTimeMillis();
+		for(int i = 0; i < REPS; i++)
+			testPrimitiveJoin();
+		System.out.println((System.currentTimeMillis()-millis) + "ms");
 	}
 
-	private void testDataGenEquiMapChain() {
+	@Test
+	public void testPlainMatrixBlockBenchmark() {
+		for(int i = 0; i < 3; i++)
+			runFullMatrixBlockChain();
+
+		long millis = System.currentTimeMillis();
+		for(int i = 0; i < REPS; i++)
+			runFullMatrixBlockChain();
+		System.out.println("Full MatrixBlock chain: " + (System.currentTimeMillis() - millis) + "ms");
+	}
+
+	@Test
+	public void testFusedMatrixBlockBenchmark() {
+		for(int i = 0; i < 5; i++)
+			runFusedMatrixBlockChain();
+
+		long millis = System.currentTimeMillis();
+		for(int i = 0; i < REPS; i++)
+			runFusedMatrixBlockChain();
+		System.out.println("Fused MatrixBlock chain: " + (System.currentTimeMillis() - millis) + "ms");
+	}
+
+	private void testPrimitiveJoin() {
 		List<List<OOCStream<IndexedMatrixValue>>> streamsList = new ArrayList<>();
 		streamsList.add(new ArrayList<>());
 		streamsList.add(new ArrayList<>());
@@ -105,7 +145,7 @@ public class OOCPrimitiveJoinTest {
 		OOCInstructionUtils.equiJoin(List.of(l.get(l.size()-1), r.get(r.size()-1)), streams.get(0),
 			col -> col.get(0).binaryOperations(new BinaryOperator(Plus.getPlusFnObject()), col.get(1)),
 			scMaps.get(0));
-		for(int k = 1; k < K; k++) {
+		for(int k = 1; k < K + 1; k++) {
 			streams.add(createMatrixStream());
 			scMaps.add(new StreamContext(0, "op_" + k).addOutStream(streams.get(streams.size() - 1)));
 			OOCInstructionUtils.equiMap(streams.get(k - 1), streams.get(k),
@@ -125,9 +165,9 @@ public class OOCPrimitiveJoinTest {
 
 				IndexedMatrixValue imv = cb.get();
 				double checksum = ((MatrixBlock) imv.getValue()).sum();
-				/*if(checksum < (7.0 + (K-1)*2.0) * imv.getValue().getNumRows() * imv.getValue().getNumColumns() - 1e-9
-					|| checksum > (7.0 + (K-1)*2.0) * imv.getValue().getNumRows() * imv.getValue().getNumColumns() + 1e-9)
-					throw new AssertionError("Wrong checksum: " + checksum + " at " + imv.getIndexes());*/
+				double expectedChecksum = fusedOutputValue() * imv.getValue().getNumRows()
+					* imv.getValue().getNumColumns();
+				Assert.assertEquals("Wrong checksum at " + imv.getIndexes(), expectedChecksum, checksum, 1e-9);
 				count.incrementAndGet();
 			}
 			catch(Throwable t) {
@@ -138,12 +178,16 @@ public class OOCPrimitiveJoinTest {
 			}
 		});
 
-		streamsList.get(0).get(1).getPrimitive().requestPattern(OOCAccessPattern.COL_MAJOR);
-		streamsList.get(1).get(1).getPrimitive().requestPattern(OOCAccessPattern.ROW_MAJOR);
 		streams.get(streams.size()-1).start();
 		future.join();
 
 		Assert.assertEquals(TILES, count.get());
+		try {
+			assertMemoryReturned(streamsList);
+		}
+		finally {
+			OOCCacheManager.reset();
+		}
 	}
 
 	private static OOCStream<IndexedMatrixValue> createMatrixStream() {
@@ -151,5 +195,154 @@ public class OOCPrimitiveJoinTest {
 		MatrixCharacteristics dc = new MatrixCharacteristics(ROWS, COLS, BLEN, -1);
 		stream.setData(new MatrixObject(ValueType.FP64, null, new MetaDataFormat(dc, FileFormat.BINARY)));
 		return stream;
+	}
+
+	private static void runFullMatrixBlockChain() {
+		int numThreads = InfrastructureAnalyzer.getLocalParallelism();
+		RightScalarOperator plusTwo = new RightScalarOperator(Plus.getPlusFnObject(), 2.0, numThreads);
+		BinaryOperator plus = new BinaryOperator(Plus.getPlusFnObject(), numThreads);
+		MatrixBlock left = runFullInputChain(plusTwo);
+		MatrixBlock right = runFullInputChain(plusTwo);
+		MatrixBlock out = left.binaryOperations(plus, right, new MatrixBlock());
+		left = null;
+		right = null;
+		for(int k = 1; k < K; k++)
+			out = out.scalarOperations(plusTwo, new MatrixBlock());
+		_benchmarkSink = out;
+	}
+
+	private static MatrixBlock runFullInputChain(RightScalarOperator plusTwo) {
+		MatrixBlock block = new MatrixBlock(ROWS, COLS, 5.0);
+		for(int k = 1; k <= K; k++)
+			block = block.scalarOperations(plusTwo, new MatrixBlock());
+		return block;
+	}
+
+	private static void runFusedMatrixBlockChain() {
+		double value = fusedOutputValue();
+		MatrixBlock out = new MatrixBlock(ROWS, COLS, false);
+		out.allocateDenseBlock(false);
+		DenseBlock dense = out.getDenseBlock();
+		int numThreads = InfrastructureAnalyzer.getLocalParallelism();
+		ExecutorService pool = CommonThreadPool.get(numThreads);
+		List<Future<?>> tasks = new ArrayList<>();
+		int rowsPerTask = Math.max(1, (ROWS + numThreads - 1) / numThreads);
+
+		for(int rowStart = 0; rowStart < ROWS; rowStart += rowsPerTask) {
+			final int start = rowStart;
+			final int end = Math.min(ROWS, rowStart + rowsPerTask);
+			tasks.add(pool.submit(() -> {
+				for(int r = start; r < end; r++) {
+					double[] values = dense.values(r);
+					int offset = dense.pos(r);
+					for(int c = 0; c < COLS; c++)
+						values[offset + c] = value;
+				}
+			}));
+		}
+
+		try {
+			for(Future<?> task : tasks)
+				task.get();
+		}
+		catch(Exception ex) {
+			throw new RuntimeException(ex);
+		}
+		out.setAllNonZeros();
+		_benchmarkSink = out;
+	}
+
+	private static double fusedOutputValue() {
+		double left = 5.0;
+		double right = 5.0;
+		for(int k = 1; k <= K; k++) {
+			left += 2.0;
+			right += 2.0;
+		}
+		double out = left + right;
+		for(int k = 1; k < K; k++)
+			out += 2.0;
+		return out;
+	}
+
+	private static void assertMemoryReturned(List<List<OOCStream<IndexedMatrixValue>>> streamsList) {
+		Set<OOCPrimitive> primitives = Collections.newSetFromMap(new IdentityHashMap<>());
+		for(List<OOCStream<IndexedMatrixValue>> streams : streamsList)
+			for(OOCStream<IndexedMatrixValue> stream : streams)
+				collectPrimitives(stream.getPrimitive(), primitives);
+
+		IdentityHashMap<MemoryAllowance, String> allowances = new IdentityHashMap<>();
+		for(OOCPrimitive primitive : primitives) {
+			MemoryAllowance allowance = getMemoryAllowance(primitive, "_allowance");
+			if(allowance != null)
+				allowances.putIfAbsent(allowance, primitive.getClass().getSimpleName());
+
+			MemoryAllowance cache = getMemoryAllowance(primitive, "_cache");
+			if(cache != null)
+				allowances.putIfAbsent(cache, primitive.getClass().getSimpleName());
+		}
+
+		waitForAllowancesReturned(allowances.keySet());
+		for(Map.Entry<MemoryAllowance, String> entry : allowances.entrySet())
+			assertAllowanceReturned(entry.getValue(), entry.getKey());
+	}
+
+	private static void collectPrimitives(OOCPrimitive primitive, Set<OOCPrimitive> primitives) {
+		if(primitive == null || !primitives.add(primitive))
+			return;
+		for(OOCPrimitive child : primitive.getChildren())
+			collectPrimitives(child, primitives);
+	}
+
+	private static MemoryAllowance getMemoryAllowance(OOCPrimitive primitive, String fieldName) {
+		try {
+			Field field = findField(primitive.getClass(), fieldName);
+			if(field == null)
+				return null;
+			field.setAccessible(true);
+			return (MemoryAllowance) field.get(primitive);
+		}
+		catch(IllegalAccessException ex) {
+			throw new RuntimeException(ex);
+		}
+	}
+
+	private static Field findField(Class<?> clazz, String fieldName) {
+		Class<?> current = clazz;
+		while(current != null) {
+			try {
+				return current.getDeclaredField(fieldName);
+			}
+			catch(NoSuchFieldException ignored) {
+				current = current.getSuperclass();
+			}
+		}
+		return null;
+	}
+
+	private static void waitForAllowancesReturned(Set<MemoryAllowance> allowances) {
+		long deadline = System.nanoTime() + 2_000_000_000L;
+		while(System.nanoTime() < deadline) {
+			boolean returned = true;
+			for(MemoryAllowance allowance : allowances)
+				returned &= allowance.getUsedMemory() == 0
+					&& allowance.getGrantedMemory() == 0
+					&& allowance.isShutdown();
+			if(returned)
+				return;
+			try {
+				Thread.sleep(10);
+			}
+			catch(InterruptedException ex) {
+				Thread.currentThread().interrupt();
+				throw new RuntimeException(ex);
+			}
+		}
+	}
+
+	private static void assertAllowanceReturned(String primitiveName, MemoryAllowance allowance) {
+		Assert.assertEquals("Allowance retained used memory for " + primitiveName, 0, allowance.getUsedMemory());
+		Assert.assertEquals("Allowance retained granted memory for " + primitiveName, 0, allowance.getGrantedMemory());
+		Assert.assertTrue("Allowance was not shut down for " + primitiveName, allowance.isShutdown());
 	}
 }
