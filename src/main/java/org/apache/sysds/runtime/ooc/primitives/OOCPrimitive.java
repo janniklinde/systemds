@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
+import org.apache.commons.lang3.NotImplementedException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
@@ -122,8 +123,7 @@ public abstract class OOCPrimitive {
 	}
 
 	public void startExecution() {
-		// Default no-op. Plannable leaf primitives can override this to emit
-		// work once the planner has assigned an access pattern.
+		throw new NotImplementedException();
 	}
 
 	public void onComplete() {

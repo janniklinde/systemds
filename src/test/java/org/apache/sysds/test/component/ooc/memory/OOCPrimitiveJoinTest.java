@@ -60,7 +60,7 @@ public class OOCPrimitiveJoinTest {
 	private static final int COLS = 16384;//*2;
 	private static final int K = 2;
 	private static final int REPS = 1;
-	private static int BLEN = 64;
+	private static int BLEN = 128;
 	private static int TILES = ((ROWS-1) / BLEN + 1) * ((COLS-1) / BLEN + 1);
 	private static volatile MatrixBlock _benchmarkSink;
 
@@ -158,6 +158,14 @@ public class OOCPrimitiveJoinTest {
 					new MatrixBlock()), scMaps.get(k));
 		}
 
+		streams.add(createMatrixStream(1, COLS));
+		scMaps.add(new StreamContext(0, "op_col_reduce").addOutStream(streams.get(streams.size() - 1)));
+		OOCInstructionUtils.colGroupedReduce(streams.get(streams.size() - 2), streams.get(streams.size() - 1),
+			2, MatrixBlock::colSum,
+			(leftBlock, rightBlock) -> leftBlock.binaryOperations(new BinaryOperator(Plus.getPlusFnObject()),
+				rightBlock),
+			mb -> mb, scMaps.get(scMaps.size() - 1));
+
 		CompletableFuture<Void> future = new CompletableFuture<>();
 		AtomicInteger count = new AtomicInteger();
 
@@ -170,8 +178,7 @@ public class OOCPrimitiveJoinTest {
 
 				IndexedMatrixValue imv = cb.get();
 				double checksum = ((MatrixBlock) imv.getValue()).sum();
-				double expectedChecksum = fusedOutputValue() * imv.getValue().getNumRows()
-					* imv.getValue().getNumColumns();
+				double expectedChecksum = fusedOutputValue() * ROWS * imv.getValue().getNumColumns();
 				Assert.assertEquals("Wrong checksum at " + imv.getIndexes(), expectedChecksum, checksum, 1e-9);
 				count.incrementAndGet();
 			}
@@ -186,7 +193,7 @@ public class OOCPrimitiveJoinTest {
 		streams.get(streams.size()-1).start();
 		future.join();
 
-		Assert.assertEquals(TILES, count.get());
+		Assert.assertEquals((COLS - 1) / BLEN + 1, count.get());
 		try {
 			assertMemoryReturned(streamsList);
 		}
@@ -196,8 +203,12 @@ public class OOCPrimitiveJoinTest {
 	}
 
 	private static OOCStream<IndexedMatrixValue> createMatrixStream() {
+		return createMatrixStream(ROWS, COLS);
+	}
+
+	private static OOCStream<IndexedMatrixValue> createMatrixStream(long rows, long cols) {
 		SubscribableTaskQueue<IndexedMatrixValue> stream = new SubscribableTaskQueue<>();
-		MatrixCharacteristics dc = new MatrixCharacteristics(ROWS, COLS, BLEN, -1);
+		MatrixCharacteristics dc = new MatrixCharacteristics(rows, cols, BLEN, -1);
 		stream.setData(new MatrixObject(ValueType.FP64, null, new MetaDataFormat(dc, FileFormat.BINARY)));
 		return stream;
 	}

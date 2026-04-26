@@ -26,6 +26,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
@@ -71,6 +72,46 @@ public class OOCInstructionUtils {
 
 	public static void transpose(OOCStream<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out, StreamContext sc) {
 		transposedMap(in, out, MatrixBlock::transpose, sc);
+	}
+
+	public static void groupedReduce(OOCStream<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out,
+		GroupedReduceOOCPrimitive.Grouping grouping, int accumulatorsPerGroup,
+		Function<MatrixBlock, MatrixBlock> partialFn, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> mergeFn,
+		Function<MatrixBlock, MatrixBlock> finalizeFn, StreamContext sc) {
+		OOCPrimitive primitive = new GroupedReduceOOCPrimitive(in, out, grouping, accumulatorsPerGroup, partialFn,
+			mergeFn, finalizeFn, sc);
+		out.assignPrimitive(primitive);
+	}
+
+	public static void groupedReduce(OOCStream<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out,
+		GroupedReduceOOCPrimitive.Grouping grouping, int accumulatorsPerGroup,
+		Function<MatrixBlock, MatrixBlock> partialFn, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> mergeFn,
+		StreamContext sc) {
+		groupedReduce(in, out, grouping, accumulatorsPerGroup, partialFn, mergeFn, Function.identity(), sc);
+	}
+
+	public static void rowGroupedReduce(OOCStream<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out,
+		int accumulatorsPerGroup, Function<MatrixBlock, MatrixBlock> partialFn,
+		BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> mergeFn, Function<MatrixBlock, MatrixBlock> finalizeFn,
+		StreamContext sc) {
+		groupedReduce(in, out, GroupedReduceOOCPrimitive.Grouping.ROW_BLOCKS, accumulatorsPerGroup, partialFn,
+			mergeFn, finalizeFn, sc);
+	}
+
+	public static void colGroupedReduce(OOCStream<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out,
+		int accumulatorsPerGroup, Function<MatrixBlock, MatrixBlock> partialFn,
+		BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> mergeFn, Function<MatrixBlock, MatrixBlock> finalizeFn,
+		StreamContext sc) {
+		groupedReduce(in, out, GroupedReduceOOCPrimitive.Grouping.COL_BLOCKS, accumulatorsPerGroup, partialFn,
+			mergeFn, finalizeFn, sc);
+	}
+
+	public static void singleGroupedReduce(OOCStream<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out,
+		int accumulatorsPerGroup, Function<MatrixBlock, MatrixBlock> partialFn,
+		BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> mergeFn, Function<MatrixBlock, MatrixBlock> finalizeFn,
+		StreamContext sc) {
+		groupedReduce(in, out, GroupedReduceOOCPrimitive.Grouping.SINGLE, accumulatorsPerGroup, partialFn, mergeFn,
+			finalizeFn, sc);
 	}
 
 	public static void equiJoin(List<OOCStreamable<IndexedMatrixValue>> l, OOCStream<IndexedMatrixValue> out, Function<List<MatrixBlock>, MatrixBlock> fn, StreamContext sc) {
