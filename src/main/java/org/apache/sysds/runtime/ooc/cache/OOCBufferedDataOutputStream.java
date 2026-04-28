@@ -150,8 +150,8 @@ class OOCBufferedDataOutputStream extends FilterOutputStream implements DataOutp
 		if(_count + 4 > _bufflen)
 			flushBuffer();
 		intToBa(Float.floatToIntBits(v), _buff, _count);
-		_count += 8;
-		_position += 8;
+		_count += 4;
+		_position += 4;
 	}
 
 	@Override
@@ -218,16 +218,22 @@ class OOCBufferedDataOutputStream extends FilterOutputStream implements DataOutp
 
 	@Override
 	public void writeDoubleArray(int len, double[] varr) throws IOException {
-		flushBuffer();
-		int blen = _bufflen / 8;
-		for(int i = 0; i < len; i += Math.min(len - i, blen)) {
-			int lblen = Math.min(len - i, blen);
+		for(int i = 0; i < len; ) {
+			if(_count >= _bufflen)
+				flushBuffer();
+			int lblen = Math.min(len - i, (_bufflen - _count) / 8);
+			if(lblen == 0) {
+				flushBuffer();
+				continue;
+			}
 			for(int j = 0; j < lblen; j++) {
 				longToBa(Double.doubleToRawLongBits(varr[i + j]), _buff, _count);
 				_count += 8;
 			}
 			_position += 8L * lblen;
-			flushBuffer();
+			i += lblen;
+			if(_count >= _bufflen)
+				flushBuffer();
 		}
 	}
 
@@ -238,33 +244,19 @@ class OOCBufferedDataOutputStream extends FilterOutputStream implements DataOutp
 			if(!rows.isEmpty(i)) {
 				int apos = rows.pos(i);
 				int alen = rows.size(i);
-				int alen2 = alen * 12;
 				int[] aix = rows.indexes(i);
 				double[] avals = rows.values(i);
 
 				writeInt(alen);
 
-				if(alen2 < _bufflen) {
-					if(_count + alen2 > _bufflen)
+				for(int j = apos; j < apos + alen; j++) {
+					if(_count + 12 > _bufflen)
 						flushBuffer();
-					for(int j = apos; j < apos + alen; j++) {
-						long tmp = Double.doubleToRawLongBits(avals[j]);
-						intToBa(aix[j], _buff, _count);
-						longToBa(tmp, _buff, _count + 4);
-						_count += 12;
-					}
-					_position += 12L * alen;
-				}
-				else {
-					for(int j = apos; j < apos + alen; j++) {
-						if(_count + 12 > _bufflen)
-							flushBuffer();
-						long tmp = Double.doubleToRawLongBits(avals[j]);
-						intToBa(aix[j], _buff, _count);
-						longToBa(tmp, _buff, _count + 4);
-						_count += 12;
-						_position += 12;
-					}
+					long tmp = Double.doubleToRawLongBits(avals[j]);
+					intToBa(aix[j], _buff, _count);
+					longToBa(tmp, _buff, _count + 4);
+					_count += 12;
+					_position += 12;
 				}
 			}
 			else {
