@@ -1224,7 +1224,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			onEvicted(entry);
 			return;
 		}
-		CompletableFuture<Void> future = _ioHandler.scheduleEviction(entry).readFuture();
+		CompletableFuture<Void> future = _ioHandler.scheduleEviction(entry);
 		future.whenComplete((r, e) -> onEvicted(entry));
 	}
 
