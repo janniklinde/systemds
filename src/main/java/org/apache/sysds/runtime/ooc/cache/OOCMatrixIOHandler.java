@@ -34,7 +34,6 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
-import org.apache.sysds.runtime.util.FastBufferedDataInputStream;
 import org.apache.sysds.runtime.util.LocalFileUtils;
 import org.apache.sysds.utils.Statistics;
 import scala.Tuple2;
@@ -44,7 +43,6 @@ import java.io.DataInput;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
-import java.nio.channels.Channels;
 import java.nio.channels.ClosedByInterruptException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -65,8 +63,8 @@ import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class OOCMatrixIOHandler implements OOCIOHandler {
-	private static final int WRITER_SIZE = 4;
-	private static final int READER_SIZE = 10;
+	private static final int WRITER_SIZE = 8;
+	private static final int READER_SIZE = 8;
 	private static final long OVERFLOW = 8192 * 1024;
 	private static final long MAX_PARTITION_SIZE = 8192 * 8192;
 	private static final long GROUP_TARGET_BYTES = 8L * 1024 * 1024;
@@ -536,7 +534,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		try (RandomAccessFile raf = new RandomAccessFile(filename, "r")) {
 			raf.seek(sloc.offset);
 
-			DataInput dis = new FastBufferedDataInputStream(Channels.newInputStream(raf.getChannel()), 8192/2);
+			DataInput dis = new OOCBufferedDataInputStream(raf);
 			long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 			imv.read(dis);
 			if (DMLScript.OOC_STATISTICS)
