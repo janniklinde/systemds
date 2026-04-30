@@ -77,7 +77,7 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 			String fname = min.getFileName();
 			OOCIOHandler io = OOCCacheManager.getIOHandler();
 
-			UncoordinatedDataGenOOCPrimitive primitive = new UncoordinatedDataGenOOCPrimitive(out, 100, getContext().addOutStream(out));
+			UncoordinatedDataGenOOCPrimitive primitive = new UncoordinatedDataGenOOCPrimitive(out, 10, getContext().addOutStream(out));
 			OOCStream<IndexedMatrixValue> untracked = createWritableStream();
 			AtomicReference<OOCIOHandler.SourceReadContinuation> continuation = new AtomicReference<>();
 			AtomicBoolean done = new AtomicBoolean(false);

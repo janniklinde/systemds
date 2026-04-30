@@ -32,6 +32,8 @@ import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.ScalarOperator;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
+import java.util.List;
+
 public class BinaryOOCInstruction extends ComputationOOCInstruction {
 	
 	protected BinaryOOCInstruction(OOCType type, Operator bop, 
@@ -132,6 +134,13 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 				throw new NotImplementedException("Invalid dimensions for matrix-matrix binary op: "
 					+ m1.getNumRows() + "x" + m1.getNumColumns() + " <=> "
 					+ m2.getNumRows() + "x" + m2.getNumColumns());
+
+			if(OOC_NEW_SYSTEM) {
+				OOCInstructionUtils.equiJoin(List.of(qIn1, qIn2), qOut, pair -> {
+					return pair.get(0).binaryOperations((BinaryOperator)_optr, pair.get(1));
+				}, getContext().addInStream(qIn1, qIn2).addOutStream(qOut));
+				return;
+			}
 
 			joinOOC(qIn1, qIn2, qOut, (tmp1, tmp2) -> {
 				IndexedMatrixValue tmpOut = new IndexedMatrixValue();

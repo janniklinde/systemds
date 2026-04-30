@@ -62,6 +62,9 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			maxRequest = Math.max(minRequest, Math.max(_grantedBytes, bytes) * 2);
 		}
 
+		if(bytes > _consumptionLimit)
+			throw new IllegalArgumentException("Cannot reserve more memory than the consumption limit");
+
 		long granted = _broker.requestMemory(this, minRequest, maxRequest);
 		long refund = 0;
 		boolean success = false;
