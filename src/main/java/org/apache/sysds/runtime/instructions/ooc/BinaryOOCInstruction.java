@@ -30,6 +30,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.ScalarOperator;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class BinaryOOCInstruction extends ComputationOOCInstruction {
 	
@@ -154,6 +155,12 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 		ec.getMatrixObject(output).setStreamHandle(qOut);
 		qIn.setDownstreamMessageRelay(qOut::messageDownstream);
 		qOut.setUpstreamMessageRelay(qIn::messageUpstream);
+
+		if(OOC_NEW_SYSTEM) {
+			OOCInstructionUtils.equiMap(qIn, qOut, mb -> mb.scalarOperations(sc_op, new MatrixBlock()),
+				getContext().addOutStream(qOut));
+			return;
+		}
 
 		mapOOC(qIn, qOut, tmp -> {
 			IndexedMatrixValue tmpOut = new IndexedMatrixValue();

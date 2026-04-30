@@ -69,6 +69,7 @@ import java.util.function.Function;
 public abstract class OOCInstruction extends Instruction {
 	public static final boolean ALLOW_PIPELINING = true;
 	public static final ExecutorService COMPUTE_EXECUTOR = OOCInstructionUtils.COMPUTE_EXECUTOR;
+	public static final boolean OOC_NEW_SYSTEM = true;
 	private static final AtomicInteger COMPUTE_IN_FLIGHT = OOCInstructionUtils.COMPUTE_IN_FLIGHT;
 	private static final int COMPUTE_BACKPRESSURE_THRESHOLD = 100;
 	protected static final Log LOG = LogFactory.getLog(OOCInstruction.class.getName());

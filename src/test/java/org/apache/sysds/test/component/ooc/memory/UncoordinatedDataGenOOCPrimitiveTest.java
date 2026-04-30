@@ -83,11 +83,11 @@ public class UncoordinatedDataGenOOCPrimitiveTest extends AutomatedTestBase {
 		writeBinaryMatrix(src, fname, blen);
 
 		OOCStream<IndexedMatrixValue> out = createMatrixStream(rows, cols, blen);
-		AtomicReference<UncoordinatedDataGenOOCPrimitive> primitiveRef = new AtomicReference<>();
 		AtomicInteger sourceBlocks = new AtomicInteger();
 		AtomicInteger producerCalls = new AtomicInteger();
 
-		UncoordinatedDataGenOOCPrimitive primitive = new UncoordinatedDataGenOOCPrimitive(out, allow -> {
+		UncoordinatedDataGenOOCPrimitive primitive = new UncoordinatedDataGenOOCPrimitive(out, 100, new StreamContext(0, TEST_NAME).addOutStream(out));
+		primitive.setProducer(allow -> {
 			try {
 				producerCalls.incrementAndGet();
 				SourceOOCStream source = new SourceOOCStream();
@@ -100,18 +100,17 @@ public class UncoordinatedDataGenOOCPrimitiveTest extends AutomatedTestBase {
 					OOCIOHandler.SourceBlockDescriptor desc = source.getDescriptor(imv.getIndexes());
 					Assert.assertNotNull("Missing source descriptor for " + imv.getIndexes(), desc);
 					sourceBlocks.incrementAndGet();
-					primitiveRef.get().emit(imv, desc);
+					primitive.emit(imv, desc);
 				}
 
 				Assert.assertTrue("Test expects the read to finish in one producer call.", res.eof);
-				primitiveRef.get().shutdown();
+				primitive.shutdown();
 			}
 			catch(Throwable t) {
 				out.propagateFailure(DMLRuntimeException.of(t));
-				primitiveRef.get().shutdown();
+				primitive.shutdown();
 			}
-		}, 100, new StreamContext(0, TEST_NAME).addOutStream(out));
-		primitiveRef.set(primitive);
+		});
 		out.assignPrimitive(primitive);
 
 		MatrixBlock reconstructed = new MatrixBlock(rows, cols, false);

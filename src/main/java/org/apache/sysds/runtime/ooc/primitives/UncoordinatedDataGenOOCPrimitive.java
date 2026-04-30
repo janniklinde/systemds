@@ -36,20 +36,23 @@ import java.util.function.LongConsumer;
 public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _outputStream;
 	private final StreamContext _sc;
-	private final LongConsumer _bulkProducer;
 	private final int _bulkAlloc;
 	private final LongAdder _spentCtr = new LongAdder();
+	private LongConsumer _bulkProducer;
 	private OOCStream<IndexedMatrixValue> _out;
 	private boolean _shutdown;
 
-	public UncoordinatedDataGenOOCPrimitive(OOCStreamable<IndexedMatrixValue> outputStream, LongConsumer bulkProducer,
-		int bulkAlloc, StreamContext sc) {
+	public UncoordinatedDataGenOOCPrimitive(OOCStreamable<IndexedMatrixValue> outputStream, int bulkAlloc,
+		StreamContext sc) {
 		super(Collections.emptyList());
 		_outputStream = outputStream;
 		_sc = sc;
-		_bulkProducer = bulkProducer;
 		_bulkAlloc = bulkAlloc;
 		_shutdown = false;
+	}
+
+	public void setProducer(LongConsumer bulkProducer) {
+		_bulkProducer = bulkProducer;
 	}
 
 	@Override

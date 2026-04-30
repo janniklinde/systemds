@@ -31,7 +31,11 @@ import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
+import org.apache.sysds.runtime.ooc.primitives.UncoordinatedDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
+
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class ReblockOOCInstruction extends ComputationOOCInstruction {
 	private int blen;
@@ -66,22 +70,87 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 
 		//get the source format from the meta data
 		//MetaDataFormat iimd = (MetaDataFormat) min.getMetaData();
-		//TODO support other formats than binary 
-		
-		//create queue, spawn thread for asynchronous reading, and return
-		OOCStream<IndexedMatrixValue> q = new SourceOOCStream();
-		OOCIOHandler io = OOCCacheManager.getIOHandler();
-		OOCIOHandler.SourceReadRequest req = new OOCIOHandler.SourceReadRequest(
-			min.getFileName(), Types.FileFormat.BINARY, mc.getRows(), mc.getCols(), blen, mc.getNonZeros(),
-			Long.MAX_VALUE, true, q);
-		io.scheduleSourceRead(req).whenComplete((res, err) -> {
-			if (err != null) {
-				Exception ex = err instanceof Exception ? (Exception) err : new Exception(err);
-				q.propagateFailure(new DMLRuntimeException(ex));
-			}
-		});
-		
-		MatrixObject mout = ec.getMatrixObject(output);
-		mout.setStreamHandle(q);
+		//TODO support other formats than binary
+
+		if(OOC_NEW_SYSTEM) {
+			OOCStream<IndexedMatrixValue> out = createWritableStream();
+			String fname = min.getFileName();
+			OOCIOHandler io = OOCCacheManager.getIOHandler();
+
+			UncoordinatedDataGenOOCPrimitive primitive = new UncoordinatedDataGenOOCPrimitive(out, 100, getContext().addOutStream(out));
+			OOCStream<IndexedMatrixValue> untracked = createWritableStream();
+			AtomicReference<OOCIOHandler.SourceReadContinuation> continuation = new AtomicReference<>();
+			AtomicBoolean done = new AtomicBoolean(false);
+			AtomicBoolean failed = new AtomicBoolean(false);
+			untracked.setSubscriber(cb -> {
+				if(cb.isEos())
+					return;
+
+				try {
+					primitive.emit(cb.get());
+				}
+				catch(Throwable t) {
+					failed.set(true);
+					DMLRuntimeException ex = DMLRuntimeException.of(t);
+					out.propagateFailure(ex);
+					primitive.shutdown();
+					throw ex;
+				}
+			});
+			primitive.setProducer(allow -> {
+				if(done.get() || failed.get()) {
+					primitive.shutdown();
+					return;
+				}
+
+				try {
+					OOCIOHandler.SourceReadContinuation cont = continuation.get();
+					OOCIOHandler.SourceReadResult res;
+					if(cont == null) {
+						OOCIOHandler.SourceReadRequest req = new OOCIOHandler.SourceReadRequest(fname,
+							Types.FileFormat.BINARY, mc.getRows(), mc.getCols(), blen, mc.getNonZeros(), allow,
+							true, untracked);
+						res = io.scheduleSourceRead(req).get();
+					}
+					else
+						res = io.continueSourceRead(cont, allow).get();
+
+					if(res.eof) {
+						done.set(true);
+						primitive.shutdown();
+					}
+					else if(res.continuation != null)
+						continuation.set(res.continuation);
+					else
+						throw new DMLRuntimeException("Source read stopped before EOF without a continuation.");
+				}
+				catch(Throwable t) {
+					failed.set(true);
+					out.propagateFailure(DMLRuntimeException.of(t));
+					primitive.shutdown();
+				}
+			});
+			out.assignPrimitive(primitive);
+
+			MatrixObject mout = ec.getMatrixObject(output);
+			mout.setStreamHandle(out);
+		}
+		else {
+			//create queue, spawn thread for asynchronous reading, and return
+			OOCStream<IndexedMatrixValue> q = new SourceOOCStream();
+			OOCIOHandler io = OOCCacheManager.getIOHandler();
+			OOCIOHandler.SourceReadRequest req = new OOCIOHandler.SourceReadRequest(
+				min.getFileName(), Types.FileFormat.BINARY, mc.getRows(), mc.getCols(), blen, mc.getNonZeros(),
+				Long.MAX_VALUE, true, q);
+			io.scheduleSourceRead(req).whenComplete((res, err) -> {
+				if (err != null) {
+					Exception ex = err instanceof Exception ? (Exception) err : new Exception(err);
+					q.propagateFailure(new DMLRuntimeException(ex));
+				}
+			});
+
+			MatrixObject mout = ec.getMatrixObject(output);
+			mout.setStreamHandle(q);
+		}
 	}
 }
