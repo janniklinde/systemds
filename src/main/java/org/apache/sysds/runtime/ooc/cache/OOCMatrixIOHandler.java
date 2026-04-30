@@ -64,7 +64,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public class OOCMatrixIOHandler implements OOCIOHandler {
 	private static final int WRITER_SIZE = 8;
-	private static final int READER_SIZE = 8;
+	private static final int READER_SIZE = 10;
 	private static final long OVERFLOW = 8192 * 1024;
 	private static final long MAX_PARTITION_SIZE = 8192 * 8192;
 	private static final long GROUP_TARGET_BYTES = 8L * 1024 * 1024;
