@@ -20,6 +20,8 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.commons.lang3.NotImplementedException;
+import org.apache.commons.lang3.mutable.MutableDouble;
+import org.apache.commons.lang3.mutable.MutableInt;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.commons.math3.random.Well1024a;
@@ -37,6 +39,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.data.RandomMatrixGenerator;
 import org.apache.sysds.runtime.matrix.operators.UnaryOperator;
+import org.apache.sysds.runtime.ooc.primitives.UncoordinatedDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.util.UtilFunctions;
@@ -192,6 +195,53 @@ public class DataGenOOCInstruction extends UnaryOOCInstruction {
 			long lcols = ec.getScalarInput(cols).getLongValue();
 			checkValidDimensions(lrows, lcols);
 
+			if(OOC_NEW_SYSTEM) {
+				if(sparsity == 0.0 && lrows < Integer.MAX_VALUE && lcols < Integer.MAX_VALUE) {
+					OOCInstructionUtils.dataGen(qOut, idx -> {
+						long rlen = Math.min(blen, lrows - (idx.getRowIndex() - 1) * blen);
+						long clen = Math.min(blen, lcols - (idx.getColumnIndex() - 1) * blen);
+						return new MatrixBlock((int) rlen, (int) clen, 0.0);
+					}, getContext().addOutStream(qOut));
+					return;
+				}
+				else if(sparsity == 1.0 && minValue == maxValue) {
+					OOCInstructionUtils.dataGen(qOut, idx -> {
+						long rlen = Math.min(blen, lrows - (idx.getRowIndex() - 1) * blen);
+						long clen = Math.min(blen, lcols - (idx.getColumnIndex() - 1) * blen);
+						return new MatrixBlock((int) rlen, (int) clen, minValue);
+					}, getContext().addOutStream(qOut));
+					return;
+				}
+
+				Well1024a bigrand = LibMatrixDatagen.setupSeedsForRand(lSeed);
+				int nrb = (int)((lrows-1) / blen)+1;
+				int ncb = (int)((lcols-1) / blen)+1;
+				int nb = nrb * ncb;
+				long[] seeds = new long[nb];
+				for(int i = 0; i < nb; i++)
+					seeds[i] = bigrand.nextLong();
+				OOCInstructionUtils.dataGen(qOut, idx -> {
+					long rlen = Math.min(blen, lrows - (idx.getRowIndex()-1) * blen);
+					long clen =  Math.min(blen, lcols - (idx.getColumnIndex()-1) * blen);
+
+					int r = (int) idx.getRowIndex()-1;
+					int c = (int) idx.getColumnIndex()-1;
+					long bSeed = seeds[r*ncb+c];
+
+					final long estnnz = ((minValue==0.0 && maxValue==0.0) ? 0 : (long)(sparsity * rlen * clen));
+					boolean lsparse = MatrixBlock.evalSparseFormatInMemory(rlen, clen, estnnz);
+
+					MatrixBlock mout = new MatrixBlock();
+					mout.reset((int) rlen, (int) clen, lsparse, estnnz);
+					mout.allocateBlock();
+
+					LibMatrixDatagen.genRandomNumbers(false, 0, 1, 0, 1, mout, getGenerator(rlen, clen), bSeed, null);
+					mout.recomputeNonZeros();
+					return mout;
+				}, getContext().addOutStream(qOut));
+				return;
+			}
+
 			OOCStream<MatrixIndexes> qIn = createWritableStream();
 			int nrb = (int)((lrows-1) / blen)+1;
 			int ncb = (int)((lcols-1) / blen)+1;
@@ -260,6 +310,46 @@ public class DataGenOOCInstruction extends UnaryOOCInstruction {
 			final int maxK = (int) UtilFunctions.getSeqLength(lfrom, lto, lincr);
 			final double finalLincr = lincr;
 
+			if(OOC_NEW_SYSTEM) {
+				// Uncoordinated generator for now
+				int bulk = 100;
+				var primitive = new UncoordinatedDataGenOOCPrimitive(qOut, bulk, getContext().addOutStream(qOut));
+				final MutableInt mK = new MutableInt(0);
+				final MutableDouble mCurFrom = new MutableDouble(lfrom);
+				primitive.setProducer(alloc -> {
+					int ctr = 0;
+					int k = mK.getValue();
+					double curFrom = mCurFrom.getValue();
+					double curTo;
+					MatrixBlock mb;
+
+					while(++ctr < bulk && k < maxK) {
+						long desiredLen = Math.min(blen, maxK - k);
+						curTo = curFrom + (desiredLen - 1) * finalLincr;
+						long actualLen = UtilFunctions.getSeqLength(curFrom, curTo, finalLincr);
+
+						if (actualLen != desiredLen) {
+							// Then we add / subtract a small correction term
+							curTo += (actualLen < desiredLen) ? finalLincr / 2 : -finalLincr / 2;
+
+							if (UtilFunctions.getSeqLength(curFrom, curTo, finalLincr) != desiredLen)
+								throw new DMLRuntimeException("OOC seq could not construct the right number of elements.");
+						}
+
+						mb = MatrixBlock.seqOperations(curFrom, curTo, finalLincr);
+						primitive.emit(new IndexedMatrixValue(new MatrixIndexes(1 + k / blen, 1), mb));
+						curFrom = mb.get(mb.getNumRows() - 1, 0) + finalLincr;
+						k += desiredLen;
+					}
+
+					if(k == maxK)
+						primitive.shutdown();
+					mK.setValue(k);
+					mCurFrom.setValue(curFrom);
+				});
+				qOut.assignPrimitive(primitive);
+				return;
+			}
 
 			OOCInstructionUtils.submitOOCTask(() -> {
 				int k = 0;
@@ -283,7 +373,7 @@ public class DataGenOOCInstruction extends UnaryOOCInstruction {
 					mb = MatrixBlock.seqOperations(curFrom, curTo, finalLincr);
 					qOut.enqueue(new IndexedMatrixValue(new MatrixIndexes(1 + k / blen, 1), mb));
 					curFrom = mb.get(mb.getNumRows() - 1, 0) + finalLincr;
-					k += blen;
+					k += desiredLen;
 				}
 
 				qOut.closeInput();

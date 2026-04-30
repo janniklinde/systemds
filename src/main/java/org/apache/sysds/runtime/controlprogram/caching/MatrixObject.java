@@ -636,7 +636,9 @@ public class MatrixObject extends CacheableData<MatrixBlock> {
 		MetaDataFormat iimd = (MetaDataFormat) _metaData;
 		FileFormat fmt = (ofmt != null ? FileFormat.safeValueOf(ofmt) : iimd.getFileFormat());
 		MatrixWriter writer = MatrixWriterFactory.createMatrixWriter(fmt, rep, fprop);
-		return writer.writeMatrixFromStream(fname, getStreamHandle(),
+		OOCStream<IndexedMatrixValue> stream = getStreamHandle();
+		stream.start();
+		return writer.writeMatrixFromStream(fname, stream,
 			getNumRows(), getNumColumns(), ConfigurationManager.getBlocksize());
 	}
 
