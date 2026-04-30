@@ -22,27 +22,28 @@ package org.apache.sysds.runtime.ooc.primitives;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
-import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.LongConsumer;
 
 public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _outputStream;
 	private final StreamContext _sc;
-	private final int _bulkAlloc;
+	private final long _bulkAlloc;
 	private final LongAdder _spentCtr = new LongAdder();
 	private LongConsumer _bulkProducer;
 	private OOCStream<IndexedMatrixValue> _out;
 	private boolean _shutdown;
 
-	public UncoordinatedDataGenOOCPrimitive(OOCStreamable<IndexedMatrixValue> outputStream, int bulkAlloc,
+	public UncoordinatedDataGenOOCPrimitive(OOCStreamable<IndexedMatrixValue> outputStream, long bulkAlloc,
 		StreamContext sc) {
 		super(Collections.emptyList());
 		_outputStream = outputStream;
@@ -94,23 +95,26 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 
 	@Override
 	public void startExecution() {
-		final long baseAlloc = _allocFn.applyAsLong(new MatrixIndexes(1, 1)) * _bulkAlloc;
 		_out = _outputStream.getWriteStream();
 
-		new Thread(() -> {
+		new Thread(OOCInstructionUtils.oocTask(() -> {
 			long allow = 0;
+			long spent;
 			while(!_shutdown) {
-				allow -= _spentCtr.sumThenReset();
-				if(allow < baseAlloc)
-					_allowance.reserveBlocking(baseAlloc - allow);
-				allow = baseAlloc;
+				spent = _spentCtr.sumThenReset();
+				if(spent < 0)
+					throw new IllegalArgumentException("More bytes spent than allocated");
+				allow -= spent;
+				if(allow < _bulkAlloc)
+					_allowance.reserveBlocking(_bulkAlloc - allow);
+				allow = _bulkAlloc;
 				_bulkProducer.accept(allow);
 			}
 			allow -= _spentCtr.sumThenReset();
 			_allowance.release(allow);
 			_out.closeInput();
 			onComplete();
-		}).start();
+		}, new CompletableFuture<>(), _sc)).start();
 	}
 
 	public void emit(IndexedMatrixValue imv) {

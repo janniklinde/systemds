@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.primitives.UncoordinatedDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -77,7 +78,8 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 			String fname = min.getFileName();
 			OOCIOHandler io = OOCCacheManager.getIOHandler();
 
-			UncoordinatedDataGenOOCPrimitive primitive = new UncoordinatedDataGenOOCPrimitive(out, 10, getContext().addOutStream(out));
+			long bulkAlloc = Math.min(100_000_000L, mc.getLength() * 8 + OOCUtils.getNumBlocks(mc) * 16);
+			UncoordinatedDataGenOOCPrimitive primitive = new UncoordinatedDataGenOOCPrimitive(out, bulkAlloc, getContext().addOutStream(out));
 			OOCStream<IndexedMatrixValue> untracked = createWritableStream();
 			AtomicReference<OOCIOHandler.SourceReadContinuation> continuation = new AtomicReference<>();
 			AtomicBoolean done = new AtomicBoolean(false);

@@ -367,7 +367,7 @@ public class OOCInstructionUtils {
 		return future;
 	}
 
-	private static Runnable oocTask(Runnable r, CompletableFuture<Void> future, StreamContext ctx) {
+	public static Runnable oocTask(Runnable r, CompletableFuture<Void> future, StreamContext ctx) {
 		return () -> {
 			boolean setContext = TaskContext.getContext() == null;
 			if(setContext)
