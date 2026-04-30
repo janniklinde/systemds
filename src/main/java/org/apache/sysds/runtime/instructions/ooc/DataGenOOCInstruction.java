@@ -312,8 +312,8 @@ public class DataGenOOCInstruction extends UnaryOOCInstruction {
 
 			if(OOC_NEW_SYSTEM) {
 				// Uncoordinated generator for now
-				int bulk = 100;
-				var primitive = new UncoordinatedDataGenOOCPrimitive(qOut, bulk, getContext().addOutStream(qOut));
+				long bulkAlloc = Math.min(100_000_000L, Math.max(0L, (long) maxK) * 8);
+				var primitive = new UncoordinatedDataGenOOCPrimitive(qOut, bulkAlloc, getContext().addOutStream(qOut));
 				final MutableInt mK = new MutableInt(0);
 				final MutableDouble mCurFrom = new MutableDouble(lfrom);
 				primitive.setProducer(alloc -> {
@@ -323,7 +323,7 @@ public class DataGenOOCInstruction extends UnaryOOCInstruction {
 					double curTo;
 					MatrixBlock mb;
 
-					while(++ctr < bulk && k < maxK) {
+					while(++ctr <= Math.max(1, alloc / (Math.max(1, blen) * 8L)) && k < maxK) {
 						long desiredLen = Math.min(blen, maxK - k);
 						curTo = curFrom + (desiredLen - 1) * finalLincr;
 						long actualLen = UtilFunctions.getSeqLength(curFrom, curTo, finalLincr);

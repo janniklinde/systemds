@@ -22,6 +22,7 @@ package org.apache.sysds.runtime.ooc.primitives;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
@@ -96,6 +97,7 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	@Override
 	public void startExecution() {
 		_out = _outputStream.getWriteStream();
+		final long targetAlloc = Math.max(_bulkAlloc, _allocFn.applyAsLong(new MatrixIndexes(1, 1)));
 
 		new Thread(OOCInstructionUtils.oocTask(() -> {
 			long allow = 0;
@@ -105,12 +107,14 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 				if(spent < 0)
 					throw new IllegalArgumentException("More bytes spent than allocated");
 				allow -= spent;
-				if(allow < _bulkAlloc)
-					_allowance.reserveBlocking(_bulkAlloc - allow);
-				allow = _bulkAlloc;
+				if(allow < targetAlloc)
+					_allowance.reserveBlocking(targetAlloc - allow);
+				allow = targetAlloc;
 				_bulkProducer.accept(allow);
 			}
 			allow -= _spentCtr.sumThenReset();
+			if(allow < 0)
+				throw new IllegalArgumentException("More bytes spent than allocated");
 			_allowance.release(allow);
 			_out.closeInput();
 			onComplete();
