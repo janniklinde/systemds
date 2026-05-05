@@ -112,9 +112,19 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 				allow = targetAlloc;
 				_bulkProducer.accept(allow);
 			}
-			allow -= _spentCtr.sumThenReset();
-			if(allow < 0)
+			long finalSpent = _spentCtr.sumThenReset();
+			allow -= finalSpent;
+			if(allow < 0) {
+				System.err.println(
+					"UncoordinatedDataGenOOCPrimitive overspent: " +
+						"bulkAlloc=" + _bulkAlloc +
+						", targetAlloc=" + targetAlloc +
+						", finalSpent=" + finalSpent +
+						", allowAfter=" + allow +
+						", crossBoundaries=" + _crossBoundaries
+				);
 				throw new IllegalArgumentException("More bytes spent than allocated");
+			}
 			_allowance.release(allow);
 			_out.closeInput();
 			onComplete();

@@ -139,7 +139,7 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 				boolean nextLeft = true;
 				AtomicInteger pendingRequests = new AtomicInteger(1);
 
-				while((next = (nextLeft ? l : r).dequeueCB()) != null) {
+				while(!(next = (nextLeft ? l : r).dequeueCB()).isEos()) {
 					try {
 						nextValue = next.get();
 						long rIdx = nextValue.getIndexes().getRowIndex()-1;
@@ -191,8 +191,9 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 					}
 				}
 
-				if(pendingRequests.decrementAndGet() == 0)
+				if(pendingRequests.decrementAndGet() == 0) {
 					intermediate.closeInput();
+				}
 			}
 			catch(Throwable t) {
 				failJoin(t, intermediate, out);

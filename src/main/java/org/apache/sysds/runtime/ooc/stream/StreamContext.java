@@ -94,18 +94,22 @@ public class StreamContext {
 			return;
 		_failure = e;
 
-		for(OOCStream<?> stream : _outStreams) {
-			try {
-				stream.propagateFailure(e);
+		if(_outStreams != null) {
+			for(OOCStream<?> stream : _outStreams) {
+				try {
+					stream.propagateFailure(e);
+				}
+				catch(Throwable ignored) {}
 			}
-			catch(Throwable ignored) {}
 		}
 
-		for(OOCStream<?> stream : _inStreams) {
-			try {
-				stream.propagateFailure(e);
+		if(_inStreams != null) {
+			for(OOCStream<?> stream : _inStreams) {
+				try {
+					stream.propagateFailure(e);
+				}
+				catch(Throwable ignored) {}
 			}
-			catch(Throwable ignored) {}
 		}
 	}
 

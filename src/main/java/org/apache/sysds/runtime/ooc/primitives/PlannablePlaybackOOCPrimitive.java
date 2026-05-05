@@ -19,59 +19,31 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
+import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
+import org.apache.sysds.runtime.instructions.ooc.PlaybackStream;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 
 import java.util.List;
 
-public class CachingOOCPrimitive extends PlannableOOCPrimitive {
-	private final OOCStreamable<?> _inputStream;
-	private final OOCStreamable<?> _outputStream;
+public class PlannablePlaybackOOCPrimitive extends PlannableOOCPrimitive {
+	private final CachingStream _cache;
+	private final PlaybackStream _outputStream;
 
-	private CachingOOCPrimitive(OOCPrimitive input, OOCStreamable<?> inStream, OOCStreamable<?> outStream) {
-		super(input == null ? List.of() : List.of(input));
-		_inputStream = inStream;
-		_outputStream = outStream;
-	}
-
-	public CachingOOCPrimitive(OOCStreamable<?> input, OOCStreamable<?> output) {
-		this(getPrimitive(input), input, output);
-	}
-
-	private static OOCPrimitive getPrimitive(OOCStreamable<?> stream) {
-		if(stream == null)
-			return null;
-		try {
-			return stream.getPrimitive();
-		}
-		catch(RuntimeException ex) {
-			return null;
-		}
+	public PlannablePlaybackOOCPrimitive(CachingStream cache, PlaybackStream outputStream) {
+		super(List.of(cache.getPrimitive()));
+		_cache = cache;
+		_outputStream = outputStream;
 	}
 
 	@Override
 	public List<OOCStreamable<?>> getInputStreams() {
-		return List.of(_inputStream);
+		return List.of(_cache);
 	}
 
 	@Override
 	public List<OOCStreamable<?>> getOutputStreams() {
 		return List.of(_outputStream);
-	}
-
-	@Override
-	public boolean isTileLocal() {
-		return true;
-	}
-
-	@Override
-	public boolean isOneToOne() {
-		return true;
-	}
-
-	@Override
-	public boolean isIndexPreserving() {
-		return true;
 	}
 
 	@Override
@@ -86,14 +58,12 @@ public class CachingOOCPrimitive extends PlannableOOCPrimitive {
 
 	@Override
 	public void inferPatterns() {
-		_pattern = getChildren().isEmpty() ? OOCAccessPattern.UNKNOWN : getChildren().get(0).getAccessPattern();
+		_pattern = OOCAccessPattern.ROW_MAJOR;
 		getParents().forEach(OOCPrimitive::inferPatterns);
 	}
 
 	@Override
 	public void requestPattern(OOCAccessPattern accessPattern) {
-		if(_pattern == accessPattern)
-			return;
 		_pattern = accessPattern;
 	}
 }

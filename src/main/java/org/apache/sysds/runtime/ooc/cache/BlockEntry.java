@@ -142,6 +142,10 @@ public final class BlockEntry {
 		return --_referenceCount;
 	}
 
+	synchronized int getReferenceCount() {
+		return _referenceCount;
+	}
+
 	synchronized void setState(BlockState state) {
 		_state = state;
 	}

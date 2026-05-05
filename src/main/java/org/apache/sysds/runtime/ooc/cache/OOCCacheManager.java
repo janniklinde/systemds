@@ -491,6 +491,16 @@ public class OOCCacheManager {
 			return _parent;
 		}
 
+		@Override
+		public BlockKey getBlockKey() {
+			return _parent.getBlockKey();
+		}
+
+		@Override
+		public OOCCacheScheduler.AllowanceBackedPin getBackingPin() {
+			return _parent.getBackingPin();
+		}
+
 		public int getGroupIndex() {
 			return _groupIndex;
 		}
@@ -567,8 +577,14 @@ public class OOCCacheManager {
 			return _failure != null;
 		}
 
+		@Override
 		public BlockKey getBlockKey() {
 			return _pin.getKey();
+		}
+
+		@Override
+		public OOCCacheScheduler.AllowanceBackedPin getBackingPin() {
+			return _pin;
 		}
 	}
 
@@ -582,6 +598,15 @@ public class OOCCacheManager {
 		CachedQueueCallback(BlockEntry result, DMLRuntimeException failure) {
 			this._result = result;
 			this._data = (T)result.getData();
+			if(_data == null)
+				throw new IllegalArgumentException();
+			this._failure = failure;
+			this._pinned = new AtomicBoolean(true);
+		}
+
+		CachedQueueCallback(BlockEntry result, T data, DMLRuntimeException failure) {
+			this._result = result;
+			this._data = data;
 			this._failure = failure;
 			this._pinned = new AtomicBoolean(true);
 		}
@@ -600,7 +625,7 @@ public class OOCCacheManager {
 			if(!_pinned.get())
 				throw new IllegalStateException("Cannot keep open an already closed callback");
 			pin(_result);
-			return new CachedQueueCallback<>(_result, _failure);
+			return new CachedQueueCallback<>(_result, _data, _failure);
 		}
 
 		@Override

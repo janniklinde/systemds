@@ -23,6 +23,8 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.PlannablePlaybackOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
@@ -35,6 +37,7 @@ import java.util.function.Consumer;
 
 public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	private final CachingStream _streamCache;
+	private final PlannablePlaybackOOCPrimitive _primitive;
 	private final AtomicInteger _streamIdx;
 	private final AtomicBoolean _subscriberSet;
 	private QueueCallback<IndexedMatrixValue> _lastDequeue;
@@ -42,6 +45,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 
 	public PlaybackStream(CachingStream streamCache) {
 		this._streamCache = streamCache;
+		_primitive = new PlannablePlaybackOOCPrimitive(streamCache, this);
 		this._streamIdx = new AtomicInteger(0);
 		this._subscriberSet = new AtomicBoolean(false);
 		streamCache.incrSubscriberCount(1);
@@ -95,7 +99,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 
 	@Override
 	public OOCStream<IndexedMatrixValue> getReadStream() {
-		return _streamCache.getReadStream();
+		return this;
 	}
 
 	@Override
@@ -165,6 +169,11 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	@Override
 	public CachingStream getStreamCache() {
 		return _streamCache;
+	}
+
+	@Override
+	public OOCPrimitive getPrimitive() {
+		return _primitive;
 	}
 
 	@Override

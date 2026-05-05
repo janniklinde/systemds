@@ -408,10 +408,13 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			_cache.compute(key, (k, e) -> {
 				if(e == null)
 					return null;
-				if(e.forget() == 0) {
+				if(e.forget() == 0 && e.getState() != BlockState.HANDOVER_PENDING &&
+					!e.isPinned() && !e.isBackedPinned()) {
 					mEntry.setValue(e);
 					return null;
 				}
+				//if(e.getState() != BlockState.HANDOVER_PENDING)
+				//	System.out.println("Can't forget: " + e.getKey());
 				return e;
 			});
 
@@ -419,10 +422,13 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 				_evictionCache.compute(key, (k, e) -> {
 					if(e == null)
 						return null;
-					if(e.forget() == 0) {
+					if(e.forget() == 0 && e.getState() != BlockState.HANDOVER_PENDING &&
+						!e.isPinned() && !e.isBackedPinned()) {
 						mEntry.setValue(e);
 						return null;
 					}
+					//if(e.getState() != BlockState.HANDOVER_PENDING)
+					//	System.out.println("Can't forget: " + e.getKey());
 					return e;
 				});
 			}
@@ -436,10 +442,6 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 					shouldScheduleDeletion =
 						entry.getState().isBackedByDisk() || entry.getState() == BlockState.EVICTING;
 					cacheSizeDelta = transitionMemState(entry, BlockState.REMOVED);
-					if(entry.isPinned() && entry.getDataUnsafe() != null)
-						_pinnedBytes -= entry.getSize();
-					if(_pinnedBytes < 0)
-						throw new IllegalStateException();
 					entry.setDataUnsafe(null);
 				}
 			}
@@ -479,34 +481,49 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			return; // Try to avoid using global lock first
 		long cacheSizeDelta = 0;
 		boolean shouldCheckEviction = false;
+		boolean shouldScheduleDeletion = false;
 		synchronized(this) {
 			synchronized(entry) {
 				if(!unpinEntryWithAccounting(entry))
 					return;
-				if (_cacheSize <= _evictionLimit)
-					return; // Nothing to do
 				if (entry.isPinned())
 					return; // Pin state changed so we cannot evict
-
-				if (entry.getState().isAvailable() && entry.getState().isBackedByDisk()) {
-					if (entry.getRetainHintCount() > 0) {
-						shouldCheckEviction = true;
-					}
-					else {
-						cacheSizeDelta =  transitionMemState(entry, BlockState.COLD);
-						long cleared = entry.clear();
-						if (cleared != entry.getSize())
-							throw new IllegalStateException();
-						_cache.remove(entry.getKey());
-						_evictionCache.put(entry.getKey(), entry);
-					}
+				if(entry.getReferenceCount() == 0 && !entry.isBackedPinned() &&
+					entry.getState() != BlockState.HANDOVER_PENDING) {
+					shouldScheduleDeletion =
+						entry.getState().isBackedByDisk() || entry.getState() == BlockState.EVICTING;
+					cacheSizeDelta = transitionMemState(entry, BlockState.REMOVED);
+					entry.setDataUnsafe(null);
+					BlockEntry tmp = _cache.remove(entry.getKey());
+					if(tmp == null)
+						tmp = _evictionCache.remove(entry.getKey());
+					if(tmp != null && tmp != entry)
+						throw new IllegalStateException();
 				}
-				else if (entry.getState() == BlockState.HOT) {
-					if (entry.getRetainHintCount() > 0) {
-						shouldCheckEviction = true;
+				else if (_cacheSize <= _evictionLimit) {
+					return; // Nothing to do
+				}
+				else if(entry.getReferenceCount() != 0) {
+					if (entry.getState().isAvailable() && entry.getState().isBackedByDisk()) {
+						if (entry.getRetainHintCount() > 0) {
+							shouldCheckEviction = true;
+						}
+						else {
+							cacheSizeDelta =  transitionMemState(entry, BlockState.COLD);
+							long cleared = entry.clear();
+							if (cleared != entry.getSize())
+								throw new IllegalStateException();
+							_cache.remove(entry.getKey());
+							_evictionCache.put(entry.getKey(), entry);
+						}
 					}
-					else {
-						cacheSizeDelta = onUnpinnedHotBlockUnderMemoryPressure(entry);
+					else if (entry.getState() == BlockState.HOT) {
+						if (entry.getRetainHintCount() > 0) {
+							shouldCheckEviction = true;
+						}
+						else {
+							cacheSizeDelta = onUnpinnedHotBlockUnderMemoryPressure(entry);
+						}
 					}
 				}
 			}
@@ -515,6 +532,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			onCacheSizeChanged(cacheSizeDelta > 0);
 		else if (shouldCheckEviction)
 			onCacheSizeChanged(true);
+		if(shouldScheduleDeletion)
+			_ioHandler.scheduleDeletion(entry);
 	}
 
 	@Override
@@ -1039,6 +1058,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private boolean processPendingHandovers() {
 		List<PendingHandover> committed = new ArrayList<>();
 		synchronized(this) {
+			long admittedBytes = 0;
 			while(!_pendingHandovers.isEmpty()) {
 				PendingHandover pending = _pendingHandovers.peekFirst();
 				if(pending == null)
@@ -1048,8 +1068,9 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 					continue;
 				}
 				long bytes = pending.getManagedBytes();
-				if(!canAcceptHandoverLocked(bytes))
+				if(!canAcceptHandoverLocked(admittedBytes + bytes))
 					break;
+				admittedBytes += bytes;
 				_pendingHandovers.pollFirst();
 				committed.add(pending);
 			}
@@ -1065,6 +1086,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private boolean processPendingBackingReleases() {
 		List<PendingBackingRelease> committed = new ArrayList<>();
 		synchronized(this) {
+			long admittedBytes = 0;
 			while(!_pendingBackingReleases.isEmpty()) {
 				PendingBackingRelease pending = _pendingBackingReleases.peekFirst();
 				if(pending == null)
@@ -1074,8 +1096,9 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 					continue;
 				}
 				long bytes = pending.getManagedBytes();
-				if(!canAcceptBackingReleaseLocked(bytes))
+				if(!canAcceptBackingReleaseLocked(admittedBytes + bytes))
 					break;
+				admittedBytes += bytes;
 				_pendingBackingReleases.pollFirst();
 				committed.add(pending);
 			}
@@ -1842,8 +1865,10 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			while(true) {
 				CompletableFuture<Boolean> wait = null;
 				synchronized(this) {
-					if(_cancelled)
-						throw new IllegalStateException("Pending handover was cancelled: " + _key);
+					if(_cancelled && _callbackRefs > 0) {
+						return _callback.get();
+					}
+						//throw new IllegalStateException("Pending handover was cancelled: " + _key);
 					if(_committed)
 						return (IndexedMatrixValue) _entry.getData();
 					if(!_committing && _callback != null)

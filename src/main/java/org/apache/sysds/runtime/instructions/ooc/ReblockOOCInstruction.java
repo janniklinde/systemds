@@ -27,13 +27,13 @@ import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.primitives.UncoordinatedDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
-import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -78,7 +78,7 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 			String fname = min.getFileName();
 			OOCIOHandler io = OOCCacheManager.getIOHandler();
 
-			long bulkAlloc = Math.min(100_000_000L, mc.getLength() * 8 + OOCUtils.getNumBlocks(mc) * 16);
+			long bulkAlloc = estimateDenseTileMemoryBudget(mcOut, 100_000_000L);
 			UncoordinatedDataGenOOCPrimitive primitive = new UncoordinatedDataGenOOCPrimitive(out, bulkAlloc, getContext().addOutStream(out));
 			OOCStream<IndexedMatrixValue> untracked = createWritableStream();
 			AtomicReference<OOCIOHandler.SourceReadContinuation> continuation = new AtomicReference<>();
@@ -154,5 +154,25 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 			MatrixObject mout = ec.getMatrixObject(output);
 			mout.setStreamHandle(q);
 		}
+	}
+
+	private static long estimateDenseTileMemoryBudget(DataCharacteristics dc, long cap) {
+		if(dc == null || !dc.dimsKnown() || dc.getBlocksize() <= 0)
+			return cap;
+
+		long ret = 0;
+		long blen = dc.getBlocksize();
+		long rowBlocks = dc.getNumRowBlocks();
+		long colBlocks = dc.getNumColBlocks();
+		for(long rb = 1; rb <= rowBlocks; rb++) {
+			long rows = Math.min(blen, dc.getRows() - (rb - 1) * blen);
+			for(long cb = 1; cb <= colBlocks; cb++) {
+				long cols = Math.min(blen, dc.getCols() - (cb - 1) * blen);
+				ret += MatrixBlock.estimateSizeDenseInMemory(rows, cols);
+				if(ret >= cap)
+					return cap;
+			}
+		}
+		return ret;
 	}
 }

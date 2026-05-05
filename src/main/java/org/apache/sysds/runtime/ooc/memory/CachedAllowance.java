@@ -67,18 +67,49 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	}
 
 	public void handover(OOCStream.QueueCallback<IndexedMatrixValue> callback, int index) {
-		OOCStream.QueueCallback<IndexedMatrixValue> owned = callback.transferOwnershipBlocking(this);
-		OOCStream.QueueCallback<IndexedMatrixValue> root = owned.keepOpen();
-		owned.close();
-		if(root instanceof InMemoryQueueCallback inMemoryRoot)
-			inMemoryRoot.getHandle().attachCachedAllowance(this, index);
-
+		OOCStream.QueueCallback<IndexedMatrixValue> root = null;
+		BlockKey cacheRefKey = callback.getBlockKey();
+		if(cacheRefKey != null) {
+			try {
+				OOCCacheManager.getCache().addReference(cacheRefKey);
+			}
+			catch(IllegalArgumentException ex) {
+				IndexedMatrixValue imv = callback.get();
+				long bytes = callback.getManagedBytes();
+				if(bytes <= 0)
+					bytes = estimateManagedBytes(imv);
+				admitBlocking(bytes);
+				root = new InMemoryQueueCallback(imv, null, this, bytes);
+				((InMemoryQueueCallback) root).getHandle().attachCachedAllowance(this, index);
+				cacheRefKey = null;
+			}
+		}
+		if(root == null) {
+			try {
+				OOCStream.QueueCallback<IndexedMatrixValue> owned = callback.transferOwnershipBlocking(this);
+				root = owned.keepOpen();
+				owned.close();
+				if(root instanceof InMemoryQueueCallback inMemoryRoot)
+					inMemoryRoot.getHandle().attachCachedAllowance(this, index);
+			}
+			catch(RuntimeException ex) {
+				if(cacheRefKey != null)
+					OOCCacheManager.getCache().forget(cacheRefKey);
+				throw ex;
+			}
+		}
 		SlotEntry entry = new SlotEntry(root);
 		synchronized(this) {
 			ensureCapacity(index);
 			AtomicReferenceArray<SlotEntry> slots = _slots;
 			if(slots.get(index) != null) {
-				closeRoot(root);
+				try {
+					closeRoot(root);
+				}
+				finally {
+					if(cacheRefKey != null)
+						OOCCacheManager.getCache().forget(cacheRefKey);
+				}
 				throw new IllegalStateException("Cached allowance slot " + index + " already occupied.");
 			}
 			slots.set(index, entry);
@@ -262,12 +293,18 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			CompletableFuture<Void> stateFuture;
 			OOCCacheScheduler.BackingReleaseHandle backingReleaseHandle;
 			OOCStream.QueueCallback<IndexedMatrixValue> localToClose;
+			BlockKey cacheRefKey;
 			long pendingBytes;
+			byte state;
 
 			synchronized(entry) {
+				state = entry._state;
 				pendingBytes = takePendingBytes(entry);
 				localToClose = entry._local;
 				entry._local = null;
+				cacheRefKey = localToClose != null && localToClose.getBackingPin() != null ? localToClose.getBlockKey() :
+					(state == SlotEntry.STATE_BACKING_RELEASE_PENDING || state == SlotEntry.STATE_SCHEDULER_BACKED ?
+						entry._key : null);
 				stateFuture = entry._stateFuture;
 				entry._stateFuture = null;
 				backingReleaseHandle = entry._backingReleaseHandle;
@@ -285,7 +322,13 @@ public class CachedAllowance extends SyncMemoryAllowance {
 				if(reclaimed != null)
 					reclaimed.close();
 			}
-			closeRootAfterTake(localToClose, callback, pendingBytes);
+			try {
+				closeRootAfterTake(localToClose, callback, pendingBytes);
+			}
+			finally {
+				if(cacheRefKey != null)
+					OOCCacheManager.getCache().forget(cacheRefKey);
+			}
 			return callback;
 		});
 	}
@@ -297,6 +340,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 
 		CompletableFuture<Void> stateFuture;
 		BlockKey forgetKey;
+		BlockKey cacheRefKey;
 		OOCStream.QueueCallback<IndexedMatrixValue> localToClose;
 		OOCCacheScheduler.BackingReleaseHandle backingReleaseHandle;
 		long pendingBytes;
@@ -307,6 +351,9 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			pendingBytes = takePendingBytes(entry);
 			localToClose = entry._local;
 			entry._local = null;
+			cacheRefKey = localToClose != null && localToClose.getBackingPin() != null ? localToClose.getBlockKey() :
+				(state == SlotEntry.STATE_BACKING_RELEASE_PENDING || state == SlotEntry.STATE_SCHEDULER_BACKED ?
+					entry._key : null);
 			stateFuture = entry._stateFuture;
 			entry._stateFuture = null;
 			backingReleaseHandle = entry._backingReleaseHandle;
@@ -328,7 +375,13 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		}
 		if(localToClose instanceof InMemoryQueueCallback inMemory)
 			discardPayload(inMemory);
-		closeLocalAndFinishHandover(localToClose, pendingBytes);
+		try {
+			closeLocalAndFinishHandover(localToClose, pendingBytes);
+		}
+		finally {
+			if(cacheRefKey != null)
+				OOCCacheManager.getCache().forget(cacheRefKey);
+		}
 		if(stateFuture != null && state == SlotEntry.STATE_RESERVED)
 			stateFuture.complete(null);
 		if(forgetKey != null)
@@ -806,12 +859,34 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> finishReservedHandover(
 		OOCStream.QueueCallback<IndexedMatrixValue> callback, int index, SlotEntry reservation) {
 		OOCStream.QueueCallback<IndexedMatrixValue> root = null;
+		BlockKey cacheRefKey = null;
+		boolean cacheReferenceAdded = false;
 		try {
-			OOCStream.QueueCallback<IndexedMatrixValue> owned = callback.transferOwnershipBlocking(this);
-			root = owned.keepOpen();
-			owned.close();
-			if(root instanceof InMemoryQueueCallback inMemoryRoot)
-				inMemoryRoot.getHandle().attachCachedAllowance(this, index);
+			cacheRefKey = callback.getBlockKey();
+			if(cacheRefKey != null) {
+				try {
+					OOCCacheManager.getCache().addReference(cacheRefKey);
+					cacheReferenceAdded = true;
+				}
+				catch(IllegalArgumentException ex) {
+					IndexedMatrixValue imv = callback.get();
+					long bytes = callback.getManagedBytes();
+					if(bytes <= 0)
+						bytes = estimateManagedBytes(imv);
+					admitBlocking(bytes);
+					root = new InMemoryQueueCallback(imv, null, this, bytes);
+					((InMemoryQueueCallback) root).getHandle().attachCachedAllowance(this, index);
+					cacheRefKey = null;
+					cacheReferenceAdded = false;
+				}
+			}
+			if(root == null) {
+				OOCStream.QueueCallback<IndexedMatrixValue> owned = callback.transferOwnershipBlocking(this);
+				root = owned.keepOpen();
+				owned.close();
+				if(root instanceof InMemoryQueueCallback inMemoryRoot)
+					inMemoryRoot.getHandle().attachCachedAllowance(this, index);
+			}
 
 			CompletableFuture<Void> stateFuture;
 			synchronized(reservation) {
@@ -826,8 +901,18 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			return CompletableFuture.completedFuture(null);
 		}
 		catch(RuntimeException ex) {
-			if(root != null)
-				closeRoot(root);
+			if(root != null) {
+				try {
+					closeRoot(root);
+				}
+				finally {
+					if(cacheReferenceAdded)
+						OOCCacheManager.getCache().forget(cacheRefKey);
+				}
+			}
+			else if(cacheReferenceAdded) {
+				OOCCacheManager.getCache().forget(cacheRefKey);
+			}
 			failReservedCacheSlot(index, reservation, ex);
 			CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> failed = new CompletableFuture<>();
 			failed.completeExceptionally(ex);

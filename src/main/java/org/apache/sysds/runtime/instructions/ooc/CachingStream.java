@@ -31,6 +31,8 @@ import org.apache.sysds.runtime.ooc.cache.GroupedBlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
+import org.apache.sysds.runtime.ooc.primitives.CachingOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
 import org.apache.sysds.runtime.ooc.stream.message.OOCGetStreamTypeMessage;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
@@ -60,6 +62,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	// original live stream
 	private final OOCStream<IndexedMatrixValue> _source;
+	private final CachingOOCPrimitive _primitive;
 	private final IntArrayList _consumptionCounts = new IntArrayList();
 	private final IntArrayList _consumerConsumptionCounts = new IntArrayList();
 	private final IntArrayList _groupIndices = new IntArrayList();
@@ -93,6 +96,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	public CachingStream(OOCStream<IndexedMatrixValue> source, long streamId) {
 		_source = source;
+		_primitive = new CachingOOCPrimitive(source, this);
 		_source.setDownstreamMessageRelay(this::messageDownstream);
 		_streamId = streamId;
 		if(OOCWatchdog.WATCH) {
@@ -608,6 +612,11 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	@Override
 	public CachingStream getStreamCache() {
 		return this;
+	}
+
+	@Override
+	public OOCPrimitive getPrimitive() {
+		return _primitive;
 	}
 
 	@Override
