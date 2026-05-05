@@ -35,6 +35,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.TernaryOperator;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class TernaryOOCInstruction extends ComputationOOCInstruction {
 
@@ -142,6 +143,16 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 		leftStream.setDownstreamMessageRelay(qOut::messageDownstream);
 		rightStream.setDownstreamMessageRelay(qOut::messageDownstream);
 
+		if(OOC_NEW_SYSTEM && getOpcode().equals("+*")) {
+			OOCInstructionUtils.equiJoin(List.of(leftStream, rightStream), qOut, blocks -> {
+				MatrixBlock op1 = resolveOperandBlock(1, blocks.get(0), blocks.get(1), leftPos, rightPos, s1, s2, s3);
+				MatrixBlock op2 = resolveOperandBlock(2, blocks.get(0), blocks.get(1), leftPos, rightPos, s1, s2, s3);
+				MatrixBlock op3 = resolveOperandBlock(3, blocks.get(0), blocks.get(1), leftPos, rightPos, s1, s2, s3);
+				return op1.ternaryOperations((TernaryOperator)_optr, op2, op3, new MatrixBlock());
+			}, getContext().addInStream(leftStream, rightStream).addOutStream(qOut));
+			return;
+		}
+
 		joinOOC(leftStream, rightStream, qOut, (l, r) -> {
 			IndexedMatrixValue outVal = new IndexedMatrixValue();
 			MatrixBlock op1 = resolveOperandBlock(1, l, r, leftPos, rightPos, s1, s2, s3);
@@ -200,6 +211,23 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 			return (MatrixBlock) left.getValue();
 		if(operandPos == rightPos && right != null)
 			return (MatrixBlock) right.getValue();
+
+		if(operandPos == 1)
+			return s1;
+		else if(operandPos == 2)
+			return s2;
+		else if(operandPos == 3)
+			return s3;
+		else
+			throw new DMLRuntimeException("Invalid operand position: " + operandPos);
+	}
+
+	private MatrixBlock resolveOperandBlock(int operandPos, MatrixBlock left, MatrixBlock right,
+		int leftPos, int rightPos, MatrixBlock s1, MatrixBlock s2, MatrixBlock s3) {
+		if(operandPos == leftPos && left != null)
+			return left;
+		if(operandPos == rightPos && right != null)
+			return right;
 
 		if(operandPos == 1)
 			return s1;

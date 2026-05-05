@@ -153,7 +153,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 		if (!_subscriberSet.compareAndSet(false, true))
 			throw new IllegalArgumentException("Subscriber cannot be set multiple times");
 
-		_streamCache.setSubscriber(subscriber, false);
+		_streamCache.setSubscriber(subscriber, false, true);
 	}
 
 	@Override

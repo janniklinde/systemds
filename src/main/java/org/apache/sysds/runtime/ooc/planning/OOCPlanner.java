@@ -121,6 +121,7 @@ public class OOCPlanner {
 	private static boolean canFuseDownstream(OOCPrimitive downstream, OOCPrimitive upstream) {
 		return downstream.isTileLocal()
 			&& downstream.isOneToOne()
+			&& downstream.isIndexPreserving()
 			&& !downstream.isMaterializationBoundary()
 			&& downstream.getChildren().size() == 1
 			&& upstream.getParents().size() == 1

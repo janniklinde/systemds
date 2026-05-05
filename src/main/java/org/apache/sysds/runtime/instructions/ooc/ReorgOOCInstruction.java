@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.ReorgOperator;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.util.DataConverter;
 import org.apache.sysds.runtime.util.IndexRange;
 
@@ -141,25 +142,33 @@ public class ReorgOOCInstruction extends ComputationOOCInstruction {
 				ec.releaseMatrixInput(_col.getName());
 			ec.releaseMatrixInput(input1.getName());
 			ec.setMatrixOutput(output.getName(), soresBlock);
-		} else if(r_op.fn instanceof SwapIndex) {
+		}
+		else if(r_op.fn instanceof SwapIndex) {
 			OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
 			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 			ec.getMatrixObject(output).setStreamHandle(qOut);
 
 			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
 			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
-			qOut.setIXTransform((downstream, range) ->
-				new IndexRange(range.colStart, range.colEnd, range.rowStart, range.rowEnd));
+			qOut.setIXTransform(
+				(downstream, range) -> new IndexRange(range.colStart, range.colEnd, range.rowStart, range.rowEnd));
 
-			// Transpose operation
-			mapOOC(qIn, qOut, tmp -> {
-				MatrixBlock inBlock = (MatrixBlock) tmp.getValue();
-				long oldRowIdx = tmp.getIndexes().getRowIndex();
-				long oldColIdx = tmp.getIndexes().getColumnIndex();
+			if(OOC_NEW_SYSTEM)
+				OOCInstructionUtils.transposedMap(qIn, qOut,
+					in -> in.reorgOperations((ReorgOperator) _optr, new MatrixBlock(), -1, -1, -1),
+					getContext().addOutStream(qOut));
+			else {
+				// Transpose operation
+				mapOOC(qIn, qOut, tmp -> {
+					MatrixBlock inBlock = (MatrixBlock) tmp.getValue();
+					long oldRowIdx = tmp.getIndexes().getRowIndex();
+					long oldColIdx = tmp.getIndexes().getColumnIndex();
 
-				MatrixBlock outBlock = inBlock.reorgOperations((ReorgOperator) _optr, new MatrixBlock(), -1, -1, -1);
-				return new IndexedMatrixValue(new MatrixIndexes(oldColIdx, oldRowIdx), outBlock);
-			});
+					MatrixBlock outBlock = inBlock.reorgOperations((ReorgOperator) _optr, new MatrixBlock(), -1, -1,
+						-1);
+					return new IndexedMatrixValue(new MatrixIndexes(oldColIdx, oldRowIdx), outBlock);
+				});
+			}
 		}
 	}
 }

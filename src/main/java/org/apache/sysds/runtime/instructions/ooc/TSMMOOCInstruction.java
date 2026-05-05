@@ -35,6 +35,7 @@ import org.apache.sysds.runtime.matrix.operators.AggregateBinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class TSMMOOCInstruction extends ComputationOOCInstruction {
 	private final MMTSJType _type;
@@ -74,7 +75,22 @@ public class TSMMOOCInstruction extends ComputationOOCInstruction {
 		{
 			throw new UnsupportedOperationException();
 		}
-		
+
+		if(OOC_NEW_SYSTEM) {
+			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
+			ec.getMatrixObject(output).setStreamHandle(qOut);
+			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
+			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
+
+			OOCInstructionUtils.singleGroupedReduce(qIn, qOut,
+				Math.toIntExact(Math.max(1, Math.min(8L, min.getDataCharacteristics().getNumBlocks()))),
+				tmp -> tmp.transposeSelfMatrixMultOperations(new MatrixBlock(), _type),
+				(left, right) -> left.binaryOperationsInPlace(plus, right),
+				java.util.function.Function.identity(),
+				getContext().addOutStream(qOut));
+			return;
+		}
+			
 		//int dim = _type.isLeft() ? nCols : nRows;
 		MatrixBlock resultBlock = null;
 

@@ -709,9 +709,14 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		throw new UnsupportedOperationException();
 	}
 
-	@SuppressWarnings("unchecked")
 	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers) {
-		if(_deletable)
+		setSubscriber(subscriber, incrConsumers, false);
+	}
+
+	@SuppressWarnings("unchecked")
+	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers,
+		boolean bypassDeletable) {
+		if(_deletable && !bypassDeletable)
 			throw new DMLRuntimeException("Cannot register a new subscriber on " + this + " because has been flagged for deletion");
 		if(_failure != null)
 			throw _failure;
