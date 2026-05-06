@@ -276,6 +276,8 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	}
 
 	public CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> take(int index) {
+		// TODO Take doesn't properly ensure memory management after take
+		// TODO Take should return a callback still tied to this CachedAllowance and should only be released when all callback refs are closed
 		SlotEntry expectedEntry = getSlot(index);
 		if(expectedEntry == null)
 			return CompletableFuture.completedFuture(null);

@@ -126,6 +126,9 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		getChildren().forEach(child -> child.requestPattern(_pattern));
 	}
 
+	private AtomicIntegerArray _broadcastCount;
+	private int _maxCount;
+
 	@Override
 	public void startExecution() {
 		final OOCStream<IndexedMatrixValue> broadcastStream = getBroadcastStreamable().getReadStream();
@@ -133,9 +136,9 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
 		final DataCharacteristics dcBroadcast = broadcastStream.getDataCharacteristics();
 		final DataCharacteristics dc = streamedStream.getDataCharacteristics();
-		final long nBroadcastConsumptions = _rowBroadcast ? OOCUtils.getNumRowBlocks(dc) : OOCUtils.getNumColBlocks(dc);
+		_maxCount = (int)(_rowBroadcast ? OOCUtils.getNumRowBlocks(dc) : OOCUtils.getNumColBlocks(dc));
 		final int nBroadcastTiles = (int)(_rowBroadcast ? OOCUtils.getNumColBlocks(dc) : OOCUtils.getNumRowBlocks(dc));
-		final AtomicIntegerArray broadcastCount = new AtomicIntegerArray(nBroadcastTiles);
+		_broadcastCount = new AtomicIntegerArray(nBroadcastTiles);
 
 		final CompletableFuture<Void> buildFuture = new CompletableFuture<>();
 
@@ -166,9 +169,11 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 
 		final SubscribableTaskQueue<IndexedMatrixValue> intermediate = new SubscribableTaskQueue<>();
 		final SubscribableTaskQueue<Tuple2<OOCStream.QueueCallback<IndexedMatrixValue>, OOCStream.QueueCallback<IndexedMatrixValue>>> int2 = new SubscribableTaskQueue<>();
-		OOCInstructionUtils.submitOOCTasks(streamedStream, cb -> {
+		var future = OOCInstructionUtils.submitOOCTasks(streamedStream, cb -> {
+			IndexedMatrixValue result;
+			long bytesToReserve;
 			try(cb) {
-				long bytesToReserve = _allocFn.applyAsLong(cb.get().getIndexes());
+				bytesToReserve = _allocFn.applyAsLong(cb.get().getIndexes());
 				if(!_allowance.tryReserve(bytesToReserve)) {
 					intermediate.enqueue(cb.keepOpen());
 					return;
@@ -181,17 +186,55 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 					broadcast.thenAccept(bcb -> int2.enqueue(new Tuple2<>(bcb, fCb)));
 					return;
 				}
-				var imv = new IndexedMatrixValue(cb.get().getIndexes(), _mergeFn.apply(broadcast.getNow(null).get(), cb.get()));
-				int cnt = broadcastCount.incrementAndGet(idx);
-				// TODO emit if possible
-
-				if(_crossBoundaries)
-					out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, bytesToReserve));
-				else
-					out.enqueue(imv);
+				result = process(idx, broadcast.getNow(null), cb);
 			}
+			out.enqueue(callbackOf(result, bytesToReserve));
 		}, _sc);
-		// TODO handle intermediate and int2 stream
+		future.thenRun(intermediate::closeInput);
+		var future2 = OOCInstructionUtils.submitOOCTasks(int2, c -> {
+			var bcb = c.get()._1;
+			var cb = c.get()._2;
+			IndexedMatrixValue result;
+			try(bcb; cb) {
+				int idx = (int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
+					cb.get().getIndexes().getRowIndex() - 1);
+				result = process(idx, bcb, cb);
+			}
+			out.enqueue(callbackOf(result, _allocFn.applyAsLong(result.getIndexes())));
+		}, _sc);
+		CompletableFuture<Void> future3 = new CompletableFuture<>();
+		new Thread(() -> {
+			OOCStream.QueueCallback<IndexedMatrixValue> tmp;
+			while(!(tmp = intermediate.dequeueCB()).isEos()) {
+				long bytesToReserve = _allocFn.applyAsLong(tmp.get().getIndexes());
+				_allowance.reserveBlocking(bytesToReserve);
+				int idx = (int) (_rowBroadcast ? tmp.get().getIndexes().getColumnIndex() - 1 :
+					tmp.get().getIndexes().getRowIndex() - 1);
+				var bcbFuture = _cache.get(idx);
+				final var fCb = tmp.keepOpen();
+				bcbFuture.thenAccept(bcb -> {
+					int2.enqueue(new Tuple2<>(bcb, fCb));
+				});
+			}
+			future3.complete(null);
+		}).start();
+		CompletableFuture.allOf(future, future3).thenRun(int2::closeInput);
+		future2.thenRun(out::closeInput);
+	}
+
+	private IndexedMatrixValue process(int idx, OOCStream.QueueCallback<IndexedMatrixValue> bcb,
+		OOCStream.QueueCallback<IndexedMatrixValue> cb) {
+		var imv = new IndexedMatrixValue(cb.get().getIndexes(), _mergeFn.apply(bcb.get(), cb.get()));
+		int cnt = _broadcastCount.incrementAndGet(idx);
+		if(cnt == _maxCount)
+			_cache.clear(idx);
+		return imv;
+	}
+
+	private OOCStream.QueueCallback<IndexedMatrixValue> callbackOf(IndexedMatrixValue imv, long attachedBytes) {
+		if(_crossBoundaries)
+			return new InMemoryQueueCallback(imv, null, _allowance, attachedBytes);
+		return new OOCStream.SimpleQueueCallback<>(imv, null);
 	}
 
 	public OOCStreamable<IndexedMatrixValue> getBroadcastStreamable() {
