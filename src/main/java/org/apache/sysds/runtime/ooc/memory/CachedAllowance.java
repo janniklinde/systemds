@@ -221,6 +221,8 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		if(immediate != null)
 			return CompletableFuture.completedFuture(immediate);
 
+		// TODO Currently read is issued before bytes are properly reserved
+
 		SlotEntry entry = getSlot(index);
 		if(entry == null)
 			return CompletableFuture.completedFuture(null);

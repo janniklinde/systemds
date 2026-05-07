@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import org.apache.sysds.common.Opcodes;
@@ -40,6 +41,8 @@ import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.RightScalarOperator;
+import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 public class MapMMChainOOCInstruction extends ComputationOOCInstruction {
 	private final ChainType _type;

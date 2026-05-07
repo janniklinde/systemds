@@ -26,6 +26,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
@@ -48,6 +49,7 @@ import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.ToIntFunction;
 
 public class OOCInstructionUtils {
 	public static final ExecutorService COMPUTE_EXECUTOR = CommonThreadPool.get();
@@ -116,6 +118,16 @@ public class OOCInstructionUtils {
 
 	public static void equiJoin(List<OOCStreamable<IndexedMatrixValue>> l, OOCStream<IndexedMatrixValue> out, Function<List<MatrixBlock>, MatrixBlock> fn, StreamContext sc) {
 		OOCPrimitive primitive = new JoinOOCPrimitive(l, out, fn, sc);
+		out.assignPrimitive(primitive);
+	}
+
+	public static void broadcast(OOCStreamable<IndexedMatrixValue> broadcast,
+		OOCStreamable<IndexedMatrixValue> streamed, OOCStreamable<IndexedMatrixValue> out,
+		BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> fn,
+		ToIntFunction<IndexedMatrixValue> broadcastKeyFn, ToIntFunction<IndexedMatrixValue> streamedKeyFn,
+		int numBroadcastTiles, int maxBroadcastCount, StreamContext sc) {
+		OOCPrimitive primitive = new BroadcastOOCPrimitive(broadcast, streamed, out, fn, broadcastKeyFn, streamedKeyFn,
+			numBroadcastTiles, maxBroadcastCount, sc);
 		out.assignPrimitive(primitive);
 	}
 

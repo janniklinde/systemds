@@ -36,14 +36,20 @@ import scala.Tuple2;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.function.BiFunction;
+import java.util.function.ToIntFunction;
 
 public class BroadcastOOCPrimitive extends OOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _broadcastStreamable;
 	private final OOCStreamable<IndexedMatrixValue> _streamedStreamable;
 	private final OOCStreamable<IndexedMatrixValue> _outputStreamable;
 	private final BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> _mergeFn;
+	private final ToIntFunction<IndexedMatrixValue> _broadcastKeyFn;
+	private final ToIntFunction<IndexedMatrixValue> _streamedKeyFn;
+	private final int _numBroadcastTiles;
+	private final int _maxBroadcastCount;
 	private final boolean _rowBroadcast;
 	private final StreamContext _sc;
 	private CachedAllowance _cache;
@@ -51,11 +57,16 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	private BroadcastOOCPrimitive(OOCPrimitive broadcastPrimitive, OOCPrimitive streamedPrimitive,
 		OOCStreamable<IndexedMatrixValue> broadcastStreamable, OOCStreamable<IndexedMatrixValue> streamedStreamable,
 		OOCStreamable<IndexedMatrixValue> outputStreamable, BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> mergeFn,
-		boolean rowBroadcast, StreamContext sc) {
+		ToIntFunction<IndexedMatrixValue> broadcastKeyFn, ToIntFunction<IndexedMatrixValue> streamedKeyFn,
+		int numBroadcastTiles, int maxBroadcastCount, boolean rowBroadcast, StreamContext sc) {
 		super(List.of(broadcastPrimitive, streamedPrimitive));
 		_broadcastStreamable = broadcastStreamable;
 		_streamedStreamable = streamedStreamable;
 		_outputStreamable = outputStreamable;
+		_broadcastKeyFn = broadcastKeyFn;
+		_streamedKeyFn = streamedKeyFn;
+		_numBroadcastTiles = numBroadcastTiles;
+		_maxBroadcastCount = maxBroadcastCount;
 		_rowBroadcast = rowBroadcast;
 		_mergeFn = mergeFn;
 		_sc = sc;
@@ -66,7 +77,18 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> mergeFn, boolean rowBroadcast, StreamContext sc) {
 		this(broadcastStreamable == null ? null : broadcastStreamable.getPrimitive(),
 			streamedStreamable == null ? null : streamedStreamable.getPrimitive(), broadcastStreamable,
-			streamedStreamable, outputStreamable, mergeFn, rowBroadcast, sc);
+			streamedStreamable, outputStreamable, mergeFn, null, null, -1, -1, rowBroadcast, sc);
+	}
+
+	public BroadcastOOCPrimitive(OOCStreamable<IndexedMatrixValue> broadcastStreamable,
+		OOCStreamable<IndexedMatrixValue> streamedStreamable, OOCStreamable<IndexedMatrixValue> outputStreamable,
+		BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> mergeFn,
+		ToIntFunction<IndexedMatrixValue> broadcastKeyFn, ToIntFunction<IndexedMatrixValue> streamedKeyFn,
+		int numBroadcastTiles, int maxBroadcastCount, StreamContext sc) {
+		this(broadcastStreamable == null ? null : broadcastStreamable.getPrimitive(),
+			streamedStreamable == null ? null : streamedStreamable.getPrimitive(), broadcastStreamable,
+			streamedStreamable, outputStreamable, mergeFn, broadcastKeyFn, streamedKeyFn, numBroadcastTiles,
+			maxBroadcastCount, false, sc);
 	}
 
 	@Override
@@ -136,8 +158,10 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
 		final DataCharacteristics dcBroadcast = broadcastStream.getDataCharacteristics();
 		final DataCharacteristics dc = streamedStream.getDataCharacteristics();
-		_maxCount = (int)(_rowBroadcast ? OOCUtils.getNumRowBlocks(dc) : OOCUtils.getNumColBlocks(dc));
-		final int nBroadcastTiles = (int)(_rowBroadcast ? OOCUtils.getNumColBlocks(dc) : OOCUtils.getNumRowBlocks(dc));
+		_maxCount = _maxBroadcastCount > 0 ? _maxBroadcastCount :
+			(int)(_rowBroadcast ? OOCUtils.getNumRowBlocks(dc) : OOCUtils.getNumColBlocks(dc));
+		final int nBroadcastTiles = _numBroadcastTiles > 0 ? _numBroadcastTiles :
+			(int)(_rowBroadcast ? OOCUtils.getNumColBlocks(dc) : OOCUtils.getNumRowBlocks(dc));
 		_broadcastCount = new AtomicIntegerArray(nBroadcastTiles);
 
 		final CompletableFuture<Void> buildFuture = new CompletableFuture<>();
@@ -146,10 +170,11 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 			try {
 				OOCStream.QueueCallback<IndexedMatrixValue> cb;
 
-				while(!(cb = broadcastStream.dequeueCB()).isEos()) {
+				while((cb = broadcastStream.dequeueCB()) != null && !cb.isEos()) {
 					try {
 						IndexedMatrixValue imv = cb.get();
-						int idx = (int) (_rowBroadcast ? imv.getIndexes().getColumnIndex() - 1 :
+						int idx = _broadcastKeyFn != null ? _broadcastKeyFn.applyAsInt(imv) :
+							(int) (_rowBroadcast ? imv.getIndexes().getColumnIndex() - 1 :
 							imv.getIndexes().getRowIndex() - 1);
 						_cache.handover(cb.keepOpen(), idx);
 					}
@@ -157,7 +182,8 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 						cb.close();
 					}
 				}
-				cb.close();
+				if(cb != null)
+					cb.close();
 				buildFuture.complete(null);
 			}
 			catch(Throwable t) {
@@ -167,59 +193,82 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 			}
 		}).start();
 
-		final SubscribableTaskQueue<IndexedMatrixValue> intermediate = new SubscribableTaskQueue<>();
-		final SubscribableTaskQueue<Tuple2<OOCStream.QueueCallback<IndexedMatrixValue>, OOCStream.QueueCallback<IndexedMatrixValue>>> int2 = new SubscribableTaskQueue<>();
-		var future = OOCInstructionUtils.submitOOCTasks(streamedStream, cb -> {
-			IndexedMatrixValue result;
-			long bytesToReserve;
-			try(cb) {
-				bytesToReserve = _allocFn.applyAsLong(cb.get().getIndexes());
-				if(!_allowance.tryReserve(bytesToReserve)) {
-					intermediate.enqueue(cb.keepOpen());
-					return;
+		buildFuture.thenRun(() -> {
+			final SubscribableTaskQueue<IndexedMatrixValue> intermediate = new SubscribableTaskQueue<>();
+			final SubscribableTaskQueue<Tuple2<OOCStream.QueueCallback<IndexedMatrixValue>, OOCStream.QueueCallback<IndexedMatrixValue>>> int2 = new SubscribableTaskQueue<>();
+			final AtomicInteger inflightCtr = new AtomicInteger(1);
+			CompletableFuture<Void> future = new CompletableFuture<>();
+			OOCInstructionUtils.submitOOCTasks(streamedStream, cb -> {
+				IndexedMatrixValue result;
+				long bytesToReserve;
+				try(cb) {
+					bytesToReserve = _allocFn.applyAsLong(cb.get().getIndexes());
+					if(!_allowance.tryReserve(bytesToReserve)) {
+						intermediate.enqueue(cb.keepOpen());
+						return;
+					}
+						int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(cb.get()) :
+							(int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
+							cb.get().getIndexes().getRowIndex() - 1);
+						var broadcast = _cache.get(idx);
+					if(!broadcast.isDone()) {
+						final var fCb = cb.keepOpen();
+						inflightCtr.incrementAndGet();
+						broadcast.thenAccept(bcb -> {
+							int2.enqueue(new Tuple2<>(bcb, fCb));
+							if(inflightCtr.decrementAndGet() == 0)
+								future.complete(null);
+						});
+						return;
+					}
+					result = process(idx, broadcast.getNow(null), cb);
 				}
-				int idx = (int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
-					cb.get().getIndexes().getRowIndex() - 1);
-				var broadcast = _cache.get(idx);
-				if(!broadcast.isDone()) {
-					final var fCb = cb.keepOpen();
-					broadcast.thenAccept(bcb -> int2.enqueue(new Tuple2<>(bcb, fCb)));
-					return;
+				out.enqueue(callbackOf(result, bytesToReserve));
+			}, _sc).thenRun(() -> {
+				if(inflightCtr.decrementAndGet() == 0)
+					future.complete(null);
+			});
+			future.thenRun(intermediate::closeInput);
+			var future2 = OOCInstructionUtils.submitOOCTasks(int2, c -> {
+				var bcb = c.get()._1;
+				var cb = c.get()._2;
+				IndexedMatrixValue result;
+				try(bcb; cb) {
+					int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(cb.get()) :
+						(int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
+						cb.get().getIndexes().getRowIndex() - 1);
+					result = process(idx, bcb, cb);
 				}
-				result = process(idx, broadcast.getNow(null), cb);
-			}
-			out.enqueue(callbackOf(result, bytesToReserve));
-		}, _sc);
-		future.thenRun(intermediate::closeInput);
-		var future2 = OOCInstructionUtils.submitOOCTasks(int2, c -> {
-			var bcb = c.get()._1;
-			var cb = c.get()._2;
-			IndexedMatrixValue result;
-			try(bcb; cb) {
-				int idx = (int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
-					cb.get().getIndexes().getRowIndex() - 1);
-				result = process(idx, bcb, cb);
-			}
-			out.enqueue(callbackOf(result, _allocFn.applyAsLong(result.getIndexes())));
-		}, _sc);
-		CompletableFuture<Void> future3 = new CompletableFuture<>();
-		new Thread(() -> {
-			OOCStream.QueueCallback<IndexedMatrixValue> tmp;
-			while(!(tmp = intermediate.dequeueCB()).isEos()) {
-				long bytesToReserve = _allocFn.applyAsLong(tmp.get().getIndexes());
-				_allowance.reserveBlocking(bytesToReserve);
-				int idx = (int) (_rowBroadcast ? tmp.get().getIndexes().getColumnIndex() - 1 :
-					tmp.get().getIndexes().getRowIndex() - 1);
-				var bcbFuture = _cache.get(idx);
-				final var fCb = tmp.keepOpen();
-				bcbFuture.thenAccept(bcb -> {
-					int2.enqueue(new Tuple2<>(bcb, fCb));
-				});
-			}
-			future3.complete(null);
-		}).start();
-		CompletableFuture.allOf(future, future3).thenRun(int2::closeInput);
-		future2.thenRun(out::closeInput);
+				out.enqueue(callbackOf(result, _allocFn.applyAsLong(result.getIndexes())));
+			}, _sc);
+			CompletableFuture<Void> future3 = new CompletableFuture<>();
+			new Thread(() -> {
+				OOCStream.QueueCallback<IndexedMatrixValue> tmp;
+				AtomicInteger ctr = new AtomicInteger(1);
+				while((tmp = intermediate.dequeueCB()) != null && !tmp.isEos()) {
+					long bytesToReserve = _allocFn.applyAsLong(tmp.get().getIndexes());
+					_allowance.reserveBlocking(bytesToReserve);
+					int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(tmp.get()) :
+						(int) (_rowBroadcast ? tmp.get().getIndexes().getColumnIndex() - 1 :
+						tmp.get().getIndexes().getRowIndex() - 1);
+					var bcbFuture = _cache.get(idx);
+					final var fCb = tmp.keepOpen();
+					ctr.incrementAndGet();
+					bcbFuture.thenAccept(bcb -> {
+						int2.enqueue(new Tuple2<>(bcb, fCb));
+						if(ctr.decrementAndGet() == 0)
+							future3.complete(null);
+					});
+					tmp.close();
+				}
+				if(tmp != null)
+					tmp.close();
+				if(ctr.decrementAndGet() == 0)
+					future3.complete(null);
+			}).start();
+			CompletableFuture.allOf(future, future3).thenRun(int2::closeInput);
+			future2.thenRun(out::closeInput).thenRun(this::onComplete);
+		});
 	}
 
 	private IndexedMatrixValue process(int idx, OOCStream.QueueCallback<IndexedMatrixValue> bcb,

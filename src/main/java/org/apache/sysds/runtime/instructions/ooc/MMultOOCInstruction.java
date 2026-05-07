@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.matrix.operators.AggregateBinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class MMultOOCInstruction extends ComputationOOCInstruction {
 
@@ -60,6 +61,80 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 		// 1. Identify the inputs
 		MatrixObject min = ec.getMatrixObject(input1); // big matrix
 		MatrixObject vin = ec.getMatrixObject(input2); // streamed vector
+
+		if(OOC_NEW_SYSTEM && min.getDataCharacteristics().dimsKnown()
+			&& vin.getDataCharacteristics().dimsKnown()
+			&& min.getDataCharacteristics().getRows() == 1
+			&& min.getDataCharacteristics().getCols() == vin.getDataCharacteristics().getRows()) {
+			OOCStream<IndexedMatrixValue> qBroadcast = min.getStreamHandle();
+			OOCStream<IndexedMatrixValue> qStreamed = vin.getStreamHandle();
+			OOCStream<IndexedMatrixValue> qPartial = createWritableStream();
+			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
+			qPartial.setData(vin);
+			ec.getMatrixObject(output).setStreamHandle(qOut);
+			qBroadcast.setDownstreamMessageRelay(qPartial::messageDownstream);
+			qStreamed.setDownstreamMessageRelay(qPartial::messageDownstream);
+			qPartial.setDownstreamMessageRelay(qOut::messageDownstream);
+			qOut.setUpstreamMessageRelay(msg -> {
+				qBroadcast.messageUpstream(msg.split());
+				qStreamed.messageUpstream(msg.split());
+			});
+
+			OOCInstructionUtils.broadcast(qBroadcast, qStreamed, qPartial, (left, right) -> {
+				MatrixBlock leftBlock = (MatrixBlock) left.getValue();
+				MatrixBlock rightBlock = (MatrixBlock) right.getValue();
+				return leftBlock.aggregateBinaryOperations(leftBlock, rightBlock,
+					new MatrixBlock(), (AggregateBinaryOperator) _optr);
+			}, imv -> Math.toIntExact(imv.getIndexes().getColumnIndex() - 1),
+				imv -> Math.toIntExact(imv.getIndexes().getRowIndex() - 1),
+				Math.toIntExact(min.getDataCharacteristics().getNumColBlocks()),
+				Math.toIntExact(vin.getDataCharacteristics().getNumColBlocks()),
+				getContext().addOutStream(qPartial));
+
+			BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
+			OOCInstructionUtils.colGroupedReduce(qPartial, qOut,
+				Math.toIntExact(Math.max(1, Math.min(8L, vin.getDataCharacteristics().getNumRowBlocks()))),
+				tmp -> tmp, (left, right) -> left.binaryOperationsInPlace(plus, right),
+				java.util.function.Function.identity(), getContext().addOutStream(qOut));
+			return;
+		}
+
+		if(OOC_NEW_SYSTEM && min.getDataCharacteristics().dimsKnown()
+			&& vin.getDataCharacteristics().dimsKnown()
+			&& vin.getDataCharacteristics().getCols() == 1
+			&& min.getDataCharacteristics().getCols() == vin.getDataCharacteristics().getRows()) {
+			OOCStream<IndexedMatrixValue> qBroadcast = vin.getStreamHandle();
+			OOCStream<IndexedMatrixValue> qStreamed = min.getStreamHandle();
+			OOCStream<IndexedMatrixValue> qPartial = createWritableStream();
+			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
+			qPartial.setData(min);
+			ec.getMatrixObject(output).setStreamHandle(qOut);
+			qBroadcast.setDownstreamMessageRelay(qPartial::messageDownstream);
+			qStreamed.setDownstreamMessageRelay(qPartial::messageDownstream);
+			qPartial.setDownstreamMessageRelay(qOut::messageDownstream);
+			qOut.setUpstreamMessageRelay(msg -> {
+				qBroadcast.messageUpstream(msg.split());
+				qStreamed.messageUpstream(msg.split());
+			});
+
+			OOCInstructionUtils.broadcast(qBroadcast, qStreamed, qPartial, (left, right) -> {
+					MatrixBlock vectorBlock = (MatrixBlock) left.getValue();
+					MatrixBlock matrixBlock = (MatrixBlock) right.getValue();
+					return matrixBlock.aggregateBinaryOperations(matrixBlock, vectorBlock,
+						new MatrixBlock(), (AggregateBinaryOperator) _optr);
+				}, imv -> Math.toIntExact(imv.getIndexes().getRowIndex() - 1),
+				imv -> Math.toIntExact(imv.getIndexes().getColumnIndex() - 1),
+				Math.toIntExact(vin.getDataCharacteristics().getNumRowBlocks()),
+				Math.toIntExact(min.getDataCharacteristics().getNumRowBlocks()),
+				getContext().addOutStream(qPartial));
+
+			BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
+			OOCInstructionUtils.rowGroupedReduce(qPartial, qOut,
+				Math.toIntExact(Math.max(1, Math.min(8L, min.getDataCharacteristics().getNumColBlocks()))),
+				tmp -> tmp, (left, right) -> left.binaryOperationsInPlace(plus, right),
+				java.util.function.Function.identity(), getContext().addOutStream(qOut));
+			return;
+		}
 
 		int emitLeftThreshold = (int)vin.getDataCharacteristics().getNumColBlocks();
 		int emitRightThreshold = (int)min.getDataCharacteristics().getNumRowBlocks();

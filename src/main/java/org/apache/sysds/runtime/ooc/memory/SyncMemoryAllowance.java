@@ -21,9 +21,14 @@ package org.apache.sysds.runtime.ooc.memory;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 public class SyncMemoryAllowance implements MemoryAllowance {
 	protected final MemoryBroker _broker;
 	protected final long _consumptionLimit;
+	protected final ExecutorService _waiter;
 	protected volatile long _usedBytes;
 	protected volatile long _grantedBytes;
 	protected volatile long _targetBytes;
@@ -42,6 +47,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		_targetBytes = 0;
 		_shutdown = false;
 		_destroyed = false;
+		_waiter = Executors.newSingleThreadExecutor();
 		broker.attachAllowance(this);
 	}
 
@@ -107,6 +113,16 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				}
 			}
 		}
+	}
+
+	@Override
+	public CompletableFuture<Void> reserve(long bytes) {
+		CompletableFuture<Void> future = new CompletableFuture<>();
+		_waiter.submit(() -> {
+			reserveBlocking(bytes);
+			future.complete(null);
+		});
+		return future;
 	}
 
 	@Override
@@ -191,6 +207,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			_broker.destroyAllowance(this, destroyFreedMemory);
 		else if(freedMemory > 0)
 			_broker.freeMemory(this, freedMemory);
+		_waiter.shutdownNow();
 	}
 
 	@Override
