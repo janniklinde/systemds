@@ -93,6 +93,8 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 		default OOCCacheScheduler.AllowanceBackedPin getBackingPin() {
 			return null;
 		}
+
+		default void forget() {}
 	}
 
 	interface GroupQueueCallback<T> extends QueueCallback<T> {

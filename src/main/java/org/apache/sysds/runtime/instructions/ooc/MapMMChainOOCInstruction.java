@@ -41,8 +41,7 @@ import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.RightScalarOperator;
-import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
-import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.MapMMChainOOCPrimitive;
 
 public class MapMMChainOOCInstruction extends ComputationOOCInstruction {
 	private final ChainType _type;
@@ -75,6 +74,23 @@ public class MapMMChainOOCInstruction extends ComputationOOCInstruction {
 
 	@Override
 	public void processInstruction(ExecutionContext ec) {
+		if(OOC_NEW_SYSTEM && _type == ChainType.XtXv && input3 == null) {
+			MatrixObject min = ec.getMatrixObject(input1);
+			MatrixObject mv = ec.getMatrixObject(input2);
+			OOCStreamable<IndexedMatrixValue> xIn = min.getStreamable();
+			OOCStreamable<IndexedMatrixValue> vIn = mv.getStreamable();
+			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
+			ec.getMatrixObject(output).setStreamHandle(qOut);
+			xIn.setDownstreamMessageRelay(qOut::messageDownstream);
+			vIn.setDownstreamMessageRelay(qOut::messageDownstream);
+			qOut.setUpstreamMessageRelay(msg -> {
+				xIn.messageUpstream(msg.split());
+				vIn.messageUpstream(msg.split());
+			});
+			qOut.assignPrimitive(new MapMMChainOOCPrimitive(xIn, vIn, qOut, _type, getContext().addOutStream(qOut)));
+			return;
+		}
+
 		MatrixObject min = ec.getMatrixObject(input1);
 		MatrixObject mv = ec.getMatrixObject(input2);
 		OOCStream<IndexedMatrixValue> qV = mv.getStreamHandle();

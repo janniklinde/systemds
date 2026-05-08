@@ -134,10 +134,13 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	public void inferPatterns() {
-		if(_pattern == OOCAccessPattern.UNSET)
+		if(_pattern.isUnset())
 			_pattern = OOCAccessPattern.ANY;
-		getChildren().forEach(child -> child.requestPattern(_pattern));
-		getParents().forEach(OOCPrimitive::inferPatterns);
+		getChildren().forEach(child -> {
+			if(!child.hasStartedExecution())
+				child.requestPattern(_pattern);
+		});
+		inferPatterns(getParents());
 	}
 
 	@Override
@@ -145,7 +148,10 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		if(_pattern == accessPattern)
 			return;
 		_pattern = _pattern == OOCAccessPattern.UNSET ? accessPattern : _pattern.preferred(accessPattern);
-		getChildren().forEach(child -> child.requestPattern(_pattern));
+		getChildren().forEach(child -> {
+			if(!child.hasStartedExecution())
+				child.requestPattern(_pattern);
+		});
 	}
 
 	private AtomicIntegerArray _broadcastCount;

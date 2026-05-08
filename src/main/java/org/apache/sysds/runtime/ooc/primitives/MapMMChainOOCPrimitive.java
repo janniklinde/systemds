@@ -19,21 +19,34 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
+import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.lops.MapMultChain.ChainType;
+import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.data.DenseBlock;
+import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.matrix.operators.AggregateBinaryOperator;
+import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
+import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
+import org.apache.sysds.runtime.functionobjects.Multiply;
+import org.apache.sysds.runtime.functionobjects.Plus;
+import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
+import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
-import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCPrimitiveUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 
 public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _xStreamable;
@@ -42,6 +55,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _outputStreamable;
 	private final ChainType _type;
 	private final StreamContext _sc;
+	private final AtomicBoolean _terminated = new AtomicBoolean(false);
 	private CachedAllowance _cache;
 
 	private MapMMChainOOCPrimitive(List<OOCPrimitive> children, OOCStreamable<IndexedMatrixValue> xStreamable,
@@ -139,9 +153,11 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	@Override
 	public void inferPatterns() {
 		_pattern = OOCAccessPattern.ROW_MAJOR;
-		for(OOCPrimitive child : getChildren())
-			child.requestPattern(OOCAccessPattern.ROW_MAJOR);
-		getParents().forEach(OOCPrimitive::inferPatterns);
+		for(OOCPrimitive child : getChildren()) {
+			if(!child.hasStartedExecution())
+				child.requestPattern(OOCAccessPattern.ROW_MAJOR);
+		}
+		inferPatterns(getParents());
 	}
 
 	@Override
@@ -149,27 +165,232 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		if(_pattern == accessPattern)
 			return;
 		_pattern = accessPattern;
-		for(OOCPrimitive child : getChildren())
-			child.requestPattern(OOCAccessPattern.ROW_MAJOR);
+		for(OOCPrimitive child : getChildren()) {
+			if(!child.hasStartedExecution())
+				child.requestPattern(OOCAccessPattern.ROW_MAJOR);
+		}
 	}
 
 	@Override
 	public void startExecution() {
+		if(_type != ChainType.XtXv || _wStreamable != null)
+			throw new UnsupportedOperationException("MapMMChainOOCPrimitive currently only supports XtXv.");
+
 		final OOCStream<IndexedMatrixValue> x = _xStreamable.getReadStream();
 		final OOCStream<IndexedMatrixValue> v = _vStreamable.getReadStream();
 		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
-		final long rTiles = OOCUtils.getNumRowBlocks(v.getDataCharacteristics());
-		final long nBroadcast = OOCUtils.getNumColBlocks(x.getDataCharacteristics());
+		final int numVBlocks = Math.toIntExact(OOCUtils.getNumRowBlocks(v.getDataCharacteristics()));
+		final int numRowBlocks = Math.toIntExact(OOCUtils.getNumRowBlocks(x.getDataCharacteristics()));
+		final int numColBlocks = Math.toIntExact(OOCUtils.getNumColBlocks(x.getDataCharacteristics()));
+		final int xBase = numVBlocks;
+		final int uBase = xBase + numRowBlocks * numColBlocks;
+		final int qBase = uBase + numRowBlocks;
+		final AggregateOperator agg = new AggregateOperator(0, Plus.getPlusFnObject());
+		final AggregateBinaryOperator mmOp = new AggregateBinaryOperator(Multiply.getMultiplyFnObject(), agg);
+		final BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
+		final AtomicIntegerArray seenPerRow = new AtomicIntegerArray(numRowBlocks);
 
-		OOCPrimitiveUtils.collect(v, _cache, idx -> (int)(idx.getRowIndex()-1))
+		OOCPrimitiveUtils.collect(v, _cache, idx -> Math.toIntExact(idx.getRowIndex() - 1))
 			.thenRun(() -> {
-				OOCStream<IndexedMatrixValue> workStream = new SubscribableTaskQueue<>();
+				SubscribableTaskQueue<IndexedMatrixValue> workStream = new SubscribableTaskQueue<>();
 				workStream.setSubscriber(xcb -> {
+					if(xcb == null)
+						return;
+					if(xcb.isEos()) {
+						try {
+							for(int col = 0; col < numColBlocks; col++) {
+								OOCStream.QueueCallback<IndexedMatrixValue> qcb = _cache.take(qBase + col).join();
+								if(qcb == null)
+									continue;
+								try(qcb) {
+									out.enqueue(outputCallback(new MatrixIndexes(col + 1L, 1L),
+										(MatrixBlock) qcb.get().getValue()));
+								}
+							}
+							complete(out);
+						}
+						catch(Throwable t) {
+							fail(t, out, workStream);
+						}
+						finally {
+							xcb.close();
+						}
+						return;
+					}
 
+					try(xcb) {
+						IndexedMatrixValue ximv = xcb.get();
+						int row = Math.toIntExact(ximv.getIndexes().getRowIndex() - 1);
+						int col = Math.toIntExact(ximv.getIndexes().getColumnIndex() - 1);
+						OOCStream.QueueCallback<IndexedMatrixValue> vcb = _cache.get(col).join();
+						if(vcb == null)
+							throw new IllegalStateException("Missing broadcast vector tile for column block " + col);
+
+						try(vcb) {
+							MatrixBlock xBlock = (MatrixBlock) ximv.getValue();
+							MatrixBlock vBlock = (MatrixBlock) vcb.get().getValue();
+							MatrixBlock partialU = xBlock.aggregateBinaryOperations(xBlock, vBlock, new MatrixBlock(), mmOp);
+							OOCPrimitiveUtils.accumulate(trackedCallback(new MatrixIndexes(row + 1L, 1L), partialU),
+								(left, right) -> mergeCallbacks(left, right, plus), _cache, uBase + row);
+						}
+
+						if(seenPerRow.incrementAndGet(row) == numColBlocks) {
+							finalizeRow(row, numColBlocks, xBase, uBase, qBase, plus);
+						}
+					}
+					catch(Throwable t) {
+						fail(t, out, null);
+					}
 				});
 				OOCPrimitiveUtils.collect(x, _cache,
-					idx -> (int)(2*rTiles + (idx.getRowIndex()-1) * nBroadcast + idx.getColumnIndex()-1), workStream);
+					idx -> xBase + Math.toIntExact((idx.getRowIndex() - 1) * numColBlocks + idx.getColumnIndex() - 1),
+					workStream).exceptionally(t -> {
+						fail(t, out, workStream);
+						return null;
+					});
+			}).exceptionally(t -> {
+				fail(t, out, null);
+				return null;
 			});
+	}
+
+	private void finalizeRow(int row, int numColBlocks, int xBase, int uBase, int qBase, BinaryOperator plus) {
+		OOCStream.QueueCallback<IndexedMatrixValue> ucb = _cache.take(uBase + row).join();
+		if(ucb == null)
+			return;
+
+		try(ucb) {
+			MatrixBlock uBlock = (MatrixBlock) ucb.get().getValue();
+			for(int col = 0; col < numColBlocks; col++) {
+				OOCStream.QueueCallback<IndexedMatrixValue> xcb = _cache.take(xBase + row * numColBlocks + col).join();
+				if(xcb == null)
+					continue;
+				try(xcb) {
+					MatrixBlock xBlock = (MatrixBlock) xcb.get().getValue();
+					MatrixBlock partialQ = multTransposeVector(xBlock, uBlock);
+					OOCPrimitiveUtils.accumulate(trackedCallback(new MatrixIndexes(col + 1L, 1L), partialQ),
+						(left, right) -> mergeCallbacks(left, right, plus), _cache, qBase + col);
+				}
+			}
+		}
+	}
+
+	private OOCStream.QueueCallback<IndexedMatrixValue> mergeCallbacks(
+		OOCStream.QueueCallback<IndexedMatrixValue> left, OOCStream.QueueCallback<IndexedMatrixValue> right,
+		BinaryOperator plus) {
+		MatrixIndexes outIx = right.get().getIndexes();
+		MatrixBlock merged = ((MatrixBlock) left.get().getValue()).binaryOperationsInPlace(plus, right.get().getValue());
+		return trackedCallback(outIx, merged);
+	}
+
+	private OOCStream.QueueCallback<IndexedMatrixValue> trackedCallback(MatrixIndexes index, MatrixBlock block) {
+		long bytes = _allocFn.applyAsLong(index);
+		_allowance.reserveBlocking(bytes);
+		return new InMemoryQueueCallback(new IndexedMatrixValue(index, block), null, _allowance, bytes);
+	}
+
+	private OOCStream.QueueCallback<IndexedMatrixValue> outputCallback(MatrixIndexes index, MatrixBlock block) {
+		IndexedMatrixValue imv = new IndexedMatrixValue(index, block);
+		if(_crossBoundaries) {
+			long bytes = _allocFn.applyAsLong(index);
+			_allowance.reserveBlocking(bytes);
+			return new InMemoryQueueCallback(imv, null, _allowance, bytes);
+		}
+		return new OOCStream.SimpleQueueCallback<>(imv, null);
+	}
+
+	private void fail(Throwable t, OOCStream<IndexedMatrixValue> out, OOCStream<IndexedMatrixValue> workStream) {
+		if(!_terminated.compareAndSet(false, true))
+			return;
+		DMLRuntimeException re = DMLRuntimeException.of(t);
+		if(workStream != null)
+			workStream.propagateFailure(re);
+		out.propagateFailure(re);
+		if(_sc != null)
+			_sc.failAll(re);
+		onComplete();
+	}
+
+	private void complete(OOCStream<IndexedMatrixValue> out) {
+		if(_terminated.compareAndSet(false, true)) {
+			out.closeInput();
+			onComplete();
+		}
+	}
+
+	private static MatrixBlock multTransposeVector(MatrixBlock x, MatrixBlock u) {
+		int rows = x.getNumRows();
+		int cols = x.getNumColumns();
+		MatrixBlock out = new MatrixBlock(cols, 1, false);
+		out.allocateDenseBlock();
+		double[] outVals = out.getDenseBlockValues();
+
+		if(x.isInSparseFormat()) {
+			SparseBlock a = x.getSparseBlock();
+			if(a != null) {
+				if(u.isInSparseFormat()) {
+					for(int i = 0; i < rows; i++) {
+						if(a.isEmpty(i))
+							continue;
+						double uval = u.get(i, 0);
+						if(uval == 0)
+							continue;
+						int apos = a.pos(i);
+						int alen = a.size(i);
+						int[] aix = a.indexes(i);
+						double[] avals = a.values(i);
+						for(int k = apos; k < apos + alen; k++)
+							outVals[aix[k]] += uval * avals[k];
+					}
+				}
+				else {
+					double[] uvals = u.getDenseBlockValues();
+					for(int i = 0; i < rows; i++) {
+						if(a.isEmpty(i))
+							continue;
+						double uval = uvals[i];
+						if(uval == 0)
+							continue;
+						int apos = a.pos(i);
+						int alen = a.size(i);
+						int[] aix = a.indexes(i);
+						double[] avals = a.values(i);
+						for(int k = apos; k < apos + alen; k++)
+							outVals[aix[k]] += uval * avals[k];
+					}
+				}
+			}
+		}
+		else {
+			DenseBlock a = x.getDenseBlock();
+			if(u.isInSparseFormat()) {
+				for(int i = 0; i < rows; i++) {
+					double uval = u.get(i, 0);
+					if(uval == 0)
+						continue;
+					double[] avals = a.values(i);
+					int apos = a.pos(i);
+					for(int j = 0; j < cols; j++)
+						outVals[j] += uval * avals[apos + j];
+				}
+			}
+			else {
+				double[] uvals = u.getDenseBlockValues();
+				for(int i = 0; i < rows; i++) {
+					double uval = uvals[i];
+					if(uval == 0)
+						continue;
+					double[] avals = a.values(i);
+					int apos = a.pos(i);
+					for(int j = 0; j < cols; j++)
+						outVals[j] += uval * avals[apos + j];
+				}
+			}
+		}
+
+		out.recomputeNonZeros();
+		out.examSparsity();
+		return out;
 	}
 
 	public OOCStreamable<IndexedMatrixValue> getXStreamable() {

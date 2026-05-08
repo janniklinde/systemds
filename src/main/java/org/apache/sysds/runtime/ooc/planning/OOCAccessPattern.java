@@ -46,4 +46,8 @@ public enum OOCAccessPattern {
 	public boolean isPlannable() {
 		return this == ROW_MAJOR || this == COL_MAJOR || this == ANY;
 	}
+
+	public boolean isUnset() {
+		return this == UNSET;
+	}
 }

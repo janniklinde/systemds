@@ -107,10 +107,12 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 			_pattern = _pattern.fused(p.getAccessPattern());
 		}
 		if(_pattern.isPlannable() && _pattern != OOCAccessPattern.ANY) {
-			for(OOCPrimitive p : getChildren())
-				p.requestPattern(_pattern);
+			for(OOCPrimitive p : getChildren()) {
+				if(!p.hasStartedExecution())
+					p.requestPattern(_pattern);
+			}
 		}
-		getParents().forEach(OOCPrimitive::inferPatterns);
+		inferPatterns(getParents());
 	}
 
 	@Override
@@ -118,8 +120,10 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 		if(_pattern == accessPattern)
 			return;
 		_pattern = accessPattern;
-		for(OOCPrimitive p : getChildren())
-			p.requestPattern(accessPattern);
+		for(OOCPrimitive p : getChildren()) {
+			if(!p.hasStartedExecution())
+				p.requestPattern(accessPattern);
+		}
 	}
 
 	@Override
@@ -139,12 +143,12 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 				boolean nextLeft = true;
 				AtomicInteger pendingRequests = new AtomicInteger(1);
 
-				while(!(next = (nextLeft ? l : r).dequeueCB()).isEos()) {
-					try {
-						nextValue = next.get();
-						long rIdx = nextValue.getIndexes().getRowIndex()-1;
-						long cIdx =  nextValue.getIndexes().getColumnIndex()-1;
-						int idx = (int) (rIdx * cols + cIdx);
+					while((next = (nextLeft ? l : r).dequeueCB()) != null && !next.isEos()) {
+						try {
+							nextValue = next.get();
+							long rIdx = nextValue.getIndexes().getRowIndex()-1;
+							long cIdx =  nextValue.getIndexes().getColumnIndex()-1;
+							int idx = (int) (rIdx * cols + cIdx);
 						var future = _cache.get(idx);
 						if(future.isDone()) {
 							var cb = future.getNow(null);
@@ -186,10 +190,10 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 
 						nextLeft = !nextLeft;
 					}
-					finally {
-						next.close();
+						finally {
+							next.close();
+						}
 					}
-				}
 
 				if(pendingRequests.decrementAndGet() == 0) {
 					intermediate.closeInput();

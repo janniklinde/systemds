@@ -59,7 +59,7 @@ public class PlannablePlaybackOOCPrimitive extends PlannableOOCPrimitive {
 	@Override
 	public void inferPatterns() {
 		_pattern = OOCAccessPattern.ROW_MAJOR;
-		getParents().forEach(OOCPrimitive::inferPatterns);
+		inferPatterns(getParents());
 	}
 
 	@Override

@@ -120,7 +120,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		if(_pattern == OOCAccessPattern.UNSET)
 			_pattern = OOCAccessPattern.ANY;
 		requestPreferredInputPattern();
-		getParents().forEach(OOCPrimitive::inferPatterns);
+		inferPatterns(getParents());
 	}
 
 	@Override
@@ -162,7 +162,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 	}
 
 	private void requestPreferredInputPattern() {
-		if(!getChildren().isEmpty())
+		if(!getChildren().isEmpty() && !getChildren().get(0).hasStartedExecution())
 			getChildren().get(0).requestPattern(_grouping.preferredInputPattern());
 	}
 

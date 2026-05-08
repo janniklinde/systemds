@@ -28,6 +28,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheScheduler;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixValue;
+import org.apache.sysds.runtime.ooc.util.OOCCacheUtils;
 
 import java.lang.ref.SoftReference;
 import java.util.concurrent.CompletableFuture;
@@ -59,56 +60,30 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		_streamId = CachingStream._streamSeq.getNextID();
 		_slots = new AtomicReferenceArray<>(numTiles);
 		_nextBlockId = new AtomicLong(0);
-		_pendingHandoverBytes = 0;
-		_highestPopulatedIndex = -1;
-		_handoverScheduling = false;
-		_handoverSchedulingRequested = false;
-		_handoverSchedulingRequestedBytes = 0;
+	}
+
+	@Override
+	public void shutdown() {
+		if(_usedBytes != 0)
+			throw new IllegalArgumentException();
+		super.shutdown();
 	}
 
 	public void handover(OOCStream.QueueCallback<IndexedMatrixValue> callback, int index) {
-		OOCStream.QueueCallback<IndexedMatrixValue> root = null;
-		BlockKey cacheRefKey = callback.getBlockKey();
-		if(cacheRefKey != null) {
-			try {
-				OOCCacheManager.getCache().addReference(cacheRefKey);
-			}
-			catch(IllegalArgumentException ex) {
-				IndexedMatrixValue imv = callback.get();
-				long bytes = callback.getManagedBytes();
-				if(bytes <= 0)
-					bytes = estimateManagedBytes(imv);
-				admitBlocking(bytes);
-				root = new InMemoryQueueCallback(imv, null, this, bytes);
-				((InMemoryQueueCallback) root).getHandle().attachCachedAllowance(this, index);
-				cacheRefKey = null;
-			}
-		}
-		if(root == null) {
-			try {
-				OOCStream.QueueCallback<IndexedMatrixValue> owned = callback.transferOwnershipBlocking(this);
-				root = owned.keepOpen();
-				owned.close();
-				if(root instanceof InMemoryQueueCallback inMemoryRoot)
-					inMemoryRoot.getHandle().attachCachedAllowance(this, index);
-			}
-			catch(RuntimeException ex) {
-				if(cacheRefKey != null)
-					OOCCacheManager.getCache().forget(cacheRefKey);
-				throw ex;
-			}
-		}
+		OOCStream.QueueCallback<IndexedMatrixValue> owned = OOCCacheUtils.handover(callback, this).join();
+		OOCStream.QueueCallback<IndexedMatrixValue> root = OOCCacheUtils.retainLocal(owned.keepOpen());
+		owned.close();
+
 		SlotEntry entry = new SlotEntry(root);
 		synchronized(this) {
 			ensureCapacity(index);
 			AtomicReferenceArray<SlotEntry> slots = _slots;
 			if(slots.get(index) != null) {
 				try {
-					closeRoot(root);
+					root.close();
 				}
 				finally {
-					if(cacheRefKey != null)
-						OOCCacheManager.getCache().forget(cacheRefKey);
+					root.forget();
 				}
 				throw new IllegalStateException("Cached allowance slot " + index + " already occupied.");
 			}
@@ -119,10 +94,6 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		maybeScheduleHandovers(MIN_HANDOVER_BATCH);
 	}
 
-	/**
-	 * Inserts {@code callback} if the slot is empty. On conflict, returns the existing slot value exactly once and leaves
-	 * {@code callback} untouched so the caller can merge and retry.
-	 */
 	public CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> handoverOrTakeExisting(
 		OOCStream.QueueCallback<IndexedMatrixValue> callback, int index) {
 		SlotEntry reservation = tryReserveCacheSlot(index);
@@ -141,79 +112,41 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		if(entry == null)
 			return null;
 
-		while(true) {
-			BlockKey backendKey = null;
-			BlockKey schedulerKey = null;
-			byte state;
-			CompletableFuture<Void> stateFuture = null;
-			OOCStream.QueueCallback<IndexedMatrixValue> local = null;
-			IndexedMatrixValue softLocal = null;
-			long bytes = 0;
-
-			synchronized(entry) {
-				if(entry._local != null)
-					local = entry._local.keepOpen();
-				else if(entry._softLocal != null) {
-					softLocal = entry._softLocal.get();
-					if(softLocal != null)
-						backendKey = entry._key;
-					else
-						entry._softLocal = null;
-				}
-				if(local == null && softLocal == null) {
-					state = entry._state;
-					if(state == SlotEntry.STATE_DIRECT_SPILLING) {
-						stateFuture = entry._stateFuture;
-					}
-					else if(state == SlotEntry.STATE_SCHEDULER_BACKED) {
-						schedulerKey = entry._key;
-						bytes = entry._bytes;
-					}
-					else if(state != SlotEntry.STATE_BACKEND_SPILLED)
-						return null;
-				}
-			}
-
-			if(local != null)
-				return local;
-			if(softLocal != null)
-				return tryActivateLocal(entry, softLocal, backendKey, index);
-
-			if(stateFuture != null) {
-				if(!stateFuture.isDone())
-					return null;
-				try {
-					stateFuture.join();
-				}
-				catch(CompletionException ex) {
-					throw DMLRuntimeException.of(ex.getCause() == null ? ex : ex.getCause());
-				}
-				finishSpill(entry, stateFuture);
-				continue;
-			}
-
-			if(schedulerKey != null && bytes > 0) {
-				if(!super.tryReserve(bytes))
-					return null;
-				OOCStream.QueueCallback<IndexedMatrixValue> callback =
-					OOCCacheManager.tryRequestBlockBacked(schedulerKey, this, bytes);
-				if(callback == null) {
-					release(bytes);
-					return null;
-				}
-				synchronized(entry) {
-					if(entry._state == SlotEntry.STATE_SCHEDULER_BACKED && schedulerKey.equals(entry._key) && entry._local == null) {
-						entry._local = callback.keepOpen();
-						entry._state = SlotEntry.STATE_LOCAL;
-						entry._key = null;
-						entry._bytes = 0;
-					}
-				}
-				return callback;
-			}
-
-			return null;
+		OOCCacheUtils.TileHandle handle = null;
+		synchronized(entry) {
+			if(entry._local != null)
+				return entry._local.keepOpen();
+			if(entry._state == SlotEntry.STATE_HANDLE && entry._handle != null && entry._handle.softLocal() != null)
+				handle = entry._handle;
+			else
+				return null;
 		}
+
+		if(!super.tryReserve(handle.bytes()))
+			return null;
+
+		try {
+			CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> future = handle.read(this);
+			if(!future.isDone()) {
+				release(handle.bytes());
+				return null;
+			}
+
+			OOCStream.QueueCallback<IndexedMatrixValue> callback = future.join();
+			if(callback == null) {
+				release(handle.bytes());
+				return null;
+			}
+			OOCStream.QueueCallback<IndexedMatrixValue> installed = installReadResult(entry, handle, callback);
+			if(installed != null)
+				return installed;
+		}
+		catch(RuntimeException ex) {
+			release(handle.bytes());
+			throw ex;
+		}
+
+		return null;
 	}
 
 	public CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> get(int index) {
@@ -221,65 +154,48 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		if(immediate != null)
 			return CompletableFuture.completedFuture(immediate);
 
-		// TODO Currently read is issued before bytes are properly reserved
-
 		SlotEntry entry = getSlot(index);
 		if(entry == null)
 			return CompletableFuture.completedFuture(null);
 
-		CompletableFuture<Void> stateFuture;
-		BlockKey key;
-		byte state;
-		IndexedMatrixValue softLocal = null;
-		long bytes;
+		CompletableFuture<Void> reservationFuture = null;
+		CompletableFuture<OOCCacheUtils.TileHandle> spillFuture = null;
+		OOCCacheUtils.TileHandle handle = null;
 		synchronized(entry) {
 			if(entry._local != null)
 				return CompletableFuture.completedFuture(entry._local.keepOpen());
-			if(entry._softLocal != null) {
-				softLocal = entry._softLocal.get();
-				if(softLocal == null)
-					entry._softLocal = null;
-			}
-			state = entry._state;
-			stateFuture = entry._stateFuture;
-			key = entry._key;
-			bytes = entry._bytes;
+			if(entry._state == SlotEntry.STATE_RESERVED)
+				reservationFuture = entry._reservationFuture;
+			else if(entry._state == SlotEntry.STATE_SPILLING)
+				spillFuture = entry._spillFuture;
+			else if(entry._state == SlotEntry.STATE_HANDLE)
+				handle = entry._handle;
 		}
 
-		if(softLocal != null)
-			return CompletableFuture.completedFuture(activateLocalBlocking(entry, softLocal, key, index));
+		if(reservationFuture != null)
+			return reservationFuture.thenCompose(ignored -> get(index));
+		if(spillFuture != null)
+			return spillFuture.handle((ignored, ex) -> true).thenCompose(ignored -> get(index));
+		if(handle == null)
+			return CompletableFuture.completedFuture(null);
 
-		if(state == SlotEntry.STATE_RESERVED && stateFuture != null) {
-			return stateFuture.handle((ignored, ex) -> {
-				if(ex != null)
-					throw DMLRuntimeException.of(ex.getCause() == null ? ex : ex.getCause());
-				return true;
-			}).thenCompose(ignored -> get(index));
-		}
+		final OOCCacheUtils.TileHandle mHandle = handle;
+		return reserve(mHandle.bytes())
+			.thenCompose(ignored -> mHandle.read(this))
+			.thenCompose(callback -> {
+				if(callback == null) {
+					release(mHandle.bytes());
+					return CompletableFuture.completedFuture(null);
+				}
 
-		if(state == SlotEntry.STATE_DIRECT_SPILLING && stateFuture != null) {
-			return stateFuture.handle((ignored, ex) -> {
-				if(ex != null)
-					throw DMLRuntimeException.of(ex.getCause() == null ? ex : ex.getCause());
-				return true;
-			}).thenCompose(ignored -> {
-				BlockKey mKey = finishSpill(entry, stateFuture);
-				if(mKey == null)
-					return get(index);
-				return readFromBackend(entry, mKey, index);
+				OOCStream.QueueCallback<IndexedMatrixValue> installed = installReadResult(entry, mHandle, callback);
+				if(installed != null)
+					return CompletableFuture.completedFuture(installed);
+				return get(index);
 			});
-		}
-
-		if(state == SlotEntry.STATE_BACKEND_SPILLED && key != null)
-			return readFromBackend(entry, key, index);
-		if(state == SlotEntry.STATE_SCHEDULER_BACKED && key != null && bytes > 0)
-			return readFromScheduler(entry, key, bytes);
-		return CompletableFuture.completedFuture(null);
 	}
 
 	public CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> take(int index) {
-		// TODO Take doesn't properly ensure memory management after take
-		// TODO Take should return a callback still tied to this CachedAllowance and should only be released when all callback refs are closed
 		SlotEntry expectedEntry = getSlot(index);
 		if(expectedEntry == null)
 			return CompletableFuture.completedFuture(null);
@@ -294,127 +210,71 @@ public class CachedAllowance extends SyncMemoryAllowance {
 				return null;
 			}
 
-			CompletableFuture<Void> stateFuture;
-			OOCCacheScheduler.BackingReleaseHandle backingReleaseHandle;
 			OOCStream.QueueCallback<IndexedMatrixValue> localToClose;
-			BlockKey cacheRefKey;
-			long pendingBytes;
-			byte state;
-
+			OOCCacheUtils.TileHandle handle;
 			synchronized(entry) {
-				state = entry._state;
-				pendingBytes = takePendingBytes(entry);
 				localToClose = entry._local;
+				handle = entry._handle;
 				entry._local = null;
-				cacheRefKey = localToClose != null && localToClose.getBackingPin() != null ? localToClose.getBlockKey() :
-					(state == SlotEntry.STATE_BACKING_RELEASE_PENDING || state == SlotEntry.STATE_SCHEDULER_BACKED ?
-						entry._key : null);
-				stateFuture = entry._stateFuture;
-				entry._stateFuture = null;
-				backingReleaseHandle = entry._backingReleaseHandle;
-				entry._backingReleaseHandle = null;
+				entry._handle = null;
 				entry._state = SlotEntry.STATE_CLEARED;
-				entry._key = null;
-				entry._bytes = 0;
-				entry._softLocal = null;
 			}
 
-			if(stateFuture != null)
-				stateFuture.cancel(false);
-			if(backingReleaseHandle != null) {
-				OOCCacheScheduler.AllowanceBackedPin reclaimed = backingReleaseHandle.reclaim();
-				if(reclaimed != null)
-					reclaimed.close();
+			if(localToClose != null) {
+				if(localToClose != callback)
+					localToClose.close();
+				localToClose.forget();
 			}
-			try {
-				closeRootAfterTake(localToClose, callback, pendingBytes);
-			}
-			finally {
-				if(cacheRefKey != null)
-					OOCCacheManager.getCache().forget(cacheRefKey);
-			}
+			if(handle != null)
+				handle.close();
 			return callback;
 		});
 	}
 
 	public void clear(int index) {
-		SlotEntry entry = removeSlot(index);
+		SlotEntry entry = removeSlot(index, null);
 		if(entry == null)
 			return;
 
-		CompletableFuture<Void> stateFuture;
-		BlockKey forgetKey;
-		BlockKey cacheRefKey;
 		OOCStream.QueueCallback<IndexedMatrixValue> localToClose;
-		OOCCacheScheduler.BackingReleaseHandle backingReleaseHandle;
-		long pendingBytes;
-		byte state;
-
+		OOCCacheUtils.TileHandle handle;
+		CompletableFuture<Void> reservationFuture;
+		boolean discardPayload;
 		synchronized(entry) {
-			state = entry._state;
-			pendingBytes = takePendingBytes(entry);
 			localToClose = entry._local;
+			handle = entry._handle;
+			reservationFuture = entry._reservationFuture;
+			discardPayload = localToClose instanceof InMemoryQueueCallback;
 			entry._local = null;
-			cacheRefKey = localToClose != null && localToClose.getBackingPin() != null ? localToClose.getBlockKey() :
-				(state == SlotEntry.STATE_BACKING_RELEASE_PENDING || state == SlotEntry.STATE_SCHEDULER_BACKED ?
-					entry._key : null);
-			stateFuture = entry._stateFuture;
-			entry._stateFuture = null;
-			backingReleaseHandle = entry._backingReleaseHandle;
-			entry._backingReleaseHandle = null;
-			forgetKey = entry._state == SlotEntry.STATE_DIRECT_SPILLING || entry._state == SlotEntry.STATE_BACKEND_SPILLED ?
-				entry._key : null;
+			entry._handle = null;
 			entry._state = SlotEntry.STATE_CLEARED;
-			entry._key = null;
-			entry._bytes = 0;
-			entry._softLocal = null;
 		}
 
-		if(stateFuture != null && state != SlotEntry.STATE_RESERVED)
-			stateFuture.cancel(false);
-		if(backingReleaseHandle != null) {
-			OOCCacheScheduler.AllowanceBackedPin reclaimed = backingReleaseHandle.reclaim();
-			if(reclaimed != null)
-				reclaimed.close();
+		if(discardPayload && localToClose instanceof InMemoryQueueCallback inMemory)
+			inMemory.get().discard();
+		if(localToClose != null) {
+			localToClose.close();
+			localToClose.forget();
 		}
-		if(localToClose instanceof InMemoryQueueCallback inMemory)
-			discardPayload(inMemory);
-		try {
-			closeLocalAndFinishHandover(localToClose, pendingBytes);
-		}
-		finally {
-			if(cacheRefKey != null)
-				OOCCacheManager.getCache().forget(cacheRefKey);
-		}
-		if(stateFuture != null && state == SlotEntry.STATE_RESERVED)
-			stateFuture.complete(null);
-		if(forgetKey != null)
-			OOCCacheManager.getTileStoreBackend().delete(forgetKey);
+		if(handle != null)
+			handle.close();
+		if(reservationFuture != null)
+			reservationFuture.complete(null);
 	}
 
 	@Override
 	public boolean tryReserve(long bytes) {
-		throw new UnsupportedOperationException("CachedAllowance does not support direct reservations. Use handover(...).");
+		return super.tryReserve(bytes);
 	}
 
 	@Override
 	public void reserveBlocking(long bytes) {
-		throw new UnsupportedOperationException("CachedAllowance does not support direct reservations. Use handover(...).");
+		admitBlocking(bytes);
 	}
 
 	@Override
 	public void setTargetMemory(long targetMemory) {
 		super.setTargetMemory(targetMemory);
-		maybeScheduleHandovers(0);
-	}
-
-	void onFinishedHandover(long bytes) {
-		synchronized(this) {
-			_pendingHandoverBytes -= bytes;
-			if(_pendingHandoverBytes < 0)
-				throw new IllegalStateException();
-			notifyAll();
-		}
 		maybeScheduleHandovers(0);
 	}
 
@@ -439,6 +299,43 @@ public class CachedAllowance extends SyncMemoryAllowance {
 				}
 			}
 		}
+	}
+
+	void onFinishedHandover(long bytes) {
+		synchronized(this) {
+			_pendingHandoverBytes -= bytes;
+			if(_pendingHandoverBytes < 0)
+				throw new IllegalStateException();
+			notifyAll();
+		}
+		maybeScheduleHandovers(0);
+	}
+
+	private OOCStream.QueueCallback<IndexedMatrixValue> installReadResult(SlotEntry entry, OOCCacheUtils.TileHandle handle,
+		OOCStream.QueueCallback<IndexedMatrixValue> callback) {
+		OOCStream.QueueCallback<IndexedMatrixValue> existing = null;
+		OOCStream.QueueCallback<IndexedMatrixValue> retained = OOCCacheUtils.retainLocal(callback);
+		boolean install = false;
+		synchronized(entry) {
+			if(entry._state == SlotEntry.STATE_HANDLE && entry._handle == handle && entry._local == null) {
+				entry._local = retained.keepOpen();
+				entry._handle = null;
+				entry._state = SlotEntry.STATE_LOCAL;
+				install = true;
+			}
+			else if(entry._local != null) {
+				existing = entry._local.keepOpen();
+			}
+		}
+
+		if(install) {
+			handle.close();
+			return retained;
+		}
+
+		retained.close();
+		retained.forget();
+		return existing;
 	}
 
 	private void maybeScheduleHandovers(long requestedBytes) {
@@ -476,7 +373,6 @@ public class CachedAllowance extends SyncMemoryAllowance {
 
 				AtomicReferenceArray<SlotEntry> slots = _slots;
 				int newHighest = startIndex;
-				// Find highes non-null entry
 				for(int i = Math.min(startIndex, slots.length() - 1); i >= 0; i--) {
 					if(slots.get(i) != null) {
 						newHighest = i;
@@ -509,316 +405,69 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	private long tryStartCacheHandover(SlotEntry entry) {
 		if(entry == null)
 			return 0;
+
 		OOCStream.QueueCallback<IndexedMatrixValue> local;
+		long bytes;
+		CompletableFuture<OOCCacheUtils.TileHandle> future;
 		synchronized(entry) {
 			local = entry._local;
 			if(local == null || entry._state != SlotEntry.STATE_LOCAL)
 				return 0;
-		}
-
-		if(local instanceof InMemoryQueueCallback inMemory)
-			return tryStartDirectCacheHandover(entry, inMemory);
-
-		OOCCacheScheduler.AllowanceBackedPin pin = local.getBackingPin();
-		if(pin != null)
-			return tryStartBackingRelease(entry, local, pin);
-		return 0;
-	}
-
-	private long tryStartDirectCacheHandover(SlotEntry entry, InMemoryQueueCallback local) {
-		synchronized(entry) {
-			if(entry._local != local || entry._state != SlotEntry.STATE_LOCAL || !local.getHandle().isExclusiveToRoot())
-				return 0;
-
-			long bytes = local.getManagedBytes();
+			bytes = local.getManagedBytes();
 			if(bytes <= 0)
 				return 0;
 
-			InMemoryQueueCallback retained = (InMemoryQueueCallback) local.keepOpen();
-			try {
-				entry._state = SlotEntry.STATE_DIRECT_SPILLING;
-				entry._key = new BlockKey(_streamId, _nextBlockId.getAndIncrement());
-				entry._stateFuture = OOCCacheManager.getTileStoreBackend().spill(entry._key, retained.get());
-				entry._bytes = bytes;
-				synchronized(this) {
-					_pendingHandoverBytes += bytes;
-				}
-				retained.close();
-				entry._stateFuture.whenComplete((ignored, ex) -> onHandoverCompleted(entry));
-				return bytes;
-			}
-			catch(RuntimeException ex) {
-				entry._state = SlotEntry.STATE_LOCAL;
-				entry._key = null;
-				entry._stateFuture = null;
-				entry._bytes = 0;
-				retained.close();
-				throw ex;
-			}
-		}
-	}
-
-	private long tryStartBackingRelease(SlotEntry entry, OOCStream.QueueCallback<IndexedMatrixValue> local,
-		OOCCacheScheduler.AllowanceBackedPin pin) {
-		BlockKey key;
-		long bytes;
-		synchronized(entry) {
-			if(entry._local != local || entry._state != SlotEntry.STATE_LOCAL || local.getBackingPin() != pin)
-				return 0;
-			key = local.getBlockKey();
-			bytes = local.getManagedBytes();
-			if(key == null || bytes <= 0)
-				return 0;
+			BlockKey targetKey = local.getBackingPin() != null ? local.getBlockKey() :
+				new BlockKey(_streamId, _nextBlockId.getAndIncrement());
+			future = OOCCacheUtils.spill(local, targetKey, bytes);
+			entry._state = SlotEntry.STATE_SPILLING;
+			entry._spillFuture = future;
+			entry._spillBytes = bytes;
 		}
 
-		OOCCacheScheduler.AllowanceBackedPin releasePin = pin.keepOpen();
-		OOCCacheScheduler.BackingReleaseHandle handle;
-		try {
-			handle = OOCCacheManager.getCache().releaseBacking(releasePin);
+		synchronized(this) {
+			_pendingHandoverBytes += bytes;
 		}
-		catch(RuntimeException ex) {
-			releasePin.close();
-			throw ex;
-		}
-
-		OOCCacheScheduler.AllowanceBackedPin reclaimed = null;
-		boolean abandoned = false;
-		synchronized(entry) {
-			if(entry._local != local || entry._state != SlotEntry.STATE_LOCAL || local.getBackingPin() != pin) {
-				reclaimed = handle.reclaim();
-				abandoned = true;
-			}
-			else if(!handle.isCommitted()) {
-				entry._state = SlotEntry.STATE_BACKING_RELEASE_PENDING;
-				entry._key = key;
-				entry._backingReleaseHandle = handle;
-				entry._bytes = bytes;
-				synchronized(this) {
-					_pendingHandoverBytes += bytes;
-				}
-				handle.getCompletionFuture()
-					.whenComplete((committed, ex) -> onBackingReleaseCompleted(entry, handle, key, bytes, committed, ex));
-				return bytes;
-			}
-			else {
-				entry._state = SlotEntry.STATE_SCHEDULER_BACKED;
-				entry._key = key;
-				entry._bytes = bytes;
-				entry._local = null;
-			}
-		}
-		if(reclaimed != null) {
-			reclaimed.close();
-			return 0;
-		}
-		if(abandoned)
-			return 0;
-		local.close();
+		future.whenComplete((handle, ex) -> onSpillCompleted(entry, future, handle, ex));
 		return bytes;
 	}
 
-	private void onBackingReleaseCompleted(SlotEntry entry, OOCCacheScheduler.BackingReleaseHandle handle, BlockKey key,
-		long bytes, Boolean committed, Throwable ex) {
+	private void onSpillCompleted(SlotEntry entry, CompletableFuture<OOCCacheUtils.TileHandle> future,
+		OOCCacheUtils.TileHandle handle, Throwable ex) {
 		OOCStream.QueueCallback<IndexedMatrixValue> localToClose = null;
-		long pendingBytes;
+		OOCCacheUtils.TileHandle handleToClose = null;
+		long pendingBytes = 0;
 		synchronized(entry) {
-			if(entry._backingReleaseHandle != handle)
+			if(entry._spillFuture != future)
 				return;
-			pendingBytes = takePendingBytes(entry);
-			entry._backingReleaseHandle = null;
-			if(ex == null && Boolean.TRUE.equals(committed)) {
+
+			pendingBytes = entry._spillBytes;
+			entry._spillBytes = 0;
+			entry._spillFuture = null;
+
+			if(entry._state == SlotEntry.STATE_CLEARED) {
+				if(ex == null && handle != null)
+					handleToClose = handle;
+			}
+			else if(ex == null && handle != null) {
 				localToClose = entry._local;
 				entry._local = null;
-				entry._state = SlotEntry.STATE_SCHEDULER_BACKED;
-				entry._key = key;
-				entry._bytes = bytes;
+				entry._handle = handle;
+				entry._state = SlotEntry.STATE_HANDLE;
 			}
 			else {
 				entry._state = SlotEntry.STATE_LOCAL;
-				entry._key = null;
 			}
 		}
-		closeLocalAndFinishHandover(localToClose, pendingBytes);
-	}
 
-	private void onHandoverCompleted(SlotEntry entry) {
-		OOCStream.QueueCallback<IndexedMatrixValue> localToClose = null;
-		long pendingBytes;
-		synchronized(entry) {
-			if(entry._bytes <= 0)
-				return;
-			pendingBytes = takePendingBytes(entry);
-			if(entry._state == SlotEntry.STATE_DIRECT_SPILLING && entry._stateFuture != null &&
-				entry._stateFuture.isDone() && !entry._stateFuture.isCompletedExceptionally()) {
-				localToClose = entry._local;
-				if(localToClose instanceof InMemoryQueueCallback inMemory)
-					retainSoftLocal(entry, inMemory);
-				entry._local = null;
-				entry._stateFuture = null;
-				entry._state = SlotEntry.STATE_BACKEND_SPILLED;
-			}
+		if(localToClose != null) {
+			localToClose.close();
+			localToClose.forget();
 		}
-		closeLocalAndFinishHandover(localToClose, pendingBytes);
-	}
-
-	private BlockKey finishSpill(SlotEntry entry, CompletableFuture<Void> spillFuture) {
-		OOCStream.QueueCallback<IndexedMatrixValue> localToClose = null;
-		long pendingBytes;
-		BlockKey key;
-		synchronized(entry) {
-			if(entry._stateFuture != spillFuture)
-				return null;
-			pendingBytes = takePendingBytes(entry);
-			localToClose = entry._local;
-			if(localToClose instanceof InMemoryQueueCallback inMemory)
-				retainSoftLocal(entry, inMemory);
-			entry._local = null;
-			entry._stateFuture = null;
-			entry._state = SlotEntry.STATE_BACKEND_SPILLED;
-			key = entry._key;
-		}
-		closeLocalAndFinishHandover(localToClose, pendingBytes);
-		return key;
-	}
-
-	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> readFromBackend(SlotEntry entry, BlockKey key,
-		int index) {
-		return OOCCacheManager.getTileStoreBackend().read(key)
-			.thenApply(imv -> {
-				if(imv == null)
-					return null;
-				return activateLocalBlocking(entry, imv, key, index);
-			});
-	}
-
-	private OOCStream.QueueCallback<IndexedMatrixValue> tryActivateLocal(SlotEntry entry, IndexedMatrixValue imv,
-		BlockKey key, int index) {
-		long bytes = estimateManagedBytes(imv);
-		if(!super.tryReserve(bytes))
-			return null;
-		return activateLocalReserved(entry, imv, key, bytes, index);
-	}
-
-	private OOCStream.QueueCallback<IndexedMatrixValue> activateLocalBlocking(SlotEntry entry, IndexedMatrixValue imv,
-		BlockKey key, int index) {
-		long bytes = estimateManagedBytes(imv);
-		admitBlocking(bytes);
-		return activateLocalReserved(entry, imv, key, bytes, index);
-	}
-
-	private OOCStream.QueueCallback<IndexedMatrixValue> activateLocalReserved(SlotEntry entry, IndexedMatrixValue imv,
-		BlockKey key, long bytes, int index) {
-		InMemoryQueueCallback root = new InMemoryQueueCallback(imv, null, this, bytes);
-		root.getHandle().attachCachedAllowance(this, index);
-		OOCStream.QueueCallback<IndexedMatrixValue> existing = null;
-		synchronized(entry) {
-			if(entry._state == SlotEntry.STATE_BACKEND_SPILLED && entry._local == null && key != null &&
-				key.equals(entry._key)) {
-				entry._local = root;
-				entry._state = SlotEntry.STATE_LOCAL;
-				entry._key = null;
-				entry._softLocal = null;
-				return root.keepOpen();
-			}
-			if(entry._local != null)
-				existing = entry._local.keepOpen();
-		}
-		closeRoot(root);
-		return existing;
-	}
-
-	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> readFromScheduler(SlotEntry entry,
-		BlockKey key, long bytes) {
-		admitBlocking(bytes);
-		return OOCCacheManager.requestBlockBacked(key, this, bytes)
-			.thenApply(callback -> {
-				if(callback == null)
-					return null;
-				synchronized(entry) {
-					if(entry._state == SlotEntry.STATE_SCHEDULER_BACKED && key.equals(entry._key) && entry._local == null) {
-						entry._local = callback.keepOpen();
-						entry._state = SlotEntry.STATE_LOCAL;
-						entry._key = null;
-						entry._bytes = 0;
-					}
-				}
-				return callback;
-			});
-	}
-
-	private void retainSoftLocal(SlotEntry entry, InMemoryQueueCallback local) {
-		if(local == null)
-			return;
-		entry._softLocal = new SoftReference<>(local.get());
-	}
-
-	private long estimateManagedBytes(IndexedMatrixValue imv) {
-		if(imv == null || imv.getValue() == null)
-			throw new IllegalStateException("Cannot activate empty cached tile.");
-		MatrixValue value = imv.getValue();
-		if(value instanceof MatrixBlock block)
-			return block.getInMemorySize();
-		return Math.max(1L, (long)value.getNumRows() * value.getNumColumns() * Double.BYTES);
-	}
-
-	private long takePendingBytes(SlotEntry entry) {
-		if(entry._state != SlotEntry.STATE_DIRECT_SPILLING && entry._state != SlotEntry.STATE_BACKING_RELEASE_PENDING)
-			return 0;
-		if(entry._bytes <= 0)
-			return 0;
-		long bytes = entry._bytes;
-		entry._bytes = 0;
-		return bytes;
-	}
-
-	private void closeLocalAndFinishHandover(OOCStream.QueueCallback<IndexedMatrixValue> localToClose, long pendingBytes) {
-		RuntimeException closeFailure = null;
-		try {
-			if(localToClose != null)
-				closeRoot(localToClose);
-		}
-		catch(RuntimeException ex) {
-			closeFailure = ex;
-		}
-		finally {
-			if(pendingBytes > 0)
-				onFinishedHandover(pendingBytes);
-		}
-		if(closeFailure != null)
-			throw closeFailure;
-	}
-
-	private void closeRootAfterTake(OOCStream.QueueCallback<IndexedMatrixValue> root,
-		OOCStream.QueueCallback<IndexedMatrixValue> taken, long pendingBytes) {
-		RuntimeException closeFailure = null;
-		try {
-			if(root instanceof InMemoryQueueCallback inMemory)
-				inMemory.getHandle().detachCachedAllowance();
-			if(root != null && root != taken)
-				root.close();
-		}
-		catch(RuntimeException ex) {
-			closeFailure = ex;
-		}
-		finally {
-			if(pendingBytes > 0)
-				onFinishedHandover(pendingBytes);
-		}
-		if(closeFailure != null)
-			throw closeFailure;
-	}
-
-	private void discardPayload(InMemoryQueueCallback local) {
-		if(local == null)
-			return;
-		IndexedMatrixValue imv = local.get();
-		imv.discard();
-	}
-
-	private void closeRoot(OOCStream.QueueCallback<IndexedMatrixValue> local) {
-		if(local instanceof InMemoryQueueCallback inMemory)
-			inMemory.getHandle().detachCachedAllowance();
-		local.close();
+		if(handleToClose != null)
+			handleToClose.close();
+		if(pendingBytes > 0)
+			onFinishedHandover(pendingBytes);
 	}
 
 	private SlotEntry getSlot(int index) {
@@ -826,10 +475,6 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		if(index < 0 || index >= slots.length())
 			return null;
 		return slots.get(index);
-	}
-
-	private SlotEntry removeSlot(int index) {
-		return removeSlot(index, null);
 	}
 
 	private SlotEntry removeSlot(int index, SlotEntry expectedEntry) {
@@ -862,66 +507,27 @@ public class CachedAllowance extends SyncMemoryAllowance {
 
 	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> finishReservedHandover(
 		OOCStream.QueueCallback<IndexedMatrixValue> callback, int index, SlotEntry reservation) {
-		OOCStream.QueueCallback<IndexedMatrixValue> root = null;
-		BlockKey cacheRefKey = null;
-		boolean cacheReferenceAdded = false;
-		try {
-			cacheRefKey = callback.getBlockKey();
-			if(cacheRefKey != null) {
-				try {
-					OOCCacheManager.getCache().addReference(cacheRefKey);
-					cacheReferenceAdded = true;
-				}
-				catch(IllegalArgumentException ex) {
-					IndexedMatrixValue imv = callback.get();
-					long bytes = callback.getManagedBytes();
-					if(bytes <= 0)
-						bytes = estimateManagedBytes(imv);
-					admitBlocking(bytes);
-					root = new InMemoryQueueCallback(imv, null, this, bytes);
-					((InMemoryQueueCallback) root).getHandle().attachCachedAllowance(this, index);
-					cacheRefKey = null;
-					cacheReferenceAdded = false;
-				}
-			}
-			if(root == null) {
-				OOCStream.QueueCallback<IndexedMatrixValue> owned = callback.transferOwnershipBlocking(this);
-				root = owned.keepOpen();
-				owned.close();
-				if(root instanceof InMemoryQueueCallback inMemoryRoot)
-					inMemoryRoot.getHandle().attachCachedAllowance(this, index);
-			}
-
+		return OOCCacheUtils.handover(callback, this).thenApply(owned -> {
+			OOCStream.QueueCallback<IndexedMatrixValue> retained = OOCCacheUtils.retainLocal(owned.keepOpen());
+			owned.close();
 			CompletableFuture<Void> stateFuture;
 			synchronized(reservation) {
-				stateFuture = reservation._stateFuture;
-				reservation._local = root;
+				stateFuture = reservation._reservationFuture;
+				reservation._local = retained;
+				reservation._reservationFuture = null;
 				reservation._state = SlotEntry.STATE_LOCAL;
-				reservation._stateFuture = null;
 			}
 			if(stateFuture != null)
 				stateFuture.complete(null);
 			maybeScheduleHandovers(MIN_HANDOVER_BATCH);
-			return CompletableFuture.completedFuture(null);
-		}
-		catch(RuntimeException ex) {
-			if(root != null) {
-				try {
-					closeRoot(root);
-				}
-				finally {
-					if(cacheReferenceAdded)
-						OOCCacheManager.getCache().forget(cacheRefKey);
-				}
-			}
-			else if(cacheReferenceAdded) {
-				OOCCacheManager.getCache().forget(cacheRefKey);
-			}
-			failReservedCacheSlot(index, reservation, ex);
-			CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> failed = new CompletableFuture<>();
-			failed.completeExceptionally(ex);
-			return failed;
-		}
+			return (OOCStream.QueueCallback<IndexedMatrixValue>) null;
+		}).exceptionally(ex -> {
+			Throwable cause = ex.getCause() == null ? ex : ex.getCause();
+			RuntimeException failure = cause instanceof RuntimeException ? (RuntimeException) cause :
+				new RuntimeException(cause);
+			failReservedCacheSlot(index, reservation, failure);
+			throw failure;
+		});
 	}
 
 	private void failReservedCacheSlot(int index, SlotEntry reservation, RuntimeException ex) {
@@ -933,8 +539,8 @@ public class CachedAllowance extends SyncMemoryAllowance {
 
 		CompletableFuture<Void> stateFuture;
 		synchronized(reservation) {
-			stateFuture = reservation._stateFuture;
-			reservation._stateFuture = null;
+			stateFuture = reservation._reservationFuture;
+			reservation._reservationFuture = null;
 			reservation._state = SlotEntry.STATE_CLEARED;
 		}
 		if(stateFuture != null)
@@ -955,25 +561,22 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	}
 
 	private static final class SlotEntry {
-		private final static byte STATE_LOCAL = 0;
-		private final static byte STATE_DIRECT_SPILLING = 1;
-		private final static byte STATE_BACKEND_SPILLED = 2;
-		private final static byte STATE_BACKING_RELEASE_PENDING = 3;
-		private final static byte STATE_SCHEDULER_BACKED = 4;
-		private final static byte STATE_CLEARED = 5;
-		private final static byte STATE_RESERVED = 6;
+		private static final byte STATE_LOCAL = 0;
+		private static final byte STATE_SPILLING = 1;
+		private static final byte STATE_HANDLE = 2;
+		private static final byte STATE_CLEARED = 3;
+		private static final byte STATE_RESERVED = 4;
 
 		private byte _state;
 		private OOCStream.QueueCallback<IndexedMatrixValue> _local;
-		private SoftReference<IndexedMatrixValue> _softLocal;
-		private BlockKey _key;
-		private CompletableFuture<Void> _stateFuture;
-		private OOCCacheScheduler.BackingReleaseHandle _backingReleaseHandle;
-		private long _bytes;
+		private OOCCacheUtils.TileHandle _handle;
+		private CompletableFuture<Void> _reservationFuture;
+		private CompletableFuture<OOCCacheUtils.TileHandle> _spillFuture;
+		private long _spillBytes;
 
 		private SlotEntry() {
 			_state = STATE_RESERVED;
-			_stateFuture = new CompletableFuture<>();
+			_reservationFuture = new CompletableFuture<>();
 		}
 
 		private SlotEntry(OOCStream.QueueCallback<IndexedMatrixValue> local) {

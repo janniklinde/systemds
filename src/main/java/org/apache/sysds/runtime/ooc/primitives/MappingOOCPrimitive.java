@@ -85,7 +85,7 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 	@Override
 	public void inferPatterns() {
 		_pattern = _pattern.preferred(getPattern(_inputStreamable));
-		getParents().forEach(OOCPrimitive::inferPatterns);
+		inferPatterns(getParents());
 	}
 
 	@Override
@@ -93,7 +93,7 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 		if(_pattern == accessPattern)
 			return;
 		_pattern = _pattern.preferred(accessPattern);
-		if(!getChildren().isEmpty())
+		if(!getChildren().isEmpty() && !getChildren().get(0).hasStartedExecution())
 			getChildren().get(0).requestPattern(accessPattern);
 	}
 

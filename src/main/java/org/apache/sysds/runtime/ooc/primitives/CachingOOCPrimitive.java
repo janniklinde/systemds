@@ -87,7 +87,7 @@ public class CachingOOCPrimitive extends PlannableOOCPrimitive {
 	@Override
 	public void inferPatterns() {
 		_pattern = getChildren().isEmpty() ? OOCAccessPattern.UNKNOWN : getChildren().get(0).getAccessPattern();
-		getParents().forEach(OOCPrimitive::inferPatterns);
+		inferPatterns(getParents());
 	}
 
 	@Override

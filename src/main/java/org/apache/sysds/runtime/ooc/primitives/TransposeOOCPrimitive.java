@@ -82,7 +82,7 @@ public class TransposeOOCPrimitive extends OOCPrimitive {
 	@Override
 	public void inferPatterns() {
 		_pattern = getPattern(_inputStreamable).transposed();
-		getParents().forEach(OOCPrimitive::inferPatterns);
+		inferPatterns(getParents());
 	}
 
 	@Override
@@ -90,7 +90,7 @@ public class TransposeOOCPrimitive extends OOCPrimitive {
 		if(_pattern == accessPattern)
 			return;
 		_pattern = accessPattern;
-		if(!getChildren().isEmpty())
+		if(!getChildren().isEmpty() && !getChildren().get(0).hasStartedExecution())
 			getChildren().get(0).requestPattern(accessPattern.transposed());
 	}
 

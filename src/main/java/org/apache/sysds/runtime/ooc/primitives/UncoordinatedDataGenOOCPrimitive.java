@@ -32,6 +32,7 @@ import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.LongConsumer;
 
@@ -40,6 +41,7 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	private final StreamContext _sc;
 	private final long _bulkAlloc;
 	private final LongAdder _spentCtr = new LongAdder();
+	private final AtomicBoolean _finished = new AtomicBoolean(false);
 	private LongConsumer _bulkProducer;
 	private OOCStream<IndexedMatrixValue> _out;
 	private boolean _shutdown;
@@ -86,7 +88,7 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	public void inferPatterns() {
 		if(_pattern == OOCAccessPattern.UNSET)
 			_pattern = OOCAccessPattern.ANY;
-		getParents().forEach(OOCPrimitive::inferPatterns);
+		inferPatterns(getParents());
 	}
 
 	@Override
@@ -126,8 +128,7 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 				throw new IllegalArgumentException("More bytes spent than allocated");
 			}
 			_allowance.release(allow);
-			_out.closeInput();
-			onComplete();
+			finish();
 		}, new CompletableFuture<>(), _sc)).start();
 	}
 
@@ -149,5 +150,12 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 
 	public void shutdown() {
 		_shutdown = true;
+	}
+
+	private void finish() {
+		if(_finished.compareAndSet(false, true)) {
+			_out.closeInput();
+			onComplete();
+		}
 	}
 }

@@ -66,6 +66,11 @@ public class OOCPlanner {
 	}
 
 	private static void findLeaves(OOCPrimitive primitive, Set<OOCPrimitive> leaves) {
+		if(primitive.hasStartedExecution()) {
+			leaves.add(primitive);
+			return;
+		}
+
 		if(primitive.isLeaf()) {
 			leaves.add(primitive);
 			return;
@@ -76,16 +81,30 @@ public class OOCPlanner {
 	}
 
 	private static void inferAccessPatterns(Set<OOCPrimitive> leaves) {
-		for(OOCPrimitive leaf : leaves)
-			leaf.inferPatterns();
+		for(OOCPrimitive leaf : leaves) {
+			if(leaf.hasStartedExecution())
+				leaf.getParents().forEach(OOCPrimitive::inferPatterns);
+			else
+				leaf.inferPatterns();
+		}
 	}
 
 	private static void compileRegion(List<OOCPrimitive> region) {
+		int activeCount = 0;
+		for(OOCPrimitive primitive : region) {
+			if(!primitive.hasStartedExecution())
+				activeCount++;
+		}
+		if(activeCount == 0)
+			return;
+
 		MemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), 200_000_000);
 		ToLongFunction<MatrixIndexes> allocFn = buildAllocFn(region);
-		OOCRegionBinding binding = new OOCRegionBinding(allowance, allocFn, new AtomicInteger(region.size()));
+		OOCRegionBinding binding = new OOCRegionBinding(allowance, allocFn, new AtomicInteger(activeCount));
 
 		for(int i = 0; i < region.size(); i++) {
+			if(region.get(i).hasStartedExecution())
+				continue;
 			boolean crossBoundaries = i == 0;
 			region.get(i).bindRegion(binding, crossBoundaries);
 			if(region.get(i).requiresCache()) {
@@ -96,11 +115,14 @@ public class OOCPlanner {
 
 	private static void startRegion(List<OOCPrimitive> region) {
 		for(OOCPrimitive primitive : region)
-			primitive.startExecution();
+			primitive.tryStartExecution();
 	}
 
 	private static void collectRegionRoots(OOCPrimitive primitive, Set<OOCPrimitive> visited, List<OOCPrimitive> regionRoots) {
 		if(!visited.add(primitive))
+			return;
+
+		if(primitive.hasStartedExecution())
 			return;
 
 		for(OOCPrimitive child : primitive.getChildren())
@@ -119,6 +141,9 @@ public class OOCPlanner {
 	}
 
 	private static boolean canFuseDownstream(OOCPrimitive downstream, OOCPrimitive upstream) {
+		if(downstream.hasStartedExecution() || upstream.hasStartedExecution())
+			return false;
+
 		return downstream.isTileLocal()
 			&& downstream.isOneToOne()
 			&& downstream.isIndexPreserving()
@@ -138,7 +163,7 @@ public class OOCPlanner {
 
 		while(current.getChildren().size() == 1) {
 			OOCPrimitive child = current.getChildren().get(0);
-			if(!canFuseDownstream(current, child) || !assigned.add(child))
+			if(child.hasStartedExecution() || !canFuseDownstream(current, child) || !assigned.add(child))
 				break;
 			region.add(child);
 			current = child;

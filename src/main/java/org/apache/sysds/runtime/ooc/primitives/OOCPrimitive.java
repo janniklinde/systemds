@@ -30,11 +30,14 @@ import org.apache.sysds.runtime.ooc.planning.OOCRegionBinding;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.ToLongFunction;
 
 public abstract class OOCPrimitive {
 	private final List<OOCPrimitive> _children;
 	private final List<OOCPrimitive> _parents;
+	private final AtomicBoolean _started;
+	private final AtomicBoolean _executionStarted;
 	protected OOCAccessPattern _pattern;
 	protected OOCRegionBinding _regionBinding;
 	protected MemoryAllowance _allowance;
@@ -52,6 +55,8 @@ public abstract class OOCPrimitive {
 			}
 		}
 		_parents = new ArrayList<>();
+		_started = new AtomicBoolean(false);
+		_executionStarted = new AtomicBoolean(false);
 		_pattern = OOCAccessPattern.UNSET;
 	}
 
@@ -72,6 +77,14 @@ public abstract class OOCPrimitive {
 
 	public List<OOCPrimitive> getParents() {
 		return _parents;
+	}
+
+	public void inferPatterns(List<OOCPrimitive> toInfer) {
+		toInfer.stream().filter(OOCPrimitive::patternUnset).forEach(OOCPrimitive::inferPatterns);
+	}
+
+	public boolean patternUnset() {
+		return _pattern.isUnset();
 	}
 
 	public boolean isPlannable() {
@@ -119,7 +132,17 @@ public abstract class OOCPrimitive {
 	}
 
 	public final void start() {
-		OOCPlanner.compile(this);
+		if(_started.compareAndSet(false, true))
+			OOCPlanner.compile(this);
+	}
+
+	public final boolean hasStartedExecution() {
+		return _executionStarted.get();
+	}
+
+	public final void tryStartExecution() {
+		if(_executionStarted.compareAndSet(false, true))
+			startExecution();
 	}
 
 	public void startExecution() {

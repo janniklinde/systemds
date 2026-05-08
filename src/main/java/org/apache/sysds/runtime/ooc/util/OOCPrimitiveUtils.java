@@ -59,10 +59,13 @@ public class OOCPrimitiveUtils {
 				}
 				if(cb != null)
 					cb.close();
+				workStream.closeInput();
 				future.complete(null);
 			}
 			catch(Throwable t) {
-				future.completeExceptionally(DMLRuntimeException.of(t));
+				DMLRuntimeException re = DMLRuntimeException.of(t);
+				workStream.propagateFailure(re);
+				future.completeExceptionally(re);
 			}
 		}).start();
 		return future;
