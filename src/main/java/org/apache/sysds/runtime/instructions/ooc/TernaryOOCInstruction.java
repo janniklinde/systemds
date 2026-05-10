@@ -127,8 +127,6 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 	private void processTwoMatrixInstruction(ExecutionContext ec, int leftPos, int rightPos) {
 		MatrixObject left = getMatrixObject(ec, leftPos);
 		MatrixObject right = getMatrixObject(ec, rightPos);
-		OOCStream<IndexedMatrixValue> leftStream = left.getStreamHandle();
-		OOCStream<IndexedMatrixValue> rightStream = right.getStreamHandle();
 
 		MatrixBlock s1 = input1.isMatrix() ? null : getScalarInputBlock(ec, input1);
 		MatrixBlock s2 = input2.isMatrix() ? null : getScalarInputBlock(ec, input2);
@@ -136,22 +134,33 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 		ec.getMatrixObject(output).setStreamHandle(qOut);
+
+		if(OOC_NEW_SYSTEM && getOpcode().equals("+*")) {
+			OOCStreamable<IndexedMatrixValue> leftStream = left.getStreamable();
+			OOCStreamable<IndexedMatrixValue> rightStream = right.getStreamable();
+			qOut.setUpstreamMessageRelay(msg -> {
+				leftStream.messageUpstream(msg.split());
+				rightStream.messageUpstream(msg.split());
+			});
+			leftStream.setDownstreamMessageRelay(qOut::messageDownstream);
+			rightStream.setDownstreamMessageRelay(qOut::messageDownstream);
+			OOCInstructionUtils.equiJoin(List.of(leftStream, rightStream), qOut, blocks -> {
+				MatrixBlock op1 = resolveOperandBlock(1, blocks.get(0), blocks.get(1), leftPos, rightPos, s1, s2, s3);
+				MatrixBlock op2 = resolveOperandBlock(2, blocks.get(0), blocks.get(1), leftPos, rightPos, s1, s2, s3);
+				MatrixBlock op3 = resolveOperandBlock(3, blocks.get(0), blocks.get(1), leftPos, rightPos, s1, s2, s3);
+				return op1.ternaryOperations((TernaryOperator)_optr, op2, op3, new MatrixBlock());
+			}, getContext().addOutStream(qOut));
+			return;
+		}
+
+		OOCStream<IndexedMatrixValue> leftStream = left.getStreamHandle();
+		OOCStream<IndexedMatrixValue> rightStream = right.getStreamHandle();
 		qOut.setUpstreamMessageRelay(msg -> {
 			leftStream.messageUpstream(msg.split());
 			rightStream.messageUpstream(msg.split());
 		});
 		leftStream.setDownstreamMessageRelay(qOut::messageDownstream);
 		rightStream.setDownstreamMessageRelay(qOut::messageDownstream);
-
-		if(OOC_NEW_SYSTEM && getOpcode().equals("+*")) {
-			OOCInstructionUtils.equiJoin(List.of(leftStream, rightStream), qOut, blocks -> {
-				MatrixBlock op1 = resolveOperandBlock(1, blocks.get(0), blocks.get(1), leftPos, rightPos, s1, s2, s3);
-				MatrixBlock op2 = resolveOperandBlock(2, blocks.get(0), blocks.get(1), leftPos, rightPos, s1, s2, s3);
-				MatrixBlock op3 = resolveOperandBlock(3, blocks.get(0), blocks.get(1), leftPos, rightPos, s1, s2, s3);
-				return op1.ternaryOperations((TernaryOperator)_optr, op2, op3, new MatrixBlock());
-			}, getContext().addInStream(leftStream, rightStream).addOutStream(qOut));
-			return;
-		}
 
 		joinOOC(leftStream, rightStream, qOut, (l, r) -> {
 			IndexedMatrixValue outVal = new IndexedMatrixValue();

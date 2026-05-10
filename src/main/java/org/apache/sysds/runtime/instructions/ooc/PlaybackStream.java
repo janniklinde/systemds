@@ -29,6 +29,7 @@ import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -36,6 +37,7 @@ import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
 public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
+	private static final ConcurrentHashMap<Integer, DebugInfo> LIVE_PLAYBACKS = new ConcurrentHashMap<>();
 	private final CachingStream _streamCache;
 	private final PlannablePlaybackOOCPrimitive _primitive;
 	private final AtomicInteger _streamIdx;
@@ -44,11 +46,72 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	private volatile CopyOnWriteArrayList<Consumer<OOCStreamMessage>> _downstreamRelays;
 
 	public PlaybackStream(CachingStream streamCache) {
+		this(streamCache, false);
+	}
+
+	public PlaybackStream(CachingStream streamCache, boolean reserved) {
 		this._streamCache = streamCache;
 		_primitive = new PlannablePlaybackOOCPrimitive(streamCache, this);
 		this._streamIdx = new AtomicInteger(0);
 		this._subscriberSet = new AtomicBoolean(false);
-		streamCache.incrSubscriberCount(1);
+		if(!reserved)
+			streamCache.incrSubscriberCount(1);
+		LIVE_PLAYBACKS.put(System.identityHashCode(this),
+			new DebugInfo(streamCache.toString(), creationOrigin()));
+	}
+
+	private static final class DebugInfo {
+		private final String _stream;
+		private final String _origin;
+		private volatile String _use = "constructed";
+
+		private DebugInfo(String stream, String origin) {
+			_stream = stream;
+			_origin = origin;
+		}
+	}
+
+	private static String creationOrigin() {
+		StackTraceElement[] st = new Exception().getStackTrace();
+		String[] internal = new String[] {
+			PlaybackStream.class.getName(),
+			CachingStream.class.getName(),
+			"org.apache.sysds.runtime.controlprogram.caching.CacheableData",
+			"org.apache.sysds.runtime.controlprogram.caching.MatrixObject",
+			"org.apache.sysds.runtime.ooc.stream.SourceOOCStreamable"
+		};
+		for(int i = 2; i < st.length; i++) {
+			String cls = st[i].getClassName();
+			boolean skip = false;
+			for(String internalCls : internal) {
+				if(cls.equals(internalCls)) {
+					skip = true;
+					break;
+				}
+			}
+			if(!skip)
+				return cls + ":" + st[i].getLineNumber();
+		}
+		return "unknown";
+	}
+
+	private void markUse(String use) {
+		DebugInfo info = LIVE_PLAYBACKS.get(System.identityHashCode(this));
+		if(info != null)
+			info._use = use;
+	}
+
+	public static String dumpLivePlaybackStreams(String streamLabel) {
+		StringBuilder sb = new StringBuilder();
+		LIVE_PLAYBACKS.forEach((id, info) -> {
+			if(info._stream.equals(streamLabel)) {
+				sb.append("    playback=").append(id)
+					.append(" origin=").append(info._origin)
+					.append(" use=").append(info._use)
+					.append('\n');
+			}
+		});
+		return sb.toString();
 	}
 
 	@Override
@@ -70,6 +133,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	public synchronized IndexedMatrixValue dequeue() {
 		if (_subscriberSet.get())
 			throw new IllegalStateException("Cannot dequeue from a playback stream if a subscriber has been set");
+		markUse("dequeue");
 
 		try {
 			if (_lastDequeue != null)
@@ -85,6 +149,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	public synchronized QueueCallback<IndexedMatrixValue> dequeueCB() {
 		if (_subscriberSet.get())
 			throw new IllegalStateException("Cannot dequeue from a playback stream if a subscriber has been set");
+		markUse("dequeueCB");
 
 		try {
 			if (_lastDequeue != null)
@@ -152,6 +217,7 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	public void setSubscriber(Consumer<QueueCallback<IndexedMatrixValue>> subscriber) {
 		if (!_subscriberSet.compareAndSet(false, true))
 			throw new IllegalArgumentException("Subscriber cannot be set multiple times");
+		markUse("setSubscriber");
 
 		_streamCache.setSubscriber(subscriber, false, true);
 	}

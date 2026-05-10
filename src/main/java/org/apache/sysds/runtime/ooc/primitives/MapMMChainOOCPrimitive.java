@@ -62,9 +62,9 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		OOCStreamable<IndexedMatrixValue> vStreamable, OOCStreamable<IndexedMatrixValue> wStreamable,
 		OOCStreamable<IndexedMatrixValue> outputStreamable, ChainType type, StreamContext sc) {
 		super(children);
-		_xStreamable = xStreamable;
-		_vStreamable = vStreamable;
-		_wStreamable = wStreamable;
+		_xStreamable = reserveLazyHandle(xStreamable);
+		_vStreamable = reserveLazyHandle(vStreamable);
+		_wStreamable = reserveLazyHandle(wStreamable);
 		_outputStreamable = outputStreamable;
 		_type = type;
 		_sc = sc;

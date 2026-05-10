@@ -33,29 +33,31 @@ import java.util.function.Consumer;
 
 public class SourceOOCStreamable implements OOCStreamable<IndexedMatrixValue> {
 	private final CacheableData<?> _data;
+	private OOCStream<IndexedMatrixValue> _reservedReadStream;
 
 	public SourceOOCStreamable(CacheableData<?> data) {
 		_data = data;
+		_reservedReadStream = null;
 	}
 
 	@Override
 	public OOCStream<IndexedMatrixValue> getReadStream() {
-		return _data.getStreamHandle();
+		return _reservedReadStream != null ? _reservedReadStream : _data.getStreamHandle();
 	}
 
 	@Override
 	public OOCStream<IndexedMatrixValue> getWriteStream() {
-		return _data.getStreamHandle();
+		return _reservedReadStream != null ? _reservedReadStream : _data.getStreamHandle();
 	}
 
 	@Override
 	public boolean hasStreamCache() {
-		return false;
+		return _reservedReadStream != null && _reservedReadStream.hasStreamCache();
 	}
 
 	@Override
 	public CachingStream getStreamCache() {
-		return null;
+		return _reservedReadStream == null ? null : _reservedReadStream.getStreamCache();
 	}
 
 	@Override
@@ -80,46 +82,61 @@ public class SourceOOCStreamable implements OOCStreamable<IndexedMatrixValue> {
 
 	@Override
 	public void messageUpstream(OOCStreamMessage msg) {
-
+		if(_reservedReadStream != null)
+			_reservedReadStream.messageUpstream(msg);
 	}
 
 	@Override
 	public void messageDownstream(OOCStreamMessage msg) {
-
+		if(_reservedReadStream != null)
+			_reservedReadStream.messageDownstream(msg);
 	}
 
 	@Override
 	public void setUpstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
-
+		if(_reservedReadStream != null)
+			_reservedReadStream.setUpstreamMessageRelay(relay);
 	}
 
 	@Override
 	public void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
-
+		if(_reservedReadStream != null)
+			_reservedReadStream.setDownstreamMessageRelay(relay);
 	}
 
 	@Override
 	public void addUpstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
-
+		if(_reservedReadStream != null)
+			_reservedReadStream.addUpstreamMessageRelay(relay);
 	}
 
 	@Override
 	public void addDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
-
+		if(_reservedReadStream != null)
+			_reservedReadStream.addDownstreamMessageRelay(relay);
 	}
 
 	@Override
 	public void clearUpstreamMessageRelays() {
-
+		if(_reservedReadStream != null)
+			_reservedReadStream.clearUpstreamMessageRelays();
 	}
 
 	@Override
 	public void clearDownstreamMessageRelays() {
-
+		if(_reservedReadStream != null)
+			_reservedReadStream.clearDownstreamMessageRelays();
 	}
 
 	@Override
 	public void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
+		if(_reservedReadStream != null)
+			_reservedReadStream.setIXTransform(transform);
+	}
 
+	@Override
+	public synchronized void reserveLazyHandle() {
+		if(_reservedReadStream == null)
+			_reservedReadStream = _data.getStreamHandle();
 	}
 }

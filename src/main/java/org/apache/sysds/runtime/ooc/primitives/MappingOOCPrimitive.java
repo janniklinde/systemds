@@ -41,7 +41,7 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 	private MappingOOCPrimitive(OOCPrimitive inputPrimitive, OOCStreamable<IndexedMatrixValue> inputStreamable,
 		OOCStreamable<IndexedMatrixValue> outputStreamable, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
 		super(inputPrimitive == null ? List.of() : List.of(inputPrimitive));
-		_inputStreamable = inputStreamable;
+		_inputStreamable = reserveLazyHandle(inputStreamable);
 		_outputStreamable = outputStreamable;
 		_fn = fn;
 		_sc = sc;
@@ -49,7 +49,7 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 
 	public MappingOOCPrimitive(OOCStreamable<IndexedMatrixValue> inputStreamable,
 		OOCStreamable<IndexedMatrixValue> outputStreamable, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
-		this(inputStreamable.getPrimitive(), inputStreamable, outputStreamable, fn, sc);
+		this(safePrimitive(inputStreamable), inputStreamable, outputStreamable, fn, sc);
 	}
 
 	@Override
@@ -108,8 +108,9 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 				try(cb) {
 					var imv = new IndexedMatrixValue(cb.get().getIndexes(),
 						_fn.apply((MatrixBlock) cb.get().getValue()));
-					cbOut = new InMemoryQueueCallback(imv, null, _allowance,
-						_allocFn.applyAsLong(cb.get().getIndexes()));
+					long bytes = _allocFn.applyAsLong(cb.get().getIndexes());
+					_allowance.reserveBlocking(bytes);
+					cbOut = new InMemoryQueueCallback(imv, null, _allowance, bytes);
 				}
 				out.enqueue(cbOut);
 			}, _sc).thenRun(out::closeInput).exceptionally(t -> {

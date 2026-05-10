@@ -118,6 +118,10 @@ public final class BlockEntry {
 		return _pinCount > 0;
 	}
 
+	synchronized int getPinCount() {
+		return _pinCount;
+	}
+
 	synchronized boolean addBackedPin() {
 		_backedPinCount++;
 		return _backedPinCount == 1;
@@ -132,6 +136,10 @@ public final class BlockEntry {
 
 	synchronized boolean isBackedPinned() {
 		return _backedPinCount > 0;
+	}
+
+	synchronized int getBackedPinCount() {
+		return _backedPinCount;
 	}
 
 	synchronized int addReference() {

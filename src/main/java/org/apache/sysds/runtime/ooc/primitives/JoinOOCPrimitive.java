@@ -47,14 +47,14 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 
 	private JoinOOCPrimitive(List<OOCPrimitive> inputPrimitives, List<OOCStreamable<IndexedMatrixValue>> inputs, OOCStreamable<IndexedMatrixValue> output, Function<List<MatrixBlock>, MatrixBlock> fn, StreamContext sc) {
 		super(inputPrimitives);
-		_inputStreamables = inputs;
+		_inputStreamables = inputs.stream().map(OOCPrimitive::reserveLazyHandle).toList();
 		_outputStreamable = output;
 		_fn = fn;
 		_sc = sc;
 	}
 
 	public JoinOOCPrimitive(List<OOCStreamable<IndexedMatrixValue>> inputs, OOCStreamable<IndexedMatrixValue> output, Function<List<MatrixBlock>, MatrixBlock> fn, StreamContext sc) {
-		this(inputs.stream().map(OOCStreamable::getPrimitive).toList(), inputs, output, fn, sc);
+		this(inputs.stream().map(OOCPrimitive::safePrimitive).toList(), inputs, output, fn, sc);
 	}
 
 	@Override
@@ -157,7 +157,6 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 							}
 							else {
 								try(cb) {
-									_allowance.reserveBlocking(_allocFn.applyAsLong(nextValue.getIndexes()));
 									intermediate.enqueue(nextLeft ? new Tuple3<>(next.keepOpen(), cb.keepOpen(), idx) :
 										new Tuple3<>(cb.keepOpen(), next.keepOpen(), idx));
 								}
@@ -172,7 +171,6 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 									if(err != null)
 										throw DMLRuntimeException.of(err);
 									try(cb; pinned) {
-										_allowance.reserveBlocking(_allocFn.applyAsLong(cb.get().getIndexes()));
 										intermediate.enqueue(
 											isLeft ? new Tuple3<>(pinned.keepOpen(), cb.keepOpen(), idx) :
 												new Tuple3<>(cb.keepOpen(), pinned.keepOpen(), idx));
@@ -211,9 +209,11 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 			try(qL; qR) {
 				var imv = new IndexedMatrixValue(qL.get().getIndexes(),
 					_fn.apply(List.of((MatrixBlock)qL.get().getValue(), (MatrixBlock)qR.get().getValue())));
-				if(_crossBoundaries)
-					out.enqueue(new InMemoryQueueCallback(imv, null, _allowance,
-						_allocFn.applyAsLong(imv.getIndexes())));
+				if(_crossBoundaries) {
+					long bytes = _allocFn.applyAsLong(imv.getIndexes());
+					_allowance.reserveBlocking(bytes);
+					out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, bytes));
+				}
 				else
 					out.enqueue(new OOCStream.SimpleQueueCallback<>(imv, null));
 			}

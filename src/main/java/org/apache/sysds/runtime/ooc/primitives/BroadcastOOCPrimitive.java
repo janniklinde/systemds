@@ -60,8 +60,8 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		ToIntFunction<IndexedMatrixValue> broadcastKeyFn, ToIntFunction<IndexedMatrixValue> streamedKeyFn,
 		int numBroadcastTiles, int maxBroadcastCount, boolean rowBroadcast, StreamContext sc) {
 		super(List.of(broadcastPrimitive, streamedPrimitive));
-		_broadcastStreamable = broadcastStreamable;
-		_streamedStreamable = streamedStreamable;
+		_broadcastStreamable = reserveLazyHandle(broadcastStreamable);
+		_streamedStreamable = reserveLazyHandle(streamedStreamable);
 		_outputStreamable = outputStreamable;
 		_broadcastKeyFn = broadcastKeyFn;
 		_streamedKeyFn = streamedKeyFn;
@@ -75,8 +75,8 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	public BroadcastOOCPrimitive(OOCStreamable<IndexedMatrixValue> broadcastStreamable,
 		OOCStreamable<IndexedMatrixValue> streamedStreamable, OOCStreamable<IndexedMatrixValue> outputStreamable,
 		BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> mergeFn, boolean rowBroadcast, StreamContext sc) {
-		this(broadcastStreamable == null ? null : broadcastStreamable.getPrimitive(),
-			streamedStreamable == null ? null : streamedStreamable.getPrimitive(), broadcastStreamable,
+		this(safePrimitive(broadcastStreamable),
+			safePrimitive(streamedStreamable), broadcastStreamable,
 			streamedStreamable, outputStreamable, mergeFn, null, null, -1, -1, rowBroadcast, sc);
 	}
 
@@ -85,8 +85,8 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> mergeFn,
 		ToIntFunction<IndexedMatrixValue> broadcastKeyFn, ToIntFunction<IndexedMatrixValue> streamedKeyFn,
 		int numBroadcastTiles, int maxBroadcastCount, StreamContext sc) {
-		this(broadcastStreamable == null ? null : broadcastStreamable.getPrimitive(),
-			streamedStreamable == null ? null : streamedStreamable.getPrimitive(), broadcastStreamable,
+		this(safePrimitive(broadcastStreamable),
+			safePrimitive(streamedStreamable), broadcastStreamable,
 			streamedStreamable, outputStreamable, mergeFn, broadcastKeyFn, streamedKeyFn, numBroadcastTiles,
 			maxBroadcastCount, false, sc);
 	}
@@ -213,10 +213,10 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 						intermediate.enqueue(cb.keepOpen());
 						return;
 					}
-						int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(cb.get()) :
-							(int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
-							cb.get().getIndexes().getRowIndex() - 1);
-						var broadcast = _cache.get(idx);
+					int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(cb.get()) :
+						(int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
+						cb.get().getIndexes().getRowIndex() - 1);
+					var broadcast = _cache.get(idx);
 					if(!broadcast.isDone()) {
 						final var fCb = cb.keepOpen();
 						inflightCtr.incrementAndGet();
@@ -227,7 +227,9 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 						});
 						return;
 					}
-					result = process(idx, broadcast.getNow(null), cb);
+					try(var bcb = broadcast.getNow(null)) {
+						result = process(idx, bcb, cb);
+					}
 				}
 				out.enqueue(callbackOf(result, bytesToReserve));
 			}, _sc).thenRun(() -> {
@@ -289,6 +291,8 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	private OOCStream.QueueCallback<IndexedMatrixValue> callbackOf(IndexedMatrixValue imv, long attachedBytes) {
 		if(_crossBoundaries)
 			return new InMemoryQueueCallback(imv, null, _allowance, attachedBytes);
+		// TODO release should not happen here?
+		_allowance.release(attachedBytes);
 		return new OOCStream.SimpleQueueCallback<>(imv, null);
 	}
 

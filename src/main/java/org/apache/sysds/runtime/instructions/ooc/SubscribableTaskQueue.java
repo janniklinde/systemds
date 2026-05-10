@@ -41,6 +41,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 	private final AtomicInteger _availableCtr = new AtomicInteger(1);
 	private final AtomicBoolean _closed = new AtomicBoolean(false);
 	private final AtomicInteger _blockCount = new AtomicInteger(0);
+	private QueueCallback<T> _lastDequeued = null;
 	private CacheableData<?> _cdata;
 	private volatile Consumer<QueueCallback<T>> _subscriber = null;
 	private volatile CopyOnWriteArrayList<Consumer<OOCStreamMessage>> _upstreamMsgRelays = null;
@@ -143,9 +144,14 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 		try {
 			if (OOCWatchdog.WATCH)
 				OOCWatchdog.addEvent(_watchdogId, "dequeue -- " + getCtxMsg());
+			if(_lastDequeued != null) {
+				_lastDequeued.close();
+				_lastDequeued = null;
+			}
 			OOCStream.QueueCallback<T> deq = super.dequeueTask();
 			if (deq != NO_MORE_TASKS) {
 				onDeliveryFinished();
+				_lastDequeued = deq;
 				return deq.get();
 			}
 			return null;
@@ -160,9 +166,15 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 		try {
 			if (OOCWatchdog.WATCH)
 				OOCWatchdog.addEvent(_watchdogId, "dequeue -- " + getCtxMsg());
+			if(_lastDequeued != null) {
+				_lastDequeued.close();
+				_lastDequeued = null;
+			}
 			OOCStream.QueueCallback<T> deq = super.dequeueTask();
-			if (deq != NO_MORE_TASKS)
+			if (deq != NO_MORE_TASKS) {
 				onDeliveryFinished();
+				_lastDequeued = deq;
+			}
 			return deq == NO_MORE_TASKS ? null : deq;
 		}
 		catch(InterruptedException e) {

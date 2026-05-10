@@ -42,7 +42,7 @@ public class TransposeOOCPrimitive extends OOCPrimitive {
 	private TransposeOOCPrimitive(OOCPrimitive inputPrimitive, OOCStreamable<IndexedMatrixValue> inputStreamable,
 		OOCStreamable<IndexedMatrixValue> outputStreamable, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
 		super(inputPrimitive == null ? List.of() : List.of(inputPrimitive));
-		_inputStreamable = inputStreamable;
+		_inputStreamable = reserveLazyHandle(inputStreamable);
 		_outputStreamable = outputStreamable;
 		_fn = fn;
 		_sc = sc;
@@ -50,8 +50,7 @@ public class TransposeOOCPrimitive extends OOCPrimitive {
 
 	public TransposeOOCPrimitive(OOCStreamable<IndexedMatrixValue> inputStreamable,
 		OOCStreamable<IndexedMatrixValue> outputStreamable, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
-		this(inputStreamable == null ? null : inputStreamable.getPrimitive(), inputStreamable, outputStreamable, fn,
-			sc);
+		this(safePrimitive(inputStreamable), inputStreamable, outputStreamable, fn, sc);
 	}
 
 	@Override
@@ -99,19 +98,21 @@ public class TransposeOOCPrimitive extends OOCPrimitive {
 		final OOCStream<IndexedMatrixValue> in = _inputStreamable.getReadStream();
 		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
 
-		if(_crossBoundaries) {
-			OOCInstructionUtils.submitOOCTasks(in, cb -> {
-				InMemoryQueueCallback cbOut;
-				try(cb) {
-					IndexedMatrixValue input = cb.get();
-					MatrixIndexes inIx = input.getIndexes();
-					MatrixIndexes outIx = new MatrixIndexes(inIx.getColumnIndex(), inIx.getRowIndex());
-					MatrixBlock outBlock = _fn.apply((MatrixBlock) input.getValue());
-					cbOut = new InMemoryQueueCallback(new IndexedMatrixValue(outIx, outBlock), null, _allowance,
-						_allocFn.applyAsLong(outIx));
-				}
-				out.enqueue(cbOut);
-			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
+			if(_crossBoundaries) {
+				OOCInstructionUtils.submitOOCTasks(in, cb -> {
+					InMemoryQueueCallback cbOut;
+					try(cb) {
+						IndexedMatrixValue input = cb.get();
+						MatrixIndexes inIx = input.getIndexes();
+						MatrixIndexes outIx = new MatrixIndexes(inIx.getColumnIndex(), inIx.getRowIndex());
+						MatrixBlock outBlock = _fn.apply((MatrixBlock) input.getValue());
+						long bytes = _allocFn.applyAsLong(outIx);
+						_allowance.reserveBlocking(bytes);
+						cbOut = new InMemoryQueueCallback(new IndexedMatrixValue(outIx, outBlock), null, _allowance,
+							bytes);
+					}
+					out.enqueue(cbOut);
+				}, _sc).thenRun(out::closeInput).exceptionally(t -> {
 				out.propagateFailure(DMLRuntimeException.of(t));
 				return null;
 			}).thenRun(() -> out.getPrimitive().onComplete());

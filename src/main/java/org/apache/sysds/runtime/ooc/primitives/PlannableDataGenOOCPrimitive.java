@@ -111,6 +111,7 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 			OOCInstructionUtils.submitOOCTasks(stream, cb -> {
 				var imv = new IndexedMatrixValue(cb.get(), _fn.apply(cb.get()));
 				var cbOut = new OOCStream.SimpleQueueCallback<>(imv, null);
+				_allowance.release(_allocFn.applyAsLong(cb.get()));
 				out.enqueue(cbOut);
 			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
 				out.propagateFailure(DMLRuntimeException.of(t));

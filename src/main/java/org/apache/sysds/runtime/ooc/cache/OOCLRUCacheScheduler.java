@@ -23,6 +23,7 @@ import org.apache.commons.lang3.mutable.MutableObject;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.sysds.api.DMLScript;
+import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
@@ -43,6 +44,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
@@ -735,6 +737,25 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			cachedStreams.addAll(evictedStreams);
 			System.out.println("[WARN] Affected stream IDs: " + cachedStreams + ", Pinned: " + _cache.values().stream().mapToInt(
 				e -> e.isPinned() ? 1 : 0).sum());
+			System.out.print(CachingStream.dumpStreams(cachedStreams));
+			_cache.values().stream()
+				.sorted((l, r) -> l.getKey().compareTo(r.getKey()))
+				.forEach(e -> System.out.println("[WARN] Cache entry key=" + e.getKey()
+					+ " state=" + e.getState()
+					+ " refs=" + e.getReferenceCount()
+					+ " retainHints=" + e.getRetainHintCount()
+					+ " pins=" + e.getPinCount()
+					+ " backedPins=" + e.getBackedPinCount()
+					+ " hasData=" + (e.getDataUnsafe() != null)));
+			_evictionCache.values().stream()
+				.sorted((l, r) -> l.getKey().compareTo(r.getKey()))
+				.forEach(e -> System.out.println("[WARN] Eviction entry key=" + e.getKey()
+					+ " state=" + e.getState()
+					+ " refs=" + e.getReferenceCount()
+					+ " retainHints=" + e.getRetainHintCount()
+					+ " pins=" + e.getPinCount()
+					+ " backedPins=" + e.getBackedPinCount()
+					+ " hasData=" + (e.getDataUnsafe() != null)));
 		}
 		_cache.clear();
 		_evictionCache.clear();
@@ -1615,7 +1636,49 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		}
 	}
 
+	public static void noteBackedPinEscape(AllowanceBackedPin pin, String escape) {
+		if(pin instanceof AllowanceBackedPinImpl impl)
+			BackedPinHandle.noteEscape(impl._handle, escape);
+	}
+
+	public static boolean hasLiveBackedPins() {
+		return !BackedPinHandle.LIVE_BACKED_PINS.isEmpty();
+	}
+
+	public static String dumpLiveBackedPins() {
+		StringBuilder sb = new StringBuilder();
+		sb.append("Live backed pins: ").append(BackedPinHandle.LIVE_BACKED_PINS.size()).append('\n');
+		BackedPinHandle.LIVE_BACKED_PINS.entrySet().stream()
+			.sorted((l, r) -> Integer.compare(System.identityHashCode(l.getKey()), System.identityHashCode(r.getKey())))
+			.forEach(e -> {
+				BackedPinHandle h = e.getKey();
+				BackedPinDebugInfo d = e.getValue();
+				sb.append("  pin=").append(System.identityHashCode(h))
+					.append(" key=").append(h._entry.getKey())
+					.append(" allow=").append(h._allowance == null ? "null" :
+						h._allowance.getClass().getSimpleName() + "@" + System.identityHashCode(h._allowance))
+					.append(" bytes=").append(h._logicalBytes)
+					.append(" refs=").append(h._refCount)
+					.append(" released=").append(h._released)
+					.append(" origin=").append(d._origin)
+					.append(" lastEscape=").append(d._lastEscape)
+					.append('\n');
+			});
+		return sb.toString();
+	}
+
+	private static final class BackedPinDebugInfo {
+		private final String _origin;
+		private volatile String _lastEscape = "unrecorded";
+
+		private BackedPinDebugInfo(String origin) {
+			_origin = origin;
+		}
+	}
+
 	private static final class BackedPinHandle {
+		private static final ConcurrentHashMap<BackedPinHandle, BackedPinDebugInfo> LIVE_BACKED_PINS =
+			new ConcurrentHashMap<>();
 		private final OOCLRUCacheScheduler _scheduler;
 		private final BlockEntry _entry;
 		private final MemoryAllowance _allowance;
@@ -1631,12 +1694,29 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			_logicalBytes = logicalBytes;
 			_refCount = 1;
 			_released = false;
+			LIVE_BACKED_PINS.put(this, new BackedPinDebugInfo(pinOrigin()));
 		}
 
 		private synchronized void retain() {
 			if(_released)
 				throw new IllegalStateException("Cannot retain released allowance-backed pin.");
 			_refCount++;
+		}
+
+		private static void noteEscape(BackedPinHandle handle, String escape) {
+			BackedPinDebugInfo info = LIVE_BACKED_PINS.get(handle);
+			if(info != null)
+				info._lastEscape = escape;
+		}
+
+		private static String pinOrigin() {
+			StackTraceElement[] st = new Exception().getStackTrace();
+			for(int i = 2; i < st.length; i++) {
+				String cls = st[i].getClassName();
+				if(!cls.equals(BackedPinHandle.class.getName()) && !cls.equals(AllowanceBackedPinImpl.class.getName()))
+					return cls + ":" + st[i].getLineNumber();
+			}
+			return "unknown";
 		}
 
 		private void release() {
@@ -1654,6 +1734,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 			if(!finalRelease)
 				return;
+			LIVE_BACKED_PINS.remove(this);
 
 			RuntimeException releaseFailure = null;
 			try {

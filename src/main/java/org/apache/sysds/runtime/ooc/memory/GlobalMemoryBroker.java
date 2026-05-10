@@ -53,7 +53,9 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	public long requestMemory(MemoryAllowance allowance, long minSize, long maxSize) {
 		List<TargetUpdate> updates = null;
 		long allow = 0;
+		long usedBefore;
 		synchronized(this) {
+			usedBefore = _usedBytes;
 			if(minSize < 0 || maxSize < minSize)
 				throw new IllegalArgumentException();
 			long share = getEqualShare();
@@ -81,6 +83,9 @@ public class GlobalMemoryBroker implements MemoryBroker {
 					addOverconsumer(allowance);
 			}
 		}
+		System.out.println("[BROKER-REQUEST] allowance=" + dbgId(allowance) + " min=" + minSize + " max=" + maxSize
+			+ " granted=" + allow + " used=" + usedBefore + "->" + _usedBytes
+			+ " allowances=" + _allowances.size() + " overconsumers=" + _overconsumers.size());
 		if(updates != null)
 			applyTargetUpdates(updates);
 		return allow;
@@ -102,9 +107,11 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	@Override
 	public void freeMemory(MemoryAllowance allowance, long freedMemory) {
 		List<TargetUpdate> updates = null;
+		long usedBefore;
 		synchronized(this) {
 			if(freedMemory < 0)
 				throw new IllegalArgumentException();
+			usedBefore = _usedBytes;
 			_usedBytes -= freedMemory;
 			if(allowance.isShutdown())
 				updates = rebalance(false);
@@ -114,6 +121,9 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			else if(allowance.getGrantedMemory() <= allowance.getTargetMemory() && allowance.getGrantedMemory() > share)
 				addOverconsumer(allowance);
 		}
+		System.out.println("[BROKER-FREE] allowance=" + dbgId(allowance) + " freed=" + freedMemory
+			+ " used=" + usedBefore + "->" + _usedBytes + " allowances=" + _allowances.size()
+			+ " overconsumers=" + _overconsumers.size());
 		if(updates != null)
 			applyTargetUpdates(updates);
 	}
@@ -125,26 +135,35 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			_overconsumers.remove(allowance);
 			updates = rebalance(true);
 		}
+		System.out.println("[BROKER-SHUTDOWN] allowance=" + dbgId(allowance) + " used=" + _usedBytes
+			+ " allowances=" + _allowances.size() + " overconsumers=" + _overconsumers.size());
 		applyTargetUpdates(updates);
 	}
 
 	@Override
 	public void destroyAllowance(MemoryAllowance allowance, long freedMemory) {
 		List<TargetUpdate> updates;
+		long usedBefore;
 		synchronized(this) {
 			if(freedMemory < 0)
 				throw new IllegalArgumentException();
+			usedBefore = _usedBytes;
 			_allowances.remove(allowance);
 			_overconsumers.remove(allowance);
 			_usedBytes -= freedMemory;
 			updates = rebalance(true);
 		}
+		System.out.println("[BROKER-DESTROY] allowance=" + dbgId(allowance) + " freed=" + freedMemory
+			+ " used=" + usedBefore + "->" + _usedBytes + " allowances=" + _allowances.size()
+			+ " overconsumers=" + _overconsumers.size());
 		applyTargetUpdates(updates);
 	}
 
 	@Override
 	public synchronized void attachAllowance(MemoryAllowance allowance) {
 		_allowances.add(allowance);
+		System.out.println("[BROKER-ATTACH] allowance=" + dbgId(allowance) + " allowances=" + _allowances.size()
+			+ " used=" + _usedBytes + " allowed=" + _allowedBytes);
 		allowance.setTargetMemory(_allowedBytes);
 	}
 
@@ -227,5 +246,42 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	private static void applyTargetUpdates(List<TargetUpdate> updates) {
 		for(TargetUpdate update : updates)
 			update._allowance.setTargetMemory(update._target);
+	}
+
+	private static String dbgId(MemoryAllowance allowance) {
+		return allowance.getClass().getSimpleName() + "@" + System.identityHashCode(allowance);
+	}
+
+	public synchronized String dumpOutstandingAllowances() {
+		StringBuilder sb = new StringBuilder();
+		sb.append("GlobalMemoryBroker used=").append(_usedBytes)
+			.append(" allowed=").append(_allowedBytes)
+			.append(" allowances=").append(_allowances.size())
+			.append(" overconsumers=").append(_overconsumers.size())
+			.append('\n');
+		for(MemoryAllowance allowance : _allowances) {
+			long used = allowance.getUsedMemory();
+			long granted = allowance.getGrantedMemory();
+			long target = allowance.getTargetMemory();
+			if(used == 0 && granted == 0)
+				continue;
+			sb.append("  allowance=").append(dbgId(allowance))
+				.append(" used=").append(used)
+				.append(" granted=").append(granted)
+				.append(" target=").append(target)
+				.append(" shutdown=").append(allowance.isShutdown())
+				.append('\n');
+		}
+		return sb.toString();
+	}
+
+	public synchronized boolean hasOutstandingUsage() {
+		if(_usedBytes != 0)
+			return true;
+		for(MemoryAllowance allowance : _allowances) {
+			if(allowance.getUsedMemory() != 0 || allowance.getGrantedMemory() != 0)
+				return true;
+		}
+		return false;
 	}
 }

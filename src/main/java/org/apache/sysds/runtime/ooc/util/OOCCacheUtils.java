@@ -112,6 +112,14 @@ public class OOCCacheUtils {
 		}
 	}
 
+	public static void noteEscape(OOCStream.QueueCallback<IndexedMatrixValue> cb, String escape) {
+		cb = unwrap(cb);
+		if(cb instanceof InMemoryQueueCallback inMemory)
+			InMemoryQueueCallback.noteEscape(inMemory, escape);
+		else if(cb != null && cb.getBackingPin() != null)
+			OOCCacheManager.noteBackedEscape(cb, escape);
+	}
+
 	public static CompletableFuture<TileHandle> spill(OOCStream.QueueCallback<IndexedMatrixValue> cb, BlockKey targetKey) {
 		return spill(cb, targetKey, cb.getManagedBytes());
 	}

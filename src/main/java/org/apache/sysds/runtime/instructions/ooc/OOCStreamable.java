@@ -75,4 +75,10 @@ public interface OOCStreamable<T> {
 	default void assignPrimitive(OOCPrimitive primitive) {
 		throw new NotImplementedException();
 	}
+
+	default void reserveLazyHandle() {
+	}
+
+	default void discardHandle() {
+	}
 }

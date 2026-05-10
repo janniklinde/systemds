@@ -61,7 +61,8 @@ public class OOCInstructionUtils {
 		out.assignPrimitive(primitive);
 	}
 
-	public static void equiMap(OOCStream<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
+	public static void equiMap(OOCStreamable<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out,
+		Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
 		OOCPrimitive primitive = new MappingOOCPrimitive(in, out, fn, sc);
 		out.assignPrimitive(primitive);
 	}

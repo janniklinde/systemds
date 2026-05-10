@@ -27,6 +27,7 @@ import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
@@ -61,6 +62,7 @@ public class OOCCacheManager {
 	}
 
 	public static void reset() {
+		dumpOutstandingMemoryState("before-reset");
 		TeeOOCInstruction.reset();
 		OOCIOHandler ioHandler = _ioHandler.getAndSet(null);
 		OOCCacheScheduler cacheScheduler = _scheduler.getAndSet(null);
@@ -91,6 +93,17 @@ public class OOCCacheManager {
 			}
 			OOCEventLog.clear();
 		}
+		dumpOutstandingMemoryState("after-reset");
+	}
+
+	private static void dumpOutstandingMemoryState(String phase) {
+		GlobalMemoryBroker broker = GlobalMemoryBroker.get();
+		if(!broker.hasOutstandingUsage() && !InMemoryQueueCallback.hasLiveHandles() && !hasLiveBackedPins())
+			return;
+		System.out.println("[WARN] Outstanding OOC memory state at OOCCacheManager.reset() phase=" + phase);
+		System.out.print(broker.dumpOutstandingAllowances());
+		System.out.print(InMemoryQueueCallback.dumpLiveHandles());
+		System.out.print(dumpLiveBackedPins());
 	}
 
 	public static OOCCacheScheduler getCache() {
@@ -311,6 +324,20 @@ public class OOCCacheManager {
 
 	public static boolean canClaimMemory() {
 		return getCache().isWithinLimits() && OOCInstruction.getComputeInFlight() <= OOCInstruction.getComputeBackpressureThreshold();
+	}
+
+	public static void noteBackedEscape(OOCStream.QueueCallback<?> cb, String escape) {
+		OOCCacheScheduler.AllowanceBackedPin pin = cb == null ? null : cb.getBackingPin();
+		if(pin != null)
+			OOCLRUCacheScheduler.noteBackedPinEscape(pin, escape);
+	}
+
+	public static boolean hasLiveBackedPins() {
+		return OOCLRUCacheScheduler.hasLiveBackedPins();
+	}
+
+	public static String dumpLiveBackedPins() {
+		return OOCLRUCacheScheduler.dumpLiveBackedPins();
 	}
 
 	public static OOCCacheScheduler.HandoverHandle handover(BlockKey key, InMemoryQueueCallback callback) {

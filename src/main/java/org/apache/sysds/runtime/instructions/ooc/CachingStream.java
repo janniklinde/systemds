@@ -59,6 +59,7 @@ import java.util.function.Consumer;
 public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	public static final IDSequence _streamSeq = new IDSequence();
+	private static final ConcurrentHashMap<Long, CachingStream> LIVE_STREAMS = new ConcurrentHashMap<>();
 
 	// original live stream
 	private final OOCStream<IndexedMatrixValue> _source;
@@ -68,6 +69,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	private final IntArrayList _groupIndices = new IntArrayList();
 	private final IntArrayList _groupSizes = new IntArrayList();
 	private final List<BlockKey> _cacheKeys = new ArrayList<>();
+	private final List<String> _consumerRegistrations = new ArrayList<>();
 	private final BitSet _ownedCacheKeys = new BitSet();
 	private int _ownedCacheKeysSize = 0;
 
@@ -88,6 +90,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	private boolean _deletable = false;
 	private int _maxConsumptionCount = 0;
+	private int _lazyHandleReservations = 0;
 	private String _watchdogId = null;
 
 	public CachingStream(OOCStream<IndexedMatrixValue> source) {
@@ -99,6 +102,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		_primitive = new CachingOOCPrimitive(source, this);
 		_source.setDownstreamMessageRelay(this::messageDownstream);
 		_streamId = streamId;
+		LIVE_STREAMS.put(streamId, this);
 		if(OOCWatchdog.WATCH) {
 			_watchdogId = "CS-" + hashCode();
 			// Capture a short context to help identify origin
@@ -312,6 +316,47 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		});
 	}
 
+	public static String dumpStreams(Iterable<Long> streamIds) {
+		StringBuilder sb = new StringBuilder();
+		for(Long streamId : streamIds) {
+			CachingStream stream = LIVE_STREAMS.get(streamId);
+			sb.append("[WARN] CachingStream dump streamId=").append(streamId);
+			if(stream == null) {
+				sb.append(" missing").append('\n');
+				continue;
+			}
+			synchronized(stream) {
+				sb.append(" cacheInProgress=").append(stream._cacheInProgress)
+					.append(" deletable=").append(stream._deletable)
+					.append(" maxConsumptionCount=").append(stream._maxConsumptionCount)
+					.append(" numBlocks=").append(stream._numBlocks)
+					.append(" ownedCacheKeysSize=").append(stream._ownedCacheKeysSize)
+					.append(" subscribers=").append(stream._subscribers == null ? 0 : stream._subscribers.length)
+					.append(" failure=").append(stream._failure != null)
+					.append('\n');
+				sb.append("  consumptionCounts=").append(stream._consumptionCounts).append('\n');
+				sb.append("  consumerCounts=").append(stream._consumerConsumptionCounts).append('\n');
+				sb.append("  groupIndices=").append(stream._groupIndices).append('\n');
+				sb.append("  groupSizes=").append(stream._groupSizes).append('\n');
+				sb.append("  cacheKeys=").append(stream._cacheKeys).append('\n');
+				sb.append("  ownedCacheKeys=").append(stream._ownedCacheKeys).append('\n');
+				sb.append("  consumerRegistrations=").append(stream._consumerRegistrations).append('\n');
+				sb.append(PlaybackStream.dumpLivePlaybackStreams(stream.toString()));
+			}
+		}
+		return sb.toString();
+	}
+
+	private static String debugOrigin(String label) {
+		StackTraceElement[] st = new Exception().getStackTrace();
+		for(int i = 2; i < st.length; i++) {
+			String cls = st[i].getClassName();
+			if(!cls.equals(CachingStream.class.getName()))
+				return label + "@" + cls + ":" + st[i].getLineNumber();
+		}
+		return label + "@unknown";
+	}
+
 
 	private void ensureReferencedOrRematerialize(BlockKey key, IndexedMatrixValue value) {
 		try {
@@ -373,7 +418,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		if (_deletable)
 			return; // Deletion already scheduled
 
-		if (_cacheInProgress && _maxConsumptionCount == 0)
+		if (_cacheInProgress && _maxConsumptionCount == 0 && _lazyHandleReservations == 0)
 			System.out.println("[WARN] Scheduling deletion for caching stream with no listeners: " + this);
 
 		_deletable = true;
@@ -387,6 +432,8 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	}
 
 	private synchronized void tryDeleteBlock(int i) {
+		if(_lazyHandleReservations > 0)
+			return;
 		int cnt = _consumptionCounts.getInt(i);
 		if (cnt > _maxConsumptionCount)
 			throw new DMLRuntimeException("Cannot have more than " + _maxConsumptionCount + " consumptions.");
@@ -596,7 +643,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	@Override
 	public OOCStream<IndexedMatrixValue> getReadStream() {
-		return new PlaybackStream(this);
+		return new PlaybackStream(this, consumeLazyHandleReservation());
 	}
 
 	@Override
@@ -729,8 +776,13 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 			cacheInProgress = _cacheInProgress;
 			consumerIdx = _consumerConsumptionCounts.size();
 			_consumerConsumptionCounts.add(0);
-			if(incrConsumers)
+			if(incrConsumers) {
 				_maxConsumptionCount++;
+				_consumerRegistrations.add(debugOrigin("setSubscriber+1"));
+			}
+			else {
+				_consumerRegistrations.add(debugOrigin("setSubscriber+0"));
+			}
 			if(cacheInProgress) {
 				int newLen = _subscribers == null ? 1 : _subscribers.length + 1;
 				Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>[] newSubscribers = new Consumer[newLen];
@@ -811,6 +863,32 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 			throw new IllegalStateException("Cannot increment the subscriber count if flagged for deletion");
 
 		_maxConsumptionCount += count;
+		_consumerRegistrations.add(debugOrigin("incrSubscriberCount+" + count));
+	}
+
+	@Override
+	public synchronized void reserveLazyHandle() {
+		_lazyHandleReservations++;
+	}
+
+	@Override
+	public synchronized void discardHandle() {
+		if(_lazyHandleReservations <= 0)
+			return;
+		_lazyHandleReservations--;
+		if(_deletable) {
+			for(int i = 0; i < _consumptionCounts.size(); i++)
+				tryDeleteBlock(i);
+		}
+	}
+
+	private synchronized boolean consumeLazyHandleReservation() {
+		if(_lazyHandleReservations <= 0)
+			return false;
+		_lazyHandleReservations--;
+		_maxConsumptionCount++;
+		_consumerRegistrations.add(debugOrigin("consumeLazyHandle+1"));
+		return true;
 	}
 
 	/**

@@ -62,14 +62,10 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		_nextBlockId = new AtomicLong(0);
 	}
 
-	@Override
-	public void shutdown() {
-		if(_usedBytes != 0)
-			throw new IllegalArgumentException();
-		super.shutdown();
-	}
-
 	public void handover(OOCStream.QueueCallback<IndexedMatrixValue> callback, int index) {
+		System.out.println("[CACHE-HANDOVER-BEGIN] cache=" + dbgId() + " idx=" + index
+			+ " cb=" + cbId(callback) + " managed=" + callback.getManagedBytes()
+			+ " blockKey=" + callback.getBlockKey() + " backingPin=" + (callback.getBackingPin() != null));
 		OOCStream.QueueCallback<IndexedMatrixValue> owned = OOCCacheUtils.handover(callback, this).join();
 		OOCStream.QueueCallback<IndexedMatrixValue> root = OOCCacheUtils.retainLocal(owned.keepOpen());
 		owned.close();
@@ -91,6 +87,8 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			if(index > _highestPopulatedIndex)
 				_highestPopulatedIndex = index;
 		}
+		System.out.println("[CACHE-HANDOVER-END] cache=" + dbgId() + " idx=" + index
+			+ " root=" + cbId(root) + " slots=" + slotCount());
 		maybeScheduleHandovers(MIN_HANDOVER_BATCH);
 	}
 
@@ -138,8 +136,10 @@ public class CachedAllowance extends SyncMemoryAllowance {
 				return null;
 			}
 			OOCStream.QueueCallback<IndexedMatrixValue> installed = installReadResult(entry, handle, callback);
-			if(installed != null)
+			if(installed != null) {
+				OOCCacheUtils.noteEscape(installed, "CachedAllowance.tryGet[index=" + index + "]");
 				return installed;
+			}
 		}
 		catch(RuntimeException ex) {
 			release(handle.bytes());
@@ -189,8 +189,10 @@ public class CachedAllowance extends SyncMemoryAllowance {
 				}
 
 				OOCStream.QueueCallback<IndexedMatrixValue> installed = installReadResult(entry, mHandle, callback);
-				if(installed != null)
+				if(installed != null) {
+					OOCCacheUtils.noteEscape(installed, "CachedAllowance.get[index=" + index + "]");
 					return CompletableFuture.completedFuture(installed);
+				}
 				return get(index);
 			});
 	}
@@ -227,6 +229,10 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			}
 			if(handle != null)
 				handle.close();
+			System.out.println("[CACHE-TAKE] cache=" + dbgId() + " idx=" + index
+				+ " returned=" + cbId(callback) + " hadLocal=" + (localToClose != null)
+				+ " hadHandle=" + (handle != null) + " slots=" + slotCount());
+			OOCCacheUtils.noteEscape(callback, "CachedAllowance.take[index=" + index + "]");
 			return callback;
 		});
 	}
@@ -260,6 +266,9 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			handle.close();
 		if(reservationFuture != null)
 			reservationFuture.complete(null);
+		System.out.println("[CACHE-CLEAR] cache=" + dbgId() + " idx=" + index
+			+ " hadLocal=" + (localToClose != null) + " hadHandle=" + (handle != null)
+			+ " slots=" + slotCount());
 	}
 
 	@Override
@@ -308,6 +317,8 @@ public class CachedAllowance extends SyncMemoryAllowance {
 				throw new IllegalStateException();
 			notifyAll();
 		}
+		System.out.println("[CACHE-HANDOVER-FINISHED] cache=" + dbgId() + " bytes=" + bytes
+			+ " pending=" + _pendingHandoverBytes + " slots=" + slotCount());
 		maybeScheduleHandovers(0);
 	}
 
@@ -330,6 +341,8 @@ public class CachedAllowance extends SyncMemoryAllowance {
 
 		if(install) {
 			handle.close();
+			System.out.println("[CACHE-READ-INSTALL] cache=" + dbgId() + " handle=" + handle
+				+ " local=" + cbId(retained) + " slots=" + slotCount());
 			return retained;
 		}
 
@@ -409,6 +422,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		OOCStream.QueueCallback<IndexedMatrixValue> local;
 		long bytes;
 		CompletableFuture<OOCCacheUtils.TileHandle> future;
+		BlockKey targetKey;
 		synchronized(entry) {
 			local = entry._local;
 			if(local == null || entry._state != SlotEntry.STATE_LOCAL)
@@ -417,7 +431,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			if(bytes <= 0)
 				return 0;
 
-			BlockKey targetKey = local.getBackingPin() != null ? local.getBlockKey() :
+			targetKey = local.getBackingPin() != null ? local.getBlockKey() :
 				new BlockKey(_streamId, _nextBlockId.getAndIncrement());
 			future = OOCCacheUtils.spill(local, targetKey, bytes);
 			entry._state = SlotEntry.STATE_SPILLING;
@@ -428,6 +442,8 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		synchronized(this) {
 			_pendingHandoverBytes += bytes;
 		}
+		System.out.println("[CACHE-SPILL-START] cache=" + dbgId() + " local=" + cbId(local)
+			+ " bytes=" + bytes + " targetKey=" + targetKey + " pending=" + _pendingHandoverBytes);
 		future.whenComplete((handle, ex) -> onSpillCompleted(entry, future, handle, ex));
 		return bytes;
 	}
@@ -466,6 +482,9 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		}
 		if(handleToClose != null)
 			handleToClose.close();
+		System.out.println("[CACHE-SPILL-DONE] cache=" + dbgId() + " success=" + (ex == null && handle != null)
+			+ " handle=" + handle + " hadLocal=" + (localToClose != null)
+			+ " pendingBytes=" + pendingBytes + " slots=" + slotCount());
 		if(pendingBytes > 0)
 			onFinishedHandover(pendingBytes);
 	}
@@ -583,5 +602,25 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			_state = STATE_LOCAL;
 			_local = local;
 		}
+	}
+
+	private String dbgId() {
+		return getClass().getSimpleName() + "@" + System.identityHashCode(this);
+	}
+
+	private static String cbId(OOCStream.QueueCallback<IndexedMatrixValue> cb) {
+		if(cb == null)
+			return "null";
+		return cb.getClass().getSimpleName() + "@" + System.identityHashCode(cb);
+	}
+
+	private int slotCount() {
+		int count = 0;
+		AtomicReferenceArray<SlotEntry> slots = _slots;
+		for(int i = 0; i < slots.length(); i++) {
+			if(slots.get(i) != null)
+				count++;
+		}
+		return count;
 	}
 }

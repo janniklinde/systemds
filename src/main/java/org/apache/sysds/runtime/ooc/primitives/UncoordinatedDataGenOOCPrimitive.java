@@ -33,14 +33,14 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongConsumer;
 
 public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _outputStream;
 	private final StreamContext _sc;
 	private final long _bulkAlloc;
-	private final LongAdder _spentCtr = new LongAdder();
+	private final AtomicLong _remainingBudget = new AtomicLong();
 	private final AtomicBoolean _finished = new AtomicBoolean(false);
 	private LongConsumer _bulkProducer;
 	private OOCStream<IndexedMatrixValue> _out;
@@ -102,45 +102,28 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 		final long targetAlloc = Math.max(_bulkAlloc, _allocFn.applyAsLong(new MatrixIndexes(1, 1)));
 
 		new Thread(OOCInstructionUtils.oocTask(() -> {
-			long allow = 0;
-			long spent;
 			while(!_shutdown) {
-				spent = _spentCtr.sumThenReset();
-				if(spent < 0)
-					throw new IllegalArgumentException("More bytes spent than allocated");
-				allow -= spent;
-				if(allow < targetAlloc)
-					_allowance.reserveBlocking(targetAlloc - allow);
-				allow = targetAlloc;
-				_bulkProducer.accept(allow);
+				topUpBudget(targetAlloc);
+				_bulkProducer.accept(targetAlloc);
 			}
-			long finalSpent = _spentCtr.sumThenReset();
-			allow -= finalSpent;
-			if(allow < 0) {
-				System.err.println(
-					"UncoordinatedDataGenOOCPrimitive overspent: " +
-						"bulkAlloc=" + _bulkAlloc +
-						", targetAlloc=" + targetAlloc +
-						", finalSpent=" + finalSpent +
-						", allowAfter=" + allow +
-						", crossBoundaries=" + _crossBoundaries
-				);
-				throw new IllegalArgumentException("More bytes spent than allocated");
-			}
-			_allowance.release(allow);
+			long remaining = _remainingBudget.getAndSet(0);
+			if(remaining < 0)
+				throw new IllegalArgumentException("Negative remaining budget: " + remaining);
+			_allowance.release(remaining);
 			finish();
 		}, new CompletableFuture<>(), _sc)).start();
 	}
 
 	public void emit(IndexedMatrixValue imv) {
 		long newMem = _allocFn.applyAsLong(imv.getIndexes());
-		_spentCtr.add(newMem);
+		consumeBudget(newMem);
 
 		if(_crossBoundaries) {
 			_out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, newMem));
 			return;
 		}
 		_out.enqueue(imv);
+		_allowance.release(newMem);
 	}
 
 	public void emit(IndexedMatrixValue imv, OOCIOHandler.SourceBlockDescriptor desc) {
@@ -156,6 +139,38 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 		if(_finished.compareAndSet(false, true)) {
 			_out.closeInput();
 			onComplete();
+		}
+	}
+
+	private void topUpBudget(long targetAlloc) {
+		while(true) {
+			long current = _remainingBudget.get();
+			if(current >= targetAlloc)
+				return;
+			long delta = targetAlloc - current;
+			_allowance.reserveBlocking(delta);
+			if(_remainingBudget.compareAndSet(current, targetAlloc))
+				return;
+			_allowance.release(delta);
+		}
+	}
+
+	private void consumeBudget(long bytes) {
+		if(bytes < 0)
+			throw new IllegalArgumentException("Cannot consume negative bytes: " + bytes);
+		while(true) {
+			long current = _remainingBudget.get();
+			if(current >= bytes) {
+				if(_remainingBudget.compareAndSet(current, current - bytes))
+					return;
+				continue;
+			}
+
+			long delta = bytes - current;
+			_allowance.reserveBlocking(delta);
+			if(_remainingBudget.compareAndSet(current, 0))
+				return;
+			_allowance.release(delta);
 		}
 	}
 }

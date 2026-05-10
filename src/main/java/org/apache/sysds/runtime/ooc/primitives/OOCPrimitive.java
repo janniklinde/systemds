@@ -153,10 +153,25 @@ public abstract class OOCPrimitive {
 		_regionBinding.dereference();
 	}
 
-	protected OOCAccessPattern getPattern(OOCStreamable<?> streamable) {
+	protected static OOCPrimitive safePrimitive(OOCStreamable<?> streamable) {
 		if(streamable == null)
-			return OOCAccessPattern.UNKNOWN;
-		OOCPrimitive primitive = streamable.getPrimitive();
+			return null;
+		try {
+			return streamable.getPrimitive();
+		}
+		catch(RuntimeException ex) {
+			return null;
+		}
+	}
+
+	protected static <T extends OOCStreamable<?>> T reserveLazyHandle(T streamable) {
+		if(streamable != null)
+			streamable.reserveLazyHandle();
+		return streamable;
+	}
+
+	protected OOCAccessPattern getPattern(OOCStreamable<?> streamable) {
+		OOCPrimitive primitive = safePrimitive(streamable);
 		return primitive == null ? OOCAccessPattern.UNKNOWN : primitive.getAccessPattern();
 	}
 

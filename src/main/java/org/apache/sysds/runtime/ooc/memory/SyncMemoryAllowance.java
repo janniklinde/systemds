@@ -49,19 +49,29 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		_destroyed = false;
 		_waiter = Executors.newSingleThreadExecutor();
 		broker.attachAllowance(this);
+		System.out.println("[ALLOW-INIT] allowance=" + dbgId() + " limit=" + _consumptionLimit);
 	}
 
 	@Override
 	public boolean tryReserve(long bytes) {
 		long minRequest;
 		long maxRequest;
+		long usedBefore;
+		long grantedBefore;
+		long targetBefore;
 		synchronized(this) {
 			if(_shutdown || _destroyed)
 				return false;
 			if(_usedBytes + bytes > _targetBytes)
 				return false;
 			if(_usedBytes + bytes <= _grantedBytes) {
+				usedBefore = _usedBytes;
+				grantedBefore = _grantedBytes;
+				targetBefore = _targetBytes;
 				_usedBytes += bytes;
+				System.out.println("[ALLOW-RESERVE-FAST] allowance=" + dbgId() + " bytes=" + bytes
+					+ " used=" + usedBefore + "->" + _usedBytes + " granted=" + grantedBefore
+					+ " target=" + targetBefore);
 				return true;
 			}
 			minRequest = _usedBytes + bytes - _grantedBytes;
@@ -78,11 +88,19 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			if(_shutdown || _destroyed)
 				refund = granted;
 			else {
+				usedBefore = _usedBytes;
+				grantedBefore = _grantedBytes;
+				targetBefore = _targetBytes;
 				_grantedBytes += granted;
 				if(_usedBytes + bytes <= _targetBytes && _usedBytes + bytes <= _grantedBytes) {
 					_usedBytes += bytes;
 					success = true;
 				}
+				System.out.println("[ALLOW-RESERVE-SLOW] allowance=" + dbgId() + " bytes=" + bytes
+					+ " brokerGranted=" + granted + " success=" + success
+					+ " used=" + usedBefore + "->" + _usedBytes
+					+ " granted=" + grantedBefore + "->" + _grantedBytes
+					+ " target=" + targetBefore);
 				notifyAll();
 			}
 		}
@@ -130,11 +148,32 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		long freedMemory = 0;
 		long destroyFreedMemory = 0;
 		boolean destroy = false;
-		synchronized(this) {
+		long usedBefore;
+		long grantedBefore;
+		long targetBefore;
+			synchronized(this) {
+				if(bytes < 0)
+					throw new IllegalArgumentException("Cannot release negative bytes: " + bytes);
+				usedBefore = _usedBytes;
+				grantedBefore = _grantedBytes;
+				targetBefore = _targetBytes;
+				if(_usedBytes < bytes) {
+					System.out.println("[ALLOW-UNDERFLOW] allowance=" + getClass().getSimpleName() + "@"
+						+ System.identityHashCode(this) + " release=" + bytes + " used=" + _usedBytes
+						+ " granted=" + _grantedBytes + " target=" + _targetBytes + " shutdown=" + _shutdown
+						+ " destroyed=" + _destroyed);
+					throw new IllegalArgumentException("Memory allowance underflow in " + getClass().getSimpleName()
+						+ ": release=" + bytes + ", used=" + _usedBytes + ", granted=" + _grantedBytes
+						+ ", target=" + _targetBytes + ", shutdown=" + _shutdown + ", destroyed=" + _destroyed);
+				}
 			_usedBytes -= bytes;
 			if(_shutdown) {
 				long oldGrantedBytes = _grantedBytes;
 				_grantedBytes = _usedBytes;
+				if(_grantedBytes < 0) {
+					throw new IllegalArgumentException("Granted memory underflow in " + getClass().getSimpleName()
+						+ ": granted=" + _grantedBytes + ", used=" + _usedBytes + ", released=" + bytes);
+				}
 				if(_usedBytes == 0) {
 					_destroyed = true;
 					destroy = true;
@@ -149,6 +188,11 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				_grantedBytes = Math.max(_usedBytes, _targetBytes);
 				freedMemory = oldGrantedBytes - _grantedBytes;
 			}
+			System.out.println("[ALLOW-RELEASE] allowance=" + dbgId() + " bytes=" + bytes
+				+ " used=" + usedBefore + "->" + _usedBytes
+				+ " granted=" + grantedBefore + "->" + _grantedBytes
+				+ " target=" + targetBefore + " shutdown=" + _shutdown + " destroyed=" + _destroyed
+				+ " freedMemory=" + freedMemory + " destroy=" + destroy);
 			notifyAll();
 		}
 		if(destroy)
@@ -176,7 +220,10 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	public synchronized void setTargetMemory(long targetMemory) {
 		if(_shutdown || _destroyed)
 			return;
+		long oldTarget = _targetBytes;
 		_targetBytes = Math.min(targetMemory, _consumptionLimit);
+		System.out.println("[ALLOW-TARGET] allowance=" + dbgId() + " target=" + oldTarget + "->" + _targetBytes
+			+ " used=" + _usedBytes + " granted=" + _grantedBytes);
 		notifyAll();
 	}
 
@@ -188,6 +235,8 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		synchronized(this) {
 			if(_shutdown || _destroyed)
 				return;
+			System.out.println("[ALLOW-SHUTDOWN-BEGIN] allowance=" + dbgId() + " used=" + _usedBytes
+				+ " granted=" + _grantedBytes + " target=" + _targetBytes);
 			_shutdown = true;
 			long oldGrantedBytes = _grantedBytes;
 			_grantedBytes = _usedBytes;
@@ -202,6 +251,9 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			}
 			notifyAll();
 		}
+		System.out.println("[ALLOW-SHUTDOWN-END] allowance=" + dbgId() + " used=" + _usedBytes
+			+ " granted=" + _grantedBytes + " target=" + _targetBytes + " destroy=" + destroy
+			+ " freedMemory=" + freedMemory + " destroyFreed=" + destroyFreedMemory);
 		_broker.shutdownAllowance(this);
 		if(destroy)
 			_broker.destroyAllowance(this, destroyFreedMemory);
@@ -213,5 +265,9 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	@Override
 	public boolean isShutdown() {
 		return _shutdown || _destroyed;
+	}
+
+	private String dbgId() {
+		return getClass().getSimpleName() + "@" + System.identityHashCode(this);
 	}
 }

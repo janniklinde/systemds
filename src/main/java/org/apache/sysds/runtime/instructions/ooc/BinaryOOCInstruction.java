@@ -65,16 +65,16 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 	protected void processMatrixMatrixInstruction(ExecutionContext ec) {
 		MatrixObject m1 = ec.getMatrixObject(input1);
 		MatrixObject m2 = ec.getMatrixObject(input2);
+		OOCStreamable<IndexedMatrixValue> sIn1 = m1.getStreamable();
+		OOCStreamable<IndexedMatrixValue> sIn2 = m2.getStreamable();
 
-		OOCStream<IndexedMatrixValue> qIn1 = m1.getStreamHandle();
-		OOCStream<IndexedMatrixValue> qIn2 = m2.getStreamHandle();
 		OOCStream<IndexedMatrixValue> qOut = new SubscribableTaskQueue<>();
 		ec.getMatrixObject(output).setStreamHandle(qOut);
-		qIn1.setDownstreamMessageRelay(qOut::messageDownstream);
-		qIn2.setDownstreamMessageRelay(qOut::messageDownstream);
+		sIn1.setDownstreamMessageRelay(qOut::messageDownstream);
+		sIn2.setDownstreamMessageRelay(qOut::messageDownstream);
 		qOut.setUpstreamMessageRelay(msg -> {
-			qIn1.messageUpstream(msg.split());
-			qIn2.messageUpstream(msg.split());
+			sIn1.messageUpstream(msg.split());
+			sIn2.messageUpstream(msg.split());
 		});
 
 		final boolean known1 = (m1.getNumRows() >= 0 && m1.getNumColumns() >= 0);
@@ -89,6 +89,8 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 					+ m1.getNumColumns() + ", " + input2.getName() + "=" + m2.getNumRows() + "x"
 					+ m2.getNumColumns());
 			}
+			OOCStream<IndexedMatrixValue> qIn1 = m1.getStreamHandle();
+			OOCStream<IndexedMatrixValue> qIn2 = m2.getStreamHandle();
 			joinOOC(qIn1, qIn2, qOut, (tmp1, tmp2) -> {
 				IndexedMatrixValue tmpOut = new IndexedMatrixValue();
 				tmpOut.set(tmp1.getIndexes(),
@@ -100,6 +102,23 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 
 		boolean isColBroadcast = m1.getNumColumns() > 1 && m2.getNumColumns() == 1;
 		boolean isRowBroadcast = m1.getNumRows() > 1 && m2.getNumRows() == 1;
+
+		if(!isColBroadcast && !isRowBroadcast) {
+			if (m1.getNumColumns() != m2.getNumColumns() || m1.getNumRows() != m2.getNumRows())
+				throw new NotImplementedException("Invalid dimensions for matrix-matrix binary op: "
+					+ m1.getNumRows() + "x" + m1.getNumColumns() + " <=> "
+					+ m2.getNumRows() + "x" + m2.getNumColumns());
+
+			if(OOC_NEW_SYSTEM) {
+				OOCInstructionUtils.equiJoin(List.of(sIn1, sIn2), qOut, pair -> {
+					return pair.get(0).binaryOperations((BinaryOperator)_optr, pair.get(1));
+				}, getContext().addOutStream(qOut));
+				return;
+			}
+		}
+
+		OOCStream<IndexedMatrixValue> qIn1 = m1.getStreamHandle();
+		OOCStream<IndexedMatrixValue> qIn2 = m2.getStreamHandle();
 
 		if (isColBroadcast && !isRowBroadcast) {
 			final long maxProcessesPerBroadcast = (m1.getNumColumns() + m1.getBlocksize() - 1) / m1.getBlocksize();
@@ -130,18 +149,6 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 			}, tmp -> tmp.getIndexes().getColumnIndex());
 		}
 		else {
-			if (m1.getNumColumns() != m2.getNumColumns() || m1.getNumRows() != m2.getNumRows())
-				throw new NotImplementedException("Invalid dimensions for matrix-matrix binary op: "
-					+ m1.getNumRows() + "x" + m1.getNumColumns() + " <=> "
-					+ m2.getNumRows() + "x" + m2.getNumColumns());
-
-			if(OOC_NEW_SYSTEM) {
-				OOCInstructionUtils.equiJoin(List.of(qIn1, qIn2), qOut, pair -> {
-					return pair.get(0).binaryOperations((BinaryOperator)_optr, pair.get(1));
-				}, getContext().addInStream(qIn1, qIn2).addOutStream(qOut));
-				return;
-			}
-
 			joinOOC(qIn1, qIn2, qOut, (tmp1, tmp2) -> {
 				IndexedMatrixValue tmpOut = new IndexedMatrixValue();
 				tmpOut.set(tmp1.getIndexes(),
@@ -159,17 +166,21 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 
 		//create thread and process binary operation
 		MatrixObject min = ec.getMatrixObject(input1.isMatrix() ? input1 : input2);
-		OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 		ec.getMatrixObject(output).setStreamHandle(qOut);
-		qIn.setDownstreamMessageRelay(qOut::messageDownstream);
-		qOut.setUpstreamMessageRelay(qIn::messageUpstream);
 
 		if(OOC_NEW_SYSTEM) {
-			OOCInstructionUtils.equiMap(qIn, qOut, mb -> mb.scalarOperations(sc_op, new MatrixBlock()),
+			OOCStreamable<IndexedMatrixValue> sIn = min.getStreamable();
+			sIn.setDownstreamMessageRelay(qOut::messageDownstream);
+			qOut.setUpstreamMessageRelay(sIn::messageUpstream);
+			OOCInstructionUtils.equiMap(sIn, qOut, mb -> mb.scalarOperations(sc_op, new MatrixBlock()),
 				getContext().addOutStream(qOut));
 			return;
 		}
+
+		OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
+		qIn.setDownstreamMessageRelay(qOut::messageDownstream);
+		qOut.setUpstreamMessageRelay(qIn::messageUpstream);
 
 		mapOOC(qIn, qOut, tmp -> {
 			IndexedMatrixValue tmpOut = new IndexedMatrixValue();

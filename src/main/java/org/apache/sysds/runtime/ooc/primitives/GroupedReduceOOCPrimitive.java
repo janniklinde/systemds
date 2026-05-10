@@ -56,7 +56,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		super(inputPrimitive == null ? List.of() : List.of(inputPrimitive));
 		if(accumulatorsPerGroup <= 0)
 			throw new IllegalArgumentException("Number of accumulators per group must be positive.");
-		_inputStreamable = inputStreamable;
+		_inputStreamable = reserveLazyHandle(inputStreamable);
 		_outputStreamable = outputStreamable;
 		_grouping = grouping;
 		_accumulatorsPerGroup = accumulatorsPerGroup;
@@ -70,7 +70,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		OOCStreamable<IndexedMatrixValue> outputStreamable, Grouping grouping, int accumulatorsPerGroup,
 		Function<MatrixBlock, MatrixBlock> partialFn, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> mergeFn,
 		Function<MatrixBlock, MatrixBlock> finalizeFn, StreamContext sc) {
-		this(inputStreamable == null ? null : inputStreamable.getPrimitive(), inputStreamable, outputStreamable,
+		this(safePrimitive(inputStreamable), inputStreamable, outputStreamable,
 			grouping, accumulatorsPerGroup, partialFn, mergeFn, finalizeFn, sc);
 	}
 
