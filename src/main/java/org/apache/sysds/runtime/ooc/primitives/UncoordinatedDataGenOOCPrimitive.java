@@ -103,27 +103,30 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 
 		new Thread(OOCInstructionUtils.oocTask(() -> {
 			while(!_shutdown) {
-				topUpBudget(targetAlloc);
+				if(_startsRegion)
+					topUpBudget(targetAlloc);
 				_bulkProducer.accept(targetAlloc);
 			}
-			long remaining = _remainingBudget.getAndSet(0);
-			if(remaining < 0)
-				throw new IllegalArgumentException("Negative remaining budget: " + remaining);
-			_allowance.release(remaining);
+			if(_startsRegion) {
+				long remaining = _remainingBudget.getAndSet(0);
+				if(remaining < 0)
+					throw new IllegalArgumentException("Negative remaining budget: " + remaining);
+				_allowance.release(remaining);
+			}
 			finish();
 		}, new CompletableFuture<>(), _sc)).start();
 	}
 
 	public void emit(IndexedMatrixValue imv) {
 		long newMem = _allocFn.applyAsLong(imv.getIndexes());
-		consumeBudget(newMem);
+		if(_startsRegion)
+			consumeBudget(newMem);
 
 		if(_crossBoundaries) {
 			_out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, newMem));
 			return;
 		}
 		_out.enqueue(imv);
-		_allowance.release(newMem);
 	}
 
 	public void emit(IndexedMatrixValue imv, OOCIOHandler.SourceBlockDescriptor desc) {

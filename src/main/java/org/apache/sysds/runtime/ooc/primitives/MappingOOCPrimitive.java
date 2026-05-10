@@ -102,35 +102,23 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 		final OOCStream<IndexedMatrixValue> in = _inputStreamable.getReadStream();
 		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
 
-		if(_crossBoundaries) {
-			OOCInstructionUtils.submitOOCTasks(in, cb -> {
-				InMemoryQueueCallback cbOut;
-				try(cb) {
-					var imv = new IndexedMatrixValue(cb.get().getIndexes(),
-						_fn.apply((MatrixBlock) cb.get().getValue()));
-					long bytes = _allocFn.applyAsLong(cb.get().getIndexes());
+		OOCInstructionUtils.submitOOCTasks(in, cb -> {
+			OOCStream.QueueCallback<IndexedMatrixValue> cbOut;
+			try(cb) {
+				var imv = new IndexedMatrixValue(cb.get().getIndexes(),
+					_fn.apply((MatrixBlock) cb.get().getValue()));
+				long bytes = _allocFn.applyAsLong(cb.get().getIndexes());
+				if(_startsRegion)
 					_allowance.reserveBlocking(bytes);
+				if(_crossBoundaries)
 					cbOut = new InMemoryQueueCallback(imv, null, _allowance, bytes);
-				}
-				out.enqueue(cbOut);
-			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
-				out.propagateFailure(DMLRuntimeException.of(t));
-				return null;
-			}).thenRun(() -> out.getPrimitive().onComplete());
-		}
-		else {
-			OOCInstructionUtils.submitOOCTasks(in, cb -> {
-				OOCStream.QueueCallback<IndexedMatrixValue> cbOut;
-				try(cb) {
-					var imv = new IndexedMatrixValue(cb.get().getIndexes(),
-						_fn.apply((MatrixBlock) cb.get().getValue()));
+				else
 					cbOut = new OOCStream.SimpleQueueCallback<>(imv, null);
-				}
-				out.enqueue(cbOut);
-			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
-				out.propagateFailure(DMLRuntimeException.of(t));
-				return null;
-			}).thenRun(() -> out.getPrimitive().onComplete());
-		}
+			}
+			out.enqueue(cbOut);
+		}, _sc).thenRun(out::closeInput).exceptionally(t -> {
+			out.propagateFailure(DMLRuntimeException.of(t));
+			return null;
+		}).thenRun(() -> out.getPrimitive().onComplete());
 	}
 }

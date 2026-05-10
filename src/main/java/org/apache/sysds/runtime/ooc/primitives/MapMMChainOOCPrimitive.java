@@ -291,9 +291,10 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 
 	private OOCStream.QueueCallback<IndexedMatrixValue> outputCallback(MatrixIndexes index, MatrixBlock block) {
 		IndexedMatrixValue imv = new IndexedMatrixValue(index, block);
-		if(_crossBoundaries) {
-			long bytes = _allocFn.applyAsLong(index);
+		long bytes = _allocFn.applyAsLong(index);
+		if(_startsRegion)
 			_allowance.reserveBlocking(bytes);
+		if(_crossBoundaries) {
 			return new InMemoryQueueCallback(imv, null, _allowance, bytes);
 		}
 		return new OOCStream.SimpleQueueCallback<>(imv, null);

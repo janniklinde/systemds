@@ -90,25 +90,25 @@ public class OOCPlanner {
 	}
 
 	private static void compileRegion(List<OOCPrimitive> region) {
-		int activeCount = 0;
+		List<OOCPrimitive> activeRegion = new ArrayList<>();
 		for(OOCPrimitive primitive : region) {
 			if(!primitive.hasStartedExecution())
-				activeCount++;
+				activeRegion.add(primitive);
 		}
-		if(activeCount == 0)
+		if(activeRegion.isEmpty())
 			return;
 
 		MemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), 200_000_000);
 		ToLongFunction<MatrixIndexes> allocFn = buildAllocFn(region);
-		OOCRegionBinding binding = new OOCRegionBinding(allowance, allocFn, new AtomicInteger(activeCount));
+		OOCRegionBinding binding = new OOCRegionBinding(allowance, allocFn, new AtomicInteger(activeRegion.size()));
 
-		for(int i = 0; i < region.size(); i++) {
-			if(region.get(i).hasStartedExecution())
-				continue;
+		for(int i = 0; i < activeRegion.size(); i++) {
+			OOCPrimitive primitive = activeRegion.get(i);
 			boolean crossBoundaries = i == 0;
-			region.get(i).bindRegion(binding, crossBoundaries);
-			if(region.get(i).requiresCache()) {
-				region.get(i).bindCache(new CachedAllowance(GlobalMemoryBroker.get()));
+			boolean startsRegion = i == activeRegion.size() - 1;
+			primitive.bindRegion(binding, crossBoundaries, startsRegion);
+			if(primitive.requiresCache()) {
+				primitive.bindCache(new CachedAllowance(GlobalMemoryBroker.get()));
 			}
 		}
 	}
@@ -150,6 +150,7 @@ public class OOCPlanner {
 			&& !downstream.isMaterializationBoundary()
 			&& downstream.getChildren().size() == 1
 			&& upstream.getParents().size() == 1
+			&& !upstream.isMaterializationBoundary()
 			&& upstream.isTileLocal();
 	}
 

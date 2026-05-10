@@ -98,40 +98,26 @@ public class TransposeOOCPrimitive extends OOCPrimitive {
 		final OOCStream<IndexedMatrixValue> in = _inputStreamable.getReadStream();
 		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
 
-			if(_crossBoundaries) {
-				OOCInstructionUtils.submitOOCTasks(in, cb -> {
-					InMemoryQueueCallback cbOut;
-					try(cb) {
-						IndexedMatrixValue input = cb.get();
-						MatrixIndexes inIx = input.getIndexes();
-						MatrixIndexes outIx = new MatrixIndexes(inIx.getColumnIndex(), inIx.getRowIndex());
-						MatrixBlock outBlock = _fn.apply((MatrixBlock) input.getValue());
-						long bytes = _allocFn.applyAsLong(outIx);
-						_allowance.reserveBlocking(bytes);
-						cbOut = new InMemoryQueueCallback(new IndexedMatrixValue(outIx, outBlock), null, _allowance,
-							bytes);
-					}
-					out.enqueue(cbOut);
-				}, _sc).thenRun(out::closeInput).exceptionally(t -> {
-				out.propagateFailure(DMLRuntimeException.of(t));
-				return null;
-			}).thenRun(() -> out.getPrimitive().onComplete());
-		}
-		else {
-			OOCInstructionUtils.submitOOCTasks(in, cb -> {
-				OOCStream.QueueCallback<IndexedMatrixValue> cbOut;
-				try(cb) {
-					IndexedMatrixValue input = cb.get();
-					MatrixIndexes inIx = input.getIndexes();
-					MatrixIndexes outIx = new MatrixIndexes(inIx.getColumnIndex(), inIx.getRowIndex());
-					MatrixBlock outBlock = _fn.apply((MatrixBlock) input.getValue());
+		OOCInstructionUtils.submitOOCTasks(in, cb -> {
+			OOCStream.QueueCallback<IndexedMatrixValue> cbOut;
+			try(cb) {
+				IndexedMatrixValue input = cb.get();
+				MatrixIndexes inIx = input.getIndexes();
+				MatrixIndexes outIx = new MatrixIndexes(inIx.getColumnIndex(), inIx.getRowIndex());
+				MatrixBlock outBlock = _fn.apply((MatrixBlock) input.getValue());
+				long bytes = _allocFn.applyAsLong(outIx);
+				if(_startsRegion)
+					_allowance.reserveBlocking(bytes);
+				if(_crossBoundaries)
+					cbOut = new InMemoryQueueCallback(new IndexedMatrixValue(outIx, outBlock), null, _allowance,
+						bytes);
+				else
 					cbOut = new OOCStream.SimpleQueueCallback<>(new IndexedMatrixValue(outIx, outBlock), null);
-				}
-				out.enqueue(cbOut);
-			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
-				out.propagateFailure(DMLRuntimeException.of(t));
-				return null;
-			}).thenRun(() -> out.getPrimitive().onComplete());
-		}
+			}
+			out.enqueue(cbOut);
+		}, _sc).thenRun(out::closeInput).exceptionally(t -> {
+			out.propagateFailure(DMLRuntimeException.of(t));
+			return null;
+		}).thenRun(() -> out.getPrimitive().onComplete());
 	}
 }

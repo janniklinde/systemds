@@ -43,6 +43,7 @@ public abstract class OOCPrimitive {
 	protected MemoryAllowance _allowance;
 	protected ToLongFunction<MatrixIndexes> _allocFn;
 	protected boolean _crossBoundaries;
+	protected boolean _startsRegion;
 
 	public OOCPrimitive(List<OOCPrimitive> children) {
 		_children = new ArrayList<>();
@@ -60,11 +61,12 @@ public abstract class OOCPrimitive {
 		_pattern = OOCAccessPattern.UNSET;
 	}
 
-	public void bindRegion(OOCRegionBinding binding, boolean crossBoundaries) {
+	public void bindRegion(OOCRegionBinding binding, boolean crossBoundaries, boolean startsRegion) {
 		_regionBinding = binding;
 		_allowance = binding.allowance();
 		_allocFn = binding.allocFn();
 		_crossBoundaries = crossBoundaries;
+		_startsRegion = startsRegion;
 	}
 
 	public List<OOCPrimitive> getChildren() {

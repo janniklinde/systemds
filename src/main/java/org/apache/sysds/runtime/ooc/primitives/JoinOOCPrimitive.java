@@ -209,11 +209,11 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 			try(qL; qR) {
 				var imv = new IndexedMatrixValue(qL.get().getIndexes(),
 					_fn.apply(List.of((MatrixBlock)qL.get().getValue(), (MatrixBlock)qR.get().getValue())));
-				if(_crossBoundaries) {
-					long bytes = _allocFn.applyAsLong(imv.getIndexes());
+				long bytes = _allocFn.applyAsLong(imv.getIndexes());
+				if(_startsRegion)
 					_allowance.reserveBlocking(bytes);
+				if(_crossBoundaries)
 					out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, bytes));
-				}
 				else
 					out.enqueue(new OOCStream.SimpleQueueCallback<>(imv, null));
 			}

@@ -91,32 +91,22 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 		final OOCStream<IndexedMatrixValue> out = _outputStream.getWriteStream();
 		new Thread(() -> {
 			for(MatrixIndexes ix : OOCUtils.getAccessPattern(_outputStream.getDataCharacteristics(), _pattern)) {
-				_allowance.reserveBlocking(_allocFn.applyAsLong(ix));
+				if(_startsRegion)
+					_allowance.reserveBlocking(_allocFn.applyAsLong(ix));
 				stream.enqueue(ix);
 			}
 			stream.closeInput();
 		}).start();
 
-		if(_crossBoundaries) {
-			OOCInstructionUtils.submitOOCTasks(stream, cb -> {
-				var imv = new IndexedMatrixValue(cb.get(), _fn.apply(cb.get()));
-				var cbOut = new InMemoryQueueCallback(imv, null, _allowance, _allocFn.applyAsLong(cb.get()));
-				out.enqueue(cbOut);
-			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
-				out.propagateFailure(DMLRuntimeException.of(t));
-				return null;
-			}).thenRun(() -> out.getPrimitive().onComplete());
-		}
-		else {
-			OOCInstructionUtils.submitOOCTasks(stream, cb -> {
-				var imv = new IndexedMatrixValue(cb.get(), _fn.apply(cb.get()));
-				var cbOut = new OOCStream.SimpleQueueCallback<>(imv, null);
-				_allowance.release(_allocFn.applyAsLong(cb.get()));
-				out.enqueue(cbOut);
-			}, _sc).thenRun(out::closeInput).exceptionally(t -> {
-				out.propagateFailure(DMLRuntimeException.of(t));
-				return null;
-			}).thenRun(() -> out.getPrimitive().onComplete());
-		}
+		OOCInstructionUtils.submitOOCTasks(stream, cb -> {
+			var imv = new IndexedMatrixValue(cb.get(), _fn.apply(cb.get()));
+			if(_crossBoundaries)
+				out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, _allocFn.applyAsLong(cb.get())));
+			else
+				out.enqueue(new OOCStream.SimpleQueueCallback<>(imv, null));
+		}, _sc).thenRun(out::closeInput).exceptionally(t -> {
+			out.propagateFailure(DMLRuntimeException.of(t));
+			return null;
+		}).thenRun(() -> out.getPrimitive().onComplete());
 	}
 }
