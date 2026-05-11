@@ -23,6 +23,7 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.PlannablePlaybackOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
@@ -56,8 +57,9 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 		this._subscriberSet = new AtomicBoolean(false);
 		if(!reserved)
 			streamCache.incrSubscriberCount(1);
-		LIVE_PLAYBACKS.put(System.identityHashCode(this),
-			new DebugInfo(streamCache.toString(), creationOrigin()));
+		if(OOCDebug.DUMP_CACHE_STATE)
+			LIVE_PLAYBACKS.put(System.identityHashCode(this),
+				new DebugInfo(streamCache.toString(), creationOrigin()));
 	}
 
 	private static final class DebugInfo {
@@ -102,6 +104,8 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	}
 
 	public static String dumpLivePlaybackStreams(String streamLabel) {
+		if(!OOCDebug.DUMP_CACHE_STATE)
+			return "";
 		StringBuilder sb = new StringBuilder();
 		LIVE_PLAYBACKS.forEach((id, info) -> {
 			if(info._stream.equals(streamLabel)) {

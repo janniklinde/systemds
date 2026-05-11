@@ -31,6 +31,7 @@ import org.apache.sysds.runtime.ooc.cache.GroupedBlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
+import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.primitives.CachingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
@@ -102,7 +103,8 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		_primitive = new CachingOOCPrimitive(source, this);
 		_source.setDownstreamMessageRelay(this::messageDownstream);
 		_streamId = streamId;
-		LIVE_STREAMS.put(streamId, this);
+		if(OOCDebug.TRACK_LIVE_STATE || OOCDebug.DUMP_CACHE_STATE)
+			LIVE_STREAMS.put(streamId, this);
 		if(OOCWatchdog.WATCH) {
 			_watchdogId = "CS-" + hashCode();
 			// Capture a short context to help identify origin
@@ -317,6 +319,8 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	}
 
 	public static String dumpStreams(Iterable<Long> streamIds) {
+		if(!OOCDebug.DUMP_CACHE_STATE)
+			return "";
 		StringBuilder sb = new StringBuilder();
 		for(Long streamId : streamIds) {
 			CachingStream stream = LIVE_STREAMS.get(streamId);
@@ -778,10 +782,12 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 			_consumerConsumptionCounts.add(0);
 			if(incrConsumers) {
 				_maxConsumptionCount++;
-				_consumerRegistrations.add(debugOrigin("setSubscriber+1"));
+				if(OOCDebug.DUMP_CACHE_STATE)
+					_consumerRegistrations.add(debugOrigin("setSubscriber+1"));
 			}
 			else {
-				_consumerRegistrations.add(debugOrigin("setSubscriber+0"));
+				if(OOCDebug.DUMP_CACHE_STATE)
+					_consumerRegistrations.add(debugOrigin("setSubscriber+0"));
 			}
 			if(cacheInProgress) {
 				int newLen = _subscribers == null ? 1 : _subscribers.length + 1;
@@ -863,7 +869,8 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 			throw new IllegalStateException("Cannot increment the subscriber count if flagged for deletion");
 
 		_maxConsumptionCount += count;
-		_consumerRegistrations.add(debugOrigin("incrSubscriberCount+" + count));
+		if(OOCDebug.DUMP_CACHE_STATE)
+			_consumerRegistrations.add(debugOrigin("incrSubscriberCount+" + count));
 	}
 
 	@Override
@@ -887,7 +894,8 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 			return false;
 		_lazyHandleReservations--;
 		_maxConsumptionCount++;
-		_consumerRegistrations.add(debugOrigin("consumeLazyHandle+1"));
+		if(OOCDebug.DUMP_CACHE_STATE)
+			_consumerRegistrations.add(debugOrigin("consumeLazyHandle+1"));
 		return true;
 	}
 

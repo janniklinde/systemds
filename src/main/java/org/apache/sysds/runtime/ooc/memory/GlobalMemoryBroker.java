@@ -19,6 +19,8 @@
 
 package org.apache.sysds.runtime.ooc.memory;
 
+import org.apache.sysds.runtime.ooc.OOCDebug;
+
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
@@ -83,9 +85,10 @@ public class GlobalMemoryBroker implements MemoryBroker {
 					addOverconsumer(allowance);
 			}
 		}
-		System.out.println("[BROKER-REQUEST] allowance=" + dbgId(allowance) + " min=" + minSize + " max=" + maxSize
-			+ " granted=" + allow + " used=" + usedBefore + "->" + _usedBytes
-			+ " allowances=" + _allowances.size() + " overconsumers=" + _overconsumers.size());
+		if(OOCDebug.TRACE_HOT_PATH)
+			System.out.println("[BROKER-REQUEST] allowance=" + dbgId(allowance) + " min=" + minSize + " max=" + maxSize
+				+ " granted=" + allow + " used=" + usedBefore + "->" + _usedBytes
+				+ " allowances=" + _allowances.size() + " overconsumers=" + _overconsumers.size());
 		if(updates != null)
 			applyTargetUpdates(updates);
 		return allow;
@@ -121,9 +124,10 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			else if(allowance.getGrantedMemory() <= allowance.getTargetMemory() && allowance.getGrantedMemory() > share)
 				addOverconsumer(allowance);
 		}
-		System.out.println("[BROKER-FREE] allowance=" + dbgId(allowance) + " freed=" + freedMemory
-			+ " used=" + usedBefore + "->" + _usedBytes + " allowances=" + _allowances.size()
-			+ " overconsumers=" + _overconsumers.size());
+		if(OOCDebug.TRACE_HOT_PATH)
+			System.out.println("[BROKER-FREE] allowance=" + dbgId(allowance) + " freed=" + freedMemory
+				+ " used=" + usedBefore + "->" + _usedBytes + " allowances=" + _allowances.size()
+				+ " overconsumers=" + _overconsumers.size());
 		if(updates != null)
 			applyTargetUpdates(updates);
 	}
@@ -135,8 +139,9 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			_overconsumers.remove(allowance);
 			updates = rebalance(true);
 		}
-		System.out.println("[BROKER-SHUTDOWN] allowance=" + dbgId(allowance) + " used=" + _usedBytes
-			+ " allowances=" + _allowances.size() + " overconsumers=" + _overconsumers.size());
+		if(OOCDebug.TRACE_HOT_PATH)
+			System.out.println("[BROKER-SHUTDOWN] allowance=" + dbgId(allowance) + " used=" + _usedBytes
+				+ " allowances=" + _allowances.size() + " overconsumers=" + _overconsumers.size());
 		applyTargetUpdates(updates);
 	}
 
@@ -153,17 +158,19 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			_usedBytes -= freedMemory;
 			updates = rebalance(true);
 		}
-		System.out.println("[BROKER-DESTROY] allowance=" + dbgId(allowance) + " freed=" + freedMemory
-			+ " used=" + usedBefore + "->" + _usedBytes + " allowances=" + _allowances.size()
-			+ " overconsumers=" + _overconsumers.size());
+		if(OOCDebug.TRACE_HOT_PATH)
+			System.out.println("[BROKER-DESTROY] allowance=" + dbgId(allowance) + " freed=" + freedMemory
+				+ " used=" + usedBefore + "->" + _usedBytes + " allowances=" + _allowances.size()
+				+ " overconsumers=" + _overconsumers.size());
 		applyTargetUpdates(updates);
 	}
 
 	@Override
 	public synchronized void attachAllowance(MemoryAllowance allowance) {
 		_allowances.add(allowance);
-		System.out.println("[BROKER-ATTACH] allowance=" + dbgId(allowance) + " allowances=" + _allowances.size()
-			+ " used=" + _usedBytes + " allowed=" + _allowedBytes);
+		if(OOCDebug.TRACE_HOT_PATH)
+			System.out.println("[BROKER-ATTACH] allowance=" + dbgId(allowance) + " allowances=" + _allowances.size()
+				+ " used=" + _usedBytes + " allowed=" + _allowedBytes);
 		allowance.setTargetMemory(_allowedBytes);
 	}
 

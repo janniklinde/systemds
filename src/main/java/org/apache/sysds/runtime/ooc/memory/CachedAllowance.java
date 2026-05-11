@@ -24,15 +24,10 @@ import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
-import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
-import org.apache.sysds.runtime.ooc.cache.OOCCacheScheduler;
-import org.apache.sysds.runtime.matrix.data.MatrixBlock;
-import org.apache.sysds.runtime.matrix.data.MatrixValue;
+import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.util.OOCCacheUtils;
 
-import java.lang.ref.SoftReference;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 
@@ -63,7 +58,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	}
 
 	public void handover(OOCStream.QueueCallback<IndexedMatrixValue> callback, int index) {
-		System.out.println("[CACHE-HANDOVER-BEGIN] cache=" + dbgId() + " idx=" + index
+		OOCDebug.trace(() -> "[CACHE-HANDOVER-BEGIN] cache=" + dbgId() + " idx=" + index
 			+ " cb=" + cbId(callback) + " managed=" + callback.getManagedBytes()
 			+ " blockKey=" + callback.getBlockKey() + " backingPin=" + (callback.getBackingPin() != null));
 		OOCStream.QueueCallback<IndexedMatrixValue> owned = OOCCacheUtils.handover(callback, this).join();
@@ -87,7 +82,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			if(index > _highestPopulatedIndex)
 				_highestPopulatedIndex = index;
 		}
-		System.out.println("[CACHE-HANDOVER-END] cache=" + dbgId() + " idx=" + index
+		OOCDebug.trace(() -> "[CACHE-HANDOVER-END] cache=" + dbgId() + " idx=" + index
 			+ " root=" + cbId(root) + " slots=" + slotCount());
 		maybeScheduleHandovers(MIN_HANDOVER_BATCH);
 	}
@@ -229,7 +224,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			}
 			if(handle != null)
 				handle.close();
-			System.out.println("[CACHE-TAKE] cache=" + dbgId() + " idx=" + index
+			OOCDebug.trace(() -> "[CACHE-TAKE] cache=" + dbgId() + " idx=" + index
 				+ " returned=" + cbId(callback) + " hadLocal=" + (localToClose != null)
 				+ " hadHandle=" + (handle != null) + " slots=" + slotCount());
 			OOCCacheUtils.noteEscape(callback, "CachedAllowance.take[index=" + index + "]");
@@ -266,7 +261,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			handle.close();
 		if(reservationFuture != null)
 			reservationFuture.complete(null);
-		System.out.println("[CACHE-CLEAR] cache=" + dbgId() + " idx=" + index
+		OOCDebug.trace(() -> "[CACHE-CLEAR] cache=" + dbgId() + " idx=" + index
 			+ " hadLocal=" + (localToClose != null) + " hadHandle=" + (handle != null)
 			+ " slots=" + slotCount());
 	}
@@ -317,7 +312,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 				throw new IllegalStateException();
 			notifyAll();
 		}
-		System.out.println("[CACHE-HANDOVER-FINISHED] cache=" + dbgId() + " bytes=" + bytes
+		OOCDebug.trace(() -> "[CACHE-HANDOVER-FINISHED] cache=" + dbgId() + " bytes=" + bytes
 			+ " pending=" + _pendingHandoverBytes + " slots=" + slotCount());
 		maybeScheduleHandovers(0);
 	}
@@ -341,7 +336,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 
 		if(install) {
 			handle.close();
-			System.out.println("[CACHE-READ-INSTALL] cache=" + dbgId() + " handle=" + handle
+			OOCDebug.trace(() -> "[CACHE-READ-INSTALL] cache=" + dbgId() + " handle=" + handle
 				+ " local=" + cbId(retained) + " slots=" + slotCount());
 			return retained;
 		}
@@ -442,7 +437,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		synchronized(this) {
 			_pendingHandoverBytes += bytes;
 		}
-		System.out.println("[CACHE-SPILL-START] cache=" + dbgId() + " local=" + cbId(local)
+		OOCDebug.trace(() -> "[CACHE-SPILL-START] cache=" + dbgId() + " local=" + cbId(local)
 			+ " bytes=" + bytes + " targetKey=" + targetKey + " pending=" + _pendingHandoverBytes);
 		future.whenComplete((handle, ex) -> onSpillCompleted(entry, future, handle, ex));
 		return bytes;
@@ -452,7 +447,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		OOCCacheUtils.TileHandle handle, Throwable ex) {
 		OOCStream.QueueCallback<IndexedMatrixValue> localToClose = null;
 		OOCCacheUtils.TileHandle handleToClose = null;
-		long pendingBytes = 0;
+		long pendingBytes;
 		synchronized(entry) {
 			if(entry._spillFuture != future)
 				return;
@@ -482,8 +477,9 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		}
 		if(handleToClose != null)
 			handleToClose.close();
-		System.out.println("[CACHE-SPILL-DONE] cache=" + dbgId() + " success=" + (ex == null && handle != null)
-			+ " handle=" + handle + " hadLocal=" + (localToClose != null)
+		final var fLocalToClose = localToClose;
+		OOCDebug.trace(() -> "[CACHE-SPILL-DONE] cache=" + dbgId() + " success=" + (ex == null && handle != null)
+			+ " handle=" + handle + " hadLocal=" + (fLocalToClose != null)
 			+ " pendingBytes=" + pendingBytes + " slots=" + slotCount());
 		if(pendingBytes > 0)
 			onFinishedHandover(pendingBytes);

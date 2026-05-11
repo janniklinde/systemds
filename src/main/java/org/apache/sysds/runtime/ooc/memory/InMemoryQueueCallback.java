@@ -22,6 +22,7 @@ package org.apache.sysds.runtime.ooc.memory;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.ooc.OOCDebug;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -37,11 +38,12 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 
 	public InMemoryQueueCallback(IndexedMatrixValue result, DMLRuntimeException failure, MemoryAllowance allow,
 		long reservedBytes) {
-		String origin = creationOrigin();
+		String origin = (OOCDebug.TRACK_LIVE_STATE || OOCDebug.TRACE_HOT_PATH) ? creationOrigin() : null;
 		_handle = new CallbackHandle(result, failure, allow, reservedBytes);
-		LIVE_HANDLES.put(_handle, new DebugInfo(origin));
+		if(OOCDebug.TRACK_LIVE_STATE)
+			LIVE_HANDLES.put(_handle, new DebugInfo(origin));
 		_closed = false;
-		System.out.println("[CB-CREATE] handle=" + System.identityHashCode(_handle)
+		OOCDebug.trace(() -> "[CB-CREATE] handle=" + System.identityHashCode(_handle)
 			+ " cb=" + System.identityHashCode(this)
 			+ " bytes=" + reservedBytes
 			+ " allow=" + (allow == null ? "null" : allow.getClass().getSimpleName() + "@"
@@ -52,7 +54,7 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 	private InMemoryQueueCallback(CallbackHandle handle) {
 		_handle = handle;
 		_closed = false;
-		System.out.println("[CB-ALIAS] handle=" + System.identityHashCode(_handle)
+		OOCDebug.trace(() -> "[CB-ALIAS] handle=" + System.identityHashCode(_handle)
 			+ " cb=" + System.identityHashCode(this)
 			+ " refs=" + _handle._refCtr.get()
 			+ " allow=" + (_handle._allow == null ? "null" : _handle._allow.getClass().getSimpleName() + "@"
@@ -69,7 +71,7 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 		if(_closed)
 			throw new IllegalStateException("Cannot keep open a closed callback");
 		int oldRefs = _handle._refCtr.getAndIncrement();
-		System.out.println("[CB-KEEP] handle=" + System.identityHashCode(_handle)
+		OOCDebug.trace(() -> "[CB-KEEP] handle=" + System.identityHashCode(_handle)
 			+ " cb=" + System.identityHashCode(this)
 			+ " refs=" + oldRefs + "->" + (oldRefs + 1)
 			+ " allow=" + (_handle._allow == null ? "null" : _handle._allow.getClass().getSimpleName() + "@"
@@ -119,7 +121,7 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 			long bytes = _handle._reservedBytes;
 			if(bytes <= 0 || _handle._allow == allowance)
 				return;
-			System.out.println("[CB-TRANSFER] handle=" + System.identityHashCode(_handle)
+			OOCDebug.trace(() -> "[CB-TRANSFER] handle=" + System.identityHashCode(_handle)
 				+ " cb=" + System.identityHashCode(this)
 				+ " bytes=" + bytes
 				+ " from=" + _handle._allow.getClass().getSimpleName() + "@"
@@ -136,7 +138,7 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 				allowance.reserveBlocking(bytes);
 			_handle._allow.release(bytes);
 			_handle._allow = allowance;
-			System.out.println("[CB-TRANSFER-DONE] handle=" + System.identityHashCode(_handle)
+			OOCDebug.trace(() -> "[CB-TRANSFER-DONE] handle=" + System.identityHashCode(_handle)
 				+ " newAllow=" + _handle._allow.getClass().getSimpleName() + "@"
 				+ System.identityHashCode(_handle._allow)
 				+ " bytes=" + _handle._reservedBytes);
@@ -148,7 +150,7 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 			long bytes = _handle._reservedBytes;
 			if(bytes <= 0)
 				return 0;
-			System.out.println("[CB-RELEASE-MANAGED] handle=" + System.identityHashCode(_handle)
+			OOCDebug.trace(() -> "[CB-RELEASE-MANAGED] handle=" + System.identityHashCode(_handle)
 				+ " cb=" + System.identityHashCode(this)
 				+ " bytes=" + bytes
 				+ " allow=" + _handle._allow.getClass().getSimpleName() + "@"
@@ -166,7 +168,7 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 			if(_handle._allow != expectedAllowance)
 				throw new IllegalStateException("Unexpected memory owner for handover.");
 			long bytes = _handle._reservedBytes;
-			System.out.println("[CB-DETACH-HANDOVER] handle=" + System.identityHashCode(_handle)
+			OOCDebug.trace(() -> "[CB-DETACH-HANDOVER] handle=" + System.identityHashCode(_handle)
 				+ " cb=" + System.identityHashCode(this)
 				+ " bytes=" + bytes
 				+ " allow=" + _handle._allow.getClass().getSimpleName() + "@"
@@ -258,7 +260,7 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 					+ _reservedBytes + ", allow=" + (_allow == null ? "null" : _allow.getClass().getSimpleName())
 					+ ", cacheIdx=" + _cacheIdx + ", resultNull=" + (_result == null));
 			}
-			System.out.println("[CB-CLOSE-FINAL] handle=" + System.identityHashCode(this)
+			OOCDebug.trace(() -> "[CB-CLOSE-FINAL] handle=" + System.identityHashCode(this)
 				+ " bytes=" + _reservedBytes
 				+ " allow=" + (_allow == null ? "null" : _allow.getClass().getSimpleName() + "@"
 					+ System.identityHashCode(_allow))
@@ -269,7 +271,8 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 			_allow.release(_reservedBytes);
 			_reservedBytes = 0;
 			_cacheIdx = -1;
-			LIVE_HANDLES.remove(this);
+			if(OOCDebug.TRACK_LIVE_STATE)
+				LIVE_HANDLES.remove(this);
 		}
 	}
 
@@ -289,6 +292,8 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 	}
 
 	public static String dumpLiveHandles() {
+		if(!OOCDebug.TRACK_LIVE_STATE)
+			return "Live InMemoryQueueCallback handles tracking disabled\n";
 		StringBuilder sb = new StringBuilder();
 		ArrayList<Map.Entry<CallbackHandle, DebugInfo>> entries = new ArrayList<>(LIVE_HANDLES.entrySet());
 		entries.sort(Comparator.comparingInt(e -> System.identityHashCode(e.getKey())));
@@ -313,10 +318,12 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 	}
 
 	public static boolean hasLiveHandles() {
-		return !LIVE_HANDLES.isEmpty();
+		return OOCDebug.TRACK_LIVE_STATE && !LIVE_HANDLES.isEmpty();
 	}
 
 	public static void noteEscape(InMemoryQueueCallback cb, String escape) {
+		if(!OOCDebug.TRACK_LIVE_STATE)
+			return;
 		if(cb == null || cb._handle == null)
 			return;
 		DebugInfo info = LIVE_HANDLES.get(cb._handle);

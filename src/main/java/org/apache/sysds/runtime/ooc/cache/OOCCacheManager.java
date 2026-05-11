@@ -26,6 +26,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
@@ -38,7 +39,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -52,6 +55,8 @@ public class OOCCacheManager {
 	private static final AtomicReference<OOCIOHandler> _ioHandler;
 	private static final AtomicReference<OOCCacheScheduler> _scheduler;
 	private static final TileStoreBackend _tileStoreBackend;
+	private static final ConcurrentHashMap<Object, BackedCallbackDebugInfo> LIVE_BACKED_CALLBACKS =
+		new ConcurrentHashMap<>();
 
 	static {
 		_evictionLimit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE);
@@ -97,13 +102,17 @@ public class OOCCacheManager {
 	}
 
 	private static void dumpOutstandingMemoryState(String phase) {
+		if(!OOCDebug.DUMP_ON_RESET)
+			return;
 		GlobalMemoryBroker broker = GlobalMemoryBroker.get();
-		if(!broker.hasOutstandingUsage() && !InMemoryQueueCallback.hasLiveHandles() && !hasLiveBackedPins())
+		if(!broker.hasOutstandingUsage() && !InMemoryQueueCallback.hasLiveHandles() && !hasLiveBackedPins()
+			&& !hasLiveBackedCallbacks())
 			return;
 		System.out.println("[WARN] Outstanding OOC memory state at OOCCacheManager.reset() phase=" + phase);
 		System.out.print(broker.dumpOutstandingAllowances());
 		System.out.print(InMemoryQueueCallback.dumpLiveHandles());
 		System.out.print(dumpLiveBackedPins());
+		System.out.print(dumpLiveBackedCallbacks());
 	}
 
 	public static OOCCacheScheduler getCache() {
@@ -340,6 +349,78 @@ public class OOCCacheManager {
 		return OOCLRUCacheScheduler.dumpLiveBackedPins();
 	}
 
+	public static boolean hasLiveBackedCallbacks() {
+		return OOCDebug.TRACK_LIVE_STATE && !LIVE_BACKED_CALLBACKS.isEmpty();
+	}
+
+	public static String dumpLiveBackedCallbacks() {
+		if(!OOCDebug.TRACK_LIVE_STATE)
+			return "Live backed callbacks tracking disabled\n";
+		StringBuilder sb = new StringBuilder();
+		sb.append("Live backed callbacks: ").append(LIVE_BACKED_CALLBACKS.size()).append('\n');
+		LIVE_BACKED_CALLBACKS.entrySet().stream()
+			.sorted((l, r) -> Integer.compare(System.identityHashCode(l.getKey()), System.identityHashCode(r.getKey())))
+			.forEach(e -> {
+				BackedCallbackDebugInfo d = e.getValue();
+				sb.append("  cb=").append(System.identityHashCode(e.getKey()))
+					.append(" type=").append(d._type)
+					.append(" key=").append(d._key)
+					.append(" origin=").append(d._origin)
+					.append(" state=").append(d._state)
+					.append('\n');
+			});
+		return sb.toString();
+	}
+
+	private static void registerBackedCallback(Object cb, String type, String key) {
+		registerBackedCallback(cb, type, key, callbackOrigin());
+	}
+
+	private static void registerBackedCallback(Object cb, String type, String key, String origin) {
+		if(!OOCDebug.TRACK_LIVE_STATE)
+			return;
+		LIVE_BACKED_CALLBACKS.put(cb, new BackedCallbackDebugInfo(type, key, origin));
+	}
+
+	private static void noteBackedCallbackState(Object cb, String state) {
+		if(!OOCDebug.TRACK_LIVE_STATE)
+			return;
+		BackedCallbackDebugInfo info = LIVE_BACKED_CALLBACKS.get(cb);
+		if(info != null)
+			info._state = state;
+	}
+
+	private static void unregisterBackedCallback(Object cb) {
+		if(!OOCDebug.TRACK_LIVE_STATE)
+			return;
+		LIVE_BACKED_CALLBACKS.remove(cb);
+	}
+
+	private static String callbackOrigin() {
+		StackTraceElement[] st = new Exception().getStackTrace();
+		for(int i = 2; i < st.length; i++) {
+			String cls = st[i].getClassName();
+			if(!cls.startsWith(OOCCacheManager.class.getName())
+				&& !cls.startsWith(CompletableFuture.class.getName()))
+				return cls + ":" + st[i].getLineNumber();
+		}
+		return "unknown";
+	}
+
+	private static final class BackedCallbackDebugInfo {
+		private final String _type;
+		private final String _key;
+		private final String _origin;
+		private volatile String _state;
+
+		private BackedCallbackDebugInfo(String type, String key, String origin) {
+			_type = type;
+			_key = key;
+			_origin = origin;
+			_state = "open";
+		}
+	}
+
 	public static OOCCacheScheduler.HandoverHandle handover(BlockKey key, InMemoryQueueCallback callback) {
 		return getCache().handover(key, callback);
 	}
@@ -368,10 +449,16 @@ public class OOCCacheManager {
 
 		@SuppressWarnings("unchecked")
 		BackedCachedQueueCallback(OOCCacheScheduler.AllowanceBackedPin pin, DMLRuntimeException failure) {
+			this(pin, failure, callbackOrigin());
+		}
+
+		@SuppressWarnings("unchecked")
+		BackedCachedQueueCallback(OOCCacheScheduler.AllowanceBackedPin pin, DMLRuntimeException failure, String origin) {
 			_pin = pin;
 			_data = (T)pin.getEntry().getData();
 			_failure = failure;
 			_pinned = new AtomicBoolean(true);
+			registerBackedCallback(this, "BackedCachedQueueCallback", String.valueOf(pin.getKey()), origin);
 		}
 
 		@Override
@@ -387,7 +474,9 @@ public class OOCCacheManager {
 		public OOCStream.QueueCallback<T> keepOpen() {
 			if(!_pinned.get())
 				throw new IllegalStateException("Cannot keep open an already closed callback");
-			return new BackedCachedQueueCallback<>(_pin.keepOpen(), _failure);
+			String aliasOrigin = callbackOrigin();
+			noteBackedCallbackState(this, "aliased-by@" + aliasOrigin);
+			return new BackedCachedQueueCallback<>(_pin.keepOpen(), _failure, aliasOrigin);
 		}
 
 		@Override
@@ -451,6 +540,7 @@ public class OOCCacheManager {
 			if(_pinned.compareAndSet(true, false)) {
 				_data = null;
 				_pin.close();
+				unregisterBackedCallback(this);
 			}
 		}
 
@@ -472,10 +562,16 @@ public class OOCCacheManager {
 		private final int _groupIndex;
 
 		BackedCachedSubCallback(BackedCachedGroupCallback<T> parent, T data, int groupIndex) {
+			this(parent, data, groupIndex, callbackOrigin());
+		}
+
+		BackedCachedSubCallback(BackedCachedGroupCallback<T> parent, T data, int groupIndex, String origin) {
 			_parent = parent;
 			_data = data;
 			_groupIndex = groupIndex;
 			_pinned = new AtomicBoolean(true);
+			registerBackedCallback(this, "BackedCachedSubCallback",
+				parent.getBlockKey() + "#" + groupIndex, origin);
 		}
 
 		@Override
@@ -488,7 +584,9 @@ public class OOCCacheManager {
 		@Override
 		public OOCStream.QueueCallback<T> keepOpen() {
 			_parent.registerQueueCallback();
-			return new BackedCachedSubCallback<>(_parent, _data, _groupIndex);
+			String aliasOrigin = callbackOrigin();
+			noteBackedCallbackState(this, "aliased-by@" + aliasOrigin);
+			return new BackedCachedSubCallback<>(_parent, _data, _groupIndex, aliasOrigin);
 		}
 
 		@Override
@@ -496,6 +594,7 @@ public class OOCCacheManager {
 			if(_pinned.compareAndSet(true, false)) {
 				_data = null;
 				_parent.close();
+				unregisterBackedCallback(this);
 			}
 		}
 
@@ -541,17 +640,25 @@ public class OOCCacheManager {
 
 		@SuppressWarnings("unchecked")
 		BackedCachedGroupCallback(OOCCacheScheduler.AllowanceBackedPin pin, DMLRuntimeException failure) {
+			this(pin, failure, callbackOrigin());
+		}
+
+		@SuppressWarnings("unchecked")
+		BackedCachedGroupCallback(OOCCacheScheduler.AllowanceBackedPin pin, DMLRuntimeException failure, String origin) {
 			_pin = pin;
 			_data = (List<T>)pin.getEntry().getData();
 			_failure = failure;
 			_pinCounter = new AtomicInteger(1);
+			registerBackedCallback(this, "BackedCachedGroupCallback", String.valueOf(pin.getKey()), origin);
 		}
 
 		public OOCStream.QueueCallback<T> getCallback(int idx) {
 			if(_pinCounter.get() <= 0)
 				throw new IllegalStateException("Cannot open sub-callback on a closed GroupCallback");
 			registerQueueCallback();
-			return new BackedCachedSubCallback<>(this, _data.get(idx), idx);
+			String subOrigin = callbackOrigin();
+			noteBackedCallbackState(this, "subcallback-opened@" + subOrigin);
+			return new BackedCachedSubCallback<>(this, _data.get(idx), idx, subOrigin);
 		}
 
 		public void registerQueueCallback() {
@@ -577,7 +684,9 @@ public class OOCCacheManager {
 		public OOCStream.QueueCallback<T> keepOpen() {
 			if(_pinCounter.get() <= 0)
 				throw new IllegalStateException("Cannot keep open an already closed callback");
-			return new BackedCachedGroupCallback<>(_pin.keepOpen(), _failure);
+			String aliasOrigin = callbackOrigin();
+			noteBackedCallbackState(this, "aliased-by@" + aliasOrigin);
+			return new BackedCachedGroupCallback<>(_pin.keepOpen(), _failure, aliasOrigin);
 		}
 
 		@Override
@@ -586,6 +695,7 @@ public class OOCCacheManager {
 			if(cnt == 0) {
 				_data = null;
 				_pin.close();
+				unregisterBackedCallback(this);
 			}
 		}
 

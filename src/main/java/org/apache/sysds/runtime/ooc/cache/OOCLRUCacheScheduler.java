@@ -26,6 +26,7 @@ import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
@@ -737,25 +738,27 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			cachedStreams.addAll(evictedStreams);
 			System.out.println("[WARN] Affected stream IDs: " + cachedStreams + ", Pinned: " + _cache.values().stream().mapToInt(
 				e -> e.isPinned() ? 1 : 0).sum());
-			System.out.print(CachingStream.dumpStreams(cachedStreams));
-			_cache.values().stream()
-				.sorted((l, r) -> l.getKey().compareTo(r.getKey()))
-				.forEach(e -> System.out.println("[WARN] Cache entry key=" + e.getKey()
-					+ " state=" + e.getState()
-					+ " refs=" + e.getReferenceCount()
-					+ " retainHints=" + e.getRetainHintCount()
-					+ " pins=" + e.getPinCount()
-					+ " backedPins=" + e.getBackedPinCount()
-					+ " hasData=" + (e.getDataUnsafe() != null)));
-			_evictionCache.values().stream()
-				.sorted((l, r) -> l.getKey().compareTo(r.getKey()))
-				.forEach(e -> System.out.println("[WARN] Eviction entry key=" + e.getKey()
-					+ " state=" + e.getState()
-					+ " refs=" + e.getReferenceCount()
-					+ " retainHints=" + e.getRetainHintCount()
-					+ " pins=" + e.getPinCount()
-					+ " backedPins=" + e.getBackedPinCount()
-					+ " hasData=" + (e.getDataUnsafe() != null)));
+			if(OOCDebug.DUMP_CACHE_STATE) {
+				System.out.print(CachingStream.dumpStreams(cachedStreams));
+				_cache.values().stream()
+					.sorted((l, r) -> l.getKey().compareTo(r.getKey()))
+					.forEach(e -> System.out.println("[WARN] Cache entry key=" + e.getKey()
+						+ " state=" + e.getState()
+						+ " refs=" + e.getReferenceCount()
+						+ " retainHints=" + e.getRetainHintCount()
+						+ " pins=" + e.getPinCount()
+						+ " backedPins=" + e.getBackedPinCount()
+						+ " hasData=" + (e.getDataUnsafe() != null)));
+				_evictionCache.values().stream()
+					.sorted((l, r) -> l.getKey().compareTo(r.getKey()))
+					.forEach(e -> System.out.println("[WARN] Eviction entry key=" + e.getKey()
+						+ " state=" + e.getState()
+						+ " refs=" + e.getReferenceCount()
+						+ " retainHints=" + e.getRetainHintCount()
+						+ " pins=" + e.getPinCount()
+						+ " backedPins=" + e.getBackedPinCount()
+						+ " hasData=" + (e.getDataUnsafe() != null)));
+			}
 		}
 		_cache.clear();
 		_evictionCache.clear();
@@ -1642,10 +1645,12 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	}
 
 	public static boolean hasLiveBackedPins() {
-		return !BackedPinHandle.LIVE_BACKED_PINS.isEmpty();
+		return OOCDebug.TRACK_LIVE_STATE && !BackedPinHandle.LIVE_BACKED_PINS.isEmpty();
 	}
 
 	public static String dumpLiveBackedPins() {
+		if(!OOCDebug.TRACK_LIVE_STATE)
+			return "Live backed pins tracking disabled\n";
 		StringBuilder sb = new StringBuilder();
 		sb.append("Live backed pins: ").append(BackedPinHandle.LIVE_BACKED_PINS.size()).append('\n');
 		BackedPinHandle.LIVE_BACKED_PINS.entrySet().stream()
@@ -1694,7 +1699,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			_logicalBytes = logicalBytes;
 			_refCount = 1;
 			_released = false;
-			LIVE_BACKED_PINS.put(this, new BackedPinDebugInfo(pinOrigin()));
+			if(OOCDebug.TRACK_LIVE_STATE)
+				LIVE_BACKED_PINS.put(this, new BackedPinDebugInfo(pinOrigin()));
 		}
 
 		private synchronized void retain() {
@@ -1704,6 +1710,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		}
 
 		private static void noteEscape(BackedPinHandle handle, String escape) {
+			if(!OOCDebug.TRACK_LIVE_STATE)
+				return;
 			BackedPinDebugInfo info = LIVE_BACKED_PINS.get(handle);
 			if(info != null)
 				info._lastEscape = escape;
@@ -1734,7 +1742,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 			if(!finalRelease)
 				return;
-			LIVE_BACKED_PINS.remove(this);
+			if(OOCDebug.TRACK_LIVE_STATE)
+				LIVE_BACKED_PINS.remove(this);
 
 			RuntimeException releaseFailure = null;
 			try {

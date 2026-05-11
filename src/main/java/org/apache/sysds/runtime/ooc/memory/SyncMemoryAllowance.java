@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.ooc.memory;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.ooc.OOCDebug;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -49,7 +50,8 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		_destroyed = false;
 		_waiter = Executors.newSingleThreadExecutor();
 		broker.attachAllowance(this);
-		System.out.println("[ALLOW-INIT] allowance=" + dbgId() + " limit=" + _consumptionLimit);
+		if(OOCDebug.TRACE_HOT_PATH)
+			System.out.println("[ALLOW-INIT] allowance=" + dbgId() + " limit=" + _consumptionLimit);
 	}
 
 	@Override
@@ -69,9 +71,10 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				grantedBefore = _grantedBytes;
 				targetBefore = _targetBytes;
 				_usedBytes += bytes;
-				System.out.println("[ALLOW-RESERVE-FAST] allowance=" + dbgId() + " bytes=" + bytes
-					+ " used=" + usedBefore + "->" + _usedBytes + " granted=" + grantedBefore
-					+ " target=" + targetBefore);
+				if(OOCDebug.TRACE_HOT_PATH)
+					System.out.println("[ALLOW-RESERVE-FAST] allowance=" + dbgId() + " bytes=" + bytes
+						+ " used=" + usedBefore + "->" + _usedBytes + " granted=" + grantedBefore
+						+ " target=" + targetBefore);
 				return true;
 			}
 			minRequest = _usedBytes + bytes - _grantedBytes;
@@ -96,11 +99,12 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 					_usedBytes += bytes;
 					success = true;
 				}
-				System.out.println("[ALLOW-RESERVE-SLOW] allowance=" + dbgId() + " bytes=" + bytes
-					+ " brokerGranted=" + granted + " success=" + success
-					+ " used=" + usedBefore + "->" + _usedBytes
-					+ " granted=" + grantedBefore + "->" + _grantedBytes
-					+ " target=" + targetBefore);
+				if(OOCDebug.TRACE_HOT_PATH)
+					System.out.println("[ALLOW-RESERVE-SLOW] allowance=" + dbgId() + " bytes=" + bytes
+						+ " brokerGranted=" + granted + " success=" + success
+						+ " used=" + usedBefore + "->" + _usedBytes
+						+ " granted=" + grantedBefore + "->" + _grantedBytes
+						+ " target=" + targetBefore);
 				notifyAll();
 			}
 		}
@@ -158,10 +162,11 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				grantedBefore = _grantedBytes;
 				targetBefore = _targetBytes;
 				if(_usedBytes < bytes) {
-					System.out.println("[ALLOW-UNDERFLOW] allowance=" + getClass().getSimpleName() + "@"
-						+ System.identityHashCode(this) + " release=" + bytes + " used=" + _usedBytes
-						+ " granted=" + _grantedBytes + " target=" + _targetBytes + " shutdown=" + _shutdown
-						+ " destroyed=" + _destroyed);
+					if(OOCDebug.TRACE_HOT_PATH)
+						System.out.println("[ALLOW-UNDERFLOW] allowance=" + getClass().getSimpleName() + "@"
+							+ System.identityHashCode(this) + " release=" + bytes + " used=" + _usedBytes
+							+ " granted=" + _grantedBytes + " target=" + _targetBytes + " shutdown=" + _shutdown
+							+ " destroyed=" + _destroyed);
 					throw new IllegalArgumentException("Memory allowance underflow in " + getClass().getSimpleName()
 						+ ": release=" + bytes + ", used=" + _usedBytes + ", granted=" + _grantedBytes
 						+ ", target=" + _targetBytes + ", shutdown=" + _shutdown + ", destroyed=" + _destroyed);
@@ -188,11 +193,12 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				_grantedBytes = Math.max(_usedBytes, _targetBytes);
 				freedMemory = oldGrantedBytes - _grantedBytes;
 			}
-			System.out.println("[ALLOW-RELEASE] allowance=" + dbgId() + " bytes=" + bytes
-				+ " used=" + usedBefore + "->" + _usedBytes
-				+ " granted=" + grantedBefore + "->" + _grantedBytes
-				+ " target=" + targetBefore + " shutdown=" + _shutdown + " destroyed=" + _destroyed
-				+ " freedMemory=" + freedMemory + " destroy=" + destroy);
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[ALLOW-RELEASE] allowance=" + dbgId() + " bytes=" + bytes
+					+ " used=" + usedBefore + "->" + _usedBytes
+					+ " granted=" + grantedBefore + "->" + _grantedBytes
+					+ " target=" + targetBefore + " shutdown=" + _shutdown + " destroyed=" + _destroyed
+					+ " freedMemory=" + freedMemory + " destroy=" + destroy);
 			notifyAll();
 		}
 		if(destroy)
@@ -222,8 +228,9 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			return;
 		long oldTarget = _targetBytes;
 		_targetBytes = Math.min(targetMemory, _consumptionLimit);
-		System.out.println("[ALLOW-TARGET] allowance=" + dbgId() + " target=" + oldTarget + "->" + _targetBytes
-			+ " used=" + _usedBytes + " granted=" + _grantedBytes);
+		if(OOCDebug.TRACE_HOT_PATH)
+			System.out.println("[ALLOW-TARGET] allowance=" + dbgId() + " target=" + oldTarget + "->" + _targetBytes
+				+ " used=" + _usedBytes + " granted=" + _grantedBytes);
 		notifyAll();
 	}
 
@@ -235,8 +242,9 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		synchronized(this) {
 			if(_shutdown || _destroyed)
 				return;
-			System.out.println("[ALLOW-SHUTDOWN-BEGIN] allowance=" + dbgId() + " used=" + _usedBytes
-				+ " granted=" + _grantedBytes + " target=" + _targetBytes);
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[ALLOW-SHUTDOWN-BEGIN] allowance=" + dbgId() + " used=" + _usedBytes
+					+ " granted=" + _grantedBytes + " target=" + _targetBytes);
 			_shutdown = true;
 			long oldGrantedBytes = _grantedBytes;
 			_grantedBytes = _usedBytes;
@@ -251,9 +259,10 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			}
 			notifyAll();
 		}
-		System.out.println("[ALLOW-SHUTDOWN-END] allowance=" + dbgId() + " used=" + _usedBytes
-			+ " granted=" + _grantedBytes + " target=" + _targetBytes + " destroy=" + destroy
-			+ " freedMemory=" + freedMemory + " destroyFreed=" + destroyFreedMemory);
+		if(OOCDebug.TRACE_HOT_PATH)
+			System.out.println("[ALLOW-SHUTDOWN-END] allowance=" + dbgId() + " used=" + _usedBytes
+				+ " granted=" + _grantedBytes + " target=" + _targetBytes + " destroy=" + destroy
+				+ " freedMemory=" + freedMemory + " destroyFreed=" + destroyFreedMemory);
 		_broker.shutdownAllowance(this);
 		if(destroy)
 			_broker.destroyAllowance(this, destroyFreedMemory);
