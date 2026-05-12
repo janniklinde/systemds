@@ -19,7 +19,6 @@
 
 package org.apache.sysds.runtime.ooc.util;
 
-import org.apache.commons.lang3.NotImplementedException;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;

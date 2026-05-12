@@ -43,8 +43,10 @@ import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.runtime.util.IndexRange;
 import shaded.parquet.it.unimi.dsi.fastutil.ints.IntArrayList;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -66,7 +68,7 @@ import java.util.function.ToLongFunction;
 
 	public static final IDSequence _streamSeq = new IDSequence();
 	private static final ConcurrentHashMap<Long, CachingStream> LIVE_STREAMS = new ConcurrentHashMap<>();
-	private static final long DEFAULT_READ_WINDOW_BYTES = 40_000_000L;
+	private static final int DEFAULT_ALLOWANCE_REPLAY_INFLIGHT = 8;
 
 	// original live stream
 	private final OOCStream<IndexedMatrixValue> _source;
@@ -772,24 +774,25 @@ import java.util.function.ToLongFunction;
 
 	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers,
 		MemoryAllowance readAllowance, ToLongFunction<MatrixIndexes> allocFn) {
-		setSubscriber(subscriber, incrConsumers, false, readAllowance, allocFn, DEFAULT_READ_WINDOW_BYTES);
+		setSubscriber(subscriber, incrConsumers, false, readAllowance, allocFn);
 	}
 
 	@SuppressWarnings("unchecked")
 	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers,
 		boolean bypassDeletable) {
-		setSubscriber(subscriber, incrConsumers, bypassDeletable, null, null, 0);
+		setSubscriber(subscriber, incrConsumers, bypassDeletable, null, null);
 	}
 
 	@SuppressWarnings("unchecked")
 	public void setSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean incrConsumers,
-		boolean bypassDeletable, MemoryAllowance readAllowance, ToLongFunction<MatrixIndexes> allocFn,
-		long readWindowBytes) {
+		boolean bypassDeletable, MemoryAllowance readAllowance, ToLongFunction<MatrixIndexes> allocFn) {
 		boolean allowanceBound = readAllowance != null;
+		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> sourceSubscriber = subscriber;
+		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> replaySubscriber = subscriber;
 		if(readAllowance != null) {
 			if(allocFn == null)
 				throw new IllegalArgumentException("Allocation function required for allowance-bound subscriber.");
-			subscriber = new AllowanceBoundSubscriber(subscriber, readAllowance, allocFn, readWindowBytes);
+			replaySubscriber = new AllowanceBoundSubscriber(subscriber, readAllowance, allocFn);
 		}
 		if(_deletable && !bypassDeletable)
 			throw new DMLRuntimeException("Cannot register a new subscriber on " + this + " because has been flagged for deletion");
@@ -820,13 +823,13 @@ import java.util.function.ToLongFunction;
 				if(newLen > 1)
 					System.arraycopy(_subscribers, 0, newSubscribers, 0, newLen - 1);
 
-				newSubscribers[newLen - 1] = subscriber;
+				newSubscribers[newLen - 1] = sourceSubscriber;
 				_subscribers = newSubscribers;
 			}
 		}
 
 		if(allowanceBound) {
-			Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> finalSubscriber = subscriber;
+			Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> finalSubscriber = replaySubscriber;
 			new Thread(() -> {
 				replayExistingBlocks(mNumBlocks, consumerIdx, finalSubscriber, true);
 				if(!cacheInProgress && onNoMoreTasks(consumerIdx))
@@ -834,14 +837,18 @@ import java.util.function.ToLongFunction;
 			}).start();
 		}
 		else {
-			replayExistingBlocks(mNumBlocks, consumerIdx, subscriber, false);
+			replayExistingBlocks(mNumBlocks, consumerIdx, sourceSubscriber, false);
 			if(!cacheInProgress && onNoMoreTasks(consumerIdx))
-				subscriber.accept(OOCStream.eos(_failure)); // NO_MORE_TASKS
+				sourceSubscriber.accept(OOCStream.eos(_failure)); // NO_MORE_TASKS
 		}
 	}
 
 	private void replayExistingBlocks(int mNumBlocks, int consumerIdx,
 		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, boolean sequential) {
+		if(sequential) {
+			replayExistingBlocksBounded(mNumBlocks, consumerIdx, subscriber, DEFAULT_ALLOWANCE_REPLAY_INFLIGHT);
+			return;
+		}
 		for(int i = 0; i < mNumBlocks; i++) {
 			final int idx = i;
 			int gIdx;
@@ -856,30 +863,72 @@ import java.util.function.ToLongFunction;
 				continue; // only replay grouped blocks once at the base index
 
 			BlockKey replayKey = (groupSize > 1 && groupIdx == 0) ? getEntryBlockKey(idx) : getBlockKey(i);
-			if(sequential) {
+			OOCCacheManager.requestBlock(replayKey).whenComplete((cb, r) -> {
+				if(r != null) {
+					subscriber.accept(OOCStream.eos(DMLRuntimeException.of(r)));
+					return;
+				}
 				try {
-					deliverReplayBlock(OOCCacheManager.requestBlock(replayKey).get(), idx, groupSize, consumerIdx,
-						subscriber);
+					deliverReplayBlock(cb, idx, groupSize, consumerIdx, subscriber);
 				}
 				catch(Throwable t) {
 					subscriber.accept(OOCStream.eos(DMLRuntimeException.of(t)));
-					return;
 				}
+			});
+		}
+	}
+
+	private void replayExistingBlocksBounded(int mNumBlocks, int consumerIdx,
+		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber, int maxInflight) {
+		Deque<ReplayRequest> inflight = new ArrayDeque<>(Math.max(1, maxInflight));
+		int nextIdx = 0;
+		while(true) {
+			while(inflight.size() < maxInflight && nextIdx < mNumBlocks) {
+				final int idx = nextIdx++;
+				int gIdx;
+				int gSize;
+				synchronized(this) {
+					gIdx = _groupIndices.getInt(idx);
+					gSize = _groupSizes.getInt(idx);
+				}
+				final int groupIdx = gIdx;
+				final int groupSize = gSize;
+				if(groupIdx > 0)
+					continue; // only replay grouped blocks once at the base index
+
+				BlockKey replayKey = (groupSize > 1 && groupIdx == 0) ? getEntryBlockKey(idx) : getBlockKey(idx);
+				inflight.addLast(new ReplayRequest(idx, groupSize, OOCCacheManager.requestBlock(replayKey)));
 			}
-			else {
-				OOCCacheManager.requestBlock(replayKey).whenComplete((cb, r) -> {
-					if(r != null) {
-						subscriber.accept(OOCStream.eos(DMLRuntimeException.of(r)));
-						return;
-					}
-					try {
-						deliverReplayBlock(cb, idx, groupSize, consumerIdx, subscriber);
-					}
-					catch(Throwable t) {
-						subscriber.accept(OOCStream.eos(DMLRuntimeException.of(t)));
-					}
-				});
-			}
+
+			if(inflight.isEmpty())
+				return;
+
+			if(!drainReplayRequest(inflight.removeFirst(), consumerIdx, subscriber))
+				return;
+		}
+	}
+
+	private boolean drainReplayRequest(ReplayRequest req, int consumerIdx,
+		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber) {
+		try {
+			deliverReplayBlock(req.future.get(), req.idx, req.groupSize, consumerIdx, subscriber);
+			return true;
+		}
+		catch(Throwable t) {
+			subscriber.accept(OOCStream.eos(DMLRuntimeException.of(t)));
+			return false;
+		}
+	}
+
+	private static class ReplayRequest {
+		private final int idx;
+		private final int groupSize;
+		private final CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> future;
+
+		private ReplayRequest(int idx, int groupSize, CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> future) {
+			this.idx = idx;
+			this.groupSize = groupSize;
+			this.future = future;
 		}
 	}
 
@@ -923,20 +972,27 @@ import java.util.function.ToLongFunction;
 
 	private static class AllowanceBoundSubscriber implements Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> {
 		private final Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> _subscriber;
-		private final ReadWindow _window;
+		private final MemoryAllowance _allowance;
 		private final ToLongFunction<MatrixIndexes> _allocFn;
 
 		private AllowanceBoundSubscriber(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> subscriber,
-			MemoryAllowance allowance, ToLongFunction<MatrixIndexes> allocFn, long readWindowBytes) {
+			MemoryAllowance allowance, ToLongFunction<MatrixIndexes> allocFn) {
 			_subscriber = subscriber;
-			_window = new ReadWindow(allowance, readWindowBytes);
+			_allowance = allowance;
 			_allocFn = allocFn;
 		}
 
 		@Override
 		public void accept(OOCStream.QueueCallback<IndexedMatrixValue> cb) {
 			if(cb.isEos() || cb.isFailure()) {
-				_window.close();
+				if(_allowance instanceof AutoCloseable ownedAllowance) {
+					try {
+						ownedAllowance.close();
+					}
+					catch(Exception e) {
+						throw DMLRuntimeException.of(e);
+					}
+				}
 				_subscriber.accept(cb);
 				return;
 			}
@@ -946,98 +1002,12 @@ import java.util.function.ToLongFunction;
 			}
 
 			long bytes = Math.max(0, _allocFn.applyAsLong(cb.get().getIndexes()));
-			_window.acquire(bytes);
-			OOCStream.QueueCallback<IndexedMatrixValue> wrapped = new AllowanceBoundCallback(cb, _window, bytes);
+			if(bytes > 0)
+				_allowance.reserveBlocking(bytes);
+			OOCStream.QueueCallback<IndexedMatrixValue> wrapped = new AllowanceBoundCallback(cb, _allowance, bytes);
 			try(wrapped) {
 				_subscriber.accept(wrapped);
 			}
-		}
-	}
-
-	private static class ReadWindow {
-		private final MemoryAllowance _allowance;
-		private final long _targetBytes;
-		private long _reservedBytes;
-		private long _pendingReserveBytes;
-		private long _availableBytes;
-		private boolean _closed;
-
-		private ReadWindow(MemoryAllowance allowance, long targetBytes) {
-			_allowance = allowance;
-			_targetBytes = Math.max(1, targetBytes);
-		}
-
-		private synchronized void acquire(long bytes) {
-			if(bytes <= 0)
-				return;
-			ensureCapacity(bytes);
-			while(_availableBytes < bytes && !_closed) {
-				try {
-					wait();
-				}
-				catch(InterruptedException e) {
-					throw new DMLRuntimeException(e);
-				}
-			}
-			if(_closed)
-				throw new DMLRuntimeException("Cannot acquire read allowance after subscriber close.");
-			_availableBytes -= bytes;
-		}
-
-		private void ensureCapacity(long bytes) {
-			long delta;
-			synchronized(this) {
-				long required = Math.max(_targetBytes, bytes);
-				if(_reservedBytes + _pendingReserveBytes >= required)
-					return;
-				delta = required - _reservedBytes - _pendingReserveBytes;
-				_pendingReserveBytes += delta;
-			}
-			try {
-				_allowance.reserveBlocking(delta);
-			}
-			catch(RuntimeException ex) {
-				synchronized(this) {
-					_pendingReserveBytes -= delta;
-					notifyAll();
-				}
-				throw ex;
-			}
-			synchronized(this) {
-				_pendingReserveBytes -= delta;
-				if(_closed) {
-					_allowance.release(delta);
-					return;
-				}
-				_reservedBytes += delta;
-				_availableBytes += delta;
-				notifyAll();
-			}
-		}
-
-		private synchronized void release(long bytes) {
-			if(bytes <= 0)
-				return;
-			if(_closed) {
-				_allowance.release(bytes);
-				_reservedBytes -= bytes;
-			}
-			else {
-				_availableBytes += bytes;
-			}
-			notifyAll();
-		}
-
-		private synchronized void close() {
-			if(_closed)
-				return;
-			_closed = true;
-			if(_availableBytes > 0) {
-				_allowance.release(_availableBytes);
-				_reservedBytes -= _availableBytes;
-				_availableBytes = 0;
-			}
-			notifyAll();
 		}
 	}
 
@@ -1046,8 +1016,9 @@ import java.util.function.ToLongFunction;
 		private final SharedReadHandle _handle;
 		private final AtomicBoolean _closed;
 
-		private AllowanceBoundCallback(OOCStream.QueueCallback<IndexedMatrixValue> delegate, ReadWindow window, long bytes) {
-			this(delegate, new SharedReadHandle(window, bytes));
+		private AllowanceBoundCallback(OOCStream.QueueCallback<IndexedMatrixValue> delegate, MemoryAllowance allowance,
+			long bytes) {
+			this(delegate, new SharedReadHandle(allowance, bytes));
 		}
 
 		private AllowanceBoundCallback(OOCStream.QueueCallback<IndexedMatrixValue> delegate, SharedReadHandle handle) {
@@ -1144,12 +1115,12 @@ import java.util.function.ToLongFunction;
 	}
 
 	private static class SharedReadHandle {
-		private final ReadWindow _window;
+		private final MemoryAllowance _allowance;
 		private final long _bytes;
 		private final AtomicInteger _refs = new AtomicInteger(1);
 
-		private SharedReadHandle(ReadWindow window, long bytes) {
-			_window = window;
+		private SharedReadHandle(MemoryAllowance allowance, long bytes) {
+			_allowance = allowance;
 			_bytes = bytes;
 		}
 
@@ -1159,7 +1130,7 @@ import java.util.function.ToLongFunction;
 
 		private void close() {
 			if(_refs.decrementAndGet() == 0)
-				_window.release(_bytes);
+				_allowance.release(_bytes);
 		}
 	}
 

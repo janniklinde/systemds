@@ -25,7 +25,9 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.OOCDebug;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.PlannablePlaybackOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
@@ -42,6 +44,7 @@ import java.util.function.ToLongFunction;
 
 public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	private static final ConcurrentHashMap<Integer, DebugInfo> LIVE_PLAYBACKS = new ConcurrentHashMap<>();
+	private static final long DEFAULT_PLAYBACK_ALLOWANCE_LIMIT = 50_000_000L;
 	private final CachingStream _streamCache;
 	private final PlannablePlaybackOOCPrimitive _primitive;
 	private final AtomicInteger _streamIdx;
@@ -73,6 +76,17 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 		private DebugInfo(String stream, String origin) {
 			_stream = stream;
 			_origin = origin;
+		}
+	}
+
+	static final class OwnedPlaybackAllowance extends SyncMemoryAllowance implements AutoCloseable {
+		private OwnedPlaybackAllowance(long consumptionLimit) {
+			super(GlobalMemoryBroker.get(), consumptionLimit);
+		}
+
+		@Override
+		public void close() {
+			shutdown();
 		}
 	}
 
@@ -235,7 +249,16 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 			throw new IllegalArgumentException("Subscriber cannot be set multiple times");
 		markUse("setSubscriber");
 
-		_streamCache.setSubscriber(subscriber, false, true, readAllowance, allocFn, 40_000_000L);
+		long limit = readAllowance == null ? DEFAULT_PLAYBACK_ALLOWANCE_LIMIT :
+			Math.min(Math.max(1L, readAllowance.getTargetMemory()), DEFAULT_PLAYBACK_ALLOWANCE_LIMIT);
+		OwnedPlaybackAllowance playbackAllowance = new OwnedPlaybackAllowance(limit);
+		try {
+			_streamCache.setSubscriber(subscriber, false, true, playbackAllowance, allocFn);
+		}
+		catch(RuntimeException ex) {
+			playbackAllowance.shutdown();
+			throw ex;
+		}
 	}
 
 	@Override

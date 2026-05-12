@@ -19,7 +19,6 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import org.apache.sysds.common.Opcodes;
