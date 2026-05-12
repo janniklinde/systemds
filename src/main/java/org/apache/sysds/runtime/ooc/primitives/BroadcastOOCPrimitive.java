@@ -230,12 +230,12 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 					try(var bcb = broadcast.getNow(null)) {
 						result = process(idx, bcb, cb);
 					}
-				}
-				out.enqueue(callbackOf(result, bytesToReserve));
-			}, _sc).thenRun(() -> {
-				if(inflightCtr.decrementAndGet() == 0)
-					future.complete(null);
-			});
+					}
+					out.enqueue(callbackOf(result, bytesToReserve));
+				}, _allowance, _allocFn, _sc).thenRun(() -> {
+					if(inflightCtr.decrementAndGet() == 0)
+						future.complete(null);
+				});
 			future.thenRun(intermediate::closeInput);
 			var future2 = OOCInstructionUtils.submitOOCTasks(int2, c -> {
 				var bcb = c.get()._1;

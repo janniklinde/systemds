@@ -116,7 +116,7 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 					cbOut = new OOCStream.SimpleQueueCallback<>(imv, null);
 			}
 			out.enqueue(cbOut);
-		}, _sc).thenRun(out::closeInput).exceptionally(t -> {
+		}, _allowance, _allocFn, _sc).thenRun(out::closeInput).exceptionally(t -> {
 			out.propagateFailure(DMLRuntimeException.of(t));
 			return null;
 		}).thenRun(() -> out.getPrimitive().onComplete());

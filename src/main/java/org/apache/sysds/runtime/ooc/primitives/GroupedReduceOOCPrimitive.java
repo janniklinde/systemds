@@ -155,7 +155,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 				emittedPerGroup.compareAndSet(group, 0, 1)) {
 				finalizeGroup(group, out);
 			}
-		}, _sc).thenRun(out::closeInput).exceptionally(t -> {
+		}, _allowance, _allocFn, _sc).thenRun(out::closeInput).exceptionally(t -> {
 			out.propagateFailure(DMLRuntimeException.of(t));
 			return null;
 		}).thenRun(() -> out.getPrimitive().onComplete());

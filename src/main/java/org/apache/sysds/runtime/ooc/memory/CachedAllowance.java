@@ -84,7 +84,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		}
 		OOCDebug.trace(() -> "[CACHE-HANDOVER-END] cache=" + dbgId() + " idx=" + index
 			+ " root=" + cbId(root) + " slots=" + slotCount());
-		maybeScheduleHandovers(MIN_HANDOVER_BATCH);
+		maybeScheduleHandovers();
 	}
 
 	public CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> handoverOrTakeExisting(
@@ -279,7 +279,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	@Override
 	public void setTargetMemory(long targetMemory) {
 		super.setTargetMemory(targetMemory);
-		maybeScheduleHandovers(0);
+		maybeScheduleHandovers();
 	}
 
 	public void admitBlocking(long bytes) {
@@ -287,7 +287,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		while(true) {
 			if(super.tryReserve(bytes))
 				return;
-			maybeScheduleHandovers(requestedBytes);
+			maybeScheduleHandovers();
 			if(super.tryReserve(bytes))
 				return;
 			if(_shutdown || _destroyed)
@@ -314,7 +314,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		}
 		OOCDebug.trace(() -> "[CACHE-HANDOVER-FINISHED] cache=" + dbgId() + " bytes=" + bytes
 			+ " pending=" + _pendingHandoverBytes + " slots=" + slotCount());
-		maybeScheduleHandovers(0);
+		maybeScheduleHandovers();
 	}
 
 	private OOCStream.QueueCallback<IndexedMatrixValue> installReadResult(SlotEntry entry, OOCCacheUtils.TileHandle handle,
@@ -346,10 +346,15 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		return existing;
 	}
 
-	private void maybeScheduleHandovers(long requestedBytes) {
+	private void maybeScheduleHandovers() {
+		long toEvict;
 		synchronized(this) {
+			long diff = _targetBytes - _usedBytes;
+			if(diff >= _targetBytes * 0.1)
+				return;
+			toEvict = _targetBytes / 3;
 			_handoverSchedulingRequested = true;
-			_handoverSchedulingRequestedBytes = Math.max(_handoverSchedulingRequestedBytes, requestedBytes);
+			_handoverSchedulingRequestedBytes = Math.max(_handoverSchedulingRequestedBytes, toEvict);
 			if(_handoverScheduling)
 				return;
 			_handoverScheduling = true;
@@ -362,7 +367,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 				int startIndex;
 				synchronized(this) {
 					_handoverSchedulingRequested = false;
-					effectiveRequestedBytes = Math.max(requestedBytes, _handoverSchedulingRequestedBytes);
+					effectiveRequestedBytes = Math.max(toEvict, _handoverSchedulingRequestedBytes);
 					_handoverSchedulingRequestedBytes = 0;
 					if(_shutdown || _destroyed)
 						return;
@@ -534,7 +539,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 			}
 			if(stateFuture != null)
 				stateFuture.complete(null);
-			maybeScheduleHandovers(MIN_HANDOVER_BATCH);
+			maybeScheduleHandovers();
 			return (OOCStream.QueueCallback<IndexedMatrixValue>) null;
 		}).exceptionally(ex -> {
 			Throwable cause = ex.getCause() == null ? ex : ex.getCause();

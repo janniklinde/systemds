@@ -20,12 +20,14 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheScheduler;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 import java.util.function.Consumer;
+import java.util.function.ToLongFunction;
 
 public interface OOCStream<T> extends OOCStreamable<T> {
 	static <T> QueueCallback<T> eos(DMLRuntimeException e) {
@@ -51,6 +53,11 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 	 * callback can be used to free dependent resources and close output streams.
 	 */
 	void setSubscriber(Consumer<QueueCallback<T>> subscriber);
+
+	default void setSubscriber(Consumer<QueueCallback<T>> subscriber, MemoryAllowance readAllowance,
+		ToLongFunction<MatrixIndexes> allocFn) {
+		setSubscriber(subscriber);
+	}
 
 	default void start() {
 		OOCPrimitive primitive = getPrimitive();

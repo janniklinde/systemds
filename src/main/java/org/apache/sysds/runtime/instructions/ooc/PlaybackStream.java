@@ -22,8 +22,10 @@ package org.apache.sysds.runtime.instructions.ooc;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.OOCDebug;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.PlannablePlaybackOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
@@ -36,6 +38,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.function.ToLongFunction;
 
 public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 	private static final ConcurrentHashMap<Integer, DebugInfo> LIVE_PLAYBACKS = new ConcurrentHashMap<>();
@@ -224,6 +227,15 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 		markUse("setSubscriber");
 
 		_streamCache.setSubscriber(subscriber, false, true);
+	}
+
+	public void setSubscriber(Consumer<QueueCallback<IndexedMatrixValue>> subscriber, MemoryAllowance readAllowance,
+		ToLongFunction<MatrixIndexes> allocFn) {
+		if (!_subscriberSet.compareAndSet(false, true))
+			throw new IllegalArgumentException("Subscriber cannot be set multiple times");
+		markUse("setSubscriber");
+
+		_streamCache.setSubscriber(subscriber, false, true, readAllowance, allocFn, 40_000_000L);
 	}
 
 	@Override

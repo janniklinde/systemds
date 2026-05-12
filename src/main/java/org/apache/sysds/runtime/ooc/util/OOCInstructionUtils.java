@@ -26,6 +26,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
@@ -50,6 +51,7 @@ import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.ToIntFunction;
+import java.util.function.ToLongFunction;
 
 public class OOCInstructionUtils {
 	public static final ExecutorService COMPUTE_EXECUTOR = CommonThreadPool.get();
@@ -134,25 +136,41 @@ public class OOCInstructionUtils {
 
 	public static <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues,
 		BiConsumer<Integer, OOCStream.QueueCallback<T>> consumer, StreamContext sc) {
-		return submitOOCTasks(queues, consumer, null, null, sc);
+		return submitOOCTasks(queues, consumer, null, null, null, null, sc);
 	}
 
 	public static <T> CompletableFuture<Void> submitOOCTasks(OOCStream<T> queue,
 		Consumer<OOCStream.QueueCallback<T>> consumer, StreamContext sc) {
-		return OOCInstructionUtils.submitOOCTasks(List.of(queue), (i, tmp) -> consumer.accept(tmp), null, null, sc);
+		return OOCInstructionUtils.submitOOCTasks(List.of(queue), (i, tmp) -> consumer.accept(tmp), null, null, null,
+			null, sc);
+	}
+
+	public static <T> CompletableFuture<Void> submitOOCTasks(OOCStream<T> queue,
+		Consumer<OOCStream.QueueCallback<T>> consumer, MemoryAllowance readAllowance,
+		ToLongFunction<MatrixIndexes> allocFn, StreamContext sc) {
+		return OOCInstructionUtils.submitOOCTasks(List.of(queue), (i, tmp) -> consumer.accept(tmp), null, null,
+			readAllowance, allocFn, sc);
 	}
 
 	public static <T> CompletableFuture<Void> submitOOCTasks(OOCStream<T> queue,
 		Consumer<OOCStream.QueueCallback<T>> consumer, Function<OOCStream.QueueCallback<T>, Boolean> predicate,
 		BiConsumer<Integer, OOCStream.QueueCallback<T>> onNotProcessed, StreamContext sc) {
 		return submitOOCTasks(List.of(queue), (i, tmp) -> consumer.accept(tmp), (i, tmp) -> predicate.apply(tmp),
-			onNotProcessed, sc);
+			onNotProcessed, null, null, sc);
 	}
 
 	public static <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues,
 		BiConsumer<Integer, OOCStream.QueueCallback<T>> consumer,
 		BiFunction<Integer, OOCStream.QueueCallback<T>, Boolean> predicate,
 		BiConsumer<Integer, OOCStream.QueueCallback<T>> onNotProcessed, StreamContext sc) {
+		return submitOOCTasks(queues, consumer, predicate, onNotProcessed, null, null, sc);
+	}
+
+	public static <T> CompletableFuture<Void> submitOOCTasks(final List<OOCStream<T>> queues,
+		BiConsumer<Integer, OOCStream.QueueCallback<T>> consumer,
+		BiFunction<Integer, OOCStream.QueueCallback<T>, Boolean> predicate,
+		BiConsumer<Integer, OOCStream.QueueCallback<T>> onNotProcessed, MemoryAllowance readAllowance,
+		ToLongFunction<MatrixIndexes> allocFn, StreamContext sc) {
 		sc.addInStream(queues.toArray(OOCStream[]::new));
 		if(!sc.outStreamsDefined())
 			throw new IllegalArgumentException(
@@ -182,7 +200,7 @@ public class OOCInstructionUtils {
 			final CompletableFuture<Void> localFuture = futures.get(k);
 			final AtomicBoolean closeRaceWatchdog = new AtomicBoolean(false);
 
-			queue.setSubscriber(oocTask(callback -> {
+			Consumer<OOCStream.QueueCallback<T>> subscriber = oocTask(callback -> {
 				long startTime = DMLScript.STATISTICS ? System.nanoTime() : 0;
 				try(callback) {
 					if(callback.isEos()) {
@@ -326,7 +344,8 @@ public class OOCInstructionUtils {
 						}
 					}
 				}
-			}, null, streamContext));
+			}, null, streamContext);
+			queue.setSubscriber(subscriber, readAllowance, allocFn);
 
 			i++;
 		}
