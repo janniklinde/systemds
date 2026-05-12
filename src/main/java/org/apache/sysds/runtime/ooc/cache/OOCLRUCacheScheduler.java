@@ -699,7 +699,9 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 				removeBackedStateContribution(entry);
 			}
 		}
-		onCacheSizeChanged(true);
+		// Releasing a backed pin lowers charged cache pressure, which is the signal
+		// deferred reads need in order to retry admission.
+		onCacheSizeChanged(false);
 	}
 
 	@Override
