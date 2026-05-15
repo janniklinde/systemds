@@ -372,7 +372,7 @@ public class OOCCacheManager {
 	}
 
 	private static void registerBackedCallback(Object cb, String type, String key) {
-		registerBackedCallback(cb, type, key, callbackOrigin());
+		registerBackedCallback(cb, type, key, callbackOriginIfTracking());
 	}
 
 	private static void registerBackedCallback(Object cb, String type, String key, String origin) {
@@ -404,6 +404,10 @@ public class OOCCacheManager {
 				return cls + ":" + st[i].getLineNumber();
 		}
 		return "unknown";
+	}
+
+	private static String callbackOriginIfTracking() {
+		return OOCDebug.TRACK_LIVE_STATE ? callbackOrigin() : null;
 	}
 
 	private static final class BackedCallbackDebugInfo {
@@ -448,7 +452,7 @@ public class OOCCacheManager {
 
 		@SuppressWarnings("unchecked")
 		BackedCachedQueueCallback(OOCCacheScheduler.AllowanceBackedPin pin, DMLRuntimeException failure) {
-			this(pin, failure, callbackOrigin());
+			this(pin, failure, callbackOriginIfTracking());
 		}
 
 		@SuppressWarnings("unchecked")
@@ -564,7 +568,7 @@ public class OOCCacheManager {
 		private final int _groupIndex;
 
 		BackedCachedSubCallback(BackedCachedGroupCallback<T> parent, T data, int groupIndex) {
-			this(parent, data, groupIndex, callbackOrigin());
+			this(parent, data, groupIndex, callbackOriginIfTracking());
 		}
 
 		BackedCachedSubCallback(BackedCachedGroupCallback<T> parent, T data, int groupIndex, String origin) {
@@ -645,7 +649,7 @@ public class OOCCacheManager {
 
 		@SuppressWarnings("unchecked")
 		BackedCachedGroupCallback(OOCCacheScheduler.AllowanceBackedPin pin, DMLRuntimeException failure) {
-			this(pin, failure, callbackOrigin());
+			this(pin, failure, callbackOriginIfTracking());
 		}
 
 		@SuppressWarnings("unchecked")

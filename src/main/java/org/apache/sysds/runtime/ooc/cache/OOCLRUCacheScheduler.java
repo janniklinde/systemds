@@ -79,6 +79,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private final AtomicBoolean _maintenanceRunning;
 	private final AtomicBoolean _maintenanceRequested;
 	private final AtomicBoolean _maintenanceNeedsIncr;
+	private final AtomicBoolean _maintenanceNeedsDecr;
 
 	public OOCLRUCacheScheduler(OOCIOHandler ioHandler, long evictionLimit, long hardLimit, long readBuffer) {
 		this._ioHandler = ioHandler;
@@ -107,6 +108,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		this._maintenanceRunning = new AtomicBoolean(false);
 		this._maintenanceRequested = new AtomicBoolean(false);
 		this._maintenanceNeedsIncr = new AtomicBoolean(false);
+		this._maintenanceNeedsDecr = new AtomicBoolean(false);
 		this._callerId = DMLScript.OOC_LOG_EVENTS ? OOCEventLog.registerCaller("LRUCacheScheduler") : 0;
 
 		if (DMLScript.OOC_LOG_EVENTS) {
@@ -841,6 +843,8 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private void onCacheSizeChanged(boolean incr) {
 		if(incr)
 			_maintenanceNeedsIncr.set(true);
+		else
+			_maintenanceNeedsDecr.set(true);
 		_maintenanceRequested.set(true);
 		if(!_maintenanceRunning.compareAndSet(false, true))
 			return;
@@ -853,7 +857,9 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			try {
 				do {
 					_maintenanceRequested.set(false);
-					onCacheSizeChangedInternal(_maintenanceNeedsIncr.getAndSet(false));
+					onCacheSizeChangedInternal(
+						_maintenanceNeedsIncr.getAndSet(false),
+						_maintenanceNeedsDecr.getAndSet(false));
 				} while(_maintenanceRequested.get());
 			}
 			finally {
@@ -866,10 +872,10 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		}
 	}
 
-	private void onCacheSizeChangedInternal(boolean incr) {
+	private void onCacheSizeChangedInternal(boolean incr, boolean decr) {
 		if(incr)
 			onCacheSizeIncremented();
-		else
+		if(decr)
 			while(onCacheSizeDecremented()) {}
 		while(processPendingBackingReleases()) {
 			onCacheSizeIncremented();
