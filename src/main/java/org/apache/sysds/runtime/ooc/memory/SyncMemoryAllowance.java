@@ -27,6 +27,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class SyncMemoryAllowance implements MemoryAllowance {
+	private static final long RELEASE_TRIM_BUFFER_BYTES = 20_000_000L;
+
 	protected final MemoryBroker _broker;
 	protected final long _consumptionLimit;
 	protected final ExecutorService _waiter;
@@ -155,22 +157,22 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		long usedBefore;
 		long grantedBefore;
 		long targetBefore;
-			synchronized(this) {
-				if(bytes < 0)
-					throw new IllegalArgumentException("Cannot release negative bytes: " + bytes);
-				usedBefore = _usedBytes;
-				grantedBefore = _grantedBytes;
-				targetBefore = _targetBytes;
-				if(_usedBytes < bytes) {
-					if(OOCDebug.TRACE_HOT_PATH)
-						System.out.println("[ALLOW-UNDERFLOW] allowance=" + getClass().getSimpleName() + "@"
-							+ System.identityHashCode(this) + " release=" + bytes + " used=" + _usedBytes
-							+ " granted=" + _grantedBytes + " target=" + _targetBytes + " shutdown=" + _shutdown
-							+ " destroyed=" + _destroyed);
-					throw new IllegalArgumentException("Memory allowance underflow in " + getClass().getSimpleName()
-						+ ": release=" + bytes + ", used=" + _usedBytes + ", granted=" + _grantedBytes
-						+ ", target=" + _targetBytes + ", shutdown=" + _shutdown + ", destroyed=" + _destroyed);
-				}
+		synchronized(this) {
+			if(bytes < 0)
+				throw new IllegalArgumentException("Cannot release negative bytes: " + bytes);
+			usedBefore = _usedBytes;
+			grantedBefore = _grantedBytes;
+			targetBefore = _targetBytes;
+			if(_usedBytes < bytes) {
+				if(OOCDebug.TRACE_HOT_PATH)
+					System.out.println("[ALLOW-UNDERFLOW] allowance=" + getClass().getSimpleName() + "@"
+						+ System.identityHashCode(this) + " release=" + bytes + " used=" + _usedBytes
+						+ " granted=" + _grantedBytes + " target=" + _targetBytes + " shutdown=" + _shutdown
+						+ " destroyed=" + _destroyed);
+				throw new IllegalArgumentException("Memory allowance underflow in " + getClass().getSimpleName()
+					+ ": release=" + bytes + ", used=" + _usedBytes + ", granted=" + _grantedBytes
+					+ ", target=" + _targetBytes + ", shutdown=" + _shutdown + ", destroyed=" + _destroyed);
+			}
 			_usedBytes -= bytes;
 			if(_shutdown) {
 				long oldGrantedBytes = _grantedBytes;
@@ -191,6 +193,12 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			else if(_grantedBytes > _targetBytes) {
 				long oldGrantedBytes = _grantedBytes;
 				_grantedBytes = Math.max(_usedBytes, _targetBytes);
+				freedMemory = oldGrantedBytes - _grantedBytes;
+			}
+			else if(_usedBytes * 3 < _grantedBytes * 2) {
+				long oldGrantedBytes = _grantedBytes;
+				_grantedBytes = Math.max(_usedBytes,
+					Math.min(_grantedBytes, saturatingAdd(_usedBytes, RELEASE_TRIM_BUFFER_BYTES)));
 				freedMemory = oldGrantedBytes - _grantedBytes;
 			}
 			if(OOCDebug.TRACE_HOT_PATH)
@@ -223,15 +231,33 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	}
 
 	@Override
-	public synchronized void setTargetMemory(long targetMemory) {
-		if(_shutdown || _destroyed)
-			return;
-		long oldTarget = _targetBytes;
-		_targetBytes = Math.min(targetMemory, _consumptionLimit);
-		if(OOCDebug.TRACE_HOT_PATH)
-			System.out.println("[ALLOW-TARGET] allowance=" + dbgId() + " target=" + oldTarget + "->" + _targetBytes
-				+ " used=" + _usedBytes + " granted=" + _grantedBytes);
-		notifyAll();
+	public void setTargetMemory(long targetMemory) {
+		long freedMemory = 0;
+		long oldTarget;
+		long targetAfter;
+		long usedBefore;
+		long grantedBefore;
+		synchronized(this) {
+			if(_shutdown || _destroyed)
+				return;
+			oldTarget = _targetBytes;
+			usedBefore = _usedBytes;
+			grantedBefore = _grantedBytes;
+			_targetBytes = Math.min(targetMemory, _consumptionLimit);
+			targetAfter = _targetBytes;
+			if(_grantedBytes > _targetBytes) {
+				long oldGrantedBytes = _grantedBytes;
+				_grantedBytes = Math.max(_usedBytes, _targetBytes);
+				freedMemory = oldGrantedBytes - _grantedBytes;
+			}
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[ALLOW-TARGET] allowance=" + dbgId() + " target=" + oldTarget + "->" + targetAfter
+					+ " used=" + usedBefore + " granted=" + grantedBefore + "->" + _grantedBytes
+					+ " freedMemory=" + freedMemory);
+			notifyAll();
+		}
+		if(freedMemory > 0)
+			_broker.freeMemory(this, freedMemory);
 	}
 
 	@Override
@@ -278,5 +304,11 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 
 	private String dbgId() {
 		return getClass().getSimpleName() + "@" + System.identityHashCode(this);
+	}
+
+	private static long saturatingAdd(long left, long right) {
+		if(Long.MAX_VALUE - left < right)
+			return Long.MAX_VALUE;
+		return left + right;
 	}
 }
