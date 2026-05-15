@@ -182,6 +182,13 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 	@Override
 	public CompletableFuture<BlockEntry> scheduleRead(final BlockEntry block) {
+		if(block.restoreSoftData()) {
+			if (DMLScript.OOC_STATISTICS) {
+				Statistics.incrementOOCSoftRevival();
+				Statistics.accumulateOOCSoftRevivalBytes(block.getSize());
+			}
+			return CompletableFuture.completedFuture(block);
+		}
 		final CompletableFuture<BlockEntry> future = new CompletableFuture<>();
 		int pinnedPartitionId = pinPartitionForRead(block.getKey());
 		try {

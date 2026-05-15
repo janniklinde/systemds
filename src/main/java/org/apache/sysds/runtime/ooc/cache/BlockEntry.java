@@ -19,8 +19,7 @@
 
 package org.apache.sysds.runtime.ooc.cache;
 
-import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
-
+import java.lang.ref.SoftReference;
 import java.util.List;
 
 public final class BlockEntry {
@@ -30,6 +29,7 @@ public final class BlockEntry {
 	private int _backedPinCount;
 	private volatile BlockState _state;
 	private Object _data;
+	private SoftReference<Object> _softData;
 	private int _retainHintCount;
 	private int _referenceCount; // The number of references from different managing instances (e.g. CachingStream)
 
@@ -40,6 +40,7 @@ public final class BlockEntry {
 		this._backedPinCount = 0;
 		this._state = BlockState.COLD;
 		this._data = null;
+		this._softData = null;
 		this._retainHintCount = 0;
 		this._referenceCount = 0;
 	}
@@ -51,6 +52,7 @@ public final class BlockEntry {
 		this._backedPinCount = 0;
 		this._state = BlockState.HOT;
 		this._data = data;
+		this._softData = null;
 		this._retainHintCount = 0;
 		this._referenceCount = 1;
 	}
@@ -62,6 +64,7 @@ public final class BlockEntry {
 		this._backedPinCount = 0;
 		this._state = state;
 		this._data = data;
+		this._softData = null;
 		this._retainHintCount = 0;
 		this._referenceCount = 1;
 	}
@@ -102,12 +105,14 @@ public final class BlockEntry {
 		if(data != null && _data != null)
 			throw new IllegalStateException("Cannot overwrite data");
 		_data = data;
+		_softData = null;
 	}
 
 	void replaceDataUnsafe(Object expected, Object data) {
 		if(_data != expected)
 			throw new IllegalStateException("Cannot replace unexpected data");
 		_data = data;
+		_softData = null;
 	}
 
 	public BlockState getState() {
@@ -189,11 +194,25 @@ public final class BlockEntry {
 	synchronized long clear() {
 		if (_state == BlockState.HANDOVER_PENDING || _pinCount != 0 || _data == null)
 			return 0;
-		if (_data instanceof IndexedMatrixValue)
-			((IndexedMatrixValue)_data).setValue(null); // Explicitly clear
+		_softData = new SoftReference<>(_data);
 		_data = null;
 		_retainHintCount = 0;
 		return _size;
+	}
+
+	synchronized boolean restoreSoftData() {
+		if(_data != null)
+			return true;
+		if(_softData == null)
+			return false;
+		Object data = _softData.get();
+		if(data == null) {
+			_softData = null;
+			return false;
+		}
+		_data = data;
+		_softData = null;
+		return true;
 	}
 
 	/**
