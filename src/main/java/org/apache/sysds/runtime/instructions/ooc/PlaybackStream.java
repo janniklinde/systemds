@@ -249,6 +249,11 @@ public class PlaybackStream implements OOCStream<IndexedMatrixValue> {
 			throw new IllegalArgumentException("Subscriber cannot be set multiple times");
 		markUse("setSubscriber");
 
+		if(allocFn == null) {
+			_streamCache.setSubscriber(subscriber, false, true);
+			return;
+		}
+
 		long limit = readAllowance == null ? DEFAULT_PLAYBACK_ALLOWANCE_LIMIT :
 			Math.min(Math.max(1L, readAllowance.getTargetMemory()), DEFAULT_PLAYBACK_ALLOWANCE_LIMIT);
 		OwnedPlaybackAllowance playbackAllowance = new OwnedPlaybackAllowance(limit);
