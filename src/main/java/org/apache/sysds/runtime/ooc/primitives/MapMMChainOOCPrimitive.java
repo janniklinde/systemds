@@ -303,7 +303,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 										throw new IllegalStateException(
 											"Missing finalized XtXv row accumulator " + result.row());
 									}
-									try {
+									try(ucb) {
 										for(int col = 0; col < numColBlocks; col++) {
 											OOCStream.QueueCallback<IndexedMatrixValue> xcb =
 												_cache.take(xBase + result.row() * numColBlocks + col).join();
@@ -314,9 +314,6 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 											}
 											phase2Stream.enqueue(new MMChainWorkload(ucb.keepOpen(), xcb));
 										}
-									}
-									finally {
-										ucb.close();
 									}
 								}
 							}
@@ -342,26 +339,26 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 						}
 						final var fXcb = xcb.keepOpen();
 						inflightCtr.incrementAndGet();
-							int col = Math.toIntExact(xcb.get().getIndexes().getColumnIndex() - 1);
-							_cache.get(col).whenComplete((vcb, err) -> {
-								try {
-									if(err != null)
-										throw DMLRuntimeException.of(err);
-									if(vcb == null)
-										throw new IllegalStateException("Missing broadcast vector tile for column block " + col);
-									phase1Stream.enqueue(new MMChainWorkload(vcb.keepOpen(), fXcb.keepOpen()));
-								}
-								catch(Throwable t) {
-									fail(t, out, phase1Stream);
-								}
-								finally {
-									if(vcb != null)
-										vcb.close();
-									fXcb.close();
-									if(inflightCtr.decrementAndGet() == 0)
-										phase1Stream.closeInput();
-								}
-							});
+						int col = Math.toIntExact(xcb.get().getIndexes().getColumnIndex() - 1);
+						_cache.get(col).whenComplete((vcb, err) -> {
+							try {
+								if(err != null)
+									throw DMLRuntimeException.of(err);
+								if(vcb == null)
+									throw new IllegalStateException("Missing broadcast vector tile for column block " + col);
+								phase1Stream.enqueue(new MMChainWorkload(vcb.keepOpen(), fXcb.keepOpen()));
+							}
+							catch(Throwable t) {
+								fail(t, out, phase1Stream);
+							}
+							finally {
+								if(vcb != null)
+									vcb.close();
+								fXcb.close();
+								if(inflightCtr.decrementAndGet() == 0)
+									phase1Stream.closeInput();
+							}
+						});
 					}
 				};
 				if(x instanceof PlaybackStream playback)

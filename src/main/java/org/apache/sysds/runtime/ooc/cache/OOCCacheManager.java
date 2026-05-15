@@ -473,8 +473,11 @@ public class OOCCacheManager {
 		public OOCStream.QueueCallback<T> keepOpen() {
 			if(!_pinned.get())
 				throw new IllegalStateException("Cannot keep open an already closed callback");
-			String aliasOrigin = callbackOrigin();
-			noteBackedCallbackState(this, "aliased-by@" + aliasOrigin);
+			String aliasOrigin = null;
+			if(OOCDebug.TRACK_LIVE_STATE) {
+				aliasOrigin = callbackOrigin();
+				noteBackedCallbackState(this, "aliased-by@" + aliasOrigin);
+			}
 			return new BackedCachedQueueCallback<>(_pin.keepOpen(), _failure, aliasOrigin);
 		}
 
@@ -583,8 +586,11 @@ public class OOCCacheManager {
 		@Override
 		public OOCStream.QueueCallback<T> keepOpen() {
 			_parent.registerQueueCallback();
-			String aliasOrigin = callbackOrigin();
-			noteBackedCallbackState(this, "aliased-by@" + aliasOrigin);
+			String aliasOrigin = null;
+			if(OOCDebug.TRACK_LIVE_STATE) {
+				aliasOrigin = callbackOrigin();
+				noteBackedCallbackState(this, "aliased-by@" + aliasOrigin);
+			}
 			return new BackedCachedSubCallback<>(_parent, _data, _groupIndex, aliasOrigin);
 		}
 
@@ -655,8 +661,11 @@ public class OOCCacheManager {
 			if(_pinCounter.get() <= 0)
 				throw new IllegalStateException("Cannot open sub-callback on a closed GroupCallback");
 			registerQueueCallback();
-			String subOrigin = callbackOrigin();
-			noteBackedCallbackState(this, "subcallback-opened@" + subOrigin);
+			String subOrigin = null;
+			if(OOCDebug.TRACK_LIVE_STATE) {
+				subOrigin = callbackOrigin();
+				noteBackedCallbackState(this, "subcallback-opened@" + subOrigin);
+			}
 			return new BackedCachedSubCallback<>(this, _data.get(idx), idx, subOrigin);
 		}
 
@@ -683,8 +692,11 @@ public class OOCCacheManager {
 		public OOCStream.QueueCallback<T> keepOpen() {
 			if(_pinCounter.get() <= 0)
 				throw new IllegalStateException("Cannot keep open an already closed callback");
-			String aliasOrigin = callbackOrigin();
-			noteBackedCallbackState(this, "aliased-by@" + aliasOrigin);
+			String aliasOrigin = null;
+			if(OOCDebug.TRACK_LIVE_STATE) {
+				aliasOrigin = callbackOrigin();
+				noteBackedCallbackState(this, "aliased-by@" + aliasOrigin);
+			}
 			return new BackedCachedGroupCallback<>(_pin.keepOpen(), _failure, aliasOrigin);
 		}
 
