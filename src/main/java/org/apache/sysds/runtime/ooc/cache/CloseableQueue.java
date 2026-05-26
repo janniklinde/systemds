@@ -96,4 +96,8 @@ public class CloseableQueue<T> {
 	public synchronized boolean isFinished() {
 		return closed && queue.isEmpty();
 	}
+
+	public synchronized boolean isEmpty() {
+		return queue.isEmpty();
+	}
 }

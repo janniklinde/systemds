@@ -38,7 +38,7 @@ public class OOCCacheUtils {
 	private static final long HANDOVER_STREAM_ID = CachingStream._streamSeq.getNextID();
 	private static final AtomicLong HANDOVER_BLOCK_ID = new AtomicLong();
 
-	public record TileHandle(BlockKey key, long bytes, SoftReference<IndexedMatrixValue> softLocal, Kind kind)
+	public record TileHandle(BlockKey key, long bytes, Kind kind)
 		implements AutoCloseable {
 		public enum Kind {
 			CACHE,
@@ -46,13 +46,6 @@ public class OOCCacheUtils {
 		}
 
 		public CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> read(MemoryAllowance owner) {
-			SoftReference<IndexedMatrixValue> mSoftLocal = softLocal();
-			if(mSoftLocal != null) {
-				IndexedMatrixValue imv = mSoftLocal.get();
-				if(imv != null)
-					return CompletableFuture.completedFuture(new InMemoryQueueCallback(imv, null, owner, bytes()));
-			}
-
 			if(kind() == Kind.CACHE)
 				return OOCCacheManager.requestBlockBacked(key(), owner, bytes());
 
@@ -147,7 +140,7 @@ public class OOCCacheUtils {
 							if(ex != null)
 								throw ex instanceof RuntimeException ? (RuntimeException) ex :
 									new RuntimeException(ex);
-							return new TileHandle(targetKey, logicalBytes, softLocal, TileHandle.Kind.BACKEND);
+							return new TileHandle(targetKey, logicalBytes, TileHandle.Kind.BACKEND);
 						}
 						finally {
 							retained.close();
@@ -251,7 +244,7 @@ public class OOCCacheUtils {
 
 	private static TileHandle createCacheHandle(BlockKey key, long logicalBytes) {
 		OOCCacheManager.getCache().addReference(key);
-		return new TileHandle(key, logicalBytes, null, TileHandle.Kind.CACHE);
+		return new TileHandle(key, logicalBytes, TileHandle.Kind.CACHE);
 	}
 
 	@SuppressWarnings("unchecked")

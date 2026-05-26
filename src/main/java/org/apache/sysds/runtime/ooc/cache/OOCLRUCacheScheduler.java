@@ -1010,7 +1010,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	private void onCacheSizeIncremented() {
 		if(System.currentTimeMillis() - _lastEvictRun < 5)
-			return; // Debounce (at least 5ms)
+			return; // Debounce (at least 5ms) // TODO This can create stalls / deadlocks
 		long cacheSizeDelta = 0;
 		List<BlockEntry> upForEvictionNeedsWrite;
 		List<BlockEntry> upForEvictionNoWrite;
@@ -1026,7 +1026,9 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			//System.out.println("[CACHE] Claiming " + (pressure + overshoot - _evictionLimit)/1000 + "kB (last claim was " + (System.currentTimeMillis() - _lastEvictRun) + "ms ago)");
 
 			// Scan for values that can be evicted
-			Collection<BlockEntry> entries = _cache.values();
+			Collection<BlockEntry> e = _cache.values();
+			List<BlockEntry> entries = new ArrayList<>(e);
+			Collections.reverse(entries);
 			List<BlockEntry> toRemove = new ArrayList<>();
 			upForEvictionNeedsWrite = new ArrayList<>();
 			upForEvictionNoWrite = new ArrayList<>();

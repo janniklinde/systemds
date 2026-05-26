@@ -109,7 +109,7 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		synchronized(entry) {
 			if(entry._local != null)
 				return entry._local.keepOpen();
-			if(entry._state == SlotEntry.STATE_HANDLE && entry._handle != null && entry._handle.softLocal() != null)
+			if(entry._state == SlotEntry.STATE_HANDLE && entry._handle != null)
 				handle = entry._handle;
 			else
 				return null;
