@@ -19,30 +19,86 @@
 
 package org.apache.sysds.runtime.ooc.cache;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.function.Consumer;
 
 public class MaskedOnceArray<T> extends OnceArray<T> {
+	private static final int RETIRED = Integer.MIN_VALUE;
+	private static final VarHandle NON_NULL_COUNT;
+
+	static {
+		try {
+			NON_NULL_COUNT = MethodHandles.lookup().findVarHandle(MaskedOnceArray.class,
+				"_nonNullCount", int.class);
+		}
+		catch(ReflectiveOperationException e) {
+			throw new ExceptionInInitializerError(e);
+		}
+	}
+
 	protected final ConcurrentBitSet _liveState;
+	private volatile int _nonNullCount;
 
 	public MaskedOnceArray(int length) {
 		super(length);
 		_liveState = new ConcurrentBitSet(length);
+		_nonNullCount = 0;
 	}
 
 	@Override
-	public void put(int i, T value) {
+	public boolean put(int i, T value) {
 		if(value == null) {
-			clear(i);
-			return;
+			return clear(i);
 		}
-		super.put(i, value);
+		if(!incrementNonNullCount())
+			return false;
+		boolean changed = super.put(i, value);
+		if(!changed)
+			decrementNonNullCount();
 		_liveState.set(i);
+		return changed;
+	}
+
+	private boolean incrementNonNullCount() {
+		while(true) {
+			int count = (int) NON_NULL_COUNT.getAcquire(this);
+			if(count == RETIRED)
+				return false;
+			if(NON_NULL_COUNT.compareAndSet(this, count, count + 1))
+				return true;
+		}
+	}
+
+	private void decrementNonNullCount() {
+		while(true) {
+			int count = (int) NON_NULL_COUNT.getAcquire(this);
+			if(count <= 0)
+				return;
+			if(NON_NULL_COUNT.compareAndSet(this, count, count - 1))
+				return;
+		}
 	}
 
 	@Override
-	public void clear(int i) {
-		super.clear(i);
+	public boolean clear(int i) {
+		boolean changed = super.clear(i);
+		if(changed)
+			decrementNonNullCount();
 		_liveState.clear(i);
+		return changed;
+	}
+
+	public boolean tryRetireIfEmpty() {
+		return NON_NULL_COUNT.compareAndSet(this, 0, RETIRED);
+	}
+
+	public boolean isRetired() {
+		return (int) NON_NULL_COUNT.getAcquire(this) == RETIRED;
+	}
+
+	public boolean isEmpty() {
+		return (int) NON_NULL_COUNT.getAcquire(this) == 0;
 	}
 
 	public void setLive(int i) {
