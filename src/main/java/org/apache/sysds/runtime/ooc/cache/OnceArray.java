@@ -36,13 +36,13 @@ public class OnceArray<T> {
 		this(16);
 	}
 
-	public void put(int i, T value) {
+	public boolean put(int i, T value) {
 		// Publish value; all prior writes become visible to acquire readers.
-		VH.setRelease(_a, i, value);
+		return VH.getAndSetRelease(_a, i, value) == null;
 	}
 
-	public void clear(int i) {
-		VH.setRelease(_a, i, null);
+	public boolean clear(int i) {
+		return VH.getAndSetRelease(_a, i, null) != null;
 	}
 
 	@SuppressWarnings("unchecked")
