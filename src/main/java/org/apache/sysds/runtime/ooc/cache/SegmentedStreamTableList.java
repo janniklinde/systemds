@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.ooc.cache;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.util.function.Consumer;
 
 public class SegmentedStreamTableList<T> {
 	private static final VarHandle SEGMENTS;
@@ -53,6 +54,7 @@ public class SegmentedStreamTableList<T> {
 	}
 
 	public SegmentedStreamTableList(int segmentSize, int streamPartitionSize) {
+		validatePowerOfTwo(segmentSize, "segmentSize");
 		_segmentSize = segmentSize;
 		_segmentBits = Integer.numberOfTrailingZeros(segmentSize);
 		_segmentMask = segmentSize - 1;
@@ -61,6 +63,7 @@ public class SegmentedStreamTableList<T> {
 	}
 
 	public MaskedOnceArrayList<T> get(int streamId) {
+		checkStreamId(streamId);
 		Object[] segments = (Object[]) SEGMENTS.getAcquire(this);
 		int segmentIndex = segmentIndex(streamId);
 		if(segmentIndex >= segments.length)
@@ -77,10 +80,11 @@ public class SegmentedStreamTableList<T> {
 	}
 
 	public MaskedOnceArrayList<T> get(long streamId) {
-		return get((int)streamId);
+		return get(asIntStreamId(streamId));
 	}
 
 	public MaskedOnceArrayList<T> getOrCreate(int streamId) {
+		checkStreamId(streamId);
 		int segmentIndex = segmentIndex(streamId);
 		int offset = offsetInSegment(streamId);
 
@@ -107,12 +111,39 @@ public class SegmentedStreamTableList<T> {
 	}
 
 	public MaskedOnceArrayList<T> getOrCreate(long streamId) {
-		return getOrCreate((int)streamId);
+		return getOrCreate(asIntStreamId(streamId));
 	}
 
 	public int capacity() {
 		Object[] segments = (Object[]) SEGMENTS.getAcquire(this);
 		return segments.length * _segmentSize;
+	}
+
+	public void forEachLive(Consumer<? super T> action) {
+		forEachStreamTable(table -> table.forEachLive(action, false));
+	}
+
+	public void forEachVisible(Consumer<? super T> action) {
+		forEachStreamTable(table -> table.forEachVisible(action));
+	}
+
+	public void clear() {
+		SEGMENTS.setRelease(this, new Object[1]);
+	}
+
+	private void forEachStreamTable(Consumer<MaskedOnceArrayList<T>> action) {
+		Object[] segments = (Object[]) SEGMENTS.getAcquire(this);
+		for(int i = 0; i < segments.length; i++) {
+			Object[] segment = (Object[]) ARRAY.getAcquire(segments, i);
+			if(segment == null)
+				continue;
+			for(int j = 0; j < segment.length; j++) {
+				@SuppressWarnings("unchecked")
+				MaskedOnceArrayList<T> table = (MaskedOnceArrayList<T>) ARRAY.getAcquire(segment, j);
+				if(table != null)
+					action.accept(table);
+			}
+		}
 	}
 
 	private Object[] ensureOuterCapacity(int minLength) {
@@ -140,5 +171,21 @@ public class SegmentedStreamTableList<T> {
 
 	private int offsetInSegment(int streamId) {
 		return streamId & _segmentMask;
+	}
+
+	private static int asIntStreamId(long streamId) {
+		if(streamId < 0 || streamId > Integer.MAX_VALUE)
+			throw new IndexOutOfBoundsException("Invalid streamId: " + streamId);
+		return (int) streamId;
+	}
+
+	private static void checkStreamId(int streamId) {
+		if(streamId < 0)
+			throw new IndexOutOfBoundsException("Invalid streamId: " + streamId);
+	}
+
+	private static void validatePowerOfTwo(int value, String name) {
+		if(value <= 0 || (value & (value - 1)) != 0)
+			throw new IllegalArgumentException(name + " must be a power of two: " + value);
 	}
 }

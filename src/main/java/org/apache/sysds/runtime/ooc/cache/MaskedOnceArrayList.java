@@ -41,7 +41,6 @@ public class MaskedOnceArrayList<T> {
 	private final int _partitionBits;
 	private final int _partitionMask;
 
-	@SuppressWarnings("rawtypes")
 	private volatile MaskedOnceArray[] _partitions;
 
 	public MaskedOnceArrayList() {
@@ -49,6 +48,7 @@ public class MaskedOnceArrayList<T> {
 	}
 
 	public MaskedOnceArrayList(int partitionSize) {
+		validatePartitionSize(partitionSize);
 		_partitionSize = partitionSize;
 		_partitionBits = Integer.numberOfTrailingZeros(partitionSize);
 		_partitionMask = partitionSize - 1;
@@ -56,11 +56,22 @@ public class MaskedOnceArrayList<T> {
 	}
 
 	public void put(int i, T value) {
+		checkIndex(i);
 		partitionAt(partitionIndex(i)).put(offsetInPartition(i), value);
+	}
+
+	@SuppressWarnings("rawtypes")
+	public void clear(int i) {
+		checkIndex(i);
+		int partition = partitionIndex(i);
+		MaskedOnceArray[] partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
+		if(partition < partitions.length)
+			partitions[partition].clear(offsetInPartition(i));
 	}
 
 	@SuppressWarnings({"unchecked", "rawtypes"})
 	public T get(int i) {
+		checkIndex(i);
 		int partition = partitionIndex(i);
 		MaskedOnceArray[] partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
 		if(partition >= partitions.length)
@@ -69,11 +80,13 @@ public class MaskedOnceArrayList<T> {
 	}
 
 	public void setLive(int i) {
+		checkIndex(i);
 		partitionAt(partitionIndex(i)).setLive(offsetInPartition(i));
 	}
 
 	@SuppressWarnings("rawtypes")
 	public void clearLive(int i) {
+		checkIndex(i);
 		int partition = partitionIndex(i);
 		MaskedOnceArray[] partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
 		if(partition < partitions.length)
@@ -97,6 +110,13 @@ public class MaskedOnceArrayList<T> {
 			for(MaskedOnceArray partition : partitions)
 				partition.forEachLive(action, false);
 		}
+	}
+
+	@SuppressWarnings({"rawtypes", "unchecked"})
+	public void forEachVisible(Consumer<? super T> action) {
+		MaskedOnceArray[] partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
+		for(MaskedOnceArray partition : partitions)
+			partition.forEachVisible(action);
 	}
 
 	@SuppressWarnings({"rawtypes", "unchecked"})
@@ -142,5 +162,17 @@ public class MaskedOnceArrayList<T> {
 
 	private int offsetInPartition(int index) {
 		return index & _partitionMask;
+	}
+
+	private static void validatePartitionSize(int partitionSize) {
+		if(partitionSize < 64 || (partitionSize & (partitionSize - 1)) != 0) {
+			throw new IllegalArgumentException(
+				"partitionSize must be a power of two and at least 64: " + partitionSize);
+		}
+	}
+
+	private static void checkIndex(int i) {
+		if(i < 0)
+			throw new IndexOutOfBoundsException("Negative index: " + i);
 	}
 }

@@ -41,6 +41,10 @@ public class OnceArray<T> {
 		VH.setRelease(_a, i, value);
 	}
 
+	public void clear(int i) {
+		VH.setRelease(_a, i, null);
+	}
+
 	@SuppressWarnings("unchecked")
 	public T get(int i) {
 		// See value immediately once release-store is observed.

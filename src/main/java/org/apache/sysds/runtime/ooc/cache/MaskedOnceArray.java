@@ -31,8 +31,18 @@ public class MaskedOnceArray<T> extends OnceArray<T> {
 
 	@Override
 	public void put(int i, T value) {
+		if(value == null) {
+			clear(i);
+			return;
+		}
 		super.put(i, value);
 		_liveState.set(i);
+	}
+
+	@Override
+	public void clear(int i) {
+		super.clear(i);
+		_liveState.clear(i);
 	}
 
 	public void setLive(int i) {
