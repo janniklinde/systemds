@@ -25,6 +25,7 @@ import java.util.function.Consumer;
 
 public class MaskedOnceArrayList<T> {
 	private static final VarHandle PARTITIONS;
+	private static final VarHandle PARTITION = MethodHandles.arrayElementVarHandle(MaskedOnceArray[].class);
 	private static final int DEFAULT_PARTITION_SIZE = 1024;
 
 	static {
@@ -52,21 +53,33 @@ public class MaskedOnceArrayList<T> {
 		_partitionSize = partitionSize;
 		_partitionBits = Integer.numberOfTrailingZeros(partitionSize);
 		_partitionMask = partitionSize - 1;
-		_partitions = newPartitions(1);
-	}
-
-	public void put(int i, T value) {
-		checkIndex(i);
-		partitionAt(partitionIndex(i)).put(offsetInPartition(i), value);
+		_partitions = new MaskedOnceArray[1];
 	}
 
 	@SuppressWarnings("rawtypes")
-	public void clear(int i) {
+	public boolean put(int i, T value) {
+		checkIndex(i);
+		if(value == null)
+			return clear(i);
+		int partitionIndex = partitionIndex(i);
+		int offset = offsetInPartition(i);
+		while(true) {
+			MaskedOnceArray[] partitions = ensurePartitionCapacity(partitionIndex);
+			MaskedOnceArray<T> partition = partitionAt(partitions, partitionIndex);
+			boolean changed = partition.put(offset, value);
+			if(PARTITION.getAcquire(partitions, partitionIndex) == partition && !partition.isRetired())
+				return changed;
+		}
+	}
+
+	@SuppressWarnings("rawtypes")
+	public boolean clear(int i) {
 		checkIndex(i);
 		int partition = partitionIndex(i);
 		MaskedOnceArray[] partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
 		if(partition < partitions.length)
-			partitions[partition].clear(offsetInPartition(i));
+			return clear(partitions, partition, offsetInPartition(i));
+		return false;
 	}
 
 	@SuppressWarnings({"unchecked", "rawtypes"})
@@ -76,12 +89,16 @@ public class MaskedOnceArrayList<T> {
 		MaskedOnceArray[] partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
 		if(partition >= partitions.length)
 			return null;
-		return (T) partitions[partition].get(offsetInPartition(i));
+		MaskedOnceArray p = (MaskedOnceArray) PARTITION.getAcquire(partitions, partition);
+		return p == null ? null : (T) p.get(offsetInPartition(i));
 	}
 
+	@SuppressWarnings("rawtypes")
 	public void setLive(int i) {
 		checkIndex(i);
-		partitionAt(partitionIndex(i)).setLive(offsetInPartition(i));
+		int partitionIndex = partitionIndex(i);
+		MaskedOnceArray[] partitions = ensurePartitionCapacity(partitionIndex);
+		partitionAt(partitions, partitionIndex).setLive(offsetInPartition(i));
 	}
 
 	@SuppressWarnings("rawtypes")
@@ -89,8 +106,11 @@ public class MaskedOnceArrayList<T> {
 		checkIndex(i);
 		int partition = partitionIndex(i);
 		MaskedOnceArray[] partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
-		if(partition < partitions.length)
-			partitions[partition].clearLive(offsetInPartition(i));
+		if(partition < partitions.length) {
+			MaskedOnceArray p = (MaskedOnceArray) PARTITION.getAcquire(partitions, partition);
+			if(p != null)
+				p.clearLive(offsetInPartition(i));
+		}
 	}
 
 	@SuppressWarnings("rawtypes")
@@ -103,24 +123,33 @@ public class MaskedOnceArrayList<T> {
 	public void forEachLive(Consumer<? super T> action, boolean reversed) {
 		MaskedOnceArray[] partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
 		if(reversed) {
-			for(int i = partitions.length - 1; i >= 0; i--)
-				partitions[i].forEachLive(action, true);
+			for(int i = partitions.length - 1; i >= 0; i--) {
+				MaskedOnceArray partition = (MaskedOnceArray) PARTITION.getAcquire(partitions, i);
+				if(partition != null)
+					partition.forEachLive(action, true);
+			}
 		}
 		else {
-			for(MaskedOnceArray partition : partitions)
-				partition.forEachLive(action, false);
+			for(int i = 0; i < partitions.length; i++) {
+				MaskedOnceArray partition = (MaskedOnceArray) PARTITION.getAcquire(partitions, i);
+				if(partition != null)
+					partition.forEachLive(action, false);
+			}
 		}
 	}
 
 	@SuppressWarnings({"rawtypes", "unchecked"})
 	public void forEachVisible(Consumer<? super T> action) {
 		MaskedOnceArray[] partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
-		for(MaskedOnceArray partition : partitions)
-			partition.forEachVisible(action);
+		for(int i = 0; i < partitions.length; i++) {
+			MaskedOnceArray partition = (MaskedOnceArray) PARTITION.getAcquire(partitions, i);
+			if(partition != null)
+				partition.forEachVisible(action);
+		}
 	}
 
-	@SuppressWarnings({"rawtypes", "unchecked"})
-	private MaskedOnceArray<T> partitionAt(int partitionIndex) {
+	@SuppressWarnings("rawtypes")
+	private MaskedOnceArray[] ensurePartitionCapacity(int partitionIndex) {
 		MaskedOnceArray[] partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
 		while(partitionIndex >= partitions.length) {
 			MaskedOnceArray[] bigger = growPartitions(partitions, partitionIndex + 1);
@@ -129,7 +158,34 @@ public class MaskedOnceArrayList<T> {
 			else
 				partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
 		}
-		return (MaskedOnceArray<T>) partitions[partitionIndex];
+		return partitions;
+	}
+
+	@SuppressWarnings({"unchecked", "rawtypes"})
+	private MaskedOnceArray<T> partitionAt(MaskedOnceArray[] partitions, int partitionIndex) {
+		MaskedOnceArray<T> partition;
+		while((partition = (MaskedOnceArray<T>) PARTITION.getAcquire(partitions, partitionIndex)) == null ||
+			partition.isRetired()) {
+			if(partition != null) {
+				PARTITION.compareAndSet(partitions, partitionIndex, partition, null);
+				continue;
+			}
+			MaskedOnceArray<T> newPartition = new MaskedOnceArray<>(_partitionSize);
+			if(PARTITION.compareAndSet(partitions, partitionIndex, null, newPartition))
+				return newPartition;
+		}
+		return partition;
+	}
+
+	@SuppressWarnings("rawtypes")
+	private boolean clear(MaskedOnceArray[] partitions, int partitionIndex, int offset) {
+		MaskedOnceArray partition = (MaskedOnceArray) PARTITION.getAcquire(partitions, partitionIndex);
+		if(partition == null)
+			return false;
+		boolean changed = partition.clear(offset);
+		if(partition.tryRetireIfEmpty())
+			PARTITION.compareAndSet(partitions, partitionIndex, partition, null);
+		return changed;
 	}
 
 	@SuppressWarnings("rawtypes")
@@ -143,17 +199,7 @@ public class MaskedOnceArrayList<T> {
 
 		MaskedOnceArray[] bigger = new MaskedOnceArray[newLength];
 		System.arraycopy(partitions, 0, bigger, 0, partitions.length);
-		for(int i = partitions.length; i < newLength; i++)
-			bigger[i] = new MaskedOnceArray<>(_partitionSize);
 		return bigger;
-	}
-
-	@SuppressWarnings("rawtypes")
-	private MaskedOnceArray[] newPartitions(int length) {
-		MaskedOnceArray[] partitions = new MaskedOnceArray[length];
-		for(int i = 0; i < length; i++)
-			partitions[i] = new MaskedOnceArray<>(_partitionSize);
-		return partitions;
 	}
 
 	private int partitionIndex(int index) {
