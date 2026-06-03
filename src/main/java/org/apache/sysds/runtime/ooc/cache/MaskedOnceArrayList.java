@@ -120,7 +120,7 @@ public class MaskedOnceArrayList<T> {
 	}
 
 	@SuppressWarnings({"rawtypes", "unchecked"})
-	public void forEachLive(Consumer<? super T> action, boolean reversed) {
+	public void forEachLive(IndexedObjectPredicate<? super T> action, boolean reversed) {
 		MaskedOnceArray[] partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
 		if(reversed) {
 			for(int i = partitions.length - 1; i >= 0; i--) {

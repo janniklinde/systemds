@@ -21,7 +21,6 @@ package org.apache.sysds.runtime.ooc.cache;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
-import java.util.function.Consumer;
 
 public class MaskedOnceArray<T> extends OnceArray<T> {
 	private static final int RETIRED = Integer.MIN_VALUE;
@@ -109,14 +108,14 @@ public class MaskedOnceArray<T> extends OnceArray<T> {
 		_liveState.clear(i);
 	}
 
-	public void forEachLive(Consumer<? super T> action, boolean reversed) {
+	public boolean forEachLive(IndexedObjectPredicate<? super T> action, boolean reversed) {
 		if(reversed)
-			forEachLiveBackward(action);
+			return forEachLiveBackward(action);
 		else
-			forEachLiveForward(action);
+			return forEachLiveForward(action);
 	}
 
-	private void forEachLiveForward(Consumer<? super T> action) {
+	private boolean forEachLiveForward(IndexedObjectPredicate<? super T> action) {
 		int len = _liveState.length();
 		T data;
 		for(int word = 0; word < len; word++) {
@@ -127,12 +126,14 @@ public class MaskedOnceArray<T> extends OnceArray<T> {
 			for(int i = lower; i < upper; i++) {
 				data = get(i);
 				if(data != null)
-					action.accept(data);
+					if(!action.test(i, data))
+						return false;
 			}
 		}
+		return true;
 	}
 
-	private void forEachLiveBackward(Consumer<? super T> action) {
+	private boolean forEachLiveBackward(IndexedObjectPredicate<? super T> action) {
 		int len = _liveState.length();
 		for(int word = len-1; word >= 0; word--) {
 			if(_liveState.getWord(word) == 0)
@@ -143,8 +144,10 @@ public class MaskedOnceArray<T> extends OnceArray<T> {
 			for(int i = upper-1; i >= lower; i--) {
 				data = get(i);
 				if(data != null)
-					action.accept(data);
+					if(!action.test(i, data))
+						return false;
 			}
 		}
+		return true;
 	}
 }

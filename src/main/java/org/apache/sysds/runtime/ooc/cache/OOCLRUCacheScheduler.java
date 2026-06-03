@@ -44,13 +44,22 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private static final boolean SANITY_CHECKS = false;
 	private static final Log LOG = LogFactory.getLog(OOCLRUCacheScheduler.class.getName());
+	private final Executor collectorExecutor =
+		Executors.newSingleThreadExecutor(r -> {
+			Thread t = new Thread(r, "buffer-pool-collector");
+			t.setDaemon(true);
+			return t;
+		});
 	private final OOCIOHandler _ioHandler;
 	private final SegmentedStreamTableList<BlockEntry> _blocks;
+	private final SegmentedStreamTableList<EvictController> _evictControllers;
 	private final DeferredReadQueue _deferredReadRequests;
 	private final Deque<PendingHandover> _pendingHandovers;
 	private final Deque<PendingBackingRelease> _pendingBackingReleases;
@@ -80,6 +89,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	public OOCLRUCacheScheduler(OOCIOHandler ioHandler, long evictionLimit, long hardLimit, long readBuffer) {
 		this._ioHandler = ioHandler;
 		this._blocks = new SegmentedStreamTableList<>();
+		this._evictControllers = new SegmentedStreamTableList<>();
 		this._deferredReadRequests = new DeferredReadQueue();
 		this._pendingHandovers = new ArrayDeque<>();
 		this._pendingBackingReleases = new ArrayDeque<>();
