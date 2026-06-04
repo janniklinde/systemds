@@ -39,6 +39,7 @@ import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import java.lang.reflect.Field;
@@ -55,6 +56,10 @@ public class CachingStreamMemoryTrackingTest {
 	private static final int PRESSURE_ROWS = 256 * 1024;
 	private static final int PRESSURE_TILES = 8;
 	private static final long WAIT_TIMEOUT_SEC = 5;
+	private static final long STRESS_TARGET_BYTES = 4L << 30; // 4 GiB
+	private static final long STRESS_CACHE_BYTES = 1L << 30; // 1 GiB
+	private static final long STRESS_HARD_BYTES = STRESS_CACHE_BYTES + Math.max(40_000_000L, STRESS_CACHE_BYTES / 5);
+	private static final long STRESS_WAIT_TIMEOUT_SEC = 120;
 
 	@Before
 	public void setUp() {
@@ -290,6 +295,72 @@ public class CachingStreamMemoryTrackingTest {
 		cached.scheduleDeletion();
 	}
 
+	@Ignore("4 GiB OOC stress test; enable manually when validating eviction behavior.")
+	@Test
+	public void testCachingStreamScansFourGiBWithOneGiBCache() throws Exception {
+		System.out.println("250x250");
+		runCachingStreamScanStress(250, 250);
+		System.out.println("250x1");
+		runCachingStreamScanStress(250, 1);
+	}
+
+	private static void runCachingStreamScanStress(int rows, int cols) throws Exception {
+		MatrixBlock tile = new MatrixBlock(rows, cols, 1.0);
+		long bytes = tile.getExactSerializedSize();
+		int blocks = (int)Math.ceil(STRESS_TARGET_BYTES / (double)bytes);
+		double expectedSum = (double)blocks * rows * cols;
+
+		OOCMatrixIOHandler ioHandler = new OOCMatrixIOHandler();
+		OOCLRUCacheScheduler scheduler = new OOCLRUCacheScheduler(ioHandler, STRESS_CACHE_BYTES,
+			STRESS_HARD_BYTES, Math.max(40_000_000L, STRESS_HARD_BYTES - STRESS_CACHE_BYTES));
+		installCache(ioHandler, scheduler);
+
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(STRESS_CACHE_BYTES);
+		SyncMemoryAllowance sourceAllowance = new SyncMemoryAllowance(broker, STRESS_CACHE_BYTES);
+		SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
+		CachingStream cached = new CachingStream(source);
+		try {
+			for(int i = 0; i < blocks; i++) {
+				sourceAllowance.reserveBlocking(bytes);
+				source.enqueue(new InMemoryQueueCallback(
+					new IndexedMatrixValue(new MatrixIndexes(i + 1L, 1L), tile),
+					null, sourceAllowance, bytes));
+			}
+			source.closeInput();
+			waitFor(() -> sourceAllowance.getUsedMemory() == 0, STRESS_WAIT_TIMEOUT_SEC);
+			waitFor(() -> scheduler.snapshot().stream().anyMatch(e -> e.getState() == BlockState.COLD),
+				STRESS_WAIT_TIMEOUT_SEC);
+
+			consumeFullScan(cached.getReadStream(), blocks, expectedSum);
+			consumeFullScan(cached.getReadStream(), blocks, expectedSum);
+		}
+		finally {
+			cached.scheduleDeletion();
+			sourceAllowance.destroy();
+			scheduler.shutdown();
+			ioHandler.shutdown();
+			OOCCacheManager.reset();
+		}
+	}
+
+	private static void consumeFullScan(OOCStream<IndexedMatrixValue> stream, int expectedBlocks,
+		double expectedSum) {
+		int count = 0;
+		double sum = 0;
+		while(true) {
+			OOCStream.QueueCallback<IndexedMatrixValue> cb = stream.dequeueCB();
+			if(cb == null || cb.isEos())
+				break;
+			try(cb) {
+				Assert.assertFalse(cb.isFailure());
+				sum += ((MatrixBlock)cb.get().getValue()).sum();
+				count++;
+			}
+		}
+		Assert.assertEquals(expectedBlocks, count);
+		Assert.assertEquals(expectedSum, sum, 0.0);
+	}
+
 	private static IndexedMatrixValue tile(int idx, double value) {
 		return new IndexedMatrixValue(new MatrixIndexes(idx + 1L, 1L), new MatrixBlock(ROWS, COLS, value));
 	}
@@ -319,7 +390,11 @@ public class CachingStreamMemoryTrackingTest {
 	}
 
 	private static void waitFor(BooleanSupplier condition) throws Exception {
-		long timeoutNanos = TimeUnit.SECONDS.toNanos(WAIT_TIMEOUT_SEC);
+		waitFor(condition, WAIT_TIMEOUT_SEC);
+	}
+
+	private static void waitFor(BooleanSupplier condition, long timeoutSeconds) throws Exception {
+		long timeoutNanos = TimeUnit.SECONDS.toNanos(timeoutSeconds);
 		long start = System.nanoTime();
 		while(System.nanoTime() - start < timeoutNanos) {
 			if(condition.getAsBoolean())
