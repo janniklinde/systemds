@@ -109,13 +109,17 @@ public class MaskedOnceArray<T> extends OnceArray<T> {
 	}
 
 	public boolean forEachLive(IndexedObjectPredicate<? super T> action, boolean reversed) {
-		if(reversed)
-			return forEachLiveBackward(action);
-		else
-			return forEachLiveForward(action);
+		return forEachLive(action, reversed, 0);
 	}
 
-	private boolean forEachLiveForward(IndexedObjectPredicate<? super T> action) {
+	public boolean forEachLive(IndexedObjectPredicate<? super T> action, boolean reversed, int offset) {
+		if(reversed)
+			return forEachLiveBackward(action, offset);
+		else
+			return forEachLiveForward(action, offset);
+	}
+
+	private boolean forEachLiveForward(IndexedObjectPredicate<? super T> action, int offset) {
 		int len = _liveState.length();
 		T data;
 		for(int word = 0; word < len; word++) {
@@ -126,14 +130,14 @@ public class MaskedOnceArray<T> extends OnceArray<T> {
 			for(int i = lower; i < upper; i++) {
 				data = get(i);
 				if(data != null)
-					if(!action.test(i, data))
+					if(!action.test(offset + i, data))
 						return false;
 			}
 		}
 		return true;
 	}
 
-	private boolean forEachLiveBackward(IndexedObjectPredicate<? super T> action) {
+	private boolean forEachLiveBackward(IndexedObjectPredicate<? super T> action, int offset) {
 		int len = _liveState.length();
 		for(int word = len-1; word >= 0; word--) {
 			if(_liveState.getWord(word) == 0)
@@ -144,7 +148,7 @@ public class MaskedOnceArray<T> extends OnceArray<T> {
 			for(int i = upper-1; i >= lower; i--) {
 				data = get(i);
 				if(data != null)
-					if(!action.test(i, data))
+					if(!action.test(offset + i, data))
 						return false;
 			}
 		}

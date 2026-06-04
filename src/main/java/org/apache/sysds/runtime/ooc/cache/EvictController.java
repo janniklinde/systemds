@@ -31,6 +31,8 @@ public class EvictController {
 		PriorityQueue<IndexedObjectPair<BlockEntry>> candidates, int k, long estimatedReuseTimestamp) {
 		if(_op.isEmpty() && _futureOp.isEmpty()) {
 			list.forEachLive((idx, b) -> {
+				if(!isEvictionCandidate(b))
+					return true;
 				var iop = new IndexedObjectPair<>(estimatedReuseTimestamp + idx, b);
 				if(candidates.size() < k) {
 					candidates.offer(iop);
@@ -44,6 +46,8 @@ public class EvictController {
 			return;
 		}
 		list.forEachLive((idx, b) -> {
+			if(!isEvictionCandidate(b))
+				return true;
 			long score = computeScore(idx);
 			if(score == Long.MAX_VALUE)
 				score = computeFutureScore(idx) + estimatedReuseTimestamp;
@@ -57,6 +61,11 @@ public class EvictController {
 			}
 			return true;
 		}, true);
+	}
+
+	private boolean isEvictionCandidate(BlockEntry entry) {
+		BlockState state = entry.getState();
+		return state == BlockState.HOT || state == BlockState.WARM;
 	}
 
 	private long computeScore(int idx) {

@@ -853,33 +853,7 @@ import java.util.function.ToLongFunction;
 				readAllowance, allocFn);
 			return;
 		}
-		for(int i = 0; i < mNumBlocks; i++) {
-			final int idx = i;
-			int gIdx;
-			int gSize;
-			synchronized(this) {
-				gIdx = _groupIndices.getInt(idx);
-				gSize = _groupSizes.getInt(idx);
-			}
-			final int groupIdx = gIdx;
-			final int groupSize = gSize;
-			if(groupIdx > 0)
-				continue; // only replay grouped blocks once at the base index
-
-			BlockKey replayKey = (groupSize > 1 && groupIdx == 0) ? getEntryBlockKey(idx) : getBlockKey(i);
-			requestReplayBlock(replayKey, idx, groupSize, readAllowance, allocFn).whenComplete((cb, r) -> {
-				if(r != null) {
-					subscriber.accept(OOCStream.eos(DMLRuntimeException.of(r)));
-					return;
-				}
-				try {
-					deliverReplayBlock(cb, idx, groupSize, consumerIdx, subscriber);
-				}
-				catch(Throwable t) {
-					subscriber.accept(OOCStream.eos(DMLRuntimeException.of(t)));
-				}
-			});
-		}
+		replayExistingBlocksBounded(mNumBlocks, consumerIdx, subscriber, 1, null, null);
 	}
 
 	private void replayExistingBlocksBounded(int mNumBlocks, int consumerIdx,

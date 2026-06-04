@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.ooc.cache;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 public class SegmentedStreamTableList<T> {
@@ -119,12 +120,27 @@ public class SegmentedStreamTableList<T> {
 		return segments.length * _segmentSize;
 	}
 
-	public void forEachLive(Consumer<? super T> action) {
+	public void forEachLive(IndexedObjectPredicate<? super T> action) {
 		forEachStreamTable(table -> table.forEachLive(action, false));
 	}
 
 	public void forEachVisible(Consumer<? super T> action) {
 		forEachStreamTable(table -> table.forEachVisible(action));
+	}
+
+	public void forEachStreamTable(BiConsumer<Integer, MaskedOnceArrayList<T>> action) {
+		Object[] segments = (Object[]) SEGMENTS.getAcquire(this);
+		for(int i = 0; i < segments.length; i++) {
+			Object[] segment = (Object[]) ARRAY.getAcquire(segments, i);
+			if(segment == null)
+				continue;
+			for(int j = 0; j < segment.length; j++) {
+				@SuppressWarnings("unchecked")
+				MaskedOnceArrayList<T> table = (MaskedOnceArrayList<T>) ARRAY.getAcquire(segment, j);
+				if(table != null)
+					action.accept((i << _segmentBits) | j, table);
+			}
+		}
 	}
 
 	public void clear() {

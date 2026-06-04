@@ -42,6 +42,7 @@ public class MaskedOnceArrayList<T> {
 	private final int _partitionBits;
 	private final int _partitionMask;
 
+	@SuppressWarnings("rawtypes")
 	private volatile MaskedOnceArray[] _partitions;
 
 	public MaskedOnceArrayList() {
@@ -126,14 +127,14 @@ public class MaskedOnceArrayList<T> {
 			for(int i = partitions.length - 1; i >= 0; i--) {
 				MaskedOnceArray partition = (MaskedOnceArray) PARTITION.getAcquire(partitions, i);
 				if(partition != null)
-					partition.forEachLive(action, true);
+					partition.forEachLive(action, true, i * _partitionSize);
 			}
 		}
 		else {
 			for(int i = 0; i < partitions.length; i++) {
 				MaskedOnceArray partition = (MaskedOnceArray) PARTITION.getAcquire(partitions, i);
 				if(partition != null)
-					partition.forEachLive(action, false);
+					partition.forEachLive(action, false, i * _partitionSize);
 			}
 		}
 	}

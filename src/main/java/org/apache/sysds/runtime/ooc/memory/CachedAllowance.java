@@ -279,7 +279,8 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	@Override
 	public void setTargetMemory(long targetMemory) {
 		super.setTargetMemory(targetMemory);
-		maybeScheduleHandovers();
+		if(_slots != null)
+			maybeScheduleHandovers();
 	}
 
 	public void admitBlocking(long bytes) {
@@ -349,7 +350,8 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	private void maybeScheduleHandovers() {
 		long toEvict;
 		synchronized(this) {
-			long diff = _targetBytes - _usedBytes;
+			long capacity = Math.min(_targetBytes, _grantedBytes);
+			long diff = capacity - _usedBytes;
 			if(diff >= _targetBytes * 0.1)
 				return;
 			toEvict = _targetBytes / 3;
