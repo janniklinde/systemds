@@ -142,7 +142,8 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		if (started) {
 			try {
 				for(int i = 0; i < WRITER_SIZE; i++) {
-					_q[i].close();
+					if(_q[i] != null)
+						_q[i].close();
 				}
 			}
 			catch(InterruptedException ignored) {

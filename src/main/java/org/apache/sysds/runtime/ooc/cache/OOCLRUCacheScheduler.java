@@ -41,6 +41,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -50,6 +51,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private static final boolean SANITY_CHECKS = false;
+	private static final int MIN_EVICTION_CANDIDATES = 1024;
+	private static final int MAX_EVICTION_CANDIDATES = 65536;
+	private static final long DEFAULT_EVICTION_CANDIDATE_BYTE_FACTOR = 250_000;
 	private static final Log LOG = LogFactory.getLog(OOCLRUCacheScheduler.class.getName());
 	private final Executor collectorExecutor =
 		Executors.newSingleThreadExecutor(r -> {
@@ -60,6 +64,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private final OOCIOHandler _ioHandler;
 	private final SegmentedStreamTableList<BlockEntry> _blocks;
 	private final SegmentedStreamTableList<EvictController> _evictControllers;
+	private final EvictController _defaultEvictController;
 	private final DeferredReadQueue _deferredReadRequests;
 	private final Deque<PendingHandover> _pendingHandovers;
 	private final Deque<PendingBackingRelease> _pendingBackingReleases;
@@ -81,6 +86,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private boolean _warnThrottling;
 	private long _lastEvictRun;
 	private volatile int _deferredReadCountHint;
+	private volatile long _evictionCandidateByteFactor;
 	private final AtomicBoolean _maintenanceRunning;
 	private final AtomicBoolean _maintenanceRequested;
 	private final AtomicBoolean _maintenanceNeedsIncr;
@@ -90,6 +96,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		this._ioHandler = ioHandler;
 		this._blocks = new SegmentedStreamTableList<>();
 		this._evictControllers = new SegmentedStreamTableList<>();
+		this._defaultEvictController = new EvictController();
 		this._deferredReadRequests = new DeferredReadQueue();
 		this._pendingHandovers = new ArrayDeque<>();
 		this._pendingBackingReleases = new ArrayDeque<>();
@@ -108,6 +115,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		this._warmPinnedBytes = 0;
 		this._lastEvictRun = System.currentTimeMillis();
 		this._deferredReadCountHint = 0;
+		this._evictionCandidateByteFactor = DEFAULT_EVICTION_CANDIDATE_BYTE_FACTOR;
 		this._running = true;
 		this._warnThrottling = false;
 		this._maintenanceRunning = new AtomicBoolean(false);
@@ -834,7 +842,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	private List<BlockEntry> liveEntries() {
 		ArrayList<BlockEntry> entries = new ArrayList<>();
-		_blocks.forEachLive(entries::add);
+		_blocks.forEachLive((i, b) -> entries.add(b));
 		return entries;
 	}
 
@@ -889,7 +897,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 		if(!_maintenanceRunning.compareAndSet(false, true))
 			return;
 
-		runMaintenanceLoop();
+		collectorExecutor.execute(this::runMaintenanceLoop);
 	}
 
 	private void runMaintenanceLoop() {
@@ -913,10 +921,10 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	}
 
 	private void onCacheSizeChangedInternal(boolean incr, boolean decr) {
-		if(incr)
-			onCacheSizeIncremented();
 		if(decr)
 			while(onCacheSizeDecremented()) {}
+		if(incr)
+			onCacheSizeIncremented();
 		while(processPendingBackingReleases()) {
 			onCacheSizeIncremented();
 		}
@@ -1039,41 +1047,63 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	}
 
 	private void onCacheSizeIncremented() {
-		if(System.currentTimeMillis() - _lastEvictRun < 5)
-			return; // Debounce (at least 5ms) // TODO This can create stalls / deadlocks
+		long sinceLastEvictRun = System.currentTimeMillis() - _lastEvictRun;
+		if(sinceLastEvictRun < 5) {
+			_maintenanceNeedsIncr.set(true);
+			_maintenanceRequested.set(true);
+			try {
+				Thread.sleep(5 - sinceLastEvictRun);
+			}
+			catch(InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+			return;
+		}
+
+		long bytesToEvict;
+		synchronized(this) {
+			bytesToEvict = getBytesToEvictLocked();
+			if(bytesToEvict <= 0)
+				return;
+		}
+
+		List<IndexedObjectPair<BlockEntry>> candidates = collectEvictionCandidates(bytesToEvict);
+		if(candidates.isEmpty())
+			return;
+		updateEvictionCandidateFactor(candidates);
+
 		long cacheSizeDelta = 0;
+		boolean needsMoreEviction = false;
 		List<BlockEntry> upForEvictionNeedsWrite;
 		List<BlockEntry> upForEvictionNoWrite;
 		synchronized(this) {
-			long pressure = getChargedCacheSizeLocked() + _readBuffer - getChargedEvictingBytesLocked() -
-				getChargedWarmPinnedBytesLocked();
+			long pressure = getEvictionPressure() - getChargedWarmPinnedBytesLocked();
 			if(pressure <= _evictionLimit)
 				return; // Nothing to do
 
 			long overshoot = Math.max((long)(0.1 * _evictionLimit), 10000000);
-			long lowLimit = _evictionLimit - _readBuffer - overshoot;
+			long lowLimit = Math.max(0, _evictionLimit - _readBuffer - overshoot);
 
 			//System.out.println("[CACHE] Claiming " + (pressure + overshoot - _evictionLimit)/1000 + "kB (last claim was " + (System.currentTimeMillis() - _lastEvictRun) + "ms ago)");
 
-			// Scan for values that can be evicted
-			List<BlockEntry> entries = liveEntries();
 			List<BlockEntry> toRemove = new ArrayList<>();
 			upForEvictionNeedsWrite = new ArrayList<>();
 			upForEvictionNoWrite = new ArrayList<>();
 
 			for(int pass = 0; pass < 2; pass++) {
 				boolean allowRetainHint = pass == 1;
-				for(BlockEntry entry : entries) {
+				for(IndexedObjectPair<BlockEntry> candidate : candidates) {
 					if(getEvictionPressure() <= lowLimit)
 						break;
 
+					BlockEntry entry = candidate.obj();
 					synchronized(entry) {
 						//if(entry.isPinned())
 						//	continue;
 						if(!allowRetainHint && entry.getRetainHintCount() > 0)
 							continue;
 						if(entry.getState() == BlockState.COLD || entry.getState() == BlockState.EVICTING ||
-							entry.getState() == BlockState.HANDOVER_PENDING)
+							entry.getState() == BlockState.HANDOVER_PENDING || entry.getState() == BlockState.REMOVED)
 							continue;
 
 						if(entry.getState().isBackedByDisk() && !entry.isPinned()) {
@@ -1094,6 +1124,9 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 				if(getEvictionPressure() <= lowLimit)
 					break;
 			}
+			boolean madeEvictionProgress = cacheSizeDelta != 0 || !upForEvictionNeedsWrite.isEmpty() ||
+				!upForEvictionNoWrite.isEmpty();
+			needsMoreEviction = madeEvictionProgress && getEvictionPressure() > lowLimit;
 
 			for(BlockEntry entry : toRemove) {
 				clearLive(entry);
@@ -1110,10 +1143,89 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 		if (cacheSizeDelta != 0)
 			onCacheSizeChanged(cacheSizeDelta > 0);
+		if(needsMoreEviction) {
+			_evictionCandidateByteFactor = Math.max(1, _evictionCandidateByteFactor / 2);
+			onCacheSizeChanged(true);
+		}
+	}
+
+	private List<IndexedObjectPair<BlockEntry>> collectEvictionCandidates(long bytes) {
+		int k = evictionCandidateLimit(bytes);
+		PriorityQueue<IndexedObjectPair<BlockEntry>> queue = new PriorityQueue<>();
+		_blocks.forEachStreamTable((streamId, stream) -> {
+			getEvictController(streamId).findEvictionCandidates(stream, queue, k, 0);
+		});
+
+		List<IndexedObjectPair<BlockEntry>> candidates = new ArrayList<>(queue.size());
+		while(!queue.isEmpty())
+			candidates.add(queue.poll());
+		Collections.reverse(candidates);
+		return candidates;
+	}
+
+	private int evictionCandidateLimit(long bytes) {
+		long factor = Math.max(1, _evictionCandidateByteFactor);
+		long limit = Math.max(MIN_EVICTION_CANDIDATES, (bytes + factor - 1) / factor);
+		return (int)Math.min(MAX_EVICTION_CANDIDATES, limit);
+	}
+
+	private void updateEvictionCandidateFactor(List<IndexedObjectPair<BlockEntry>> candidates) {
+		if(candidates.isEmpty())
+			return;
+		long bytes = 0;
+		for(IndexedObjectPair<BlockEntry> candidate : candidates)
+			bytes += Math.max(0, candidate.obj().getSize());
+		long avgBytes = bytes / candidates.size();
+		if(avgBytes <= 0)
+			return;
+		long observedFactor = Math.max(1, avgBytes / 2);
+		long currentFactor = Math.max(1, _evictionCandidateByteFactor);
+		_evictionCandidateByteFactor = Math.max(1, (currentFactor + observedFactor) / 2);
+	}
+
+	private long getBytesToEvictLocked() {
+		long pressure = getEvictionPressure() - getChargedWarmPinnedBytesLocked();
+		if(pressure <= _evictionLimit)
+			return 0;
+
+		long overshoot = Math.max((long)(0.1 * _evictionLimit), 10000000);
+		long lowLimit = Math.max(0, _evictionLimit - _readBuffer - overshoot);
+		return Math.max(1, pressure - lowLimit);
+	}
+
+	private EvictController getEvictController(long streamId) {
+		MaskedOnceArrayList<EvictController> streamControllers = _evictControllers.get(streamId);
+		if(streamControllers == null)
+			return _defaultEvictController;
+		EvictController controller = streamControllers.get(0);
+		return controller == null ? _defaultEvictController : controller;
 	}
 
 	private long getEvictionPressure() {
-		return getChargedCacheSizeLocked() + _readBuffer - getChargedEvictingBytesLocked();
+		return getChargedCacheSizeLocked() + getPendingAdmissionBytesLocked() + _readBuffer -
+			getChargedEvictingBytesLocked();
+	}
+
+	private long getPendingAdmissionBytesLocked() {
+		return getPendingHandoverBytesLocked() + getPendingBackingReleaseBytesLocked();
+	}
+
+	private long getPendingHandoverBytesLocked() {
+		for(PendingHandover pending : _pendingHandovers) {
+			if(pending == null || pending.isCancelled())
+				continue;
+			return Math.max(0, pending.getManagedBytes());
+		}
+		return 0;
+	}
+
+	private long getPendingBackingReleaseBytesLocked() {
+		for(PendingBackingRelease pending : _pendingBackingReleases) {
+			if(pending == null || pending.isCancelled())
+				continue;
+			return Math.max(0, pending.getManagedBytes());
+		}
+		return 0;
 	}
 
 	private boolean processPendingHandovers() {
@@ -1203,17 +1315,19 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 						pending.retainForCallback();
 						req.setPinned(idx);
 					}
-					else if (entry.getState() == BlockState.READING) {
+					else if (entry.getState() == BlockState.READING && hasActiveReadLocked(entry.getKey())) {
 						req.schedule(idx);
 						registerWaiter(entry.getKey(), req, idx);
 						reading = true;
 					}
 					else {
 						if(getChargedCacheSizeLocked() + entry.getSize() <= _hardLimit) {
+							if(entry.getState() == BlockState.READING)
+								transitionMemState(entry, BlockState.COLD);
 							transitionMemState(entry, BlockState.READING);
 							toRead.add(new Tuple2<>(idx, entry));
 							req.schedule(idx);
-							registerWaiter(entry.getKey(), req, idx);
+							registerReadAndWaiter(entry.getKey(), req, idx);
 							reading = true;
 						}
 						else {
@@ -1534,6 +1648,17 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 	private void registerWaiter(BlockKey key, DeferredReadRequest request, int index) {
 		BlockReadState state = _blockReads.computeIfAbsent(key, k -> new BlockReadState());
 		state.waiters.add(new DeferredReadWaiter(request, index));
+	}
+
+	private void registerReadAndWaiter(BlockKey key, DeferredReadRequest request, int index) {
+		BlockReadState state = _blockReads.computeIfAbsent(key, k -> new BlockReadState());
+		state.readScheduled = true;
+		state.waiters.add(new DeferredReadWaiter(request, index));
+	}
+
+	private boolean hasActiveReadLocked(BlockKey key) {
+		BlockReadState state = _blockReads.get(key);
+		return state != null && state.readScheduled;
 	}
 
 	private void releaseRequestedEntry(BlockEntry entry) {
@@ -1871,10 +1996,12 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 	private static class BlockReadState {
 		private double priority;
+		private boolean readScheduled;
 		private final List<DeferredReadWaiter> waiters;
 
 		private BlockReadState() {
 			this.priority = 0;
+			this.readScheduled = false;
 			this.waiters = new ArrayList<>();
 		}
 	}
