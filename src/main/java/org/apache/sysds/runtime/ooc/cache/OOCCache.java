@@ -29,6 +29,20 @@ public interface OOCCache {
 	}
 
 	/**
+	 * Adds a new resident entry whose bytes are already owned by the supplied allowance. This creates cache metadata and
+	 * a physical pin, but does not transfer ownership to the cache. Ownership can later move only via pin/unpin.
+	 */
+	default BlockEntry putPinned(BlockKey key, Object data, long size, MemoryAllowance allowance) {
+		return putPinned(key.getStreamId(), key.getSequenceNumber(), data, size, allowance);
+	}
+
+	/**
+	 * Adds a new resident entry whose bytes are already owned by the supplied allowance. This creates cache metadata and
+	 * a physical pin, but does not transfer ownership to the cache. Ownership can later move only via pin/unpin.
+	 */
+	BlockEntry putPinned(long sId, long tId, Object data, long size, MemoryAllowance allowance);
+
+	/**
 	 * Pins an item backed by an allowance. A successful pin transfers resident-memory ownership from the cache to the
 	 * owner of the allowance and guarantees data availability through the returned entry. While pinned, the entry remains
 	 * visible to cache metadata but its bytes are not counted as cache-owned memory.
@@ -61,8 +75,8 @@ public interface OOCCache {
 	/**
 	 * Unpins an item that is still backed by the given allowance. Unpinning tries to transfer resident-memory ownership
 	 * back to the cache. An ownership transfer may commit immediately only if this does not cause the cache to exceed its
-	 * hard limit. Otherwise, the transfer is deferred and the allowance remains charged until the returned handle commits
-	 * or is reclaimed.
+	 * hard limit. Otherwise, the transfer is deferred and the allowance remains charged until the returned handle commits,
+	 * is reclaimed, or is superseded by a later pin that transfers ownership to another allowance.
 	 *
 	 * @param entry
 	 * @param allowance
