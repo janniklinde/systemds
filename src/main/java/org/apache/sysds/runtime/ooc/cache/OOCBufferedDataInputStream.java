@@ -29,21 +29,32 @@ import java.io.DataInputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.DoubleBuffer;
+
+import jdk.incubator.vector.DoubleVector;
+import jdk.incubator.vector.VectorOperators;
+import jdk.incubator.vector.VectorSpecies;
 
 class OOCBufferedDataInputStream implements DataInput, MatrixBlockDataInput {
 	private static final int PAGE_SIZE = 4096;
 	private static final int PAGE_MASK = PAGE_SIZE - 1;
+	private static final int DEFAULT_BUFFER_SIZE = 64 * 1024;
+	private static final VectorSpecies<Double> DOUBLE_SPECIES = DoubleVector.SPECIES_PREFERRED;
+	private static final int DOUBLE_VECTOR_LENGTH = DOUBLE_SPECIES.length();
 
 	private final RandomAccessFile _in;
 	private final byte[] _buff;
 	private final byte[] _tmp;
+	private final DoubleBuffer[] _doubleDecodeBuffers;
 	private final int _bufflen;
 	private long _filePos;
 	private int _pos;
 	private int _count;
 
 	OOCBufferedDataInputStream(RandomAccessFile in) throws IOException {
-		this(in, PAGE_SIZE);
+		this(in, DEFAULT_BUFFER_SIZE);
 	}
 
 	OOCBufferedDataInputStream(RandomAccessFile in, int size) throws IOException {
@@ -54,6 +65,7 @@ class OOCBufferedDataInputStream implements DataInput, MatrixBlockDataInput {
 		_in = in;
 		_buff = new byte[size];
 		_tmp = new byte[8];
+		_doubleDecodeBuffers = createDoubleDecodeBuffers(_buff);
 		_bufflen = size;
 		_filePos = in.getFilePointer();
 		_pos = 0;
@@ -184,19 +196,24 @@ class OOCBufferedDataInputStream implements DataInput, MatrixBlockDataInput {
 		int ix = 0;
 		while(ix < len) {
 			int avail = _count - _pos;
+			if(avail <= 0) {
+				refill();
+				continue;
+			}
 			if(avail < 8) {
-				varr[ix] = readDouble();
-				nnz += (varr[ix] != 0) ? 1 : 0;
+				readFully(_tmp, 0, 8);
+				double v = Double.longBitsToDouble(baToLong(_tmp, 0));
+				varr[ix] = v;
+				nnz += (v != 0) ? 1 : 0;
 				ix++;
 				continue;
 			}
 
 			int ndbl = Math.min(len - ix, avail / 8);
 			int end = _pos + ndbl * 8;
-			for(int pos = _pos; pos < end; pos += 8, ix++) {
-				varr[ix] = Double.longBitsToDouble(baToLong(_buff, pos));
-				nnz += (varr[ix] != 0) ? 1 : 0;
-			}
+			readDoubles(_pos, ndbl, varr, ix);
+			nnz += countNonZeros(varr, ix, ndbl);
+			ix += ndbl;
 			_pos = end;
 		}
 		return nnz;
@@ -255,5 +272,36 @@ class OOCBufferedDataInputStream implements DataInput, MatrixBlockDataInput {
 
 	private static long baToLong(byte[] ba, final int off) {
 		return IOUtilFunctions.baToLong(ba, off);
+	}
+
+	private void readDoubles(int srcPos, int len, double[] dest, int destPos) {
+		int alignment = srcPos & 7;
+		DoubleBuffer dbuff = _doubleDecodeBuffers[alignment];
+		dbuff.position((srcPos - alignment) >>> 3);
+		dbuff.get(dest, destPos, len);
+	}
+
+	private static DoubleBuffer[] createDoubleDecodeBuffers(byte[] buff) {
+		DoubleBuffer[] ret = new DoubleBuffer[8];
+		for(int i = 0; i < ret.length; i++) {
+			ByteBuffer bbuff = ByteBuffer.wrap(buff);
+			bbuff.position(i);
+			ret[i] = bbuff.slice().order(ByteOrder.BIG_ENDIAN).asDoubleBuffer();
+		}
+		return ret;
+	}
+
+	private static long countNonZeros(double[] values, int off, int len) {
+		long nnz = 0;
+		int i = 0;
+		int upper = DOUBLE_SPECIES.loopBound(len);
+		DoubleVector vzero = DoubleVector.zero(DOUBLE_SPECIES);
+		for(; i < upper; i += DOUBLE_VECTOR_LENGTH) {
+			DoubleVector v = DoubleVector.fromArray(DOUBLE_SPECIES, values, off + i);
+			nnz += v.compare(VectorOperators.NE, vzero).trueCount();
+		}
+		for(; i < len; i++)
+			nnz += (values[off + i] != 0) ? 1 : 0;
+		return nnz;
 	}
 }
