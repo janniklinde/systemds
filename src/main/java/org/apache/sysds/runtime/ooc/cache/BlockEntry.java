@@ -19,7 +19,6 @@
 
 package org.apache.sysds.runtime.ooc.cache;
 
-import java.lang.ref.SoftReference;
 import java.util.List;
 
 public final class BlockEntry {
@@ -31,6 +30,8 @@ public final class BlockEntry {
 	private Object _data;
 	private int _retainHintCount;
 	private int _referenceCount; // The number of references from different managing instances (e.g. CachingStream)
+	// Optional implementation-local cache metadata; null for cache implementations that do not need it.
+	private volatile Object _cacheMeta;
 
 	BlockEntry(BlockKey key) {
 		this._key = key;
@@ -41,6 +42,7 @@ public final class BlockEntry {
 		this._data = null;
 		this._retainHintCount = 0;
 		this._referenceCount = 0;
+		this._cacheMeta = null;
 	}
 
 	BlockEntry(BlockKey key, long size, Object data) {
@@ -52,6 +54,7 @@ public final class BlockEntry {
 		this._data = data;
 		this._retainHintCount = 0;
 		this._referenceCount = 1;
+		this._cacheMeta = null;
 	}
 
 	BlockEntry(BlockKey key, long size, Object data, BlockState state) {
@@ -63,6 +66,7 @@ public final class BlockEntry {
 		this._data = data;
 		this._retainHintCount = 0;
 		this._referenceCount = 1;
+		this._cacheMeta = null;
 	}
 
 	public BlockKey getKey() {
@@ -151,6 +155,14 @@ public final class BlockEntry {
 
 	synchronized int getReferenceCount() {
 		return _referenceCount;
+	}
+
+	Object getCacheMeta() {
+		return _cacheMeta;
+	}
+
+	void setCacheMeta(Object meta) {
+		_cacheMeta = meta;
 	}
 
 	synchronized void setState(BlockState state) {

@@ -23,11 +23,11 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.PriorityQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -41,7 +41,7 @@ public class OOCCacheImpl implements OOCCache {
 	private final SegmentedStreamTableList<BlockEntry> _blocks;
 	private final SegmentedStreamTableList<EvictController> _evictControllers;
 	private final EvictController _defaultEvictController;
-	private final IdentityHashMap<BlockEntry, EntryMeta> _meta;
+	private final ConcurrentLinkedQueue<BlockKey> _deferredUnpins;
 	private final Executor _collectorExecutor;
 	private final AtomicBoolean _evictionRunning;
 
@@ -61,7 +61,7 @@ public class OOCCacheImpl implements OOCCache {
 		_blocks = new SegmentedStreamTableList<>();
 		_evictControllers = new SegmentedStreamTableList<>();
 		_defaultEvictController = new EvictController();
-		_meta = new IdentityHashMap<>();
+		_deferredUnpins = new ConcurrentLinkedQueue<>();
 		_collectorExecutor = Executors.newSingleThreadExecutor(r -> {
 			Thread t = new Thread(r, "ooc-cache-collector");
 			t.setDaemon(true);
@@ -76,11 +76,10 @@ public class OOCCacheImpl implements OOCCache {
 		BlockEntry entry = new BlockEntry(key, size, data, BlockState.REMOVED);
 		entry.pin();
 		EntryMeta meta = new EntryMeta(entry);
-		meta.addPin(allowance);
+		entry.setCacheMeta(meta);
 		synchronized(this) {
 			checkRunning();
 			putEntry(entry);
-			_meta.put(entry, meta);
 		}
 		return entry;
 	}
@@ -94,11 +93,13 @@ public class OOCCacheImpl implements OOCCache {
 			entry = findEntry(new BlockKey(sId, tId));
 			if(entry == null)
 				return CompletableFuture.completedFuture(null);
-			meta = _meta.get(entry);
+			meta = getMeta(entry);
 			BlockEntry adopted = tryAdoptDeferredPin(meta, allowance);
 			if(adopted != null)
 				return CompletableFuture.completedFuture(adopted);
 		}
+		if(meta == null)
+			return CompletableFuture.completedFuture(null);
 
 		BlockEntry immediate = pinIfLive(sId, tId, allowance);
 		if(immediate != null)
@@ -113,10 +114,12 @@ public class OOCCacheImpl implements OOCCache {
 			BlockEntry entry = findEntry(new BlockKey(sId, tId));
 			if(entry == null || entry.getDataUnsafe() == null)
 				return null;
-			EntryMeta meta = _meta.get(entry);
+			EntryMeta meta = getMeta(entry);
 			BlockEntry adopted = tryAdoptDeferredPin(meta, allowance);
 			if(adopted != null)
 				return adopted;
+			if(meta == null)
+				return null;
 			if(entry.getState() == BlockState.COLD || entry.getState() == BlockState.READING)
 				return null;
 			if(!allowance.tryReserve(entry.getSize()))
@@ -128,13 +131,15 @@ public class OOCCacheImpl implements OOCCache {
 
 	@Override
 	public UnpinHandle unpin(BlockEntry entry, MemoryAllowance allowance) {
+		if(entry.fastUnpin()) {
+			allowance.release(entry.getSize());
+			return ImmediateUnpinHandle.committed(entry, allowance, entry.getSize());
+		}
 		synchronized(this) {
-			EntryMeta meta = _meta.get(entry);
+			EntryMeta meta = getMeta(entry);
 			if(meta == null)
 				return ImmediateUnpinHandle.committed(entry, allowance, Math.max(0, entry.getSize()));
-
-			meta.removePin(allowance);
-			if(meta.activePinCount() > 0) {
+			if(entry.getPinCount() > 1) {
 				entry.unpin();
 				allowance.release(entry.getSize());
 				return ImmediateUnpinHandle.committed(entry, allowance, entry.getSize());
@@ -145,6 +150,7 @@ public class OOCCacheImpl implements OOCCache {
 
 			DeferredUnpinHandle handle = new DeferredUnpinHandle(meta, allowance);
 			meta.deferredUnpin = handle;
+			_deferredUnpins.offer(entry.getKey());
 			return handle;
 		}
 	}
@@ -160,7 +166,7 @@ public class OOCCacheImpl implements OOCCache {
 		synchronized(this) {
 			refs = entry.forget();
 			if(refs <= 0)
-				removeIfUnused(_meta.get(entry));
+				removeIfUnused(getMeta(entry));
 		}
 		return refs;
 	}
@@ -182,7 +188,7 @@ public class OOCCacheImpl implements OOCCache {
 	public synchronized void shutdown() {
 		_running = false;
 		_blocks.clear();
-		_meta.clear();
+		_deferredUnpins.clear();
 		_ownedBytes = 0;
 		_evictingBytes = 0;
 		_ioHandler.shutdown();
@@ -244,7 +250,6 @@ public class OOCCacheImpl implements OOCCache {
 		}
 		entry.setState(BlockState.REMOVED);
 		entry.pin();
-		meta.addPin(allowance);
 		resolveDeferredUnpin(meta, false);
 	}
 
@@ -262,7 +267,6 @@ public class OOCCacheImpl implements OOCCache {
 			handle.complete(false);
 		}
 		meta.deferredUnpin = null;
-		meta.addPin(allowance);
 		return meta.entry;
 	}
 
@@ -273,7 +277,7 @@ public class OOCCacheImpl implements OOCCache {
 		if(entry.getReferenceCount() <= 0) {
 			removeEntry(entry.getKey());
 			entry.clear();
-			_meta.remove(entry);
+			entry.setCacheMeta(null);
 			if(meta.backed)
 				_ioHandler.scheduleDeletion(entry);
 			return ImmediateUnpinHandle.committed(entry, allowance, entry.getSize());
@@ -297,9 +301,19 @@ public class OOCCacheImpl implements OOCCache {
 	}
 
 	private void processDeferredUnpins() {
-		for(EntryMeta meta : new ArrayList<>(_meta.values())) {
-			if(meta.deferredUnpin == null || !canAcceptOwnedBytes(meta.entry.getSize()))
+		while(true) {
+			BlockKey key = _deferredUnpins.peek();
+			if(key == null)
+				return;
+			BlockEntry entry = findEntry(key);
+			EntryMeta meta = getMeta(entry);
+			if(meta == null || meta.deferredUnpin == null) {
+				_deferredUnpins.poll();
 				continue;
+			}
+			if(!canAcceptOwnedBytes(meta.entry.getSize()))
+				return;
+			_deferredUnpins.poll();
 			commitDeferredUnpin(meta);
 		}
 	}
@@ -315,7 +329,7 @@ public class OOCCacheImpl implements OOCCache {
 		if(entry.getReferenceCount() <= 0) {
 			removeEntry(entry.getKey());
 			entry.clear();
-			_meta.remove(entry);
+			entry.setCacheMeta(null);
 			if(meta.backed)
 				_ioHandler.scheduleDeletion(entry);
 		}
@@ -357,8 +371,8 @@ public class OOCCacheImpl implements OOCCache {
 					for(IndexedObjectPair<BlockEntry> candidate : candidates) {
 						if(evictionPressure() <= _evictionLimit)
 							break;
-						EntryMeta meta = _meta.get(candidate.obj());
-						if(meta == null || meta.activePinCount() > 0 || meta.deferredUnpin != null)
+						EntryMeta meta = getMeta(candidate.obj());
+						if(meta == null || candidate.obj().getPinCount() > 0 || meta.deferredUnpin != null)
 							continue;
 						BlockEntry entry = meta.entry;
 						if(entry.getState() == BlockState.WARM) {
@@ -395,7 +409,7 @@ public class OOCCacheImpl implements OOCCache {
 
 	private void onEvicted(BlockEntry entry) {
 		synchronized(this) {
-			EntryMeta meta = _meta.get(entry);
+			EntryMeta meta = getMeta(entry);
 			if(meta == null)
 				return;
 			meta.backed = true;
@@ -443,7 +457,7 @@ public class OOCCacheImpl implements OOCCache {
 	}
 
 	private void removeIfUnused(EntryMeta meta) {
-		if(meta == null || meta.entry.getReferenceCount() > 0 || meta.activePinCount() > 0 ||
+		if(meta == null || meta.entry.getReferenceCount() > 0 || meta.entry.getPinCount() > 0 ||
 			meta.deferredUnpin != null)
 			return;
 		BlockEntry entry = meta.entry;
@@ -454,7 +468,7 @@ public class OOCCacheImpl implements OOCCache {
 		removeEntry(entry.getKey());
 		clearLive(entry);
 		entry.clear();
-		_meta.remove(entry);
+		entry.setCacheMeta(null);
 		if(meta.backed)
 			_ioHandler.scheduleDeletion(entry);
 	}
@@ -512,36 +526,19 @@ public class OOCCacheImpl implements OOCCache {
 			throw new IllegalStateException("Cache has been shut down.");
 	}
 
+	private EntryMeta getMeta(BlockEntry entry) {
+		return entry == null ? null : (EntryMeta)entry.getCacheMeta();
+	}
+
 	private static class EntryMeta {
 		private final BlockEntry entry;
-		private final IdentityHashMap<MemoryAllowance, Integer> activePins;
 		private boolean backed;
 		private CompletableFuture<BlockEntry> readFuture;
 		private DeferredUnpinHandle deferredUnpin;
 
 		private EntryMeta(BlockEntry entry) {
 			this.entry = entry;
-			activePins = new IdentityHashMap<>();
 			backed = entry.getState().isBackedByDisk();
-		}
-
-		private void addPin(MemoryAllowance allowance) {
-			activePins.merge(allowance, 1, Integer::sum);
-		}
-
-		private void removePin(MemoryAllowance allowance) {
-			Integer count = activePins.get(allowance);
-			if(count == null || count <= 1)
-				activePins.remove(allowance);
-			else
-				activePins.put(allowance, count - 1);
-		}
-
-		private int activePinCount() {
-			int count = 0;
-			for(Integer pins : activePins.values())
-				count += pins;
-			return count;
 		}
 	}
 
@@ -637,7 +634,6 @@ public class OOCCacheImpl implements OOCCache {
 				if(completed || meta.deferredUnpin != this)
 					return null;
 				meta.deferredUnpin = null;
-				meta.addPin(allowance);
 				complete(false);
 				return meta.entry;
 			}
