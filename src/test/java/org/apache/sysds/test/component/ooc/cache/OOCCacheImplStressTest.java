@@ -54,7 +54,7 @@ public class OOCCacheImplStressTest {
 	private static final long MANUAL_STRESS_BYTES = 4L * GIB;
 	private static final long MANUAL_CACHE_BYTES = GIB;
 	private static final long MANUAL_HARD_BYTES = MANUAL_CACHE_BYTES + (256L << 20);
-	private static final int MANUAL_STRESS_ROWS = 250;
+	private static final int MANUAL_STRESS_ROWS = 500;
 	private static final int MANUAL_STRESS_COLS = 1;
 	private static final long MANUAL_PACK_SEAL_DELAY_MS = 5;
 
@@ -224,6 +224,54 @@ public class OOCCacheImplStressTest {
 		}
 	}
 
+	@Test
+	public void testPackedCacheBatchAndSealedPackApisWithFakeIO() throws Exception {
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(_io, 64 * BYTES, 16 * BYTES),
+			2 * BYTES, 8 * BYTES, 4 * BYTES, 64 * BYTES, 1, 0, 0);
+		try {
+			long[] batchIds = new long[] {0, 1};
+			Object[] batchData = new Object[] {payload(0), payload(1)};
+			long[] batchSizes = new long[] {BYTES, BYTES};
+			_producer.reserveBlocking(2 * BYTES);
+			BlockEntry[] batchEntries = cache.putPackPinned(1, batchIds, batchData, batchSizes, _producer);
+
+			_producer.reserveBlocking(BYTES);
+			BlockEntry mixedEntry = cache.putPinned(2, 0, payload(2), BYTES, _producer);
+
+			long[] sealedIds = new long[] {10, 11};
+			Object[] sealedData = new Object[] {payload(10), payload(11)};
+			long[] sealedSizes = new long[] {BYTES, BYTES};
+			_producer.reserveBlocking(2 * BYTES);
+			BlockEntry sealedPhysical = cache.putSealedPackPinned(3, sealedIds, sealedData, sealedSizes, _producer);
+
+			for(BlockEntry entry : batchEntries)
+				cache.unpin(entry, _producer);
+			cache.unpin(mixedEntry, _producer);
+			cache.unpin(sealedPhysical, _producer);
+			cache.flushPacks();
+			waitFor(() -> _producer.getUsedMemory() == 0);
+
+			BlockEntry batchReplay = cache.pin(1, 1, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			Assert.assertNotNull(batchReplay);
+			Assert.assertEquals(2.0, ((MatrixBlock) ((IndexedMatrixValue) batchReplay.getData()).getValue()).sum(), 0.0);
+			cache.unpin(batchReplay, _consumerB);
+
+			BlockEntry mixedReplay = cache.pin(2, 0, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			Assert.assertNotNull(mixedReplay);
+			Assert.assertEquals(3.0, ((MatrixBlock) ((IndexedMatrixValue) mixedReplay.getData()).getValue()).sum(), 0.0);
+			cache.unpin(mixedReplay, _consumerB);
+
+			BlockEntry sealedReplay = cache.pin(3, 11, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			Assert.assertNotNull(sealedReplay);
+			Assert.assertEquals(12.0, ((MatrixBlock) ((IndexedMatrixValue) sealedReplay.getData()).getValue()).sum(), 0.0);
+			cache.unpin(sealedReplay, _consumerB);
+			waitFor(() -> _consumerB.getUsedMemory() == 0);
+		}
+		finally {
+			cache.shutdown();
+		}
+	}
+
 	@Ignore("Manual multi-GiB stress test; enable when validating large spill/replay behavior.")
 	@Test
 	public void mtest() throws Exception {
@@ -313,7 +361,7 @@ public class OOCCacheImplStressTest {
 		OOCMatrixIOHandler io = new OOCMatrixIOHandler();
 		long tileBytes = MANUAL_STRESS_ROWS * (long) MANUAL_STRESS_COLS * 8;
 		int blocks = Math.toIntExact((MANUAL_STRESS_BYTES + tileBytes - 1) / tileBytes);
-		long packTargetBytes = 1L << 20;
+		long packTargetBytes = 1L << 19;
 		GlobalMemoryBroker broker = new GlobalMemoryBroker(MANUAL_STRESS_BYTES + MANUAL_HARD_BYTES);
 		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker, MANUAL_STRESS_BYTES + MANUAL_HARD_BYTES);
 		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker, MANUAL_STRESS_BYTES + MANUAL_HARD_BYTES);
@@ -336,7 +384,7 @@ public class OOCCacheImplStressTest {
 			System.out.println("Packed spill/replay blocks=" + blocks + ", tileBytes=" + tileBytes +
 				", owned=" + cache.getOwnedCacheSize());
 
-			int parallelism = 1024*16;
+			int parallelism = 1024*4;
 			for(int scan = 0; scan < 2; scan++) {
 				long scanStart = System.currentTimeMillis();
 				AtomicInteger inflight = new AtomicInteger(0);
@@ -345,7 +393,7 @@ public class OOCCacheImplStressTest {
 					waitFor(() -> inflight.get() < parallelism);
 					inflight.incrementAndGet();
 					int block = i;
-					cache.pin(key(i), reader).thenAccept(entry -> {
+					cache.pinPacked(key(i).getStreamId(), key(i).getSequenceNumber(), reader).thenAccept(entry -> {
 						Assert.assertNotNull("Null packed pin at scan=" + scanId + ", block=" + block, entry);
 						cache.unpin(entry, reader);
 						inflight.decrementAndGet();
