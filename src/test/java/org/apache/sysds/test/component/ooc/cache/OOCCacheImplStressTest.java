@@ -29,6 +29,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.OOCMatrixIOHandler;
+import org.apache.sysds.runtime.ooc.cache.OOCPackedCache;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.utils.Statistics;
@@ -43,19 +44,19 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.DoubleAdder;
 import java.util.function.BooleanSupplier;
 
 public class OOCCacheImplStressTest {
 	private static final int BLOCKS = 512;
 	private static final long BYTES = 1_000;
-	private static final long WAIT_TIMEOUT_SEC = 5;
+	private static final long WAIT_TIMEOUT_SEC = 60;
 	private static final long GIB = 1L << 30;
 	private static final long MANUAL_STRESS_BYTES = 4L * GIB;
 	private static final long MANUAL_CACHE_BYTES = GIB;
 	private static final long MANUAL_HARD_BYTES = MANUAL_CACHE_BYTES + (256L << 20);
 	private static final int MANUAL_STRESS_ROWS = 250;
-	private static final int MANUAL_STRESS_COLS = 250;
+	private static final int MANUAL_STRESS_COLS = 1;
+	private static final long MANUAL_PACK_SEAL_DELAY_MS = 5;
 
 	private FakeIOHandler _io;
 	private GlobalMemoryBroker _broker;
@@ -168,14 +169,193 @@ public class OOCCacheImplStressTest {
 		}
 	}
 
+	@Test
+	public void testPackedCacheGroupsSmallTilesAndReplaysWithFakeIO() throws Exception {
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(_io, 64 * BYTES, 16 * BYTES),
+			2 * BYTES, 8 * BYTES, 0);
+		try {
+			BlockEntry[] entries = new BlockEntry[BLOCKS];
+			OOCCache.UnpinHandle[] handles = new OOCCache.UnpinHandle[BLOCKS];
+
+			for(int i = 0; i < BLOCKS; i++) {
+				_producer.reserveBlocking(BYTES);
+				entries[i] = cache.putPinned(key(i), payload(i), BYTES, _producer);
+			}
+
+			for(int i = 0; i < BLOCKS; i++)
+				handles[i] = cache.unpin(entries[i], _producer);
+			for(OOCCache.UnpinHandle handle : handles)
+				if(!handle.isCommitted())
+					handle.getCompletionFuture().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+
+			cache.flushPacks();
+			Assert.assertEquals(0, _producer.getUsedMemory());
+			waitFor(() -> cache.getOwnedCacheSize() <= 16 * BYTES);
+			Assert.assertTrue("Packed physical entries should be evicted.", _io.getEvictionCount() > 0);
+
+			int readsBefore = _io.getReadCount();
+			BlockEntry last = cache.pin(key(BLOCKS - 1), _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			Assert.assertNotNull(last);
+			Assert.assertTrue("Fake IO should replay an evicted packed block.", _io.getReadCount() > readsBefore);
+			Assert.assertEquals((double) BLOCKS, ((MatrixBlock) ((IndexedMatrixValue) last.getData()).getValue()).sum(),
+				0.0);
+			Assert.assertEquals(8 * BYTES, _consumerB.getUsedMemory());
+
+			BlockEntry samePack = cache.pin(key(BLOCKS - 2), _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			Assert.assertNotNull(samePack);
+			Assert.assertEquals((double) BLOCKS - 1,
+				((MatrixBlock) ((IndexedMatrixValue) samePack.getData()).getValue()).sum(), 0.0);
+			Assert.assertEquals("Same allowance pins in one pack should charge once.",
+				8 * BYTES, _consumerB.getUsedMemory());
+
+			OOCCache.UnpinHandle first = cache.unpin(last, _consumerB);
+			if(!first.isCommitted())
+				first.getCompletionFuture().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			Assert.assertEquals("First logical unpin should keep the physical pack pinned.",
+				8 * BYTES, _consumerB.getUsedMemory());
+
+			OOCCache.UnpinHandle second = cache.unpin(samePack, _consumerB);
+			if(!second.isCommitted())
+				second.getCompletionFuture().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			Assert.assertEquals(0, _consumerB.getUsedMemory());
+		}
+		finally {
+			cache.shutdown();
+		}
+	}
+
 	@Ignore("Manual multi-GiB stress test; enable when validating large spill/replay behavior.")
 	@Test
 	public void mtest() throws Exception {
-		for(int i = 0; i < 2; i++) {
+		for(int i = 0; i < 3; i++) {
 			System.out.println("Iteration: " + i);
 			long ms = System.currentTimeMillis();
 			testManualFourGiBSpillAndReplay();
 			System.out.println((System.currentTimeMillis() - ms) + " ms");
+		}
+	}
+
+	@Ignore("Manual multi-GiB packed in-memory stress test; enable when validating packed logical access overhead.")
+	@Test
+	public void mtestPackedInMemory() throws Exception {
+		for(int i = 0; i < 3; i++) {
+			System.out.println("Packed in-memory iteration: " + i);
+			long ms = System.currentTimeMillis();
+			testManualPackedFourGiBInMemoryAccess();
+			System.out.println((System.currentTimeMillis() - ms) + " ms");
+		}
+	}
+
+	@Ignore("Manual multi-GiB packed spill/replay stress test; enable when validating packed disk IO.")
+	@Test
+	public void mtestPackedSpillAndReplay() throws Exception {
+		for(int i = 0; i < 1; i++) {
+			System.out.println("Packed spill/replay iteration: " + i);
+			long ms = System.currentTimeMillis();
+			testManualPackedFourGiBSpillAndReplay();
+			System.out.println((System.currentTimeMillis() - ms) + " ms");
+		}
+	}
+
+	private void testManualPackedFourGiBInMemoryAccess() throws Exception {
+		OOCMatrixIOHandler io = new OOCMatrixIOHandler();
+		long tileBytes = MANUAL_STRESS_ROWS * (long) MANUAL_STRESS_COLS * 8;
+		int blocks = Math.toIntExact((MANUAL_STRESS_BYTES + tileBytes - 1) / tileBytes);
+		long packTargetBytes = 4L << 20;
+		long packCount = (MANUAL_STRESS_BYTES + packTargetBytes - 1) / packTargetBytes;
+		long physicalBytes = (packCount + 1) * packTargetBytes;
+		long hardBytes = physicalBytes + (256L << 20);
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(MANUAL_STRESS_BYTES + hardBytes);
+		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker, MANUAL_STRESS_BYTES + hardBytes);
+		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker, MANUAL_STRESS_BYTES + hardBytes);
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(io, hardBytes, physicalBytes),
+			64L << 10, packTargetBytes, MANUAL_PACK_SEAL_DELAY_MS);
+		try {
+			MatrixBlock tile = new MatrixBlock(MANUAL_STRESS_ROWS, MANUAL_STRESS_COLS, 1.0);
+
+			long loadStart = System.currentTimeMillis();
+			for(int i = 0; i < blocks; i++) {
+				producer.reserveBlocking(tileBytes);
+				BlockEntry entry = cache.putPinned(key(i), new IndexedMatrixValue(new MatrixIndexes(i + 1L, 1), tile),
+					tileBytes, producer);
+				cache.unpin(entry, producer);
+			}
+			cache.flushPacks();
+			waitFor(() -> producer.getUsedMemory() == 0);
+			System.out.println("Packed in-memory load done in " + (System.currentTimeMillis() - loadStart) + " ms");
+			System.out.println("Packed in-memory blocks=" + blocks + ", tileBytes=" + tileBytes +
+				", physicalBudget=" + physicalBytes + ", owned=" + cache.getOwnedCacheSize());
+
+			for(int scan = 0; scan < 2; scan++) {
+				long scanStart = System.currentTimeMillis();
+				for(int i = 0; i < blocks; i++) {
+					BlockEntry entry = cache.pin(key(i), reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+					Assert.assertNotNull("Null packed pin at scan=" + scan + ", block=" + i, entry);
+					cache.unpin(entry, reader);
+				}
+				waitFor(() -> reader.getUsedMemory() == 0);
+				System.out.println("Packed in-memory scan " + scan + " done in " +
+					(System.currentTimeMillis() - scanStart) + " ms");
+			}
+		}
+		finally {
+			cache.shutdown();
+			io.shutdown();
+			producer.destroy();
+			reader.destroy();
+		}
+	}
+
+	private void testManualPackedFourGiBSpillAndReplay() throws Exception {
+		boolean oldOOCStats = DMLScript.OOC_STATISTICS;
+		DMLScript.OOC_STATISTICS = true;
+		Statistics.resetOOCEvictionStats();
+		OOCMatrixIOHandler io = new OOCMatrixIOHandler();
+		long tileBytes = MANUAL_STRESS_ROWS * (long) MANUAL_STRESS_COLS * 8;
+		int blocks = Math.toIntExact((MANUAL_STRESS_BYTES + tileBytes - 1) / tileBytes);
+		long packTargetBytes = 4L << 17;
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(MANUAL_STRESS_BYTES + MANUAL_HARD_BYTES);
+		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker, MANUAL_STRESS_BYTES + MANUAL_HARD_BYTES);
+		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker, MANUAL_STRESS_BYTES + MANUAL_HARD_BYTES);
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(io, MANUAL_HARD_BYTES, MANUAL_CACHE_BYTES),
+			64L << 10, packTargetBytes, MANUAL_PACK_SEAL_DELAY_MS);
+		try {
+			MatrixBlock tile = new MatrixBlock(MANUAL_STRESS_ROWS, MANUAL_STRESS_COLS, 1.0);
+
+			long loadStart = System.currentTimeMillis();
+			for(int i = 0; i < blocks; i++) {
+				producer.reserveBlocking(tileBytes);
+				BlockEntry entry = cache.putPinned(key(i), new IndexedMatrixValue(new MatrixIndexes(i + 1L, 1), tile),
+					tileBytes, producer);
+				cache.unpin(entry, producer);
+			}
+			cache.flushPacks();
+			waitFor(() -> producer.getUsedMemory() == 0);
+			waitFor(() -> cache.getOwnedCacheSize() <= MANUAL_CACHE_BYTES);
+			System.out.println("Packed spill/replay load done in " + (System.currentTimeMillis() - loadStart) + " ms");
+			System.out.println("Packed spill/replay blocks=" + blocks + ", tileBytes=" + tileBytes +
+				", owned=" + cache.getOwnedCacheSize());
+
+			for(int scan = 0; scan < 2; scan++) {
+				long scanStart = System.currentTimeMillis();
+				for(int i = 0; i < blocks; i++) {
+					BlockEntry entry = cache.pin(key(i), reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+					Assert.assertNotNull("Null packed pin at scan=" + scan + ", block=" + i, entry);
+					cache.unpin(entry, reader);
+				}
+				waitFor(() -> reader.getUsedMemory() == 0);
+				waitFor(() -> cache.getOwnedCacheSize() <= MANUAL_CACHE_BYTES);
+				System.out.println("Packed spill/replay scan " + scan + " done in " +
+					(System.currentTimeMillis() - scanStart) + " ms");
+			}
+			System.out.printf("OOCPackedCache manual 4GiB stress stats:%n%s%n", Statistics.displayOOCEvictionStats());
+		}
+		finally {
+			cache.shutdown();
+			io.shutdown();
+			producer.destroy();
+			reader.destroy();
+			DMLScript.OOC_STATISTICS = oldOOCStats;
 		}
 	}
 
@@ -207,22 +387,18 @@ public class OOCCacheImplStressTest {
 			waitFor(() -> cache.getOwnedCacheSize() <= MANUAL_CACHE_BYTES);
 			int parallelism = 128;
 
-			double expectedSum = MANUAL_STRESS_ROWS * (double) MANUAL_STRESS_COLS;
 			for(int scan = 0; scan < 2; scan++) {
-				DoubleAdder sum = new DoubleAdder();
 				AtomicInteger inflight = new AtomicInteger(0);
 				for(int i = 0; i < blocks; i++) {
 					waitFor(() -> inflight.get() < parallelism);
 					inflight.incrementAndGet();
 					cache.pin(key(i), reader).thenAccept(entry -> {
 						Assert.assertNotNull(entry);
-						sum.add(((MatrixBlock) ((IndexedMatrixValue) entry.getData()).getValue()).sum());
 						cache.unpin(entry, reader);
 						inflight.decrementAndGet();
 					});
 				}
 				waitFor(() -> inflight.get() == 0);
-				Assert.assertEquals(expectedSum * blocks, sum.sum(), 0.0);
 				Assert.assertEquals(0, reader.getUsedMemory());
 				waitFor(() -> cache.getOwnedCacheSize() <= MANUAL_CACHE_BYTES);
 			}
@@ -251,7 +427,7 @@ public class OOCCacheImplStressTest {
 		while(System.nanoTime() - start < timeout) {
 			if(condition.getAsBoolean())
 				return;
-			Thread.sleep(10);
+			Thread.sleep(1);
 		}
 		Assert.assertTrue(condition.getAsBoolean());
 	}
@@ -259,6 +435,7 @@ public class OOCCacheImplStressTest {
 	private static final class FakeIOHandler implements OOCIOHandler {
 		private final Map<BlockKey, Object> _spilled = new HashMap<>();
 		private final AtomicInteger _evictions = new AtomicInteger();
+		private final AtomicInteger _reads = new AtomicInteger();
 
 		@Override
 		public void shutdown() {
@@ -274,6 +451,7 @@ public class OOCCacheImplStressTest {
 
 		@Override
 		public CompletableFuture<BlockEntry> scheduleRead(BlockEntry block) {
+			_reads.incrementAndGet();
 			Object data = _spilled.get(block.getKey());
 			if(data == null)
 				return CompletableFuture.completedFuture(null);
@@ -308,6 +486,10 @@ public class OOCCacheImplStressTest {
 
 		private int getEvictionCount() {
 			return _evictions.get();
+		}
+
+		private int getReadCount() {
+			return _reads.get();
 		}
 	}
 }

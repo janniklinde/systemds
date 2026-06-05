@@ -393,7 +393,7 @@ public class OOCCacheImpl implements OOCCache {
 					processDeferredUnpins();
 				}
 				for(BlockEntry entry : toWrite)
-					_ioHandler.scheduleEviction(entry).whenComplete((ignored, ex) -> onEvicted(entry));
+					_ioHandler.scheduleEviction(entry).whenComplete((ignored, ex) -> onEvicted(entry, ex));
 				if(!progress)
 					return;
 			}
@@ -407,11 +407,20 @@ public class OOCCacheImpl implements OOCCache {
 		}
 	}
 
-	private void onEvicted(BlockEntry entry) {
+	private void onEvicted(BlockEntry entry, Throwable ex) {
 		synchronized(this) {
 			EntryMeta meta = getMeta(entry);
 			if(meta == null)
 				return;
+			if(ex != null) {
+				if(entry.getState() == BlockState.EVICTING) {
+					entry.setState(BlockState.HOT);
+					_evictingBytes -= entry.getSize();
+					setLive(entry);
+					scheduleEvictionIfNeeded();
+				}
+				return;
+			}
 			meta.backed = true;
 			if(entry.getState() == BlockState.HOT) {
 				entry.setState(BlockState.WARM);

@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -42,11 +43,13 @@ public final class OOCPackedCache implements OOCCache {
 	private static final long DEFAULT_PACK_THRESHOLD_BYTES = 64 * 1024;
 	private static final long DEFAULT_PACK_TARGET_BYTES = 4L << 17;
 	private static final long DEFAULT_SEAL_DELAY_MS = 5;
+	private static final long DEFAULT_PACK_RELEASE_DELAY_MS = 5;
 
 	private final OOCCacheImpl _physical;
 	private final long _packThresholdBytes;
 	private final long _packTargetBytes;
 	private final long _sealDelayMs;
+	private final long _packReleaseDelayMs;
 	private final SegmentedStreamTableList<LogicalLocation> _locations;
 	private final ScheduledExecutorService _sealExecutor;
 	private final AtomicInteger _nextPackedId;
@@ -64,6 +67,11 @@ public final class OOCPackedCache implements OOCCache {
 	}
 
 	public OOCPackedCache(OOCCacheImpl physical, long packThresholdBytes, long packTargetBytes, long sealDelayMs) {
+		this(physical, packThresholdBytes, packTargetBytes, sealDelayMs, DEFAULT_PACK_RELEASE_DELAY_MS);
+	}
+
+	public OOCPackedCache(OOCCacheImpl physical, long packThresholdBytes, long packTargetBytes, long sealDelayMs,
+		long packReleaseDelayMs) {
 		if(packThresholdBytes <= 0 || packTargetBytes < packThresholdBytes)
 			throw new IllegalArgumentException("Invalid pack sizes: threshold=" + packThresholdBytes +
 				", target=" + packTargetBytes);
@@ -71,6 +79,7 @@ public final class OOCPackedCache implements OOCCache {
 		_packThresholdBytes = packThresholdBytes;
 		_packTargetBytes = packTargetBytes;
 		_sealDelayMs = sealDelayMs;
+		_packReleaseDelayMs = packReleaseDelayMs;
 		_locations = new SegmentedStreamTableList<>();
 		_nextPackedId = new AtomicInteger();
 		_builders = new PackBuilder[16];
@@ -227,7 +236,7 @@ public final class OOCPackedCache implements OOCCache {
 		}
 		entry.unpin();
 		entry.setCacheMeta(null);
-		return pin.state.unpin(_physical, allowance);
+		return pin.state.unpin(_physical, _sealExecutor, _packReleaseDelayMs, allowance);
 	}
 
 	private PackedLocation forceSeal(PendingLocation pending) {
@@ -447,10 +456,16 @@ public final class OOCPackedCache implements OOCCache {
 		}
 	}
 
-	private static final class PackedBlock implements SpillableObject {
-		private final Object[] values;
-		private final long[] sizes;
-		private final long totalSize;
+	static final class PackedBlock implements SpillableObject {
+		private Object[] values;
+		private long[] sizes;
+		private long totalSize;
+
+		PackedBlock() {
+			values = null;
+			sizes = null;
+			totalSize = 0;
+		}
 
 		private PackedBlock(Object[] values, long[] sizes, long totalSize) {
 			this.values = values;
@@ -461,10 +476,12 @@ public final class OOCPackedCache implements OOCCache {
 		@Override
 		public boolean tryWrite(DataOutput out) throws IOException {
 			out.writeInt(values.length);
-			for(Object value : values) {
+			for(int i = 0; i < values.length; i++) {
+				out.writeLong(sizes[i]);
+				Object value = values[i];
 				if(!(value instanceof SpillableObject spillable))
 					return false;
-				if(!spillable.tryWrite(out))
+				if(!SpillableObjectRegistry.tryWrite(out, spillable))
 					return false;
 			}
 			return true;
@@ -472,7 +489,15 @@ public final class OOCPackedCache implements OOCCache {
 
 		@Override
 		public void read(DataInput in) throws IOException {
-			throw new IOException("Packed OOC block reads are not implemented yet.");
+			int count = in.readInt();
+			values = new Object[count];
+			sizes = new long[count];
+			totalSize = 0;
+			for(int i = 0; i < count; i++) {
+				sizes[i] = in.readLong();
+				values[i] = SpillableObjectRegistry.read(in);
+				totalSize += sizes[i];
+			}
 		}
 	}
 
@@ -481,6 +506,8 @@ public final class OOCPackedCache implements OOCCache {
 		private MemoryAllowance[] allowances;
 		private int[] counts;
 		private CompletableFuture<BlockEntry>[] futures;
+		private ScheduledFuture<?>[] releases;
+		private DelayedPackedUnpinHandle[] releaseHandles;
 		private int size;
 
 		@SuppressWarnings("unchecked")
@@ -489,6 +516,8 @@ public final class OOCPackedCache implements OOCCache {
 			allowances = new MemoryAllowance[2];
 			counts = new int[2];
 			futures = new CompletableFuture[2];
+			releases = new ScheduledFuture[2];
+			releaseHandles = new DelayedPackedUnpinHandle[2];
 			size = 0;
 		}
 
@@ -496,6 +525,7 @@ public final class OOCPackedCache implements OOCCache {
 			boolean liveOnly) {
 			int ix = indexOf(allowance);
 			if(ix >= 0) {
+				cancelRelease(ix);
 				counts[ix]++;
 				return futures[ix];
 			}
@@ -520,15 +550,22 @@ public final class OOCPackedCache implements OOCCache {
 			}
 		}
 
-		private synchronized UnpinHandle unpin(OOCCacheImpl physical, MemoryAllowance allowance) {
+		private synchronized UnpinHandle unpin(OOCCacheImpl physical, ScheduledExecutorService executor,
+			long releaseDelayMs, MemoryAllowance allowance) {
 			int ix = indexOf(allowance);
 			if(ix < 0)
 				return ImmediateUnpinHandle.committed(physicalEntry, allowance, physicalEntry.getSize());
 			counts[ix]--;
 			if(counts[ix] > 0)
 				return ImmediateUnpinHandle.committed(physicalEntry, allowance, physicalEntry.getSize());
-			removeAt(ix);
-			return physical.unpin(physicalEntry, allowance);
+			DelayedPackedUnpinHandle handle = new DelayedPackedUnpinHandle(physicalEntry, allowance);
+			releaseHandles[ix] = handle;
+			if(releaseDelayMs <= 0)
+				releasePhysicalPin(physical, allowance, handle);
+			else
+				releases[ix] = executor.schedule(() -> releasePhysicalPin(physical, allowance, handle),
+					releaseDelayMs, TimeUnit.MILLISECONDS);
+			return handle;
 		}
 
 		private int indexOf(MemoryAllowance allowance) {
@@ -542,18 +579,56 @@ public final class OOCPackedCache implements OOCCache {
 			if(size == allowances.length) {
 				MemoryAllowance[] biggerAllowances = new MemoryAllowance[size * 2];
 				int[] biggerCounts = new int[size * 2];
+				@SuppressWarnings("unchecked")
 				CompletableFuture<BlockEntry>[] biggerFutures = new CompletableFuture[size * 2];
+				ScheduledFuture<?>[] biggerReleases = new ScheduledFuture[size * 2];
+				DelayedPackedUnpinHandle[] biggerReleaseHandles = new DelayedPackedUnpinHandle[size * 2];
 				System.arraycopy(allowances, 0, biggerAllowances, 0, size);
 				System.arraycopy(counts, 0, biggerCounts, 0, size);
 				System.arraycopy(futures, 0, biggerFutures, 0, size);
+				System.arraycopy(releases, 0, biggerReleases, 0, size);
+				System.arraycopy(releaseHandles, 0, biggerReleaseHandles, 0, size);
 				allowances = biggerAllowances;
 				counts = biggerCounts;
 				futures = biggerFutures;
+				releases = biggerReleases;
+				releaseHandles = biggerReleaseHandles;
 			}
 			allowances[size] = allowance;
 			counts[size] = 1;
 			futures[size] = future;
 			size++;
+		}
+
+		private void cancelRelease(int ix) {
+			ScheduledFuture<?> release = releases[ix];
+			if(release != null) {
+				release.cancel(false);
+				releases[ix] = null;
+			}
+			DelayedPackedUnpinHandle handle = releaseHandles[ix];
+			if(handle != null) {
+				releaseHandles[ix] = null;
+				handle.complete(false);
+			}
+		}
+
+		private void releasePhysicalPin(OOCCacheImpl physical, MemoryAllowance allowance,
+			DelayedPackedUnpinHandle handle) {
+			synchronized(this) {
+				int ix = indexOf(allowance);
+				if(ix < 0 || releaseHandles[ix] != handle || counts[ix] > 0) {
+					handle.complete(false);
+					return;
+				}
+				removeAt(ix);
+			}
+			UnpinHandle physicalHandle = physical.unpin(physicalEntry, allowance);
+			if(physicalHandle.isCommitted())
+				handle.complete(true);
+			else
+				physicalHandle.getCompletionFuture().whenComplete((committed, ex) ->
+					handle.complete(ex == null && Boolean.TRUE.equals(committed)));
 		}
 
 		private synchronized void removeFailedAllowance(MemoryAllowance allowance, CompletableFuture<BlockEntry> future) {
@@ -567,9 +642,58 @@ public final class OOCPackedCache implements OOCCache {
 			allowances[ix] = allowances[last];
 			counts[ix] = counts[last];
 			futures[ix] = futures[last];
+			releases[ix] = releases[last];
+			releaseHandles[ix] = releaseHandles[last];
 			allowances[last] = null;
 			counts[last] = 0;
 			futures[last] = null;
+			releases[last] = null;
+			releaseHandles[last] = null;
+		}
+	}
+
+	private static final class DelayedPackedUnpinHandle implements UnpinHandle {
+		private final BlockEntry entry;
+		private final MemoryAllowance allowance;
+		private final CompletableFuture<Boolean> future = new CompletableFuture<>();
+
+		private DelayedPackedUnpinHandle(BlockEntry entry, MemoryAllowance allowance) {
+			this.entry = entry;
+			this.allowance = allowance;
+		}
+
+		@Override
+		public BlockEntry getEntry() {
+			return entry;
+		}
+
+		@Override
+		public MemoryAllowance getAllowance() {
+			return allowance;
+		}
+
+		@Override
+		public long getBytes() {
+			return entry.getSize();
+		}
+
+		@Override
+		public boolean isCommitted() {
+			return Boolean.TRUE.equals(future.getNow(false));
+		}
+
+		@Override
+		public CompletableFuture<Boolean> getCompletionFuture() {
+			return future;
+		}
+
+		@Override
+		public BlockEntry reclaim() {
+			return null;
+		}
+
+		private void complete(boolean committed) {
+			future.complete(committed);
 		}
 	}
 

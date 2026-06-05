@@ -529,23 +529,23 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 		String filename = partFile.filePath;
 
-		// Create an empty object to read data into.
-		IndexedMatrixValue imv = new IndexedMatrixValue();
+		SpillableObject obj;
 
 		try (RandomAccessFile raf = new RandomAccessFile(filename, "r")) {
 			raf.seek(sloc.offset);
 
 			DataInput dis = new OOCBufferedDataInputStream(raf);
 			long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
-			imv.read(dis);
+			obj = SpillableObjectRegistry.read(dis);
 			if (DMLScript.OOC_STATISTICS)
 				ioDuration = System.nanoTime() - ioStart;
 		} catch (ClosedByInterruptException ignored) {
+			return;
 		} catch (IOException e) {
 			throw new RuntimeException(e);
 		}
 
-		block.setDataUnsafe(imv);
+		block.setDataUnsafe(obj);
 
 		if (DMLScript.OOC_STATISTICS) {
 			Statistics.incrementOOCLoadFromDisk();
@@ -702,7 +702,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			SpillableObject so = (SpillableObject) entry.getDataUnsafe(); // Get data without requiring pin
 			if(so == null)
 				return 0;
-			if(!so.tryWrite(dos))
+			if(!SpillableObjectRegistry.tryWrite(dos, so))
 				return 0;
 
 			long offsetAfter = dos.getPosition();
