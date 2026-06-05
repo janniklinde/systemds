@@ -44,7 +44,7 @@ import java.util.concurrent.locks.LockSupport;
 public final class OOCPackedCache implements OOCCache {
 	private static final int PACKED_STREAM_ID = 0;
 	private static final long DEFAULT_PACK_THRESHOLD_BYTES = 64 * 1024;
-	private static final long DEFAULT_PACK_TARGET_BYTES = 4L << 20;
+	private static final long DEFAULT_PACK_TARGET_BYTES = 1L << 20; // 1MB packed tiles
 	private static final long DEFAULT_SEAL_DELAY_MS = 5;
 	private static final long DEFAULT_PACK_RELEASE_DELAY_MS = 5;
 

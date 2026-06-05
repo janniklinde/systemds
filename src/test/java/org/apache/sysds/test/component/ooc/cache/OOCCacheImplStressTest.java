@@ -54,7 +54,7 @@ public class OOCCacheImplStressTest {
 	private static final long MANUAL_STRESS_BYTES = 4L * GIB;
 	private static final long MANUAL_CACHE_BYTES = GIB;
 	private static final long MANUAL_HARD_BYTES = MANUAL_CACHE_BYTES + (256L << 20);
-	private static final int MANUAL_STRESS_ROWS = 1000;
+	private static final int MANUAL_STRESS_ROWS = 250;
 	private static final int MANUAL_STRESS_COLS = 1;
 	private static final long MANUAL_PACK_SEAL_DELAY_MS = 5;
 
@@ -336,7 +336,7 @@ public class OOCCacheImplStressTest {
 			System.out.println("Packed spill/replay blocks=" + blocks + ", tileBytes=" + tileBytes +
 				", owned=" + cache.getOwnedCacheSize());
 
-			int parallelism = 128;
+			int parallelism = 1024*16;
 			for(int scan = 0; scan < 2; scan++) {
 				long scanStart = System.currentTimeMillis();
 				AtomicInteger inflight = new AtomicInteger(0);
