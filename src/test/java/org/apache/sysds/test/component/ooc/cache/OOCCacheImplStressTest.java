@@ -54,7 +54,7 @@ public class OOCCacheImplStressTest {
 	private static final long MANUAL_STRESS_BYTES = 4L * GIB;
 	private static final long MANUAL_CACHE_BYTES = GIB;
 	private static final long MANUAL_HARD_BYTES = MANUAL_CACHE_BYTES + (256L << 20);
-	private static final int MANUAL_STRESS_ROWS = 250;
+	private static final int MANUAL_STRESS_ROWS = 1000;
 	private static final int MANUAL_STRESS_COLS = 1;
 	private static final long MANUAL_PACK_SEAL_DELAY_MS = 5;
 
@@ -227,7 +227,7 @@ public class OOCCacheImplStressTest {
 	@Ignore("Manual multi-GiB stress test; enable when validating large spill/replay behavior.")
 	@Test
 	public void mtest() throws Exception {
-		for(int i = 0; i < 3; i++) {
+		for(int i = 0; i < 2; i++) {
 			System.out.println("Iteration: " + i);
 			long ms = System.currentTimeMillis();
 			testManualFourGiBSpillAndReplay();
@@ -249,7 +249,7 @@ public class OOCCacheImplStressTest {
 	@Ignore("Manual multi-GiB packed spill/replay stress test; enable when validating packed disk IO.")
 	@Test
 	public void mtestPackedSpillAndReplay() throws Exception {
-		for(int i = 0; i < 1; i++) {
+		for(int i = 0; i < 2; i++) {
 			System.out.println("Packed spill/replay iteration: " + i);
 			long ms = System.currentTimeMillis();
 			testManualPackedFourGiBSpillAndReplay();
@@ -313,7 +313,7 @@ public class OOCCacheImplStressTest {
 		OOCMatrixIOHandler io = new OOCMatrixIOHandler();
 		long tileBytes = MANUAL_STRESS_ROWS * (long) MANUAL_STRESS_COLS * 8;
 		int blocks = Math.toIntExact((MANUAL_STRESS_BYTES + tileBytes - 1) / tileBytes);
-		long packTargetBytes = 4L << 17;
+		long packTargetBytes = 1L << 20;
 		GlobalMemoryBroker broker = new GlobalMemoryBroker(MANUAL_STRESS_BYTES + MANUAL_HARD_BYTES);
 		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker, MANUAL_STRESS_BYTES + MANUAL_HARD_BYTES);
 		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker, MANUAL_STRESS_BYTES + MANUAL_HARD_BYTES);
@@ -336,13 +336,22 @@ public class OOCCacheImplStressTest {
 			System.out.println("Packed spill/replay blocks=" + blocks + ", tileBytes=" + tileBytes +
 				", owned=" + cache.getOwnedCacheSize());
 
+			int parallelism = 128;
 			for(int scan = 0; scan < 2; scan++) {
 				long scanStart = System.currentTimeMillis();
+				AtomicInteger inflight = new AtomicInteger(0);
+				int scanId = scan;
 				for(int i = 0; i < blocks; i++) {
-					BlockEntry entry = cache.pin(key(i), reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
-					Assert.assertNotNull("Null packed pin at scan=" + scan + ", block=" + i, entry);
-					cache.unpin(entry, reader);
+					waitFor(() -> inflight.get() < parallelism);
+					inflight.incrementAndGet();
+					int block = i;
+					cache.pin(key(i), reader).thenAccept(entry -> {
+						Assert.assertNotNull("Null packed pin at scan=" + scanId + ", block=" + block, entry);
+						cache.unpin(entry, reader);
+						inflight.decrementAndGet();
+					});
 				}
+				waitFor(() -> inflight.get() == 0);
 				waitFor(() -> reader.getUsedMemory() == 0);
 				waitFor(() -> cache.getOwnedCacheSize() <= MANUAL_CACHE_BYTES);
 				System.out.println("Packed spill/replay scan " + scan + " done in " +

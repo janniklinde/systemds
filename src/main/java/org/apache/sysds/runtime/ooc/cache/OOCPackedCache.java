@@ -28,11 +28,14 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * Logical-to-physical packing adapter. Small logical blocks are packed into larger physical cache entries
@@ -41,7 +44,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class OOCPackedCache implements OOCCache {
 	private static final int PACKED_STREAM_ID = 0;
 	private static final long DEFAULT_PACK_THRESHOLD_BYTES = 64 * 1024;
-	private static final long DEFAULT_PACK_TARGET_BYTES = 4L << 17;
+	private static final long DEFAULT_PACK_TARGET_BYTES = 4L << 20;
 	private static final long DEFAULT_SEAL_DELAY_MS = 5;
 	private static final long DEFAULT_PACK_RELEASE_DELAY_MS = 5;
 
@@ -52,6 +55,9 @@ public final class OOCPackedCache implements OOCCache {
 	private final long _packReleaseDelayMs;
 	private final SegmentedStreamTableList<LogicalLocation> _locations;
 	private final ScheduledExecutorService _sealExecutor;
+	private final ExecutorService _releaseExecutor;
+	private final ConcurrentLinkedQueue<PackedPinState> _releaseQueue;
+	private final AtomicBoolean _releaseRunning;
 	private final AtomicInteger _nextPackedId;
 
 	private PackBuilder[] _builders;
@@ -82,10 +88,17 @@ public final class OOCPackedCache implements OOCCache {
 		_packReleaseDelayMs = packReleaseDelayMs;
 		_locations = new SegmentedStreamTableList<>();
 		_nextPackedId = new AtomicInteger();
+		_releaseQueue = new ConcurrentLinkedQueue<>();
+		_releaseRunning = new AtomicBoolean(false);
 		_builders = new PackBuilder[16];
 		_running = true;
 		_sealExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
 			Thread t = new Thread(r, "ooc-pack-sealer");
+			t.setDaemon(true);
+			return t;
+		});
+		_releaseExecutor = Executors.newSingleThreadExecutor(r -> {
+			Thread t = new Thread(r, "ooc-pack-release");
 			t.setDaemon(true);
 			return t;
 		});
@@ -197,6 +210,7 @@ public final class OOCPackedCache implements OOCCache {
 			if(builder != null)
 				sealBuilder(builder);
 		_sealExecutor.shutdownNow();
+		_releaseExecutor.shutdownNow();
 		_physical.shutdown();
 	}
 
@@ -236,7 +250,61 @@ public final class OOCPackedCache implements OOCCache {
 		}
 		entry.unpin();
 		entry.setCacheMeta(null);
-		return pin.state.unpin(_physical, _sealExecutor, _packReleaseDelayMs, allowance);
+		return pin.state.unpin(this, _packReleaseDelayMs, allowance);
+	}
+
+	private void enqueueRelease(PackedPinState state) {
+		if(!_running)
+			return;
+		if(state.markReleaseQueued()) {
+			_releaseQueue.offer(state);
+			scheduleReleaseMaintenance();
+		}
+	}
+
+	private void enqueueReleaseNoSchedule(PackedPinState state) {
+		if(_running && state.markReleaseQueued())
+			_releaseQueue.offer(state);
+	}
+
+	private void scheduleReleaseMaintenance() {
+		if(!_releaseRunning.compareAndSet(false, true))
+			return;
+		_releaseExecutor.execute(this::runReleaseMaintenance);
+	}
+
+	private void runReleaseMaintenance() {
+		try {
+			while(_running) {
+				long nextDueNanos = Long.MAX_VALUE;
+				ArrayList<PackedPinState> delayed = null;
+				PackedPinState state;
+				long nowNanos = System.nanoTime();
+				while((state = _releaseQueue.poll()) != null) {
+					state.clearReleaseQueued();
+					long stateNextDue = state.releaseDuePins(_physical, nowNanos);
+					if(stateNextDue != Long.MAX_VALUE) {
+						if(delayed == null)
+							delayed = new ArrayList<>();
+						delayed.add(state);
+						nextDueNanos = Math.min(nextDueNanos, stateNextDue);
+					}
+				}
+				if(nextDueNanos == Long.MAX_VALUE)
+					return;
+				long waitNanos = nextDueNanos - System.nanoTime();
+				if(waitNanos > 0)
+					LockSupport.parkNanos(waitNanos);
+				if(delayed != null)
+					for(PackedPinState delayedState : delayed)
+						enqueueReleaseNoSchedule(delayedState);
+			}
+		}
+		finally {
+			_releaseRunning.set(false);
+			if(_running && !_releaseQueue.isEmpty())
+				scheduleReleaseMaintenance();
+		}
 	}
 
 	private PackedLocation forceSeal(PendingLocation pending) {
@@ -506,9 +574,10 @@ public final class OOCPackedCache implements OOCCache {
 		private MemoryAllowance[] allowances;
 		private int[] counts;
 		private CompletableFuture<BlockEntry>[] futures;
-		private ScheduledFuture<?>[] releases;
+		private long[] releaseDueNanos;
 		private DelayedPackedUnpinHandle[] releaseHandles;
 		private int size;
+		private boolean releaseQueued;
 
 		@SuppressWarnings("unchecked")
 		private PackedPinState(BlockEntry physicalEntry) {
@@ -516,9 +585,10 @@ public final class OOCPackedCache implements OOCCache {
 			allowances = new MemoryAllowance[2];
 			counts = new int[2];
 			futures = new CompletableFuture[2];
-			releases = new ScheduledFuture[2];
+			releaseDueNanos = new long[2];
 			releaseHandles = new DelayedPackedUnpinHandle[2];
 			size = 0;
+			releaseQueued = false;
 		}
 
 		private synchronized CompletableFuture<BlockEntry> pin(OOCCacheImpl physical, MemoryAllowance allowance,
@@ -550,8 +620,7 @@ public final class OOCPackedCache implements OOCCache {
 			}
 		}
 
-		private synchronized UnpinHandle unpin(OOCCacheImpl physical, ScheduledExecutorService executor,
-			long releaseDelayMs, MemoryAllowance allowance) {
+		private synchronized UnpinHandle unpin(OOCPackedCache owner, long releaseDelayMs, MemoryAllowance allowance) {
 			int ix = indexOf(allowance);
 			if(ix < 0)
 				return ImmediateUnpinHandle.committed(physicalEntry, allowance, physicalEntry.getSize());
@@ -560,11 +629,8 @@ public final class OOCPackedCache implements OOCCache {
 				return ImmediateUnpinHandle.committed(physicalEntry, allowance, physicalEntry.getSize());
 			DelayedPackedUnpinHandle handle = new DelayedPackedUnpinHandle(physicalEntry, allowance);
 			releaseHandles[ix] = handle;
-			if(releaseDelayMs <= 0)
-				releasePhysicalPin(physical, allowance, handle);
-			else
-				releases[ix] = executor.schedule(() -> releasePhysicalPin(physical, allowance, handle),
-					releaseDelayMs, TimeUnit.MILLISECONDS);
+			releaseDueNanos[ix] = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0, releaseDelayMs));
+			owner.enqueueRelease(this);
 			return handle;
 		}
 
@@ -581,17 +647,17 @@ public final class OOCPackedCache implements OOCCache {
 				int[] biggerCounts = new int[size * 2];
 				@SuppressWarnings("unchecked")
 				CompletableFuture<BlockEntry>[] biggerFutures = new CompletableFuture[size * 2];
-				ScheduledFuture<?>[] biggerReleases = new ScheduledFuture[size * 2];
+				long[] biggerReleaseDueNanos = new long[size * 2];
 				DelayedPackedUnpinHandle[] biggerReleaseHandles = new DelayedPackedUnpinHandle[size * 2];
 				System.arraycopy(allowances, 0, biggerAllowances, 0, size);
 				System.arraycopy(counts, 0, biggerCounts, 0, size);
 				System.arraycopy(futures, 0, biggerFutures, 0, size);
-				System.arraycopy(releases, 0, biggerReleases, 0, size);
+				System.arraycopy(releaseDueNanos, 0, biggerReleaseDueNanos, 0, size);
 				System.arraycopy(releaseHandles, 0, biggerReleaseHandles, 0, size);
 				allowances = biggerAllowances;
 				counts = biggerCounts;
 				futures = biggerFutures;
-				releases = biggerReleases;
+				releaseDueNanos = biggerReleaseDueNanos;
 				releaseHandles = biggerReleaseHandles;
 			}
 			allowances[size] = allowance;
@@ -601,11 +667,7 @@ public final class OOCPackedCache implements OOCCache {
 		}
 
 		private void cancelRelease(int ix) {
-			ScheduledFuture<?> release = releases[ix];
-			if(release != null) {
-				release.cancel(false);
-				releases[ix] = null;
-			}
+			releaseDueNanos[ix] = 0;
 			DelayedPackedUnpinHandle handle = releaseHandles[ix];
 			if(handle != null) {
 				releaseHandles[ix] = null;
@@ -613,22 +675,43 @@ public final class OOCPackedCache implements OOCCache {
 			}
 		}
 
+		private long releaseDuePins(OOCCacheImpl physical, long nowNanos) {
+			ArrayList<PackedRelease> due = null;
+			long nextDueNanos = Long.MAX_VALUE;
+			synchronized(this) {
+				for(int i = 0; i < size;) {
+					DelayedPackedUnpinHandle handle = releaseHandles[i];
+					if(handle == null || counts[i] > 0) {
+						i++;
+						continue;
+					}
+					long dueNanos = releaseDueNanos[i];
+					if(dueNanos > nowNanos) {
+						nextDueNanos = Math.min(nextDueNanos, dueNanos);
+						i++;
+						continue;
+					}
+					if(due == null)
+						due = new ArrayList<>();
+					due.add(new PackedRelease(allowances[i], handle));
+					removeAt(i);
+				}
+			}
+			if(due != null)
+				for(PackedRelease release : due)
+					releasePhysicalPin(physical, release.allowance, release.handle);
+			return nextDueNanos;
+		}
+
 		private void releasePhysicalPin(OOCCacheImpl physical, MemoryAllowance allowance,
 			DelayedPackedUnpinHandle handle) {
-			synchronized(this) {
-				int ix = indexOf(allowance);
-				if(ix < 0 || releaseHandles[ix] != handle || counts[ix] > 0) {
-					handle.complete(false);
-					return;
-				}
-				removeAt(ix);
-			}
 			UnpinHandle physicalHandle = physical.unpin(physicalEntry, allowance);
-			if(physicalHandle.isCommitted())
+			if(physicalHandle.isCommitted()) {
 				handle.complete(true);
-			else
-				physicalHandle.getCompletionFuture().whenComplete((committed, ex) ->
-					handle.complete(ex == null && Boolean.TRUE.equals(committed)));
+				return;
+			}
+			physicalHandle.getCompletionFuture().whenComplete((committed, ex) ->
+				handle.complete(ex == null && Boolean.TRUE.equals(committed)));
 		}
 
 		private synchronized void removeFailedAllowance(MemoryAllowance allowance, CompletableFuture<BlockEntry> future) {
@@ -642,14 +725,28 @@ public final class OOCPackedCache implements OOCCache {
 			allowances[ix] = allowances[last];
 			counts[ix] = counts[last];
 			futures[ix] = futures[last];
-			releases[ix] = releases[last];
+			releaseDueNanos[ix] = releaseDueNanos[last];
 			releaseHandles[ix] = releaseHandles[last];
 			allowances[last] = null;
 			counts[last] = 0;
 			futures[last] = null;
-			releases[last] = null;
+			releaseDueNanos[last] = 0;
 			releaseHandles[last] = null;
 		}
+
+		private synchronized boolean markReleaseQueued() {
+			if(releaseQueued)
+				return false;
+			releaseQueued = true;
+			return true;
+		}
+
+		private synchronized void clearReleaseQueued() {
+			releaseQueued = false;
+		}
+	}
+
+	private record PackedRelease(MemoryAllowance allowance, DelayedPackedUnpinHandle handle) {
 	}
 
 	private static final class DelayedPackedUnpinHandle implements UnpinHandle {
