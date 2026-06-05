@@ -44,13 +44,19 @@ import java.util.concurrent.locks.LockSupport;
 public final class OOCPackedCache implements OOCCache {
 	private static final int PACKED_STREAM_ID = 0;
 	private static final long DEFAULT_PACK_THRESHOLD_BYTES = 64 * 1024;
-	private static final long DEFAULT_PACK_TARGET_BYTES = 1L << 20; // 1MB packed tiles
+	private static final long DEFAULT_PACK_TARGET_BYTES = 1L << 19; //512 KB tile packing
+	private static final long DEFAULT_MIXED_PACK_TARGET_BYTES = 256L << 10;
+	private static final long DEFAULT_MAX_STAGING_BYTES = 64L << 20;
+	private static final int DEFAULT_MAX_OPEN_BUILDERS = 64;
 	private static final long DEFAULT_SEAL_DELAY_MS = 5;
 	private static final long DEFAULT_PACK_RELEASE_DELAY_MS = 5;
 
 	private final OOCCacheImpl _physical;
 	private final long _packThresholdBytes;
 	private final long _packTargetBytes;
+	private final long _mixedPackTargetBytes;
+	private final long _maxStagingBytes;
+	private final int _maxOpenBuilders;
 	private final long _sealDelayMs;
 	private final long _packReleaseDelayMs;
 	private final SegmentedStreamTableList<LogicalLocation> _locations;
@@ -61,6 +67,9 @@ public final class OOCPackedCache implements OOCCache {
 	private final AtomicInteger _nextPackedId;
 
 	private PackBuilder[] _builders;
+	private PackBuilder _mixedBuilder;
+	private long _stagingBytes;
+	private int _openBuilderCount;
 	private boolean _running;
 
 	public OOCPackedCache(OOCIOHandler ioHandler, long hardLimit, long evictionLimit) {
@@ -78,12 +87,22 @@ public final class OOCPackedCache implements OOCCache {
 
 	public OOCPackedCache(OOCCacheImpl physical, long packThresholdBytes, long packTargetBytes, long sealDelayMs,
 		long packReleaseDelayMs) {
+		this(physical, packThresholdBytes, packTargetBytes, DEFAULT_MIXED_PACK_TARGET_BYTES,
+			DEFAULT_MAX_STAGING_BYTES, DEFAULT_MAX_OPEN_BUILDERS, sealDelayMs, packReleaseDelayMs);
+	}
+
+	public OOCPackedCache(OOCCacheImpl physical, long packThresholdBytes, long packTargetBytes,
+		long mixedPackTargetBytes, long maxStagingBytes, int maxOpenBuilders, long sealDelayMs,
+		long packReleaseDelayMs) {
 		if(packThresholdBytes <= 0 || packTargetBytes < packThresholdBytes)
 			throw new IllegalArgumentException("Invalid pack sizes: threshold=" + packThresholdBytes +
 				", target=" + packTargetBytes);
 		_physical = physical;
 		_packThresholdBytes = packThresholdBytes;
 		_packTargetBytes = packTargetBytes;
+		_mixedPackTargetBytes = Math.max(packThresholdBytes, mixedPackTargetBytes);
+		_maxStagingBytes = Math.max(_mixedPackTargetBytes, maxStagingBytes);
+		_maxOpenBuilders = Math.max(1, maxOpenBuilders);
 		_sealDelayMs = sealDelayMs;
 		_packReleaseDelayMs = packReleaseDelayMs;
 		_locations = new SegmentedStreamTableList<>();
@@ -91,6 +110,9 @@ public final class OOCPackedCache implements OOCCache {
 		_releaseQueue = new ConcurrentLinkedQueue<>();
 		_releaseRunning = new AtomicBoolean(false);
 		_builders = new PackBuilder[16];
+		_mixedBuilder = null;
+		_stagingBytes = 0;
+		_openBuilderCount = 0;
 		_running = true;
 		_sealExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
 			Thread t = new Thread(r, "ooc-pack-sealer");
@@ -110,22 +132,74 @@ public final class OOCPackedCache implements OOCCache {
 			return _physical.putPinned(sId, tId, data, size, allowance);
 
 		PackBuilder builder;
-		PendingLocation location;
 		int slot;
 		synchronized(this) {
 			checkRunning();
-			builder = getOpenBuilder(sId, allowance);
-			slot = builder.append(tId, data, size);
-			location = new PendingLocation(builder, slot);
-			putLocation(new BlockKey(sId, tId), location);
-			if(builder.getBytes() >= _packTargetBytes)
-				sealBuilder(builder);
+			builder = getOpenBuilder(sId, allowance, size);
+			slot = appendToBuilder(builder, sId, tId, data, size);
 		}
 
 		BlockEntry logical = new BlockEntry(new BlockKey(sId, tId), size, data, BlockState.REMOVED);
 		logical.pin();
 		logical.setCacheMeta(new PendingLogicalPin(builder, slot));
 		return logical;
+	}
+
+	public BlockEntry[] putPackPinned(long sId, long[] tIds, Object[] data, long[] sizes,
+		MemoryAllowance allowance) {
+		return putPackPinned(sId, tIds, data, sizes, 0, tIds.length, allowance);
+	}
+
+	public BlockEntry[] putPackPinned(long sId, long[] tIds, Object[] data, long[] sizes, int off, int len,
+		MemoryAllowance allowance) {
+		BlockEntry[] entries = new BlockEntry[len];
+		synchronized(this) {
+			checkRunning();
+			for(int i = 0; i < len; i++) {
+				int p = off + i;
+				long tId = tIds[p];
+				long size = sizes[p];
+				if(size >= _packThresholdBytes) {
+					entries[i] = _physical.putPinned(sId, tId, data[p], size, allowance);
+					continue;
+				}
+				PackBuilder builder = getOpenBuilder(sId, allowance, size);
+				int slot = appendToBuilder(builder, sId, tId, data[p], size);
+				BlockEntry logical = new BlockEntry(new BlockKey(sId, tId), size, data[p], BlockState.REMOVED);
+				logical.pin();
+				logical.setCacheMeta(new PendingLogicalPin(builder, slot));
+				entries[i] = logical;
+			}
+		}
+		return entries;
+	}
+
+	public BlockEntry putSealedPackPinned(long sId, long[] tIds, Object[] data, long[] sizes,
+		MemoryAllowance allowance) {
+		return putSealedPackPinned(sId, tIds, data, sizes, 0, tIds.length, allowance);
+	}
+
+	public BlockEntry putSealedPackPinned(long sId, long[] tIds, Object[] data, long[] sizes, int off, int len,
+		MemoryAllowance allowance) {
+		long totalSize = 0;
+		Object[] packedData = new Object[len];
+		long[] packedSizes = new long[len];
+		for(int i = 0; i < len; i++) {
+			int p = off + i;
+			packedData[i] = data[p];
+			packedSizes[i] = sizes[p];
+			totalSize += sizes[p];
+		}
+
+		synchronized(this) {
+			checkRunning();
+			BlockEntry physicalEntry = putSealedBlockPinned(new PackedBlock(packedData, packedSizes, totalSize),
+				allowance);
+			PackedPinState state = new PackedPinState(physicalEntry);
+			for(int i = 0; i < len; i++)
+				putLocation(new BlockKey(sId, tIds[off + i]), new PackedLocation(state, i));
+			return physicalEntry;
+		}
 	}
 
 	@Override
@@ -209,6 +283,8 @@ public final class OOCPackedCache implements OOCCache {
 		for(PackBuilder builder : _builders)
 			if(builder != null)
 				sealBuilder(builder);
+		if(_mixedBuilder != null)
+			sealBuilder(_mixedBuilder);
 		_sealExecutor.shutdownNow();
 		_releaseExecutor.shutdownNow();
 		_physical.shutdown();
@@ -218,6 +294,8 @@ public final class OOCPackedCache implements OOCCache {
 		for(PackBuilder builder : _builders)
 			if(builder != null)
 				sealBuilder(builder);
+		if(_mixedBuilder != null)
+			sealBuilder(_mixedBuilder);
 	}
 
 	private UnpinHandle unpinPending(BlockEntry entry, PendingLogicalPin pin, MemoryAllowance allowance) {
@@ -310,7 +388,8 @@ public final class OOCPackedCache implements OOCCache {
 	private PackedLocation forceSeal(PendingLocation pending) {
 		synchronized(this) {
 			sealBuilder(pending.builder);
-			LogicalLocation location = getLocation(pending.builder.streamId, pending.builder.tileIds[pending.slot]);
+			LogicalLocation location = getLocation(pending.builder.streamIds[pending.slot],
+				pending.builder.tileIds[pending.slot]);
 			return (PackedLocation)location;
 		}
 	}
@@ -325,34 +404,96 @@ public final class OOCPackedCache implements OOCCache {
 		return logical;
 	}
 
-	private PackBuilder getOpenBuilder(long streamId, MemoryAllowance allowance) {
+	private PackBuilder getOpenBuilder(long streamId, MemoryAllowance allowance, long nextSize) {
 		int sid = asIntStreamId(streamId);
-		ensureBuilderCapacity(sid);
-		PackBuilder builder = _builders[sid];
-		if(builder == null || builder.sealed || builder.allowance != allowance) {
-			if(builder != null)
-				sealBuilder(builder);
-			builder = new PackBuilder(streamId, allowance);
-			_builders[sid] = builder;
+		PackBuilder builder = sid < _builders.length ? _builders[sid] : null;
+		if(builder != null && (builder.sealed || builder.allowance != allowance)) {
+			sealBuilder(builder);
+			builder = null;
 		}
-		return builder;
+		if(builder != null)
+			return builder;
+		if(canOpenBuilder(nextSize)) {
+			ensureBuilderCapacity(sid);
+			builder = new PackBuilder(sid, allowance, _packTargetBytes);
+			_builders[sid] = builder;
+			_openBuilderCount++;
+			return builder;
+		}
+		return getMixedBuilder(allowance);
+	}
+
+	private PackBuilder getMixedBuilder(MemoryAllowance allowance) {
+		if(_mixedBuilder != null && (_mixedBuilder.sealed || _mixedBuilder.allowance != allowance))
+			sealBuilder(_mixedBuilder);
+		if(_mixedBuilder == null) {
+			_mixedBuilder = new PackBuilder(-1, allowance, _mixedPackTargetBytes);
+			_openBuilderCount++;
+		}
+		return _mixedBuilder;
+	}
+
+	private boolean canOpenBuilder(long nextSize) {
+		return _openBuilderCount < _maxOpenBuilders && _stagingBytes + nextSize <= _maxStagingBytes;
+	}
+
+	private int appendToBuilder(PackBuilder builder, long streamId, long tileId, Object data, long size) {
+		int slot = builder.append(streamId, tileId, data, size);
+		_stagingBytes += size;
+		putLocation(new BlockKey(streamId, tileId), new PendingLocation(builder, slot));
+		if(builder.getBytes() >= builder.packTargetBytes)
+			sealBuilder(builder);
+		else
+			enforceStagingBudget();
+		return slot;
+	}
+
+	private void enforceStagingBudget() {
+		while(_stagingBytes > _maxStagingBytes || _openBuilderCount > _maxOpenBuilders) {
+			PackBuilder builder = findLargestOpenBuilder();
+			if(builder == null)
+				return;
+			sealBuilder(builder);
+		}
+	}
+
+	private PackBuilder findLargestOpenBuilder() {
+		PackBuilder largest = null;
+		for(PackBuilder builder : _builders)
+			if(builder != null && !builder.sealed && (largest == null || builder.getBytes() > largest.getBytes()))
+				largest = builder;
+		if(_mixedBuilder != null && !_mixedBuilder.sealed &&
+			(largest == null || _mixedBuilder.getBytes() > largest.getBytes()))
+			largest = _mixedBuilder;
+		return largest;
 	}
 
 	private void sealBuilder(PackBuilder builder) {
 		if(builder.sealed || builder.count == 0)
 			return;
 		builder.sealed = true;
-		BlockKey packedKey = new BlockKey(PACKED_STREAM_ID, _nextPackedId.getAndIncrement());
+		_stagingBytes -= builder.getBytes();
+		_openBuilderCount--;
+		if(builder.streamSlot >= 0 && builder.streamSlot < _builders.length && _builders[builder.streamSlot] == builder)
+			_builders[builder.streamSlot] = null;
+		if(_mixedBuilder == builder)
+			_mixedBuilder = null;
+
 		PackedBlock block = builder.createBlock();
-		BlockEntry physicalEntry = _physical.putPinned(packedKey, block, block.totalSize, builder.allowance);
+		BlockEntry physicalEntry = putSealedBlockPinned(block, builder.allowance);
 		PackedPinState state = new PackedPinState(physicalEntry);
 		builder.state = state;
 
 		for(int i = 0; i < builder.count; i++)
-			putLocation(new BlockKey(builder.streamId, builder.tileIds[i]), new PackedLocation(state, i));
+			putLocation(new BlockKey(builder.streamIds[i], builder.tileIds[i]), new PackedLocation(state, i));
 
 		if(builder.activePins == 0)
 			builder.transferProducerOwnership(_physical);
+	}
+
+	private BlockEntry putSealedBlockPinned(PackedBlock block, MemoryAllowance allowance) {
+		BlockKey packedKey = new BlockKey(PACKED_STREAM_ID, _nextPackedId.getAndIncrement());
+		return _physical.putPinned(packedKey, block, block.totalSize, allowance);
 	}
 
 	private void scheduleSeal(PackBuilder builder) {
@@ -449,9 +590,11 @@ public final class OOCPackedCache implements OOCCache {
 	}
 
 	private static final class PackBuilder {
-		private final long streamId;
+		private final int streamSlot;
 		private final MemoryAllowance allowance;
+		private final long packTargetBytes;
 		private final List<PackUnpinHandle> deferredUnpins = new ArrayList<>();
+		private long[] streamIds = new long[16];
 		private long[] tileIds = new long[16];
 		private Object[] values = new Object[16];
 		private long[] sizes = new long[16];
@@ -463,14 +606,16 @@ public final class OOCPackedCache implements OOCCache {
 		private boolean producerTransferred;
 		private PackedPinState state;
 
-		private PackBuilder(long streamId, MemoryAllowance allowance) {
-			this.streamId = streamId;
+		private PackBuilder(int streamSlot, MemoryAllowance allowance, long packTargetBytes) {
+			this.streamSlot = streamSlot;
 			this.allowance = allowance;
+			this.packTargetBytes = packTargetBytes;
 		}
 
-		private int append(long tileId, Object value, long size) {
+		private int append(long streamId, long tileId, Object value, long size) {
 			ensureCapacity(count + 1);
 			int slot = count++;
+			streamIds[slot] = streamId;
 			tileIds[slot] = tileId;
 			values[slot] = value;
 			sizes[slot] = size;
@@ -485,6 +630,7 @@ public final class OOCPackedCache implements OOCCache {
 			int len = values.length;
 			while(minSize > len)
 				len <<= 1;
+			streamIds = Arrays.copyOf(streamIds, len);
 			tileIds = Arrays.copyOf(tileIds, len);
 			values = Arrays.copyOf(values, len);
 			sizes = Arrays.copyOf(sizes, len);
