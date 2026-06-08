@@ -21,13 +21,7 @@ package org.apache.sysds.runtime.ooc.cache;
 
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -44,7 +38,7 @@ import java.util.concurrent.locks.LockSupport;
 public final class OOCPackedCache implements OOCCache {
 	private static final int PACKED_STREAM_ID = 0;
 	private static final long DEFAULT_PACK_THRESHOLD_BYTES = 64 * 1024;
-	private static final long DEFAULT_PACK_TARGET_BYTES = 1L << 19; //512 KB tile packing
+	private static final long DEFAULT_PACK_TARGET_BYTES = 1L << 19; // 512 KB tile packing
 	private static final long DEFAULT_MIXED_PACK_TARGET_BYTES = 256L << 10;
 	private static final long DEFAULT_MAX_STAGING_BYTES = 64L << 20;
 	private static final int DEFAULT_MAX_OPEN_BUILDERS = 64;
@@ -59,7 +53,7 @@ public final class OOCPackedCache implements OOCCache {
 	private final int _maxOpenBuilders;
 	private final long _sealDelayMs;
 	private final long _packReleaseDelayMs;
-	private final SegmentedStreamTableList<LogicalLocation> _locations;
+	private final SegmentedStreamTableList<PackedCacheLocation> _locations;
 	private final ScheduledExecutorService _sealExecutor;
 	private final ExecutorService _releaseExecutor;
 	private final ConcurrentLinkedQueue<PackedPinState> _releaseQueue;
@@ -197,37 +191,36 @@ public final class OOCPackedCache implements OOCCache {
 				allowance);
 			PackedPinState state = new PackedPinState(physicalEntry);
 			for(int i = 0; i < len; i++)
-				putLocation(new BlockKey(sId, tIds[off + i]), new PackedLocation(state, i));
+				putLocation(new BlockKey(sId, tIds[off + i]), new SealedPackLocation(state, i));
 			return physicalEntry;
 		}
 	}
 
 	@Override
 	public OOCFuture<BlockEntry> pin(long sId, long tId, MemoryAllowance allowance) {
-		LogicalLocation location = getLocation(sId, tId);
+		PackedCacheLocation location = getLocation(sId, tId);
 		if(location == null)
 			return _physical.pin(sId, tId, allowance);
-		if(location instanceof PendingLocation pending)
+		if(location instanceof PendingPackLocation pending)
 			location = forceSeal(pending);
-		if(!(location instanceof PackedLocation packed))
+		if(!(location instanceof SealedPackLocation packed))
 			return _physical.pin(sId, tId, allowance);
 
-		PackedLocation packedLocation = packed;
-		return packedLocation.state.pin(_physical, allowance, false).map(physicalEntry -> {
+		return packed.state.pin(_physical, allowance, false).map(physicalEntry -> {
 			if(physicalEntry == null)
 				return null;
-			return createLogicalPin(new BlockKey(sId, tId), packedLocation);
+			return createLogicalPin(new BlockKey(sId, tId), packed);
 		});
 	}
 
 	@Override
 	public BlockEntry pinIfLive(long sId, long tId, MemoryAllowance allowance) {
-		LogicalLocation location = getLocation(sId, tId);
+		PackedCacheLocation location = getLocation(sId, tId);
 		if(location == null)
 			return _physical.pinIfLive(sId, tId, allowance);
-		if(location instanceof PendingLocation pending)
+		if(location instanceof PendingPackLocation pending)
 			location = forceSeal(pending);
-		if(!(location instanceof PackedLocation packed))
+		if(!(location instanceof SealedPackLocation packed))
 			return _physical.pinIfLive(sId, tId, allowance);
 
 		if(packed.state.pinIfLive(_physical, allowance) == null)
@@ -301,13 +294,13 @@ public final class OOCPackedCache implements OOCCache {
 	private UnpinHandle unpinPending(BlockEntry entry, PendingLogicalPin pin, MemoryAllowance allowance) {
 		if(entry.fastUnpin()) {
 			allowance.release(entry.getSize());
-			return ImmediateUnpinHandle.committed(entry, allowance, entry.getSize());
+			return ImmediatePackedUnpinHandle.committed(entry, allowance, entry.getSize());
 		}
 		synchronized(this) {
 			if(entry.getPinCount() > 1) {
 				entry.unpin();
 				allowance.release(entry.getSize());
-				return ImmediateUnpinHandle.committed(entry, allowance, entry.getSize());
+				return ImmediatePackedUnpinHandle.committed(entry, allowance, entry.getSize());
 			}
 			entry.unpin();
 			entry.setCacheMeta(null);
@@ -321,17 +314,17 @@ public final class OOCPackedCache implements OOCCache {
 
 	private UnpinHandle unpinPacked(BlockEntry entry, PackedLogicalPin pin, MemoryAllowance allowance) {
 		if(entry.fastUnpin())
-			return ImmediateUnpinHandle.committed(entry, allowance, entry.getSize());
+			return ImmediatePackedUnpinHandle.committed(entry, allowance, entry.getSize());
 		if(entry.getPinCount() > 1) {
 			entry.unpin();
-			return ImmediateUnpinHandle.committed(entry, allowance, entry.getSize());
+			return ImmediatePackedUnpinHandle.committed(entry, allowance, entry.getSize());
 		}
 		entry.unpin();
 		entry.setCacheMeta(null);
 		return pin.state.unpin(this, _packReleaseDelayMs, allowance);
 	}
 
-	private void enqueueRelease(PackedPinState state) {
+	void enqueueRelease(PackedPinState state) {
 		if(!_running)
 			return;
 		if(state.markReleaseQueued()) {
@@ -385,16 +378,16 @@ public final class OOCPackedCache implements OOCCache {
 		}
 	}
 
-	private PackedLocation forceSeal(PendingLocation pending) {
+	private SealedPackLocation forceSeal(PendingPackLocation pending) {
 		synchronized(this) {
 			sealBuilder(pending.builder);
-			LogicalLocation location = getLocation(pending.builder.streamIds[pending.slot],
+			PackedCacheLocation location = getLocation(pending.builder.streamIds[pending.slot],
 				pending.builder.tileIds[pending.slot]);
-			return (PackedLocation)location;
+			return (SealedPackLocation)location;
 		}
 	}
 
-	private static BlockEntry createLogicalPin(BlockKey logicalKey, PackedLocation location) {
+	private static BlockEntry createLogicalPin(BlockKey logicalKey, SealedPackLocation location) {
 		PackedBlock block = (PackedBlock)location.state.physicalEntry.getDataUnsafe();
 		Object data = block.values[location.slot];
 		long size = block.sizes[location.slot];
@@ -440,7 +433,7 @@ public final class OOCPackedCache implements OOCCache {
 	private int appendToBuilder(PackBuilder builder, long streamId, long tileId, Object data, long size) {
 		int slot = builder.append(streamId, tileId, data, size);
 		_stagingBytes += size;
-		putLocation(new BlockKey(streamId, tileId), new PendingLocation(builder, slot));
+		putLocation(new BlockKey(streamId, tileId), new PendingPackLocation(builder, slot));
 		if(builder.getBytes() >= builder.packTargetBytes)
 			sealBuilder(builder);
 		else
@@ -485,7 +478,7 @@ public final class OOCPackedCache implements OOCCache {
 		builder.state = state;
 
 		for(int i = 0; i < builder.count; i++)
-			putLocation(new BlockKey(builder.streamIds[i], builder.tileIds[i]), new PackedLocation(state, i));
+			putLocation(new BlockKey(builder.streamIds[i], builder.tileIds[i]), new SealedPackLocation(state, i));
 
 		if(builder.activePins == 0)
 			builder.transferProducerOwnership(_physical);
@@ -508,12 +501,12 @@ public final class OOCPackedCache implements OOCCache {
 		}, _sealDelayMs, TimeUnit.MILLISECONDS);
 	}
 
-	private LogicalLocation getLocation(long sId, long tId) {
-		MaskedOnceArrayList<LogicalLocation> stream = _locations.get(sId);
+	private PackedCacheLocation getLocation(long sId, long tId) {
+		MaskedOnceArrayList<PackedCacheLocation> stream = _locations.get(sId);
 		return stream == null ? null : stream.get(blockIndex(tId));
 	}
 
-	private void putLocation(BlockKey key, LogicalLocation location) {
+	private void putLocation(BlockKey key, PackedCacheLocation location) {
 		_locations.getOrCreate(key.getStreamId()).put(blockIndex(key.getSequenceNumber()), location);
 	}
 
@@ -543,497 +536,5 @@ public final class OOCPackedCache implements OOCCache {
 	private void checkRunning() {
 		if(!_running)
 			throw new IllegalStateException("Cache has been shut down.");
-	}
-
-	private interface LogicalLocation {
-	}
-
-	private static final class PendingLocation implements LogicalLocation {
-		private final PackBuilder builder;
-		private final int slot;
-
-		private PendingLocation(PackBuilder builder, int slot) {
-			this.builder = builder;
-			this.slot = slot;
-		}
-	}
-
-	private static final class PackedLocation implements LogicalLocation {
-		private final PackedPinState state;
-		private final int slot;
-
-		private PackedLocation(PackedPinState state, int slot) {
-			this.state = state;
-			this.slot = slot;
-		}
-	}
-
-	private static final class PendingLogicalPin {
-		private final PackBuilder builder;
-		private final int slot;
-
-		private PendingLogicalPin(PackBuilder builder, int slot) {
-			this.builder = builder;
-			this.slot = slot;
-		}
-	}
-
-	private static final class PackedLogicalPin {
-		private final PackedPinState state;
-
-		private PackedLogicalPin(PackedPinState state) {
-			this.state = state;
-		}
-	}
-
-	private static final class PackBuilder {
-		private final int streamSlot;
-		private final MemoryAllowance allowance;
-		private final long packTargetBytes;
-		private final List<PackUnpinHandle> deferredUnpins = new ArrayList<>();
-		private long[] streamIds = new long[16];
-		private long[] tileIds = new long[16];
-		private Object[] values = new Object[16];
-		private long[] sizes = new long[16];
-		private long bytes;
-		private int count;
-		private int activePins;
-		private boolean sealed;
-		private boolean sealScheduled;
-		private boolean producerTransferred;
-		private PackedPinState state;
-
-		private PackBuilder(int streamSlot, MemoryAllowance allowance, long packTargetBytes) {
-			this.streamSlot = streamSlot;
-			this.allowance = allowance;
-			this.packTargetBytes = packTargetBytes;
-		}
-
-		private int append(long streamId, long tileId, Object value, long size) {
-			ensureCapacity(count + 1);
-			int slot = count++;
-			streamIds[slot] = streamId;
-			tileIds[slot] = tileId;
-			values[slot] = value;
-			sizes[slot] = size;
-			bytes += size;
-			activePins++;
-			return slot;
-		}
-
-		private void ensureCapacity(int minSize) {
-			if(minSize <= values.length)
-				return;
-			int len = values.length;
-			while(minSize > len)
-				len <<= 1;
-			streamIds = Arrays.copyOf(streamIds, len);
-			tileIds = Arrays.copyOf(tileIds, len);
-			values = Arrays.copyOf(values, len);
-			sizes = Arrays.copyOf(sizes, len);
-		}
-
-		private long getBytes() {
-			return bytes;
-		}
-
-		private PackedBlock createBlock() {
-			return new PackedBlock(Arrays.copyOf(values, count), Arrays.copyOf(sizes, count), bytes);
-		}
-
-		private PackUnpinHandle unpinProducer(BlockEntry entry, int slot, MemoryAllowance allowance) {
-			activePins--;
-			PackUnpinHandle handle = new PackUnpinHandle(entry, this, slot, allowance, sizes[slot]);
-			deferredUnpins.add(handle);
-			return handle;
-		}
-
-		private void transferProducerOwnership(OOCCacheImpl physical) {
-			if(state == null || physical == null || producerTransferred)
-				return;
-			producerTransferred = true;
-			OOCCache.UnpinHandle physicalUnpin = physical.unpin(state.physicalEntry, allowance);
-			if(physicalUnpin.isCommitted()) {
-				completeDeferredUnpins(true);
-				return;
-			}
-			physicalUnpin.getCompletionFuture().whenComplete((committed, ex) -> completeDeferredUnpins(ex == null && committed));
-		}
-
-		private void completeDeferredUnpins(boolean committed) {
-			for(PackUnpinHandle handle : deferredUnpins)
-				handle.complete(committed);
-			deferredUnpins.clear();
-		}
-	}
-
-	static final class PackedBlock implements SpillableObject {
-		private Object[] values;
-		private long[] sizes;
-		private long totalSize;
-
-		PackedBlock() {
-			values = null;
-			sizes = null;
-			totalSize = 0;
-		}
-
-		private PackedBlock(Object[] values, long[] sizes, long totalSize) {
-			this.values = values;
-			this.sizes = sizes;
-			this.totalSize = totalSize;
-		}
-
-		@Override
-		public boolean tryWrite(DataOutput out) throws IOException {
-			out.writeInt(values.length);
-			for(int i = 0; i < values.length; i++) {
-				out.writeLong(sizes[i]);
-				Object value = values[i];
-				if(!(value instanceof SpillableObject spillable))
-					return false;
-				if(!SpillableObjectRegistry.tryWrite(out, spillable))
-					return false;
-			}
-			return true;
-		}
-
-		@Override
-		public void read(DataInput in) throws IOException {
-			int count = in.readInt();
-			values = new Object[count];
-			sizes = new long[count];
-			totalSize = 0;
-			for(int i = 0; i < count; i++) {
-				sizes[i] = in.readLong();
-				values[i] = SpillableObjectRegistry.read(in);
-				totalSize += sizes[i];
-			}
-		}
-	}
-
-	private static final class PackedPinState {
-		private final BlockEntry physicalEntry;
-		private MemoryAllowance[] allowances;
-		private int[] counts;
-		private OOCFuture<BlockEntry>[] futures;
-		private long[] releaseDueNanos;
-		private DelayedPackedUnpinHandle[] releaseHandles;
-		private int size;
-		private boolean releaseQueued;
-
-		@SuppressWarnings("unchecked")
-		private PackedPinState(BlockEntry physicalEntry) {
-			this.physicalEntry = physicalEntry;
-			allowances = new MemoryAllowance[2];
-			counts = new int[2];
-			futures = new OOCFuture[2];
-			releaseDueNanos = new long[2];
-			releaseHandles = new DelayedPackedUnpinHandle[2];
-			size = 0;
-			releaseQueued = false;
-		}
-
-		private synchronized OOCFuture<BlockEntry> pin(OOCCacheImpl physical, MemoryAllowance allowance,
-			boolean liveOnly) {
-			int ix = indexOf(allowance);
-			if(ix >= 0) {
-				cancelRelease(ix);
-				counts[ix]++;
-				return futures[ix];
-			}
-			OOCFuture<BlockEntry> future = liveOnly ?
-				OOCFuture.completed(physical.pinIfLive(physicalEntry.getKey().getStreamId(),
-					physicalEntry.getKey().getSequenceNumber(), allowance)) :
-				physical.pin(physicalEntry.getKey(), allowance);
-			addAllowance(allowance, future);
-			future.whenComplete((entry, ex) -> {
-				if(entry == null || ex != null)
-					removeFailedAllowance(allowance, future);
-			});
-			return future;
-		}
-
-		private BlockEntry pinIfLive(OOCCacheImpl physical, MemoryAllowance allowance) {
-			try {
-				return pin(physical, allowance, true).getNow(null);
-			}
-			catch(RuntimeException ex) {
-				return null;
-			}
-		}
-
-		private synchronized UnpinHandle unpin(OOCPackedCache owner, long releaseDelayMs, MemoryAllowance allowance) {
-			int ix = indexOf(allowance);
-			if(ix < 0)
-				return ImmediateUnpinHandle.committed(physicalEntry, allowance, physicalEntry.getSize());
-			counts[ix]--;
-			if(counts[ix] > 0)
-				return ImmediateUnpinHandle.committed(physicalEntry, allowance, physicalEntry.getSize());
-			DelayedPackedUnpinHandle handle = new DelayedPackedUnpinHandle(physicalEntry, allowance);
-			releaseHandles[ix] = handle;
-			releaseDueNanos[ix] = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0, releaseDelayMs));
-			owner.enqueueRelease(this);
-			return handle;
-		}
-
-		private int indexOf(MemoryAllowance allowance) {
-			for(int i = 0; i < size; i++)
-				if(allowances[i] == allowance)
-					return i;
-			return -1;
-		}
-
-		private synchronized void addAllowance(MemoryAllowance allowance, OOCFuture<BlockEntry> future) {
-			if(size == allowances.length) {
-				MemoryAllowance[] biggerAllowances = new MemoryAllowance[size * 2];
-				int[] biggerCounts = new int[size * 2];
-				@SuppressWarnings("unchecked")
-				OOCFuture<BlockEntry>[] biggerFutures = new OOCFuture[size * 2];
-				long[] biggerReleaseDueNanos = new long[size * 2];
-				DelayedPackedUnpinHandle[] biggerReleaseHandles = new DelayedPackedUnpinHandle[size * 2];
-				System.arraycopy(allowances, 0, biggerAllowances, 0, size);
-				System.arraycopy(counts, 0, biggerCounts, 0, size);
-				System.arraycopy(futures, 0, biggerFutures, 0, size);
-				System.arraycopy(releaseDueNanos, 0, biggerReleaseDueNanos, 0, size);
-				System.arraycopy(releaseHandles, 0, biggerReleaseHandles, 0, size);
-				allowances = biggerAllowances;
-				counts = biggerCounts;
-				futures = biggerFutures;
-				releaseDueNanos = biggerReleaseDueNanos;
-				releaseHandles = biggerReleaseHandles;
-			}
-			allowances[size] = allowance;
-			counts[size] = 1;
-			futures[size] = future;
-			size++;
-		}
-
-		private void cancelRelease(int ix) {
-			releaseDueNanos[ix] = 0;
-			DelayedPackedUnpinHandle handle = releaseHandles[ix];
-			if(handle != null) {
-				releaseHandles[ix] = null;
-				handle.complete(false);
-			}
-		}
-
-		private long releaseDuePins(OOCCacheImpl physical, long nowNanos) {
-			ArrayList<PackedRelease> due = null;
-			long nextDueNanos = Long.MAX_VALUE;
-			synchronized(this) {
-				for(int i = 0; i < size;) {
-					DelayedPackedUnpinHandle handle = releaseHandles[i];
-					if(handle == null || counts[i] > 0) {
-						i++;
-						continue;
-					}
-					long dueNanos = releaseDueNanos[i];
-					if(dueNanos > nowNanos) {
-						nextDueNanos = Math.min(nextDueNanos, dueNanos);
-						i++;
-						continue;
-					}
-					if(due == null)
-						due = new ArrayList<>();
-					due.add(new PackedRelease(allowances[i], handle));
-					removeAt(i);
-				}
-			}
-			if(due != null)
-				for(PackedRelease release : due)
-					releasePhysicalPin(physical, release.allowance, release.handle);
-			return nextDueNanos;
-		}
-
-		private void releasePhysicalPin(OOCCacheImpl physical, MemoryAllowance allowance,
-			DelayedPackedUnpinHandle handle) {
-			UnpinHandle physicalHandle = physical.unpin(physicalEntry, allowance);
-			if(physicalHandle.isCommitted()) {
-				handle.complete(true);
-				return;
-			}
-			physicalHandle.getCompletionFuture().whenComplete((committed, ex) ->
-				handle.complete(ex == null && Boolean.TRUE.equals(committed)));
-		}
-
-		private synchronized void removeFailedAllowance(MemoryAllowance allowance, OOCFuture<BlockEntry> future) {
-			int ix = indexOf(allowance);
-			if(ix >= 0 && futures[ix] == future)
-				removeAt(ix);
-		}
-
-		private void removeAt(int ix) {
-			int last = --size;
-			allowances[ix] = allowances[last];
-			counts[ix] = counts[last];
-			futures[ix] = futures[last];
-			releaseDueNanos[ix] = releaseDueNanos[last];
-			releaseHandles[ix] = releaseHandles[last];
-			allowances[last] = null;
-			counts[last] = 0;
-			futures[last] = null;
-			releaseDueNanos[last] = 0;
-			releaseHandles[last] = null;
-		}
-
-		private synchronized boolean markReleaseQueued() {
-			if(releaseQueued)
-				return false;
-			releaseQueued = true;
-			return true;
-		}
-
-		private synchronized void clearReleaseQueued() {
-			releaseQueued = false;
-		}
-
-	}
-
-	private record PackedRelease(MemoryAllowance allowance, DelayedPackedUnpinHandle handle) {
-	}
-
-	private static final class DelayedPackedUnpinHandle implements UnpinHandle {
-		private final BlockEntry entry;
-		private final MemoryAllowance allowance;
-		private final CompletableFuture<Boolean> future = new CompletableFuture<>();
-
-		private DelayedPackedUnpinHandle(BlockEntry entry, MemoryAllowance allowance) {
-			this.entry = entry;
-			this.allowance = allowance;
-		}
-
-		@Override
-		public BlockEntry getEntry() {
-			return entry;
-		}
-
-		@Override
-		public MemoryAllowance getAllowance() {
-			return allowance;
-		}
-
-		@Override
-		public long getBytes() {
-			return entry.getSize();
-		}
-
-		@Override
-		public boolean isCommitted() {
-			return Boolean.TRUE.equals(future.getNow(false));
-		}
-
-		@Override
-		public CompletableFuture<Boolean> getCompletionFuture() {
-			return future;
-		}
-
-		@Override
-		public BlockEntry reclaim() {
-			return null;
-		}
-
-		private void complete(boolean committed) {
-			future.complete(committed);
-		}
-	}
-
-	private static final class PackUnpinHandle implements UnpinHandle {
-		private final BlockEntry entry;
-		private final PackBuilder builder;
-		private final int slot;
-		private final MemoryAllowance allowance;
-		private final long bytes;
-		private final CompletableFuture<Boolean> future = new CompletableFuture<>();
-
-		private PackUnpinHandle(BlockEntry entry, PackBuilder builder, int slot, MemoryAllowance allowance, long bytes) {
-			this.entry = entry;
-			this.builder = builder;
-			this.slot = slot;
-			this.allowance = allowance;
-			this.bytes = bytes;
-		}
-
-		@Override
-		public BlockEntry getEntry() {
-			return entry;
-		}
-
-		@Override
-		public MemoryAllowance getAllowance() {
-			return allowance;
-		}
-
-		@Override
-		public long getBytes() {
-			return bytes;
-		}
-
-		@Override
-		public boolean isCommitted() {
-			return Boolean.TRUE.equals(future.getNow(false));
-		}
-
-		@Override
-		public CompletableFuture<Boolean> getCompletionFuture() {
-			return future;
-		}
-
-		@Override
-		public BlockEntry reclaim() {
-			return null;
-		}
-
-		private void complete(boolean committed) {
-			future.complete(committed);
-		}
-	}
-
-	private static class ImmediateUnpinHandle implements UnpinHandle {
-		private final BlockEntry entry;
-		private final MemoryAllowance allowance;
-		private final long bytes;
-		private final CompletableFuture<Boolean> future;
-
-		private static ImmediateUnpinHandle committed(BlockEntry entry, MemoryAllowance allowance, long bytes) {
-			return new ImmediateUnpinHandle(entry, allowance, bytes);
-		}
-
-		private ImmediateUnpinHandle(BlockEntry entry, MemoryAllowance allowance, long bytes) {
-			this.entry = entry;
-			this.allowance = allowance;
-			this.bytes = bytes;
-			future = CompletableFuture.completedFuture(true);
-		}
-
-		@Override
-		public BlockEntry getEntry() {
-			return entry;
-		}
-
-		@Override
-		public MemoryAllowance getAllowance() {
-			return allowance;
-		}
-
-		@Override
-		public long getBytes() {
-			return bytes;
-		}
-
-		@Override
-		public boolean isCommitted() {
-			return true;
-		}
-
-		@Override
-		public CompletableFuture<Boolean> getCompletionFuture() {
-			return future;
-		}
-
-		@Override
-		public BlockEntry reclaim() {
-			return null;
-		}
 	}
 }
