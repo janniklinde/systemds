@@ -22,40 +22,14 @@ package org.apache.sysds.runtime.ooc.cache.packed;
 interface PackedCacheLocation {
 }
 
-final class PendingPackLocation implements PackedCacheLocation {
-	final PackBuilder builder;
-	final int slot;
-
-	PendingPackLocation(PackBuilder builder, int slot) {
-		this.builder = builder;
-		this.slot = slot;
-	}
+record PendingPackLocation(PackBuilder builder, int slot) implements PackedCacheLocation {
 }
 
-final class SealedPackLocation implements PackedCacheLocation {
-	final PackedPinState state;
-	final int slot;
-
-	SealedPackLocation(PackedPinState state, int slot) {
-		this.state = state;
-		this.slot = slot;
-	}
+record SealedPackLocation(PackedPinState state, int slot) implements PackedCacheLocation {
 }
 
-final class PendingLogicalPin {
-	final PackBuilder builder;
-	final int slot;
-
-	PendingLogicalPin(PackBuilder builder, int slot) {
-		this.builder = builder;
-		this.slot = slot;
-	}
+record PendingLogicalPin(PackBuilder builder, int slot) {
 }
 
-final class PackedLogicalPin {
-	final PackedPinState state;
-
-	PackedLogicalPin(PackedPinState state) {
-		this.state = state;
-	}
+record PackedLogicalPin(PackedPinState state) {
 }
