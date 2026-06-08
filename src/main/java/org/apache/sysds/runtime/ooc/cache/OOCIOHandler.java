@@ -32,7 +32,7 @@ public interface OOCIOHandler {
 
 	CompletableFuture<Void> scheduleEviction(BlockEntry block);
 
-	CompletableFuture<BlockEntry> scheduleRead(BlockEntry block);
+	OOCFuture<BlockEntry> scheduleRead(BlockEntry block);
 
 	/**
 	 * Increase priority for a pending scheduled read if it has not started yet.

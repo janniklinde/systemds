@@ -24,7 +24,7 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import java.util.concurrent.CompletableFuture;
 
 public interface OOCCache {
-	default CompletableFuture<BlockEntry> pin(BlockKey key, MemoryAllowance allowance) {
+	default OOCFuture<BlockEntry> pin(BlockKey key, MemoryAllowance allowance) {
 		return pin(key.getStreamId(), key.getSequenceNumber(), allowance);
 	}
 
@@ -56,7 +56,7 @@ public interface OOCCache {
 	 * @param allowance
 	 * @return a non-null future of the pinned block entry; the future result is null if the required memory could not be reserved
 	 */
-	CompletableFuture<BlockEntry> pin(long sId, long tId, MemoryAllowance allowance);
+	OOCFuture<BlockEntry> pin(long sId, long tId, MemoryAllowance allowance);
 
 	/**
 	 * Pins an item backed by an allowance if it is already live in cache. A successful pin transfers resident-memory

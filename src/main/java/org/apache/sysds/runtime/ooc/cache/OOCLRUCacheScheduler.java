@@ -1362,7 +1362,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 
 		for(Tuple2<Integer, BlockEntry> tpl : toRead) {
 			final BlockEntry entry = tpl._2;
-			CompletableFuture<BlockEntry> future = _ioHandler.scheduleRead(entry);
+			OOCFuture<BlockEntry> future = _ioHandler.scheduleRead(entry);
 			future.whenComplete((r, t) -> {
 				if(t != null) {
 					BlockReadState state;

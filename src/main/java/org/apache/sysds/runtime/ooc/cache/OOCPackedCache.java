@@ -36,7 +36,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
-import java.util.function.Consumer;
 
 /**
  * Logical-to-physical packing adapter. Small logical blocks are packed into larger physical cache entries
@@ -204,7 +203,7 @@ public final class OOCPackedCache implements OOCCache {
 	}
 
 	@Override
-	public CompletableFuture<BlockEntry> pin(long sId, long tId, MemoryAllowance allowance) {
+	public OOCFuture<BlockEntry> pin(long sId, long tId, MemoryAllowance allowance) {
 		LogicalLocation location = getLocation(sId, tId);
 		if(location == null)
 			return _physical.pin(sId, tId, allowance);
@@ -214,25 +213,11 @@ public final class OOCPackedCache implements OOCCache {
 			return _physical.pin(sId, tId, allowance);
 
 		PackedLocation packedLocation = packed;
-		return packedLocation.state.pin(_physical, allowance, false).thenApply(physicalEntry -> {
+		return packedLocation.state.pin(_physical, allowance, false).map(physicalEntry -> {
 			if(physicalEntry == null)
 				return null;
 			return createLogicalPin(new BlockKey(sId, tId), packedLocation);
 		});
-	}
-
-	public PackedPin pinPacked(long sId, long tId, MemoryAllowance allowance) {
-		LogicalLocation location = getLocation(sId, tId);
-		if(location == null)
-			return PackedPin.fromFuture(_physical.pin(sId, tId, allowance));
-		if(location instanceof PendingLocation pending)
-			location = forceSeal(pending);
-		if(!(location instanceof PackedLocation packed))
-			return PackedPin.fromFuture(_physical.pin(sId, tId, allowance));
-
-		PackedLocation packedLocation = packed;
-		BlockKey logicalKey = new BlockKey(sId, tId);
-		return packedLocation.state.pinLight(_physical, allowance, logicalKey, packedLocation);
 	}
 
 	@Override
@@ -731,8 +716,7 @@ public final class OOCPackedCache implements OOCCache {
 		private final BlockEntry physicalEntry;
 		private MemoryAllowance[] allowances;
 		private int[] counts;
-		private CompletableFuture<BlockEntry>[] futures;
-		private Subscriber[] subscribers;
+		private OOCFuture<BlockEntry>[] futures;
 		private long[] releaseDueNanos;
 		private DelayedPackedUnpinHandle[] releaseHandles;
 		private int size;
@@ -743,15 +727,14 @@ public final class OOCPackedCache implements OOCCache {
 			this.physicalEntry = physicalEntry;
 			allowances = new MemoryAllowance[2];
 			counts = new int[2];
-			futures = new CompletableFuture[2];
-			subscribers = new Subscriber[2];
+			futures = new OOCFuture[2];
 			releaseDueNanos = new long[2];
 			releaseHandles = new DelayedPackedUnpinHandle[2];
 			size = 0;
 			releaseQueued = false;
 		}
 
-		private synchronized CompletableFuture<BlockEntry> pin(OOCCacheImpl physical, MemoryAllowance allowance,
+		private synchronized OOCFuture<BlockEntry> pin(OOCCacheImpl physical, MemoryAllowance allowance,
 			boolean liveOnly) {
 			int ix = indexOf(allowance);
 			if(ix >= 0) {
@@ -759,44 +742,16 @@ public final class OOCPackedCache implements OOCCache {
 				counts[ix]++;
 				return futures[ix];
 			}
-			CompletableFuture<BlockEntry> future = liveOnly ?
-				CompletableFuture.completedFuture(physical.pinIfLive(physicalEntry.getKey().getStreamId(),
+			OOCFuture<BlockEntry> future = liveOnly ?
+				OOCFuture.completed(physical.pinIfLive(physicalEntry.getKey().getStreamId(),
 					physicalEntry.getKey().getSequenceNumber(), allowance)) :
 				physical.pin(physicalEntry.getKey(), allowance);
 			addAllowance(allowance, future);
 			future.whenComplete((entry, ex) -> {
-				completeSubscribers(allowance, future, entry, ex);
 				if(entry == null || ex != null)
 					removeFailedAllowance(allowance, future);
 			});
 			return future;
-		}
-
-		private PackedPin pinLight(OOCCacheImpl physical, MemoryAllowance allowance, BlockKey logicalKey,
-			PackedLocation location) {
-			CompletableFuture<BlockEntry> future;
-			synchronized(this) {
-				int ix = indexOf(allowance);
-				if(ix >= 0) {
-					cancelRelease(ix);
-					counts[ix]++;
-					BlockEntry entry = getNowOrNull(futures[ix]);
-					if(entry != null)
-						return PackedPin.completed(createLogicalPin(logicalKey, location));
-					return new SubscribedPackedPin(this, allowance, futures[ix], logicalKey, location);
-				}
-				future = physical.pin(physicalEntry.getKey(), allowance);
-				addAllowance(allowance, future);
-			}
-			future.whenComplete((entry, ex) -> {
-				completeSubscribers(allowance, future, entry, ex);
-				if(entry == null || ex != null)
-					removeFailedAllowance(allowance, future);
-			});
-			BlockEntry entry = getNowOrNull(future);
-			if(entry != null)
-				return PackedPin.completed(createLogicalPin(logicalKey, location));
-			return new SubscribedPackedPin(this, allowance, future, logicalKey, location);
 		}
 
 		private BlockEntry pinIfLive(OOCCacheImpl physical, MemoryAllowance allowance) {
@@ -829,25 +784,22 @@ public final class OOCPackedCache implements OOCCache {
 			return -1;
 		}
 
-		private synchronized void addAllowance(MemoryAllowance allowance, CompletableFuture<BlockEntry> future) {
+		private synchronized void addAllowance(MemoryAllowance allowance, OOCFuture<BlockEntry> future) {
 			if(size == allowances.length) {
 				MemoryAllowance[] biggerAllowances = new MemoryAllowance[size * 2];
 				int[] biggerCounts = new int[size * 2];
 				@SuppressWarnings("unchecked")
-				CompletableFuture<BlockEntry>[] biggerFutures = new CompletableFuture[size * 2];
-				Subscriber[] biggerSubscribers = new Subscriber[size * 2];
+				OOCFuture<BlockEntry>[] biggerFutures = new OOCFuture[size * 2];
 				long[] biggerReleaseDueNanos = new long[size * 2];
 				DelayedPackedUnpinHandle[] biggerReleaseHandles = new DelayedPackedUnpinHandle[size * 2];
 				System.arraycopy(allowances, 0, biggerAllowances, 0, size);
 				System.arraycopy(counts, 0, biggerCounts, 0, size);
 				System.arraycopy(futures, 0, biggerFutures, 0, size);
-				System.arraycopy(subscribers, 0, biggerSubscribers, 0, size);
 				System.arraycopy(releaseDueNanos, 0, biggerReleaseDueNanos, 0, size);
 				System.arraycopy(releaseHandles, 0, biggerReleaseHandles, 0, size);
 				allowances = biggerAllowances;
 				counts = biggerCounts;
 				futures = biggerFutures;
-				subscribers = biggerSubscribers;
 				releaseDueNanos = biggerReleaseDueNanos;
 				releaseHandles = biggerReleaseHandles;
 			}
@@ -905,7 +857,7 @@ public final class OOCPackedCache implements OOCCache {
 				handle.complete(ex == null && Boolean.TRUE.equals(committed)));
 		}
 
-		private synchronized void removeFailedAllowance(MemoryAllowance allowance, CompletableFuture<BlockEntry> future) {
+		private synchronized void removeFailedAllowance(MemoryAllowance allowance, OOCFuture<BlockEntry> future) {
 			int ix = indexOf(allowance);
 			if(ix >= 0 && futures[ix] == future)
 				removeAt(ix);
@@ -916,13 +868,11 @@ public final class OOCPackedCache implements OOCCache {
 			allowances[ix] = allowances[last];
 			counts[ix] = counts[last];
 			futures[ix] = futures[last];
-			subscribers[ix] = subscribers[last];
 			releaseDueNanos[ix] = releaseDueNanos[last];
 			releaseHandles[ix] = releaseHandles[last];
 			allowances[last] = null;
 			counts[last] = 0;
 			futures[last] = null;
-			subscribers[last] = null;
 			releaseDueNanos[last] = 0;
 			releaseHandles[last] = null;
 		}
@@ -938,124 +888,9 @@ public final class OOCPackedCache implements OOCCache {
 			releaseQueued = false;
 		}
 
-		private void addSubscriber(MemoryAllowance allowance, CompletableFuture<BlockEntry> future,
-			Subscriber subscriber) {
-			boolean stale = false;
-			boolean completeNow = false;
-			synchronized(this) {
-				int ix = indexOf(allowance);
-				if(ix < 0 || futures[ix] != future) {
-					stale = true;
-				}
-				else {
-					subscriber.next = subscribers[ix];
-					subscribers[ix] = subscriber;
-					completeNow = future.isDone();
-				}
-			}
-			if(stale) {
-				subscriber.accept(null);
-				return;
-			}
-			if(completeNow) {
-				BlockEntry entry;
-				Throwable ex = null;
-				try {
-					entry = getNowOrNull(future);
-				}
-				catch(Throwable t) {
-					entry = null;
-					ex = t;
-				}
-				completeSubscribers(allowance, future, entry, ex);
-			}
-		}
-
-		private void completeSubscribers(MemoryAllowance allowance, CompletableFuture<BlockEntry> future,
-			BlockEntry physicalEntry, Throwable ex) {
-			Subscriber head;
-			synchronized(this) {
-				int ix = indexOf(allowance);
-				if(ix < 0 || futures[ix] != future)
-					return;
-				head = subscribers[ix];
-				subscribers[ix] = null;
-			}
-			BlockEntry entry = ex == null ? physicalEntry : null;
-			while(head != null) {
-				Subscriber next = head.next;
-				head.accept(entry);
-				head = next;
-			}
-		}
-	}
-
-	private static final class SubscribedPackedPin implements PackedPin {
-		private final PackedPinState state;
-		private final MemoryAllowance allowance;
-		private final CompletableFuture<BlockEntry> future;
-		private final BlockKey logicalKey;
-		private final PackedLocation location;
-
-		private SubscribedPackedPin(PackedPinState state, MemoryAllowance allowance, CompletableFuture<BlockEntry> future,
-			BlockKey logicalKey, PackedLocation location) {
-			this.state = state;
-			this.allowance = allowance;
-			this.future = future;
-			this.logicalKey = logicalKey;
-			this.location = location;
-		}
-
-		@Override
-		public void thenAccept(Consumer<BlockEntry> action) {
-			BlockEntry physicalEntry = getNowOrNull(future);
-			if(physicalEntry != null) {
-				action.accept(createLogicalPin(logicalKey, location));
-				return;
-			}
-			state.addSubscriber(allowance, future, new Subscriber(logicalKey, location, action));
-		}
-	}
-
-	private static final class Subscriber {
-		private final BlockKey logicalKey;
-		private final PackedLocation location;
-		private final Consumer<BlockEntry> action;
-		private Subscriber next;
-
-		private Subscriber(BlockKey logicalKey, PackedLocation location, Consumer<BlockEntry> action) {
-			this.logicalKey = logicalKey;
-			this.location = location;
-			this.action = action;
-		}
-
-		private void accept(BlockEntry physicalEntry) {
-			action.accept(physicalEntry == null ? null : createLogicalPin(logicalKey, location));
-		}
 	}
 
 	private record PackedRelease(MemoryAllowance allowance, DelayedPackedUnpinHandle handle) {
-	}
-
-	private static BlockEntry getNowOrNull(CompletableFuture<BlockEntry> future) {
-		try {
-			return future.getNow(null);
-		}
-		catch(Throwable t) {
-			return null;
-		}
-	}
-
-	public interface PackedPin {
-		void thenAccept(Consumer<BlockEntry> action);
-
-		static PackedPin completed(BlockEntry entry) {
-			return action -> action.accept(entry);
-		}
-
-		static PackedPin fromFuture(CompletableFuture<BlockEntry> future) {
-			return action -> future.thenAccept(action);
-		}
 	}
 
 	private static final class DelayedPackedUnpinHandle implements UnpinHandle {

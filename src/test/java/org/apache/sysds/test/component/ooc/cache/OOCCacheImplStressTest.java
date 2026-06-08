@@ -27,6 +27,7 @@ import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.OOCMatrixIOHandler;
 import org.apache.sysds.runtime.ooc.cache.OOCPackedCache;
@@ -393,7 +394,7 @@ public class OOCCacheImplStressTest {
 					waitFor(() -> inflight.get() < parallelism);
 					inflight.incrementAndGet();
 					int block = i;
-					cache.pinPacked(key(i).getStreamId(), key(i).getSequenceNumber(), reader).thenAccept(entry -> {
+					cache.pin(key(i).getStreamId(), key(i).getSequenceNumber(), reader).thenAccept(entry -> {
 						Assert.assertNotNull("Null packed pin at scan=" + scanId + ", block=" + block, entry);
 						cache.unpin(entry, reader);
 						inflight.decrementAndGet();
@@ -507,13 +508,13 @@ public class OOCCacheImplStressTest {
 		}
 
 		@Override
-		public CompletableFuture<BlockEntry> scheduleRead(BlockEntry block) {
+		public OOCFuture<BlockEntry> scheduleRead(BlockEntry block) {
 			_reads.incrementAndGet();
 			Object data = _spilled.get(block.getKey());
 			if(data == null)
-				return CompletableFuture.completedFuture(null);
+				return OOCFuture.completed(null);
 			BlockEntryTestAccess.setDataUnsafe(block, data);
-			return CompletableFuture.completedFuture(block);
+			return OOCFuture.completed(block);
 		}
 
 		@Override

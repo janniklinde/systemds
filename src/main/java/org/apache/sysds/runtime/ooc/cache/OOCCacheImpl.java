@@ -26,7 +26,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.PriorityQueue;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
@@ -85,25 +84,25 @@ public class OOCCacheImpl implements OOCCache {
 	}
 
 	@Override
-	public CompletableFuture<BlockEntry> pin(long sId, long tId, MemoryAllowance allowance) {
+	public OOCFuture<BlockEntry> pin(long sId, long tId, MemoryAllowance allowance) {
 		BlockEntry entry;
 		EntryMeta meta;
 		synchronized(this) {
 			checkRunning();
 			entry = findEntry(new BlockKey(sId, tId));
 			if(entry == null)
-				return CompletableFuture.completedFuture(null);
+				return OOCFuture.completed(null);
 			meta = getMeta(entry);
 			BlockEntry adopted = tryAdoptDeferredPin(meta, allowance);
 			if(adopted != null)
-				return CompletableFuture.completedFuture(adopted);
+				return OOCFuture.completed(adopted);
 		}
 		if(meta == null)
-			return CompletableFuture.completedFuture(null);
+			return OOCFuture.completed(null);
 
 		BlockEntry immediate = pinIfLive(sId, tId, allowance);
 		if(immediate != null)
-			return CompletableFuture.completedFuture(immediate);
+			return OOCFuture.completed(immediate);
 		return pinFromBacking(meta, allowance);
 	}
 
@@ -194,19 +193,19 @@ public class OOCCacheImpl implements OOCCache {
 		_ioHandler.shutdown();
 	}
 
-	private CompletableFuture<BlockEntry> pinFromBacking(EntryMeta meta, MemoryAllowance allowance) {
+	private OOCFuture<BlockEntry> pinFromBacking(EntryMeta meta, MemoryAllowance allowance) {
 		if(!allowance.tryReserve(meta.entry.getSize()))
-			return CompletableFuture.completedFuture(null);
+			return OOCFuture.completed(null);
 
-		CompletableFuture<BlockEntry> readFuture;
+		OOCFuture<BlockEntry> readFuture;
 		synchronized(this) {
 			if(meta.entry.getDataUnsafe() != null) {
 				pinResident(meta, allowance);
-				return CompletableFuture.completedFuture(meta.entry);
+				return OOCFuture.completed(meta.entry);
 			}
 				if(meta.readFuture == null) {
 					meta.entry.setState(BlockState.READING);
-					CompletableFuture<BlockEntry> scheduled = _ioHandler.scheduleRead(meta.entry);
+					OOCFuture<BlockEntry> scheduled = _ioHandler.scheduleRead(meta.entry);
 					meta.readFuture = scheduled;
 					readFuture = scheduled;
 					scheduled.whenComplete((entry, ex) -> {
@@ -222,22 +221,34 @@ public class OOCCacheImpl implements OOCCache {
 					readFuture = meta.readFuture;
 			}
 
-		return readFuture.handle((entry, ex) -> {
-			if(ex != null) {
-				allowance.release(meta.entry.getSize());
-				throw new CompletionException(ex);
-			}
-			synchronized(OOCCacheImpl.this) {
-				if(entry == null || meta.entry.getDataUnsafe() == null) {
+		OOCFuture<BlockEntry> result = new OOCFuture<>();
+		readFuture.whenComplete((entry, ex) -> {
+			try {
+				if(ex != null) {
 					allowance.release(meta.entry.getSize());
-					if(meta.entry.getState() == BlockState.READING)
-						meta.entry.setState(BlockState.COLD);
-					return null;
+					result.completeExceptionally(ex);
+					return;
 				}
-				pinResident(meta, allowance);
-				return meta.entry;
+				BlockEntry pinned;
+				synchronized(OOCCacheImpl.this) {
+					if(entry == null || meta.entry.getDataUnsafe() == null) {
+						allowance.release(meta.entry.getSize());
+						if(meta.entry.getState() == BlockState.READING)
+							meta.entry.setState(BlockState.COLD);
+						pinned = null;
+					}
+					else {
+						pinResident(meta, allowance);
+						pinned = meta.entry;
+					}
+				}
+				result.complete(pinned);
+			}
+			catch(Throwable t) {
+				result.completeExceptionally(t);
 			}
 		});
+		return result;
 	}
 
 	private void pinResident(EntryMeta meta, MemoryAllowance allowance) {
@@ -542,7 +553,7 @@ public class OOCCacheImpl implements OOCCache {
 	private static class EntryMeta {
 		private final BlockEntry entry;
 		private boolean backed;
-		private CompletableFuture<BlockEntry> readFuture;
+		private OOCFuture<BlockEntry> readFuture;
 		private DeferredUnpinHandle deferredUnpin;
 
 		private EntryMeta(BlockEntry entry) {

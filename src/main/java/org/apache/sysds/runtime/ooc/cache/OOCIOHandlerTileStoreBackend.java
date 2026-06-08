@@ -38,7 +38,21 @@ public class OOCIOHandlerTileStoreBackend implements TileStoreBackend {
 		// Patch to avoid collisions with the OOCCacheScheduler
 		BlockKey patched = new BlockKey(Long.MAX_VALUE - key.getStreamId(), key.getSequenceNumber());
 		BlockEntry entry = new BlockEntry(patched);
-		return OOCCacheManager.getIOHandler().scheduleRead(entry).thenApply(e -> (IndexedMatrixValue)e.getDataUnsafe());
+		CompletableFuture<IndexedMatrixValue> result = new CompletableFuture<>();
+		OOCCacheManager.getIOHandler().scheduleRead(entry).whenComplete((read, error) -> {
+			try {
+				if(error != null)
+					result.completeExceptionally(error);
+				else if(read == null)
+					result.complete(null);
+				else
+					result.complete((IndexedMatrixValue)read.getDataUnsafe());
+			}
+			catch(Throwable t) {
+				result.completeExceptionally(t);
+			}
+		});
+		return result;
 	}
 
 	@Override

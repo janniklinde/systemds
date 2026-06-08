@@ -182,8 +182,8 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 	}
 
 	@Override
-	public CompletableFuture<BlockEntry> scheduleRead(final BlockEntry block) {
-		final CompletableFuture<BlockEntry> future = new CompletableFuture<>();
+	public OOCFuture<BlockEntry> scheduleRead(final BlockEntry block) {
+		final OOCFuture<BlockEntry> future = new OOCFuture<>();
 		int pinnedPartitionId = pinPartitionForRead(block.getKey());
 		try {
 			ReadTask task = new ReadTask(block, future, _readSeq.getAndIncrement(), pinnedPartitionId);
@@ -823,12 +823,12 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 	private class ReadTask implements Runnable, Comparable<ReadTask> {
 		private final BlockEntry _block;
-		private final CompletableFuture<BlockEntry> _future;
+		private final OOCFuture<BlockEntry> _future;
 		private final long _sequence;
 		private final int _pinnedPartitionId;
 		private double _priority;
 
-		private ReadTask(BlockEntry block, CompletableFuture<BlockEntry> future, long sequence, int pinnedPartitionId) {
+		private ReadTask(BlockEntry block, OOCFuture<BlockEntry> future, long sequence, int pinnedPartitionId) {
 			this._block = block;
 			this._future = future;
 			this._sequence = sequence;
