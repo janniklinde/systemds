@@ -17,7 +17,7 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.ooc.cache;
+package org.apache.sysds.runtime.ooc.cache.io;
 
 import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.io.IOUtilFunctions;

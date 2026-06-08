@@ -17,32 +17,33 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.ooc.cache;
+package org.apache.sysds.runtime.ooc.cache.io;
 
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 
-final class SpillableObjectRegistry {
+public final class SpillableObjectRegistry {
 	private static final byte INDEXED_MATRIX_VALUE = 1;
 	private static final byte PACKED_BLOCK = 2;
 
 	private SpillableObjectRegistry() {
 	}
 
-	static boolean tryWrite(DataOutput out, SpillableObject obj) throws IOException {
+	public static boolean tryWrite(DataOutput out, SpillableObject obj) throws IOException {
 		byte type = typeOf(obj);
 		out.writeByte(type);
 		return obj.tryWrite(out);
 	}
 
-	static SpillableObject read(DataInput in) throws IOException {
+	public static SpillableObject read(DataInput in) throws IOException {
 		byte type = in.readByte();
 		SpillableObject obj = switch(type) {
 			case INDEXED_MATRIX_VALUE -> new IndexedMatrixValue();
-			case PACKED_BLOCK -> new OOCPackedCache.PackedBlock();
+			case PACKED_BLOCK -> new PackedBlock();
 			default -> throw new IOException("Unknown spillable object type: " + type);
 		};
 		obj.read(in);
@@ -52,7 +53,7 @@ final class SpillableObjectRegistry {
 	private static byte typeOf(SpillableObject obj) throws IOException {
 		if(obj instanceof IndexedMatrixValue)
 			return INDEXED_MATRIX_VALUE;
-		if(obj instanceof OOCPackedCache.PackedBlock)
+		if(obj instanceof PackedBlock)
 			return PACKED_BLOCK;
 		throw new IOException("Unsupported spillable object type: " + obj.getClass().getName());
 	}

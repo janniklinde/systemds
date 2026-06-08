@@ -17,9 +17,11 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.ooc.cache;
+package org.apache.sysds.runtime.ooc.cache.packed;
 
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.cache.BlockEntry;
+import org.apache.sysds.runtime.ooc.cache.OOCCache;
 
 import java.util.concurrent.CompletableFuture;
 

@@ -17,7 +17,7 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.ooc.cache;
+package org.apache.sysds.runtime.ooc.cache.collections;
 
 public interface IndexedObjectPredicate<T> {
 	boolean test(int idx, T value);

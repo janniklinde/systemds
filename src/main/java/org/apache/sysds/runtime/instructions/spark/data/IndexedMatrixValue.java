@@ -28,7 +28,7 @@ import java.io.Serializable;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.data.MatrixValue;
-import org.apache.sysds.runtime.ooc.cache.SpillableObject;
+import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 
 public class IndexedMatrixValue implements SpillableObject, Serializable
 {

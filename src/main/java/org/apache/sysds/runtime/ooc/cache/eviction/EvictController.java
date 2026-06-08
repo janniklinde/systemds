@@ -17,7 +17,11 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.ooc.cache;
+package org.apache.sysds.runtime.ooc.cache.eviction;
+
+import org.apache.sysds.runtime.ooc.cache.BlockEntry;
+import org.apache.sysds.runtime.ooc.cache.BlockState;
+import org.apache.sysds.runtime.ooc.cache.collections.MaskedOnceArrayList;
 
 import java.util.PriorityQueue;
 import java.util.concurrent.CopyOnWriteArrayList;

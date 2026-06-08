@@ -17,45 +17,16 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.ooc.cache;
+package org.apache.sysds.runtime.ooc.cache.io;
 
-interface PackedCacheLocation {
-}
+import java.io.DataInput;
+import java.io.DataOutput;
+import java.io.IOException;
 
-final class PendingPackLocation implements PackedCacheLocation {
-	final PackBuilder builder;
-	final int slot;
+public interface SpillableObject {
+	boolean tryWrite(DataOutput out)  throws IOException;
+	void read(DataInput in)  throws IOException;
 
-	PendingPackLocation(PackBuilder builder, int slot) {
-		this.builder = builder;
-		this.slot = slot;
-	}
-}
-
-final class SealedPackLocation implements PackedCacheLocation {
-	final PackedPinState state;
-	final int slot;
-
-	SealedPackLocation(PackedPinState state, int slot) {
-		this.state = state;
-		this.slot = slot;
-	}
-}
-
-final class PendingLogicalPin {
-	final PackBuilder builder;
-	final int slot;
-
-	PendingLogicalPin(PackBuilder builder, int slot) {
-		this.builder = builder;
-		this.slot = slot;
-	}
-}
-
-final class PackedLogicalPin {
-	final PackedPinState state;
-
-	PackedLogicalPin(PackedPinState state) {
-		this.state = state;
+	default void discard() {
 	}
 }

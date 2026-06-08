@@ -33,7 +33,7 @@ public final class BlockEntry {
 	// Optional implementation-local cache metadata; null for cache implementations that do not need it.
 	private volatile Object _cacheMeta;
 
-	BlockEntry(BlockKey key) {
+	public BlockEntry(BlockKey key) {
 		this._key = key;
 		this._size = -1;
 		this._pinCount = 0;
@@ -45,7 +45,7 @@ public final class BlockEntry {
 		this._cacheMeta = null;
 	}
 
-	BlockEntry(BlockKey key, long size, Object data) {
+	public BlockEntry(BlockKey key, long size, Object data) {
 		this._key = key;
 		this._size = size;
 		this._pinCount = 0;
@@ -57,7 +57,7 @@ public final class BlockEntry {
 		this._cacheMeta = null;
 	}
 
-	BlockEntry(BlockKey key, long size, Object data, BlockState state) {
+	public BlockEntry(BlockKey key, long size, Object data, BlockState state) {
 		this._key = key;
 		this._size = size;
 		this._pinCount = 0;
@@ -97,17 +97,17 @@ public final class BlockEntry {
 		throw new IllegalStateException("Cannot get the data of an unpinned entry");
 	}
 
-	Object getDataUnsafe() {
+	public Object getDataUnsafe() {
 		return _data;
 	}
 
-	void setDataUnsafe(Object data) {
+	public void setDataUnsafe(Object data) {
 		if(data != null && _data != null)
 			throw new IllegalStateException("Cannot overwrite data");
 		_data = data;
 	}
 
-	void replaceDataUnsafe(Object expected, Object data) {
+	public void replaceDataUnsafe(Object expected, Object data) {
 		if(_data != expected)
 			throw new IllegalStateException("Cannot replace unexpected data");
 		_data = data;
@@ -121,51 +121,51 @@ public final class BlockEntry {
 		return _pinCount > 0;
 	}
 
-	synchronized int getPinCount() {
+	public synchronized int getPinCount() {
 		return _pinCount;
 	}
 
-	synchronized boolean addBackedPin() {
+	public synchronized boolean addBackedPin() {
 		_backedPinCount++;
 		return _backedPinCount == 1;
 	}
 
-	synchronized boolean removeBackedPin() {
+	public synchronized boolean removeBackedPin() {
 		if(_backedPinCount <= 0)
 			throw new IllegalStateException("Cannot remove backed pin if no backed pin is registered");
 		_backedPinCount--;
 		return _backedPinCount == 0;
 	}
 
-	synchronized boolean isBackedPinned() {
+	public synchronized boolean isBackedPinned() {
 		return _backedPinCount > 0;
 	}
 
-	synchronized int getBackedPinCount() {
+	public synchronized int getBackedPinCount() {
 		return _backedPinCount;
 	}
 
-	synchronized int addReference() {
+	public synchronized int addReference() {
 		return ++_referenceCount;
 	}
 
-	synchronized int forget() {
+	public synchronized int forget() {
 		return --_referenceCount;
 	}
 
-	synchronized int getReferenceCount() {
+	public synchronized int getReferenceCount() {
 		return _referenceCount;
 	}
 
-	Object getCacheMeta() {
+	public Object getCacheMeta() {
 		return _cacheMeta;
 	}
 
-	void setCacheMeta(Object meta) {
+	public void setCacheMeta(Object meta) {
 		_cacheMeta = meta;
 	}
 
-	synchronized void setState(BlockState state) {
+	public synchronized void setState(BlockState state) {
 		_state = state;
 	}
 
@@ -197,7 +197,7 @@ public final class BlockEntry {
 	 * Tries to clear the underlying data if it is not pinned
 	 * @return the number of cleared bytes (or 0 if could not clear or data was already cleared)
 	 */
-	synchronized long clear() {
+	public synchronized long clear() {
 		if (_state == BlockState.HANDOVER_PENDING || _pinCount != 0 || _data == null)
 			return 0;
 		//_softData = new SoftReference<>(_data);
@@ -210,7 +210,7 @@ public final class BlockEntry {
 	 * Pins the underlying data in memory
 	 * @return the new number of pins (0 if pin was unsuccessful)
 	 */
-	synchronized int pin() {
+	public synchronized int pin() {
 		if (_state == BlockState.HANDOVER_PENDING || _data == null)
 			return 0;
 		_pinCount++;
@@ -221,7 +221,7 @@ public final class BlockEntry {
 	 * Tries to increment pin-count if already pinned. Unpinned entries are not affected
 	 * by this operation. This allows bypassing the global cache lock.
 	 */
-	synchronized boolean fastPin() {
+	public synchronized boolean fastPin() {
 		if(_state == BlockState.HANDOVER_PENDING || _pinCount == 0)
 			return false;
 		_pinCount++;
@@ -232,7 +232,7 @@ public final class BlockEntry {
 	 * Unpins the underlying data
 	 * @return true if the data is now unpinned
 	 */
-	synchronized boolean unpin() {
+	public synchronized boolean unpin() {
 		if (_pinCount <= 0)
 			throw new IllegalStateException("Cannot unpin data if it was not pinned");
 		_pinCount--;
@@ -243,7 +243,7 @@ public final class BlockEntry {
 	 * Tries to unpin but guarantees that it will not
 	 * remove the last pin. This allows bypassing the global cache lock.
 	 */
-	synchronized boolean fastUnpin() {
+	public synchronized boolean fastUnpin() {
 		if(_pinCount <= 1)
 			return false;
 		_pinCount--;

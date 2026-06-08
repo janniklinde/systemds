@@ -33,8 +33,8 @@ import org.apache.sysds.runtime.io.MatrixWriterFactory;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
-import org.apache.sysds.runtime.ooc.cache.OOCIOHandler;
-import org.apache.sysds.runtime.ooc.cache.OOCMatrixIOHandler;
+import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
+import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
 import org.apache.sysds.runtime.ooc.primitives.UncoordinatedDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
@@ -48,7 +48,6 @@ import org.junit.Test;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 
 public class UncoordinatedDataGenOOCPrimitiveTest extends AutomatedTestBase {
 	private static final String TEST_NAME = "UncoordinatedDataGenOOCPrimitive";

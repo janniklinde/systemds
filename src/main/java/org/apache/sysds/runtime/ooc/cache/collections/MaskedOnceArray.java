@@ -17,7 +17,7 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.ooc.cache;
+package org.apache.sysds.runtime.ooc.cache.collections;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;

@@ -27,6 +27,12 @@ import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.ooc.OOCDebug;
+import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
+import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerTileStoreBackend;
+import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
+import org.apache.sysds.runtime.ooc.cache.io.TileStoreBackend;
+import org.apache.sysds.runtime.ooc.cache.legacy.OOCCacheScheduler;
+import org.apache.sysds.runtime.ooc.cache.legacy.OOCLRUCacheScheduler;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
@@ -865,7 +871,7 @@ public class OOCCacheManager {
 		private final AtomicBoolean _pinned;
 		private DMLRuntimeException _failure;
 
-		HandoverCachedQueueCallback(OOCCacheScheduler.HandoverHandle handover, DMLRuntimeException failure) {
+		public HandoverCachedQueueCallback(OOCCacheScheduler.HandoverHandle handover, DMLRuntimeException failure) {
 			_handover = handover;
 			_failure = failure;
 			_pinned = new AtomicBoolean(true);

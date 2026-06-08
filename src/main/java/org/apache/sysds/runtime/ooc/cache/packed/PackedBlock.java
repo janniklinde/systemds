@@ -17,18 +17,21 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.ooc.cache;
+package org.apache.sysds.runtime.ooc.cache.packed;
+
+import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
+import org.apache.sysds.runtime.ooc.cache.io.SpillableObjectRegistry;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 
-final class PackedBlock implements SpillableObject {
+public final class PackedBlock implements SpillableObject {
 	Object[] values;
 	long[] sizes;
 	long totalSize;
 
-	PackedBlock() {
+	public PackedBlock() {
 		values = null;
 		sizes = null;
 		totalSize = 0;

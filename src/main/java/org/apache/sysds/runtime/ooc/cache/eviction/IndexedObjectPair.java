@@ -17,16 +17,13 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.ooc.cache;
+package org.apache.sysds.runtime.ooc.cache.eviction;
 
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.IOException;
+import org.jetbrains.annotations.NotNull;
 
-public interface SpillableObject {
-	boolean tryWrite(DataOutput out)  throws IOException;
-	void read(DataInput in)  throws IOException;
-
-	default void discard() {
+public record IndexedObjectPair<T>(long idx, T obj) implements Comparable<IndexedObjectPair<?>> {
+	@Override
+	public int compareTo(@NotNull IndexedObjectPair indexedObjectPair) {
+		return Long.compare(idx,indexedObjectPair.idx);
 	}
 }

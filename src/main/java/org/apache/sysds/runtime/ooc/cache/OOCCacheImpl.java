@@ -19,6 +19,11 @@
 
 package org.apache.sysds.runtime.ooc.cache;
 
+import org.apache.sysds.runtime.ooc.cache.collections.MaskedOnceArrayList;
+import org.apache.sysds.runtime.ooc.cache.collections.SegmentedStreamTableList;
+import org.apache.sysds.runtime.ooc.cache.eviction.EvictController;
+import org.apache.sysds.runtime.ooc.cache.eviction.IndexedObjectPair;
+import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.ArrayList;
