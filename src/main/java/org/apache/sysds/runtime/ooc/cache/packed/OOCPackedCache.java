@@ -215,7 +215,7 @@ public final class OOCPackedCache implements OOCCache {
 		if(!(location instanceof SealedPackLocation packed))
 			return _physical.pin(sId, tId, allowance);
 
-		return packed.state.pin(_physical, allowance, false).map(physicalEntry -> {
+		return packed.state().pin(_physical, allowance, false).map(physicalEntry -> {
 			if(physicalEntry == null)
 				return null;
 			return createLogicalPin(new BlockKey(sId, tId), packed);
@@ -232,7 +232,7 @@ public final class OOCPackedCache implements OOCCache {
 		if(!(location instanceof SealedPackLocation packed))
 			return _physical.pinIfLive(sId, tId, allowance);
 
-		if(packed.state.pinIfLive(_physical, allowance) == null)
+		if(packed.state().pinIfLive(_physical, allowance) == null)
 			return null;
 		return createLogicalPin(new BlockKey(sId, tId), packed);
 	}
@@ -251,7 +251,7 @@ public final class OOCPackedCache implements OOCCache {
 	public int reference(BlockEntry entry) {
 		Object meta = entry.getCacheMeta();
 		if(meta instanceof PackedLogicalPin packed)
-			return _physical.reference(packed.state.physicalEntry);
+			return _physical.reference(packed.state().physicalEntry);
 		if(meta instanceof PendingLogicalPin)
 			return entry.addReference();
 		return _physical.reference(entry);
@@ -261,7 +261,7 @@ public final class OOCPackedCache implements OOCCache {
 	public int dereference(BlockEntry entry) {
 		Object meta = entry.getCacheMeta();
 		if(meta instanceof PackedLogicalPin packed)
-			return _physical.dereference(packed.state.physicalEntry);
+			return _physical.dereference(packed.state().physicalEntry);
 		if(meta instanceof PendingLogicalPin)
 			return entry.forget();
 		return _physical.dereference(entry);
@@ -313,10 +313,10 @@ public final class OOCPackedCache implements OOCCache {
 			}
 			entry.unpin();
 			entry.setCacheMeta(null);
-			PackUnpinHandle handle = pin.builder.unpinProducer(entry, pin.slot, allowance);
-			if(pin.builder.sealed && pin.builder.activePins == 0)
-				pin.builder.transferProducerOwnership(_physical);
-			scheduleSeal(pin.builder);
+			PackUnpinHandle handle = pin.builder().unpinProducer(entry, pin.slot(), allowance);
+			if(pin.builder().sealed && pin.builder().activePins == 0)
+				pin.builder().transferProducerOwnership(_physical);
+			scheduleSeal(pin.builder());
 			return handle;
 		}
 	}
@@ -330,7 +330,7 @@ public final class OOCPackedCache implements OOCCache {
 		}
 		entry.unpin();
 		entry.setCacheMeta(null);
-		return pin.state.unpin(this, _packReleaseDelayMs, allowance);
+		return pin.state().unpin(this, _packReleaseDelayMs, allowance);
 	}
 
 	void enqueueRelease(PackedPinState state) {
@@ -389,20 +389,20 @@ public final class OOCPackedCache implements OOCCache {
 
 	private SealedPackLocation forceSeal(PendingPackLocation pending) {
 		synchronized(this) {
-			sealBuilder(pending.builder);
-			PackedCacheLocation location = getLocation(pending.builder.streamIds[pending.slot],
-				pending.builder.tileIds[pending.slot]);
+			sealBuilder(pending.builder());
+			PackedCacheLocation location = getLocation(pending.builder().streamIds[pending.slot()],
+				pending.builder().tileIds[pending.slot()]);
 			return (SealedPackLocation)location;
 		}
 	}
 
 	private static BlockEntry createLogicalPin(BlockKey logicalKey, SealedPackLocation location) {
-		PackedBlock block = (PackedBlock)location.state.physicalEntry.getDataUnsafe();
-		Object data = block.values[location.slot];
-		long size = block.sizes[location.slot];
+		PackedBlock block = (PackedBlock) location.state().physicalEntry.getDataUnsafe();
+		Object data = block.values[location.slot()];
+		long size = block.sizes[location.slot()];
 		BlockEntry logical = new BlockEntry(logicalKey, size, data, BlockState.REMOVED);
 		logical.pin();
-		logical.setCacheMeta(new PackedLogicalPin(location.state));
+		logical.setCacheMeta(new PackedLogicalPin(location.state()));
 		return logical;
 	}
 
