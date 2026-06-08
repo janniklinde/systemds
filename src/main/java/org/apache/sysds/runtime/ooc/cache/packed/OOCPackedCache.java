@@ -48,7 +48,6 @@ public final class OOCPackedCache implements OOCCache {
 	private static final int PACKED_STREAM_ID = 0;
 	private static final long DEFAULT_PACK_THRESHOLD_BYTES = 64 * 1024;
 	private static final long DEFAULT_PACK_TARGET_BYTES = 1L << 19; // 512 KB tile packing
-	private static final long DEFAULT_MIXED_PACK_TARGET_BYTES = 256L << 10;
 	private static final long DEFAULT_MAX_STAGING_BYTES = 64L << 20;
 	private static final int DEFAULT_MAX_OPEN_BUILDERS = 64;
 	private static final long DEFAULT_SEAL_DELAY_MS = 5;
@@ -57,7 +56,6 @@ public final class OOCPackedCache implements OOCCache {
 	private final OOCCacheImpl _physical;
 	private final long _packThresholdBytes;
 	private final long _packTargetBytes;
-	private final long _mixedPackTargetBytes;
 	private final long _maxStagingBytes;
 	private final int _maxOpenBuilders;
 	private final long _sealDelayMs;
@@ -70,7 +68,6 @@ public final class OOCPackedCache implements OOCCache {
 	private final AtomicInteger _nextPackedId;
 
 	private PackBuilder[] _builders;
-	private PackBuilder _mixedBuilder;
 	private long _stagingBytes;
 	private int _openBuilderCount;
 	private boolean _running;
@@ -90,21 +87,19 @@ public final class OOCPackedCache implements OOCCache {
 
 	public OOCPackedCache(OOCCacheImpl physical, long packThresholdBytes, long packTargetBytes, long sealDelayMs,
 		long packReleaseDelayMs) {
-		this(physical, packThresholdBytes, packTargetBytes, DEFAULT_MIXED_PACK_TARGET_BYTES,
-			DEFAULT_MAX_STAGING_BYTES, DEFAULT_MAX_OPEN_BUILDERS, sealDelayMs, packReleaseDelayMs);
+		this(physical, packThresholdBytes, packTargetBytes, DEFAULT_MAX_STAGING_BYTES,
+			DEFAULT_MAX_OPEN_BUILDERS, sealDelayMs, packReleaseDelayMs);
 	}
 
 	public OOCPackedCache(OOCCacheImpl physical, long packThresholdBytes, long packTargetBytes,
-		long mixedPackTargetBytes, long maxStagingBytes, int maxOpenBuilders, long sealDelayMs,
-		long packReleaseDelayMs) {
+		long maxStagingBytes, int maxOpenBuilders, long sealDelayMs, long packReleaseDelayMs) {
 		if(packThresholdBytes <= 0 || packTargetBytes < packThresholdBytes)
 			throw new IllegalArgumentException("Invalid pack sizes: threshold=" + packThresholdBytes +
 				", target=" + packTargetBytes);
 		_physical = physical;
 		_packThresholdBytes = packThresholdBytes;
 		_packTargetBytes = packTargetBytes;
-		_mixedPackTargetBytes = Math.max(packThresholdBytes, mixedPackTargetBytes);
-		_maxStagingBytes = Math.max(_mixedPackTargetBytes, maxStagingBytes);
+		_maxStagingBytes = Math.max(packTargetBytes, maxStagingBytes);
 		_maxOpenBuilders = Math.max(1, maxOpenBuilders);
 		_sealDelayMs = sealDelayMs;
 		_packReleaseDelayMs = packReleaseDelayMs;
@@ -113,7 +108,6 @@ public final class OOCPackedCache implements OOCCache {
 		_releaseQueue = new ConcurrentLinkedQueue<>();
 		_releaseRunning = new AtomicBoolean(false);
 		_builders = new PackBuilder[16];
-		_mixedBuilder = null;
 		_stagingBytes = 0;
 		_openBuilderCount = 0;
 		_running = true;
@@ -285,8 +279,6 @@ public final class OOCPackedCache implements OOCCache {
 		for(PackBuilder builder : _builders)
 			if(builder != null)
 				sealBuilder(builder);
-		if(_mixedBuilder != null)
-			sealBuilder(_mixedBuilder);
 		_sealExecutor.shutdownNow();
 		_releaseExecutor.shutdownNow();
 		_physical.shutdown();
@@ -296,8 +288,6 @@ public final class OOCPackedCache implements OOCCache {
 		for(PackBuilder builder : _builders)
 			if(builder != null)
 				sealBuilder(builder);
-		if(_mixedBuilder != null)
-			sealBuilder(_mixedBuilder);
 	}
 
 	private UnpinHandle unpinPending(BlockEntry entry, PendingLogicalPin pin, MemoryAllowance allowance) {
@@ -415,24 +405,17 @@ public final class OOCPackedCache implements OOCCache {
 		}
 		if(builder != null)
 			return builder;
-		if(canOpenBuilder(nextSize)) {
-			ensureBuilderCapacity(sid);
-			builder = new PackBuilder(sid, allowance, _packTargetBytes);
-			_builders[sid] = builder;
-			_openBuilderCount++;
-			return builder;
+		while(!canOpenBuilder(nextSize)) {
+			PackBuilder largest = findLargestOpenBuilder();
+			if(largest == null)
+				break;
+			sealBuilder(largest);
 		}
-		return getMixedBuilder(allowance);
-	}
-
-	private PackBuilder getMixedBuilder(MemoryAllowance allowance) {
-		if(_mixedBuilder != null && (_mixedBuilder.sealed || _mixedBuilder.allowance != allowance))
-			sealBuilder(_mixedBuilder);
-		if(_mixedBuilder == null) {
-			_mixedBuilder = new PackBuilder(-1, allowance, _mixedPackTargetBytes);
-			_openBuilderCount++;
-		}
-		return _mixedBuilder;
+		ensureBuilderCapacity(sid);
+		builder = new PackBuilder(sid, allowance, _packTargetBytes);
+		_builders[sid] = builder;
+		_openBuilderCount++;
+		return builder;
 	}
 
 	private boolean canOpenBuilder(long nextSize) {
@@ -464,9 +447,6 @@ public final class OOCPackedCache implements OOCCache {
 		for(PackBuilder builder : _builders)
 			if(builder != null && !builder.sealed && (largest == null || builder.getBytes() > largest.getBytes()))
 				largest = builder;
-		if(_mixedBuilder != null && !_mixedBuilder.sealed &&
-			(largest == null || _mixedBuilder.getBytes() > largest.getBytes()))
-			largest = _mixedBuilder;
 		return largest;
 	}
 
@@ -478,8 +458,6 @@ public final class OOCPackedCache implements OOCCache {
 		_openBuilderCount--;
 		if(builder.streamSlot >= 0 && builder.streamSlot < _builders.length && _builders[builder.streamSlot] == builder)
 			_builders[builder.streamSlot] = null;
-		if(_mixedBuilder == builder)
-			_mixedBuilder = null;
 
 		PackedBlock block = builder.createBlock();
 		BlockEntry physicalEntry = putSealedBlockPinned(block, builder.allowance);
