@@ -61,7 +61,7 @@ import java.util.function.ToLongFunction;
  * consume again for other operators.
  *
  */
-	public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
+public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 	public static final IDSequence _streamSeq = new IDSequence();
 	private static final ConcurrentHashMap<Long, CachingStream> LIVE_STREAMS = new ConcurrentHashMap<>();

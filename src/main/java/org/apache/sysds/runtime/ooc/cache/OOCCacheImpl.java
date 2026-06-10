@@ -166,8 +166,16 @@ public class OOCCacheImpl implements OOCCache {
 
 	@Override
 	public int dereference(BlockEntry entry) {
+		return dereference(entry.getKey());
+	}
+
+	@Override
+	public int dereference(BlockKey key) {
 		int refs;
 		synchronized(this) {
+			BlockEntry entry = findEntry(key);
+			if(entry == null)
+				return 0;
 			refs = entry.forget();
 			if(refs <= 0)
 				removeIfUnused(getMeta(entry));

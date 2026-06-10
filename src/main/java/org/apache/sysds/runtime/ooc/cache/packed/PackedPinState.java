@@ -37,10 +37,12 @@ final class PackedPinState {
 	private DelayedPackedUnpinHandle[] releaseHandles;
 	private int size;
 	private boolean releaseQueued;
+	private int liveLocations;
 
 	@SuppressWarnings("unchecked")
-	PackedPinState(BlockEntry physicalEntry) {
+	PackedPinState(BlockEntry physicalEntry, int liveLocations) {
 		this.physicalEntry = physicalEntry;
+		this.liveLocations = liveLocations;
 		allowances = new MemoryAllowance[2];
 		counts = new int[2];
 		futures = new OOCFuture[2];
@@ -128,6 +130,12 @@ final class PackedPinState {
 
 	synchronized void clearReleaseQueued() {
 		releaseQueued = false;
+	}
+
+	synchronized boolean forgetLocation() {
+		if(liveLocations <= 0)
+			return false;
+		return --liveLocations == 0;
 	}
 
 	private int indexOf(MemoryAllowance allowance) {

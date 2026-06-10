@@ -107,6 +107,11 @@ public interface OOCCache {
 	int dereference(BlockEntry entry);
 
 	/**
+	 * Dereferences the logical entry identified by the key without requiring callers to retain a BlockEntry.
+	 */
+	int dereference(BlockKey key);
+
+	/**
 	 * Updates the cache limits.
 	 */
 	void updateLimits(long hardLimit, long evictionLimit);

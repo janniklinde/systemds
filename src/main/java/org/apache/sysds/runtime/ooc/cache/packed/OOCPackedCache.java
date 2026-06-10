@@ -192,7 +192,7 @@ public final class OOCPackedCache implements OOCCache {
 			checkRunning();
 			BlockEntry physicalEntry = putSealedBlockPinned(new PackedBlock(packedData, packedSizes, totalSize),
 				allowance);
-			PackedPinState state = new PackedPinState(physicalEntry);
+			PackedPinState state = new PackedPinState(physicalEntry, len);
 			for(int i = 0; i < len; i++)
 				putLocation(new BlockKey(sId, tIds[off + i]), new SealedPackLocation(state, i));
 			return physicalEntry;
@@ -259,6 +259,22 @@ public final class OOCPackedCache implements OOCCache {
 		if(meta instanceof PendingLogicalPin)
 			return entry.forget();
 		return _physical.dereference(entry);
+	}
+
+	@Override
+	public int dereference(BlockKey key) {
+		PackedCacheLocation location = getLocation(key.getStreamId(), key.getSequenceNumber());
+		if(location == null)
+			return _physical.dereference(key);
+		if(location instanceof PendingPackLocation pending)
+			location = forceSeal(pending);
+		if(!(location instanceof SealedPackLocation packed))
+			return _physical.dereference(key);
+		if(!clearLocation(key))
+			return 0;
+		if(packed.state().forgetLocation())
+			return _physical.dereference(packed.state().physicalEntry);
+		return 1;
 	}
 
 	@Override
@@ -461,7 +477,7 @@ public final class OOCPackedCache implements OOCCache {
 
 		PackedBlock block = builder.createBlock();
 		BlockEntry physicalEntry = putSealedBlockPinned(block, builder.allowance);
-		PackedPinState state = new PackedPinState(physicalEntry);
+		PackedPinState state = new PackedPinState(physicalEntry, builder.count);
 		builder.state = state;
 
 		for(int i = 0; i < builder.count; i++)
@@ -495,6 +511,11 @@ public final class OOCPackedCache implements OOCCache {
 
 	private void putLocation(BlockKey key, PackedCacheLocation location) {
 		_locations.getOrCreate(key.getStreamId()).put(blockIndex(key.getSequenceNumber()), location);
+	}
+
+	private boolean clearLocation(BlockKey key) {
+		MaskedOnceArrayList<PackedCacheLocation> stream = _locations.get(key.getStreamId());
+		return stream != null && stream.clear(blockIndex(key.getSequenceNumber()));
 	}
 
 	private void ensureBuilderCapacity(int streamId) {

@@ -33,6 +33,9 @@ import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
 import org.apache.sysds.runtime.ooc.cache.packed.OOCPackedCache;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
+import org.apache.sysds.runtime.ooc.store.MaterializedStore;
+import org.apache.sysds.runtime.ooc.store.MaterializedStoreImpl;
+import org.apache.sysds.runtime.ooc.store.SequentialAccessPattern;
 import org.apache.sysds.utils.Statistics;
 import org.junit.After;
 import org.junit.Assert;
@@ -41,6 +44,7 @@ import org.junit.Ignore;
 import org.junit.Test;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -228,7 +232,7 @@ public class OOCCacheImplStressTest {
 	@Test
 	public void testPackedCacheBatchAndSealedPackApisWithFakeIO() throws Exception {
 		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(_io, 64 * BYTES, 16 * BYTES),
-			2 * BYTES, 8 * BYTES, 4 * BYTES, 64 * BYTES, 1, 0, 0);
+			2 * BYTES, 8 * BYTES, 64 * BYTES, 1, 0, 0);
 		try {
 			long[] batchIds = new long[] {0, 1};
 			Object[] batchData = new Object[] {payload(0), payload(1)};
@@ -237,7 +241,10 @@ public class OOCCacheImplStressTest {
 			BlockEntry[] batchEntries = cache.putPackPinned(1, batchIds, batchData, batchSizes, _producer);
 
 			_producer.reserveBlocking(BYTES);
-			BlockEntry mixedEntry = cache.putPinned(2, 0, payload(2), BYTES, _producer);
+			BlockEntry streamEntry = cache.putPinned(2, 0, payload(2), BYTES, _producer);
+
+			_producer.reserveBlocking(BYTES);
+			BlockEntry otherStreamEntry = cache.putPinned(4, 0, payload(3), BYTES, _producer);
 
 			long[] sealedIds = new long[] {10, 11};
 			Object[] sealedData = new Object[] {payload(10), payload(11)};
@@ -247,7 +254,8 @@ public class OOCCacheImplStressTest {
 
 			for(BlockEntry entry : batchEntries)
 				cache.unpin(entry, _producer);
-			cache.unpin(mixedEntry, _producer);
+			cache.unpin(streamEntry, _producer);
+			cache.unpin(otherStreamEntry, _producer);
 			cache.unpin(sealedPhysical, _producer);
 			cache.flushPacks();
 			waitFor(() -> _producer.getUsedMemory() == 0);
@@ -256,11 +264,21 @@ public class OOCCacheImplStressTest {
 			Assert.assertNotNull(batchReplay);
 			Assert.assertEquals(2.0, ((MatrixBlock) ((IndexedMatrixValue) batchReplay.getData()).getValue()).sum(), 0.0);
 			cache.unpin(batchReplay, _consumerB);
+			waitFor(() -> _consumerB.getUsedMemory() == 0);
 
-			BlockEntry mixedReplay = cache.pin(2, 0, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
-			Assert.assertNotNull(mixedReplay);
-			Assert.assertEquals(3.0, ((MatrixBlock) ((IndexedMatrixValue) mixedReplay.getData()).getValue()).sum(), 0.0);
-			cache.unpin(mixedReplay, _consumerB);
+			BlockEntry streamReplay = cache.pin(2, 0, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			Assert.assertNotNull(streamReplay);
+			Assert.assertEquals(3.0, ((MatrixBlock) ((IndexedMatrixValue) streamReplay.getData()).getValue()).sum(), 0.0);
+			Assert.assertEquals("A per-stream pack must not include tiles from another stream.",
+				BYTES, _consumerB.getUsedMemory());
+
+			BlockEntry otherStreamReplay = cache.pin(4, 0, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			Assert.assertNotNull(otherStreamReplay);
+			Assert.assertEquals(4.0,
+				((MatrixBlock) ((IndexedMatrixValue) otherStreamReplay.getData()).getValue()).sum(), 0.0);
+			Assert.assertEquals(2 * BYTES, _consumerB.getUsedMemory());
+			cache.unpin(streamReplay, _consumerB);
+			cache.unpin(otherStreamReplay, _consumerB);
 
 			BlockEntry sealedReplay = cache.pin(3, 11, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 			Assert.assertNotNull(sealedReplay);
@@ -269,6 +287,38 @@ public class OOCCacheImplStressTest {
 			waitFor(() -> _consumerB.getUsedMemory() == 0);
 		}
 		finally {
+			cache.shutdown();
+		}
+	}
+
+	@Test
+	public void testMaterializedStoreOfflinePackedReplayWithFakeIO() throws Exception {
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(_io, 64 * BYTES, 16 * BYTES),
+			2 * BYTES, 8 * BYTES, 0);
+		MaterializedStoreImpl<IndexedMatrixValue> store = new MaterializedStoreImpl<>(cache, 3);
+		try {
+			for(int i = 0; i < BLOCKS; i++) {
+				_producer.reserveBlocking(BYTES);
+				store.publishPinned(i, payload(i), BYTES, _producer);
+			}
+			store.complete();
+			waitFor(() -> _producer.getUsedMemory() == 0);
+
+			MaterializedStore.Reader<IndexedMatrixValue> first =
+				store.openReader(new SequentialAccessPattern(BLOCKS), _consumerB, 32);
+			MaterializedStore.Reader<IndexedMatrixValue> second =
+				store.openReader(new SequentialAccessPattern(BLOCKS), _consumerB, 32);
+			store.sealReaders();
+
+			consumeStoreReader(first);
+			waitFor(() -> _consumerB.getUsedMemory() == 0);
+			consumeStoreReader(second);
+			waitFor(() -> _consumerB.getUsedMemory() == 0);
+
+			Assert.assertNull(cache.pin(3, 0, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS));
+		}
+		finally {
+			store.close();
 			cache.shutdown();
 		}
 	}
@@ -302,6 +352,17 @@ public class OOCCacheImplStressTest {
 			System.out.println("Packed spill/replay iteration: " + i);
 			long ms = System.currentTimeMillis();
 			testManualPackedFourGiBSpillAndReplay();
+			System.out.println((System.currentTimeMillis() - ms) + " ms");
+		}
+	}
+
+	@Ignore("Manual multi-GiB materialized-store stress test; enable when validating offline packed replay.")
+	@Test
+	public void mtestMaterializedStorePackedSpillAndReplay() throws Exception {
+		for(int i = 0; i < 2; i++) {
+			System.out.println("Materialized store packed spill/replay iteration: " + i);
+			long ms = System.currentTimeMillis();
+			testManualMaterializedStorePackedFourGiBSpillAndReplay();
 			System.out.println((System.currentTimeMillis() - ms) + " ms");
 		}
 	}
@@ -417,6 +478,76 @@ public class OOCCacheImplStressTest {
 		}
 	}
 
+	private void testManualMaterializedStorePackedFourGiBSpillAndReplay() throws Exception {
+		boolean oldOOCStats = DMLScript.OOC_STATISTICS;
+		DMLScript.OOC_STATISTICS = true;
+		Statistics.resetOOCEvictionStats();
+		OOCMatrixIOHandler io = new OOCMatrixIOHandler();
+		long tileBytes = MANUAL_STRESS_ROWS * (long) MANUAL_STRESS_COLS * 8;
+		int blocks = Math.toIntExact((MANUAL_STRESS_BYTES + tileBytes - 1) / tileBytes);
+		long packTargetBytes = 1L << 19;
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(MANUAL_STRESS_BYTES + MANUAL_HARD_BYTES);
+		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker, MANUAL_STRESS_BYTES + MANUAL_HARD_BYTES);
+		SyncMemoryAllowance readerAllowance =
+			new SyncMemoryAllowance(broker, MANUAL_STRESS_BYTES + MANUAL_HARD_BYTES);
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(io, MANUAL_HARD_BYTES, MANUAL_CACHE_BYTES),
+			64L << 10, packTargetBytes, MANUAL_PACK_SEAL_DELAY_MS);
+		MaterializedStoreImpl<IndexedMatrixValue> store = new MaterializedStoreImpl<>(cache, 1);
+		try {
+			MatrixBlock tile = new MatrixBlock(MANUAL_STRESS_ROWS, MANUAL_STRESS_COLS, 1.0);
+
+			long loadStart = System.currentTimeMillis();
+			for(int i = 0; i < blocks; i++) {
+				producer.reserveBlocking(tileBytes);
+				store.publishPinned(i, new IndexedMatrixValue(new MatrixIndexes(i + 1L, 1), tile),
+					tileBytes, producer);
+			}
+			store.complete();
+			waitFor(() -> producer.getUsedMemory() == 0);
+			waitFor(() -> cache.getOwnedCacheSize() <= MANUAL_CACHE_BYTES);
+			System.out.println("Materialized store load done in " +
+				(System.currentTimeMillis() - loadStart) + " ms");
+			System.out.println("Materialized store blocks=" + blocks + ", tileBytes=" + tileBytes +
+				", owned=" + cache.getOwnedCacheSize());
+
+			MaterializedStore.Reader<IndexedMatrixValue> first = store.openReader(
+				new SequentialAccessPattern(blocks), readerAllowance, 4096);
+			MaterializedStore.Reader<IndexedMatrixValue> second = store.openReader(
+				new SequentialAccessPattern(blocks), readerAllowance, 4096);
+			store.sealReaders();
+
+			List<MaterializedStore.Reader<IndexedMatrixValue>> scans = List.of(first, second);
+			for(int scan = 0; scan < scans.size(); scan++) {
+				long scanStart = System.currentTimeMillis();
+				int expected = 0;
+				MaterializedStore.Reader<IndexedMatrixValue> reader = scans.get(scan);
+				while(reader.hasNext()) {
+					try(MaterializedStore.Lease<IndexedMatrixValue> lease = reader.next()) {
+						Assert.assertEquals(expected, lease.index());
+						Assert.assertNotNull(lease.value());
+					}
+					expected++;
+				}
+				reader.close();
+				Assert.assertEquals(blocks, expected);
+				waitFor(() -> readerAllowance.getUsedMemory() == 0);
+				waitFor(() -> cache.getOwnedCacheSize() <= MANUAL_CACHE_BYTES);
+				System.out.println("Materialized store scan " + scan + " done in " +
+					(System.currentTimeMillis() - scanStart) + " ms");
+			}
+			System.out.printf("Materialized store packed 4GiB stress stats:%n%s%n",
+				Statistics.displayOOCEvictionStats());
+		}
+		finally {
+			store.close();
+			cache.shutdown();
+			io.shutdown();
+			producer.destroy();
+			readerAllowance.destroy();
+			DMLScript.OOC_STATISTICS = oldOOCStats;
+		}
+	}
+
 	private void testManualFourGiBSpillAndReplay() throws Exception {
 		boolean oldOOCStats = DMLScript.OOC_STATISTICS;
 		DMLScript.OOC_STATISTICS = true;
@@ -477,6 +608,21 @@ public class OOCCacheImplStressTest {
 
 	private static IndexedMatrixValue payload(int i) {
 		return new IndexedMatrixValue(new MatrixIndexes(i + 1L, 1), new MatrixBlock(1, 1, i + 1.0));
+	}
+
+	private static void consumeStoreReader(MaterializedStore.Reader<IndexedMatrixValue> reader)
+		throws InterruptedException {
+		int expected = 0;
+		while(reader.hasNext()) {
+			try(MaterializedStore.Lease<IndexedMatrixValue> lease = reader.next()) {
+				Assert.assertEquals(expected, lease.index());
+				Assert.assertEquals(expected + 1.0,
+					((MatrixBlock)lease.value().getValue()).sum(), 0.0);
+			}
+			expected++;
+		}
+		reader.close();
+		Assert.assertEquals(BLOCKS, expected);
 	}
 
 	private static void waitFor(BooleanSupplier condition) throws InterruptedException {

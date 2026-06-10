@@ -1,0 +1,80 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.sysds.runtime.ooc.store;
+
+import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+
+public interface MaterializedStore<T extends SpillableObject> extends AutoCloseable {
+	/**
+	 * Publishes a sequential logical index whose resident bytes are already owned by the supplied allowance.
+	 */
+	void publishPinned(int index, T value, long bytes, MemoryAllowance allowance);
+
+	void complete();
+
+	Reader<T> openReader(AccessPattern pattern, MemoryAllowance allowance, int maxPrefetch);
+
+	/**
+	 * Freezes the reader set. Offline access and reclamation start only after this call.
+	 */
+	void sealReaders();
+
+	int size();
+
+	@Override
+	void close();
+
+	interface AccessPattern {
+		boolean hasNext();
+
+		int next();
+
+		/**
+		 * Returns whether this reader may still access the index. False must never become true again.
+		 */
+		boolean needs(int index);
+
+		void consumed(int index);
+	}
+
+	interface Reader<T extends SpillableObject> extends AutoCloseable {
+		boolean hasNext();
+
+		/**
+		 * Returns the next ordered item, blocking while cache loading or allowance admission cannot progress.
+		 */
+		Lease<T> next() throws InterruptedException;
+
+		@Override
+		void close();
+	}
+
+	interface Lease<T extends SpillableObject> extends AutoCloseable {
+		int index();
+
+		T value();
+
+		Lease<T> retain();
+
+		@Override
+		void close();
+	}
+}

@@ -27,7 +27,7 @@ public class ConcurrentBitSet {
 
 	private final long[] words;
 
-	ConcurrentBitSet(int bits) {
+	public ConcurrentBitSet(int bits) {
 		this.words = new long[(bits + 63) >>> 6];
 	}
 
