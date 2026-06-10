@@ -43,6 +43,7 @@ import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
 
+import java.util.BitSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -320,6 +321,75 @@ public class OOCCacheImplStressTest {
 		finally {
 			store.close();
 			cache.shutdown();
+		}
+	}
+
+	@Test
+	public void testMaterializedStoreOpportunisticPackedReplayWithFakeIO() throws Exception {
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(_io, 64 * BYTES, 16 * BYTES),
+			2 * BYTES, 8 * BYTES, 0);
+		MaterializedStoreImpl<IndexedMatrixValue> store = new MaterializedStoreImpl<>(cache, 5);
+		try {
+			for(int i = 0; i < BLOCKS; i++) {
+				_producer.reserveBlocking(BYTES);
+				store.publishPinned(i, payload(i), BYTES, _producer);
+			}
+			store.complete();
+			int expectedPacks = cache.getPackGroupCount();
+			waitFor(() -> _producer.getUsedMemory() == 0);
+
+			MaterializedStore.PackReader<IndexedMatrixValue> first =
+				store.openOpportunisticReader(new SequentialAccessPattern(BLOCKS), _consumerB, 8);
+			MaterializedStore.PackReader<IndexedMatrixValue> second =
+				store.openOpportunisticReader(new SequentialAccessPattern(BLOCKS), _consumerB, 8);
+			store.sealReaders();
+
+			Assert.assertEquals(expectedPacks, consumeStorePackReader(first));
+			waitFor(() -> _consumerB.getUsedMemory() == 0);
+			Assert.assertEquals(expectedPacks, consumeStorePackReader(second));
+			waitFor(() -> _consumerB.getUsedMemory() == 0);
+
+			Assert.assertNull(cache.pin(5, 0, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS));
+		}
+		finally {
+			store.close();
+			cache.shutdown();
+		}
+	}
+
+	@Test
+	public void testMaterializedStoreOpportunisticPackedReplayWithRealIO() throws Exception {
+		OOCMatrixIOHandler io = new OOCMatrixIOHandler();
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(io, 64 * BYTES, 16 * BYTES),
+			2 * BYTES, 8 * BYTES, 0);
+		MaterializedStoreImpl<IndexedMatrixValue> store = new MaterializedStoreImpl<>(cache, 6);
+		try {
+			for(int i = 0; i < BLOCKS; i++) {
+				_producer.reserveBlocking(BYTES);
+				store.publishPinned(i, payload(i), BYTES, _producer);
+			}
+			store.complete();
+			int expectedPacks = cache.getPackGroupCount();
+			waitFor(() -> _producer.getUsedMemory() == 0);
+			waitFor(() -> cache.getOwnedCacheSize() <= 16 * BYTES);
+
+			MaterializedStore.PackReader<IndexedMatrixValue> first =
+				store.openOpportunisticReader(new SequentialAccessPattern(BLOCKS), _consumerB, 8);
+			MaterializedStore.PackReader<IndexedMatrixValue> second =
+				store.openOpportunisticReader(new SequentialAccessPattern(BLOCKS), _consumerB, 8);
+			store.sealReaders();
+
+			Assert.assertEquals(expectedPacks, consumeStorePackReader(first));
+			waitFor(() -> _consumerB.getUsedMemory() == 0);
+			Assert.assertEquals(expectedPacks, consumeStorePackReader(second));
+			waitFor(() -> _consumerB.getUsedMemory() == 0);
+
+			Assert.assertNull(cache.pin(6, 0, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS));
+		}
+		finally {
+			store.close();
+			cache.shutdown();
+			io.shutdown();
 		}
 	}
 
@@ -618,11 +688,37 @@ public class OOCCacheImplStressTest {
 				Assert.assertEquals(expected, lease.index());
 				Assert.assertEquals(expected + 1.0,
 					((MatrixBlock)lease.value().getValue()).sum(), 0.0);
+				if(expected == 0) {
+					try(MaterializedStore.Lease<IndexedMatrixValue> retained = lease.retain()) {
+						Assert.assertSame(lease.value(), retained.value());
+					}
+				}
 			}
 			expected++;
 		}
 		reader.close();
 		Assert.assertEquals(BLOCKS, expected);
+	}
+
+	private static int consumeStorePackReader(MaterializedStore.PackReader<IndexedMatrixValue> reader)
+		throws InterruptedException {
+		BitSet consumed = new BitSet(BLOCKS);
+		int packs = 0;
+		while(reader.hasNext()) {
+			try(MaterializedStore.PackLease<IndexedMatrixValue> pack = reader.nextPack()) {
+				packs++;
+				for(int slot = 0; slot < pack.size(); slot++) {
+					int index = pack.index(slot);
+					Assert.assertFalse(consumed.get(index));
+					Assert.assertEquals(index + 1.0,
+						((MatrixBlock)pack.value(slot).getValue()).sum(), 0.0);
+					consumed.set(index);
+				}
+			}
+		}
+		reader.close();
+		Assert.assertEquals(BLOCKS, consumed.cardinality());
+		return packs;
 	}
 
 	private static void waitFor(BooleanSupplier condition) throws InterruptedException {

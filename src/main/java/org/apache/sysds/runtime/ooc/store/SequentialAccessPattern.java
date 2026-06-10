@@ -19,13 +19,17 @@
 
 package org.apache.sysds.runtime.ooc.store;
 
+import org.apache.sysds.runtime.ooc.cache.collections.ConcurrentBitSet;
+
 public final class SequentialAccessPattern implements MaterializedStore.AccessPattern {
 	private final int size;
+	private final ConcurrentBitSet consumed;
 	private int next;
 	private volatile int consumedThrough;
 
 	public SequentialAccessPattern(int size) {
 		this.size = size;
+		consumed = new ConcurrentBitSet(Math.max(1, size));
 		next = 0;
 		consumedThrough = -1;
 	}
@@ -44,13 +48,15 @@ public final class SequentialAccessPattern implements MaterializedStore.AccessPa
 
 	@Override
 	public boolean needs(int index) {
-		return index > consumedThrough && index < size;
+		return index >= 0 && index < size && index > consumedThrough && !consumed.get(index);
 	}
 
 	@Override
-	public void consumed(int index) {
-		if(index != consumedThrough + 1)
-			throw new IllegalStateException("Sequential consumption out of order: " + index);
-		consumedThrough = index;
+	public synchronized void consumed(int index) {
+		if(index < 0 || index >= size)
+			throw new IndexOutOfBoundsException("Invalid consumed index: " + index);
+		consumed.set(index);
+		while(consumedThrough + 1 < size && consumed.get(consumedThrough + 1))
+			consumedThrough++;
 	}
 }

@@ -32,6 +32,8 @@ public interface MaterializedStore<T extends SpillableObject> extends AutoClosea
 
 	Reader<T> openReader(AccessPattern pattern, MemoryAllowance allowance, int maxPrefetch);
 
+	PackReader<T> openOpportunisticReader(AccessPattern pattern, MemoryAllowance allowance, int maxPrefetch);
+
 	/**
 	 * Freezes the reader set. Offline access and reclamation start only after this call.
 	 */
@@ -62,6 +64,29 @@ public interface MaterializedStore<T extends SpillableObject> extends AutoClosea
 		 * Returns the next ordered item, blocking while cache loading or allowance admission cannot progress.
 		 */
 		Lease<T> next() throws InterruptedException;
+
+		@Override
+		void close();
+	}
+
+	interface PackReader<T extends SpillableObject> extends AutoCloseable {
+		boolean hasNext();
+
+		/**
+		 * Returns the next completed physical pack, independent of request order.
+		 */
+		PackLease<T> nextPack() throws InterruptedException;
+
+		@Override
+		void close();
+	}
+
+	interface PackLease<T extends SpillableObject> extends AutoCloseable {
+		int size();
+
+		int index(int slot);
+
+		T value(int slot);
 
 		@Override
 		void close();

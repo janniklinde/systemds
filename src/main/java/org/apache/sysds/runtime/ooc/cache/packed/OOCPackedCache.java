@@ -192,11 +192,27 @@ public final class OOCPackedCache implements OOCCache {
 			checkRunning();
 			BlockEntry physicalEntry = putSealedBlockPinned(new PackedBlock(packedData, packedSizes, totalSize),
 				allowance);
-			PackedPinState state = new PackedPinState(physicalEntry, len);
+			PackedPinState state = new PackedPinState(physicalEntry, sId, tIds, off, len);
 			for(int i = 0; i < len; i++)
 				putLocation(new BlockKey(sId, tIds[off + i]), new SealedPackLocation(state, i));
 			return physicalEntry;
 		}
+	}
+
+	public PackGroup getPackGroup(long sId, long tId) {
+		PackedCacheLocation location = getLocation(sId, tId);
+		if(location instanceof PendingPackLocation pending)
+			location = forceSeal(pending);
+		return location instanceof SealedPackLocation packed ? packed.state().group : null;
+	}
+
+	public int getPackGroupCount() {
+		return _nextPackedId.get();
+	}
+
+	public OOCFuture<PackLease> pinPack(PackGroup group, MemoryAllowance allowance) {
+		return group.state.pin(_physical, allowance, false).map(entry ->
+			entry == null ? null : new PackLease(this, group, allowance));
 	}
 
 	@Override
@@ -477,7 +493,8 @@ public final class OOCPackedCache implements OOCCache {
 
 		PackedBlock block = builder.createBlock();
 		BlockEntry physicalEntry = putSealedBlockPinned(block, builder.allowance);
-		PackedPinState state = new PackedPinState(physicalEntry, builder.count);
+		PackedPinState state = new PackedPinState(physicalEntry, builder.streamIds[0],
+			builder.tileIds, 0, builder.count);
 		builder.state = state;
 
 		for(int i = 0; i < builder.count; i++)
@@ -544,5 +561,93 @@ public final class OOCPackedCache implements OOCCache {
 	private void checkRunning() {
 		if(!_running)
 			throw new IllegalStateException("Cache has been shut down.");
+	}
+
+	public static final class PackGroup {
+		private final PackedPinState state;
+		private final long streamId;
+		private final int firstIndex;
+		private final int[] indices;
+		private final int size;
+
+		PackGroup(PackedPinState state, long streamId, long[] tileIds, int off, int size) {
+			this.state = state;
+			this.streamId = streamId;
+			this.size = size;
+			firstIndex = blockIndex(tileIds[off]);
+			boolean contiguous = true;
+			for(int i = 1; i < size; i++) {
+				if(tileIds[off + i] != (long)firstIndex + i) {
+					contiguous = false;
+					break;
+				}
+			}
+			if(contiguous)
+				indices = null;
+			else {
+				indices = new int[size];
+				for(int i = 0; i < size; i++)
+					indices[i] = blockIndex(tileIds[off + i]);
+			}
+		}
+
+		public int id() {
+			return blockIndex(state.physicalEntry.getKey().getSequenceNumber());
+		}
+
+		public long streamId() {
+			return streamId;
+		}
+
+		public int size() {
+			return size;
+		}
+
+		public int index(int slot) {
+			if(slot < 0 || slot >= size)
+				throw new IndexOutOfBoundsException("Invalid pack slot: " + slot);
+			return indices == null ? firstIndex + slot : indices[slot];
+		}
+	}
+
+	public static final class PackLease implements AutoCloseable {
+		private final OOCPackedCache owner;
+		private final PackGroup group;
+		private final MemoryAllowance allowance;
+		private boolean open;
+
+		private PackLease(OOCPackedCache owner, PackGroup group, MemoryAllowance allowance) {
+			this.owner = owner;
+			this.group = group;
+			this.allowance = allowance;
+			open = true;
+		}
+
+		public PackGroup group() {
+			return group;
+		}
+
+		public int size() {
+			return group.size();
+		}
+
+		public int index(int slot) {
+			return group.index(slot);
+		}
+
+		public Object value(int slot) {
+			if(!open)
+				throw new IllegalStateException("Pack lease is closed");
+			PackedBlock block = (PackedBlock)group.state.physicalEntry.getData();
+			return block.values[slot];
+		}
+
+		@Override
+		public void close() {
+			if(!open)
+				return;
+			open = false;
+			group.state.unpin(owner, owner._packReleaseDelayMs, allowance);
+		}
 	}
 }

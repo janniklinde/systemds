@@ -30,6 +30,7 @@ import java.util.concurrent.TimeUnit;
 
 final class PackedPinState {
 	final BlockEntry physicalEntry;
+	final OOCPackedCache.PackGroup group;
 	private MemoryAllowance[] allowances;
 	private int[] counts;
 	private OOCFuture<BlockEntry>[] futures;
@@ -40,8 +41,9 @@ final class PackedPinState {
 	private int liveLocations;
 
 	@SuppressWarnings("unchecked")
-	PackedPinState(BlockEntry physicalEntry, int liveLocations) {
+	PackedPinState(BlockEntry physicalEntry, long streamId, long[] tileIds, int off, int liveLocations) {
 		this.physicalEntry = physicalEntry;
+		group = new OOCPackedCache.PackGroup(this, streamId, tileIds, off, liveLocations);
 		this.liveLocations = liveLocations;
 		allowances = new MemoryAllowance[2];
 		counts = new int[2];
