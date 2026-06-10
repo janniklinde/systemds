@@ -24,7 +24,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
@@ -136,7 +135,6 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		private final int maxPrefetch;
 		private final ArrayDeque<Request> requests;
 		private volatile boolean closed;
-		private boolean admissionBlocked;
 
 		private StoreReader(AccessPattern pattern, MemoryAllowance allowance, int maxPrefetch) {
 			this.pattern = pattern;
@@ -162,7 +160,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 			BlockEntry entry = awaitEntry(request);
 			requests.removeFirst();
 			fill();
-			return new LeaseAlias(new LeaseState(request.index, entry));
+			return new LeaseAlias(request.index, entry);
 		}
 
 		@Override
@@ -187,18 +185,10 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		}
 
 		private void fill() {
-			if(admissionBlocked)
-				return;
 			while(requests.size() < maxPrefetch && pattern.hasNext()) {
 				int index = pattern.next();
 				OOCFuture<BlockEntry> future = cache.pin(streamId, index, allowance);
-				Request request = new Request(index, future);
-				requests.addLast(request);
-				if(future.isDone() && future.getNow(null) == null) {
-					admissionBlocked = true;
-					request.blocksAdmission = true;
-					return;
-				}
+				requests.addLast(new Request(index, future));
 			}
 		}
 
@@ -207,11 +197,8 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 			while(true) {
 				try {
 					BlockEntry entry = future.get();
-					if(entry != null) {
-						if(request.blocksAdmission)
-							admissionBlocked = false;
+					if(entry != null)
 						return entry;
-					}
 					Thread.sleep(1);
 					future = cache.pin(streamId, request.index, allowance);
 					request.future = future;
@@ -222,67 +209,92 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 			}
 		}
 
-		private final class LeaseState {
+		private void release(int index, BlockEntry entry) {
+			cache.unpin(entry, allowance);
+			pattern.consumed(index);
+			tryForget(index);
+		}
+
+		private final class SharedLeaseState {
 			private final int index;
 			private final BlockEntry entry;
 			private final AtomicInteger references;
 
-			private LeaseState(int index, BlockEntry entry) {
+			private SharedLeaseState(int index, BlockEntry entry) {
 				this.index = index;
 				this.entry = entry;
-				references = new AtomicInteger(1);
+				references = new AtomicInteger(2);
+			}
+
+			private void retain() {
+				references.incrementAndGet();
 			}
 
 			private void release() {
 				if(references.decrementAndGet() != 0)
 					return;
-				cache.unpin(entry, allowance);
-				pattern.consumed(index);
-				tryForget(index);
+				StoreReader.this.release(index, entry);
 			}
 		}
 
 		private final class LeaseAlias implements Lease<T> {
-			private final LeaseState state;
-			private final AtomicBoolean open;
+			private final int index;
+			private final BlockEntry entry;
+			private boolean open;
+			private SharedLeaseState shared;
 
-			private LeaseAlias(LeaseState state) {
-				this.state = state;
-				open = new AtomicBoolean(true);
+			private LeaseAlias(int index, BlockEntry entry) {
+				this.index = index;
+				this.entry = entry;
+				open = true;
+			}
+
+			private LeaseAlias(SharedLeaseState shared) {
+				index = shared.index;
+				entry = shared.entry;
+				this.shared = shared;
+				open = true;
 			}
 
 			@Override
 			public int index() {
-				return state.index;
+				return index;
 			}
 
 			@SuppressWarnings("unchecked")
 			@Override
 			public T value() {
-				if(!open.get())
+				if(!open)
 					throw new IllegalStateException("Lease is closed");
-				return (T)state.entry.getData();
+				return (T)entry.getData();
 			}
 
 			@Override
 			public Lease<T> retain() {
-				if(!open.get())
+				if(!open)
 					throw new IllegalStateException("Lease is closed");
-				state.references.incrementAndGet();
-				return new LeaseAlias(state);
+				if(shared == null)
+					shared = new SharedLeaseState(index, entry);
+				else
+					shared.retain();
+				return new LeaseAlias(shared);
 			}
 
 			@Override
 			public void close() {
-				if(open.compareAndSet(true, false))
-					state.release();
+				if(!open)
+					return;
+				open = false;
+				if(shared == null)
+					StoreReader.this.release(index, entry);
+				else
+					shared.release();
 			}
 		}
 
 		private static final class Request {
 			private final int index;
 			private OOCFuture<BlockEntry> future;
-			private boolean blocksAdmission;
 
 			private Request(int index, OOCFuture<BlockEntry> future) {
 				this.index = index;
