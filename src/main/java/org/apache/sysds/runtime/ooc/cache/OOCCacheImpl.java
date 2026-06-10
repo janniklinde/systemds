@@ -90,40 +90,42 @@ public class OOCCacheImpl implements OOCCache {
 
 	@Override
 	public OOCFuture<BlockEntry> pin(long sId, long tId, MemoryAllowance allowance) {
-		BlockEntry entry;
+		BlockEntry entry = findEntry(new BlockKey(sId, tId));
 		EntryMeta meta;
 		synchronized(this) {
 			checkRunning();
-			entry = findEntry(new BlockKey(sId, tId));
 			if(entry == null)
 				return OOCFuture.completed(null);
 			meta = getMeta(entry);
+			if(meta == null)
+				return OOCFuture.completed(null);
 			BlockEntry adopted = tryAdoptDeferredPin(meta, allowance);
 			if(adopted != null)
 				return OOCFuture.completed(adopted);
+			if(entry.getDataUnsafe() != null && entry.getState() != BlockState.COLD &&
+				entry.getState() != BlockState.READING) {
+				if(!allowance.tryReserve(entry.getSize()))
+					return OOCFuture.completed(null);
+				pinResident(meta, allowance);
+				return OOCFuture.completed(entry);
+			}
 		}
-		if(meta == null)
-			return OOCFuture.completed(null);
-
-		BlockEntry immediate = pinIfLive(sId, tId, allowance);
-		if(immediate != null)
-			return OOCFuture.completed(immediate);
 		return pinFromBacking(meta, allowance);
 	}
 
 	@Override
 	public BlockEntry pinIfLive(long sId, long tId, MemoryAllowance allowance) {
+		BlockEntry entry = findEntry(new BlockKey(sId, tId));
 		synchronized(this) {
 			checkRunning();
-			BlockEntry entry = findEntry(new BlockKey(sId, tId));
-			if(entry == null || entry.getDataUnsafe() == null)
+			if(entry == null)
 				return null;
 			EntryMeta meta = getMeta(entry);
+			if(meta == null || entry.getDataUnsafe() == null)
+				return null;
 			BlockEntry adopted = tryAdoptDeferredPin(meta, allowance);
 			if(adopted != null)
 				return adopted;
-			if(meta == null)
-				return null;
 			if(entry.getState() == BlockState.COLD || entry.getState() == BlockState.READING)
 				return null;
 			if(!allowance.tryReserve(entry.getSize()))
@@ -166,19 +168,31 @@ public class OOCCacheImpl implements OOCCache {
 
 	@Override
 	public int dereference(BlockEntry entry) {
-		return dereference(entry.getKey());
+		int refs;
+		synchronized(this) {
+			EntryMeta meta = getMeta(entry);
+			if(meta == null)
+				return 0;
+			refs = entry.forget();
+			if(refs <= 0)
+				removeIfUnused(meta);
+		}
+		return refs;
 	}
 
 	@Override
 	public int dereference(BlockKey key) {
+		BlockEntry entry = findEntry(key);
+		if(entry == null)
+			return 0;
 		int refs;
 		synchronized(this) {
-			BlockEntry entry = findEntry(key);
-			if(entry == null)
+			EntryMeta meta = getMeta(entry);
+			if(meta == null)
 				return 0;
 			refs = entry.forget();
 			if(refs <= 0)
-				removeIfUnused(getMeta(entry));
+				removeIfUnused(meta);
 		}
 		return refs;
 	}
@@ -212,27 +226,31 @@ public class OOCCacheImpl implements OOCCache {
 
 		OOCFuture<BlockEntry> readFuture;
 		synchronized(this) {
+			if(!_running || getMeta(meta.entry) != meta) {
+				allowance.release(meta.entry.getSize());
+				return OOCFuture.completed(null);
+			}
 			if(meta.entry.getDataUnsafe() != null) {
 				pinResident(meta, allowance);
 				return OOCFuture.completed(meta.entry);
 			}
-				if(meta.readFuture == null) {
-					meta.entry.setState(BlockState.READING);
-					OOCFuture<BlockEntry> scheduled = _ioHandler.scheduleRead(meta.entry);
-					meta.readFuture = scheduled;
-					readFuture = scheduled;
-					scheduled.whenComplete((entry, ex) -> {
-						synchronized(OOCCacheImpl.this) {
-							if(meta.readFuture == scheduled)
-								meta.readFuture = null;
-							if(ex != null && meta.entry.getState() == BlockState.READING)
-								meta.entry.setState(BlockState.COLD);
-						}
-					});
-				}
-				else
-					readFuture = meta.readFuture;
+			if(meta.readFuture == null) {
+				meta.entry.setState(BlockState.READING);
+				OOCFuture<BlockEntry> scheduled = _ioHandler.scheduleRead(meta.entry);
+				meta.readFuture = scheduled;
+				readFuture = scheduled;
+				scheduled.whenComplete((entry, ex) -> {
+					synchronized(OOCCacheImpl.this) {
+						if(meta.readFuture == scheduled)
+							meta.readFuture = null;
+						if(ex != null && meta.entry.getState() == BlockState.READING)
+							meta.entry.setState(BlockState.COLD);
+					}
+				});
 			}
+			else
+				readFuture = meta.readFuture;
+		}
 
 		OOCFuture<BlockEntry> result = new OOCFuture<>();
 		readFuture.whenComplete((entry, ex) -> {
@@ -244,7 +262,7 @@ public class OOCCacheImpl implements OOCCache {
 				}
 				BlockEntry pinned;
 				synchronized(OOCCacheImpl.this) {
-					if(entry == null || meta.entry.getDataUnsafe() == null) {
+					if(entry == null || getMeta(meta.entry) != meta || meta.entry.getDataUnsafe() == null) {
 						allowance.release(meta.entry.getSize());
 						if(meta.entry.getState() == BlockState.READING)
 							meta.entry.setState(BlockState.COLD);
