@@ -30,6 +30,16 @@ public interface MaterializedStore<T extends SpillableObject> extends AutoClosea
 	void publishPinned(int index, T value, long bytes, MemoryAllowance allowance);
 
 	/**
+	 * Publishes an already grouped sealed pack. The supplied bytes are owned by the allowance as one physical unit,
+	 * while every item remains addressable through its logical index.
+	 */
+	void publishPackPinned(int[] indices, T[] values, long[] bytes, int off, int len, MemoryAllowance allowance);
+
+	default void publishPackPinned(int[] indices, T[] values, long[] bytes, MemoryAllowance allowance) {
+		publishPackPinned(indices, values, bytes, 0, indices.length, allowance);
+	}
+
+	/**
 	 * Completes publication after all publisher tasks have joined.
 	 */
 	void complete();

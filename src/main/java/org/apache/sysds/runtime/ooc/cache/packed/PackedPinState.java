@@ -52,6 +52,18 @@ final class PackedPinState {
 		releaseHandles = new DelayedPackedUnpinHandle[2];
 	}
 
+	@SuppressWarnings("unchecked")
+	PackedPinState(BlockEntry physicalEntry, long streamId, int[] tileIds, int off, int liveLocations) {
+		this.physicalEntry = physicalEntry;
+		group = new OOCPackedCache.PackGroup(this, streamId, tileIds, off, liveLocations);
+		this.liveLocations = liveLocations;
+		allowances = new MemoryAllowance[2];
+		counts = new int[2];
+		futures = new OOCFuture[2];
+		releaseDueNanos = new long[2];
+		releaseHandles = new DelayedPackedUnpinHandle[2];
+	}
+
 	synchronized OOCFuture<BlockEntry> pin(OOCCacheImpl physical, MemoryAllowance allowance, boolean liveOnly) {
 		int ix = indexOf(allowance);
 		if(ix >= 0) {

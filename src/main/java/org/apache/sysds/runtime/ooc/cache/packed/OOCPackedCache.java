@@ -199,6 +199,29 @@ public final class OOCPackedCache implements OOCCache {
 		}
 	}
 
+	public BlockEntry putSealedPackPinned(long sId, int[] tIds, Object[] data, long[] sizes, int off, int len,
+		MemoryAllowance allowance) {
+		long totalSize = 0;
+		Object[] packedData = new Object[len];
+		long[] packedSizes = new long[len];
+		for(int i = 0; i < len; i++) {
+			int p = off + i;
+			packedData[i] = data[p];
+			packedSizes[i] = sizes[p];
+			totalSize += sizes[p];
+		}
+
+		synchronized(this) {
+			checkRunning();
+			BlockEntry physicalEntry = putSealedBlockPinned(new PackedBlock(packedData, packedSizes, totalSize),
+				allowance);
+			PackedPinState state = new PackedPinState(physicalEntry, sId, tIds, off, len);
+			for(int i = 0; i < len; i++)
+				putLocation(new BlockKey(sId, tIds[off + i]), new SealedPackLocation(state, i));
+			return physicalEntry;
+		}
+	}
+
 	public PackGroup getPackGroup(long sId, long tId) {
 		PackedCacheLocation location = getLocation(sId, tId);
 		if(location instanceof PendingPackLocation pending)
@@ -588,6 +611,26 @@ public final class OOCPackedCache implements OOCCache {
 				indices = new int[size];
 				for(int i = 0; i < size; i++)
 					indices[i] = blockIndex(tileIds[off + i]);
+			}
+		}
+
+		PackGroup(PackedPinState state, long streamId, int[] tileIds, int off, int size) {
+			this.state = state;
+			this.streamId = streamId;
+			this.size = size;
+			firstIndex = tileIds[off];
+			boolean contiguous = true;
+			for(int i = 1; i < size; i++) {
+				if(tileIds[off + i] != firstIndex + i) {
+					contiguous = false;
+					break;
+				}
+			}
+			if(contiguous)
+				indices = null;
+			else {
+				indices = new int[size];
+				System.arraycopy(tileIds, off, indices, 0, size);
 			}
 		}
 

@@ -72,6 +72,26 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 	}
 
 	@Override
+	public void publishPackPinned(int[] indices, T[] values, long[] bytes, int off, int len,
+		MemoryAllowance allowance) {
+		if(complete || closed)
+			throw new IllegalStateException("Store no longer accepts published items");
+		if(!(cache instanceof OOCPackedCache packed))
+			throw new IllegalStateException("Packed publication requires OOCPackedCache");
+		if(len == 0)
+			return;
+		int maxIndex = -1;
+		for(int i = off; i < off + len; i++) {
+			if(indices[i] < 0 || indices[i] == Integer.MAX_VALUE)
+				throw new IndexOutOfBoundsException("Invalid index: " + indices[i]);
+			maxIndex = Math.max(maxIndex, indices[i]);
+		}
+		BlockEntry physical = packed.putSealedPackPinned(streamId, indices, values, bytes, off, len, allowance);
+		cache.unpin(physical, allowance);
+		updatePublished(maxIndex + 1);
+	}
+
+	@Override
 	public synchronized void complete() {
 		if(complete)
 			return;
