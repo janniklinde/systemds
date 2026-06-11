@@ -29,7 +29,6 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -96,7 +95,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 	public OOCFuture<StateLease<T>> installOrTake(int index, ManagedPayload<T> payload) {
 		Slot installing = null;
 		Slot taken = null;
-		CompletableFuture<Void> waitFor = null;
+		OOCFuture<Void> waitFor = null;
 		synchronized(this) {
 			checkOpen();
 			ensureCapacity(index);
@@ -131,7 +130,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 	 */
 	public OOCFuture<StateLease<T>> take(int index) {
 		Slot taken = null;
-		CompletableFuture<Void> waitFor = null;
+		OOCFuture<Void> waitFor = null;
 		synchronized(this) {
 			checkOpen();
 			if(index < 0 || index >= _slots.length)
@@ -250,7 +249,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		_cache.unpin(entry, payload.owner());
 
 		boolean cleared;
-		CompletableFuture<Void> installFuture;
+		OOCFuture<Void> installFuture;
 		synchronized(this) {
 			slot._key = key;
 			cleared = slot._cleared;
@@ -264,7 +263,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 	}
 
 	private void failInstall(int index, Slot slot, RuntimeException ex) {
-		CompletableFuture<Void> installFuture;
+		OOCFuture<Void> installFuture;
 		synchronized(this) {
 			if(index < _slots.length && _slots[index] == slot)
 				_slots[index] = null;
@@ -382,11 +381,11 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		private byte _state;
 		private boolean _cleared;
 		private BlockKey _key;
-		private CompletableFuture<Void> _installFuture;
+		private OOCFuture<Void> _installFuture;
 
 		private Slot() {
 			_state = INSTALLING;
-			_installFuture = new CompletableFuture<>();
+			_installFuture = new OOCFuture<>();
 		}
 	}
 }
