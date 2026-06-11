@@ -19,7 +19,9 @@
 
 package org.apache.sysds.runtime.ooc.store;
 
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
+import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 public interface MaterializedStore<T extends SpillableObject> extends AutoCloseable {
@@ -28,6 +30,25 @@ public interface MaterializedStore<T extends SpillableObject> extends AutoClosea
 	 * concurrent and out of order. Completed publication must contain every index in [0, size) exactly once.
 	 */
 	void publishPinned(int index, T value, long bytes, MemoryAllowance allowance);
+
+	/**
+	 * Publishes a logical index from a managed payload, transferring its detached reservation into the cache
+	 * ownership protocol. This is the preferred publication path for memory-managed inputs because settling
+	 * the payload makes a double release structurally impossible; the raw overload remains for inputs that
+	 * reserve their bytes directly on the materialization allowance.
+	 */
+	default void publishPinned(int index, ManagedPayload<T> payload) {
+		payload.transfer();
+		try {
+			publishPinned(index, payload.value(), payload.bytes(), payload.owner());
+		}
+		catch(RuntimeException ex) {
+			//the payload was already marked transferred; return the bytes to the producer directly
+			if(payload.bytes() > 0)
+				payload.owner().release(payload.bytes());
+			throw ex;
+		}
+	}
 
 	/**
 	 * Publishes an already grouped sealed pack. The supplied bytes are owned by the allowance as one physical unit,
@@ -49,6 +70,14 @@ public interface MaterializedStore<T extends SpillableObject> extends AutoClosea
 	PackReader<T> openOpportunisticReader(AccessPattern pattern, MemoryAllowance allowance, int maxPrefetch);
 
 	/**
+	 * Opens a demand-driven reader for targeted index access. Unlike the ordered and opportunistic
+	 * readers, the index sequence is not known up front but dictated by the caller (e.g. by the arrival
+	 * order of a partner stream in broadcasts and indexed-lookup joins). The reader participates in
+	 * forgetting through the supplied liveness.
+	 */
+	IndexedReader<T> openIndexedReader(Liveness liveness, MemoryAllowance allowance);
+
+	/**
 	 * Freezes the reader set. Offline access and reclamation start only after this call.
 	 */
 	void sealReaders();
@@ -58,17 +87,41 @@ public interface MaterializedStore<T extends SpillableObject> extends AutoClosea
 	@Override
 	void close();
 
-	interface AccessPattern {
-		boolean hasNext();
-
-		int next();
-
+	/**
+	 * The liveness part of a reader's access contract: which indices the reader may still access.
+	 * Replay order is a separate concern ({@link AccessPattern}); demand-driven readers carry only
+	 * liveness.
+	 */
+	interface Liveness {
 		/**
 		 * Returns whether this reader may still access the index. False must never become true again.
 		 */
 		boolean needs(int index);
 
 		void consumed(int index);
+
+		/**
+		 * Reserves one future consumption for a demand-driven request. Returning false means no remaining
+		 * use can be reserved and the request is a caller error. Reservations gate request admission only;
+		 * {@link #needs(int)} must stay true until the matching consumption, so an index with in-flight
+		 * requests cannot be forgotten. The default delegates to {@code needs} for iteration-driven
+		 * patterns that control their own request rate.
+		 */
+		default boolean reserve(int index) {
+			return needs(index);
+		}
+
+		/**
+		 * Returns a reservation taken by {@link #reserve(int)} that will not result in a consumption.
+		 */
+		default void unreserve(int index) {
+		}
+	}
+
+	interface AccessPattern extends Liveness {
+		boolean hasNext();
+
+		int next();
 	}
 
 	interface Reader<T extends SpillableObject> extends AutoCloseable {
@@ -78,6 +131,25 @@ public interface MaterializedStore<T extends SpillableObject> extends AutoClosea
 		 * Returns the next ordered item, blocking while cache loading or allowance admission cannot progress.
 		 */
 		Lease<T> next() throws InterruptedException;
+
+		@Override
+		void close();
+	}
+
+	interface IndexedReader<T extends SpillableObject> extends AutoCloseable {
+		/**
+		 * Requests a targeted index. The returned future completes with a lease once the item is loaded
+		 * and admitted under the reader allowance; admission failures are retried asynchronously, never
+		 * by blocking or polling on the caller thread. The future completes with null only if the reader
+		 * is closed before admission. Requesting an index whose liveness is exhausted is an error.
+		 */
+		OOCFuture<Lease<T>> request(int index);
+
+		/**
+		 * Returns a lease if the index is resident and admissible right now; null otherwise. Never blocks
+		 * and never schedules I/O.
+		 */
+		Lease<T> requestIfLive(int index);
 
 		@Override
 		void close();

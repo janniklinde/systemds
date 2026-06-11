@@ -44,6 +44,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 	private final ArrayList<RegisteredReader> registeredReaders;
 	private final ConcurrentGrowableBitSet forgotten;
 	private final AtomicInteger published;
+	private final AtomicInteger publishedCount;
 
 	private volatile List<RegisteredReader> readers;
 	private volatile int completedSize;
@@ -57,6 +58,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		registeredReaders = new ArrayList<>();
 		forgotten = new ConcurrentGrowableBitSet();
 		published = new AtomicInteger();
+		publishedCount = new AtomicInteger();
 		readers = Collections.emptyList();
 	}
 
@@ -68,6 +70,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 			throw new IndexOutOfBoundsException("Invalid index: " + index);
 		BlockEntry entry = cache.putPinned(streamId, index, value, bytes, allowance);
 		cache.unpin(entry, allowance);
+		publishedCount.incrementAndGet();
 		updatePublished(index + 1);
 	}
 
@@ -88,6 +91,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		}
 		BlockEntry physical = packed.putSealedPackPinned(streamId, indices, values, bytes, off, len, allowance);
 		cache.unpin(physical, allowance);
+		publishedCount.addAndGet(len);
 		updatePublished(maxIndex + 1);
 	}
 
@@ -98,6 +102,10 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		if(cache instanceof OOCPackedCache packed)
 			packed.flushPacks();
 		completedSize = published.get();
+		//holes or duplicates would otherwise surface as unbounded pin retries on missing indices
+		if(publishedCount.get() != completedSize)
+			throw new IllegalStateException("Incomplete publication: " + publishedCount.get()
+				+ " published items for logical range [0, " + completedSize + ")");
 		complete = true;
 	}
 
@@ -123,6 +131,17 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 			throw new IllegalStateException("Opportunistic pack reading requires OOCPackedCache");
 		OpportunisticPackReader reader =
 			new OpportunisticPackReader(packed, pattern, allowance, Math.max(1, maxPrefetch));
+		registeredReaders.add(reader);
+		return reader;
+	}
+
+	@Override
+	public synchronized IndexedReader<T> openIndexedReader(Liveness liveness, MemoryAllowance allowance) {
+		if(!complete || closed)
+			throw new IllegalStateException("Readers require a completed store");
+		if(readersSealed)
+			throw new IllegalStateException("Reader set is already sealed");
+		IndexedStoreReader reader = new IndexedStoreReader(liveness, allowance);
 		registeredReaders.add(reader);
 		return reader;
 	}
@@ -159,11 +178,23 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		List<RegisteredReader> localReaders = readers;
 		for(int i = 0; i < localReaders.size(); i++) {
 			RegisteredReader reader = localReaders.get(i);
-			if(!reader.isClosed() && reader.pattern().needs(index))
+			if(!reader.isClosed() && reader.liveness().needs(index))
 				return;
 		}
 		if(forgotten.set(index))
 			cache.dereference(new BlockKey(streamId, index));
+	}
+
+	/**
+	 * Re-evaluates forgetting for the full logical range after a reader closed early; without this,
+	 * entries only needed by the closed reader would stay referenced until store closure. Closing the
+	 * store sweeps itself, and before sealing there is no reader set to evaluate against.
+	 */
+	private void forgetAfterReaderClose() {
+		if(closed || !readersSealed)
+			return;
+		for(int i = 0; i < completedSize; i++)
+			tryForget(i);
 	}
 
 	private void updatePublished(int size) {
@@ -173,7 +204,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 	}
 
 	private interface RegisteredReader extends AutoCloseable {
-		AccessPattern pattern();
+		Liveness liveness();
 
 		boolean isClosed();
 
@@ -181,7 +212,178 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		void close();
 	}
 
-	private final class StoreReader implements Reader<T>, RegisteredReader {
+	private interface LeaseReleaser {
+		void release(int index, BlockEntry entry);
+	}
+
+	private static final class SharedLeaseState {
+		private final LeaseReleaser releaser;
+		private final int index;
+		private final BlockEntry entry;
+		private final AtomicInteger references;
+
+		private SharedLeaseState(LeaseReleaser releaser, int index, BlockEntry entry) {
+			this.releaser = releaser;
+			this.index = index;
+			this.entry = entry;
+			references = new AtomicInteger(2);
+		}
+
+		private void retain() {
+			references.incrementAndGet();
+		}
+
+		private void release() {
+			if(references.decrementAndGet() != 0)
+				return;
+			releaser.release(index, entry);
+		}
+	}
+
+	private final class LeaseAlias implements Lease<T> {
+		private final LeaseReleaser releaser;
+		private final int index;
+		private final BlockEntry entry;
+		private boolean open;
+		private SharedLeaseState shared;
+
+		private LeaseAlias(LeaseReleaser releaser, int index, BlockEntry entry) {
+			this.releaser = releaser;
+			this.index = index;
+			this.entry = entry;
+			open = true;
+		}
+
+		private LeaseAlias(SharedLeaseState shared) {
+			releaser = shared.releaser;
+			index = shared.index;
+			entry = shared.entry;
+			this.shared = shared;
+			open = true;
+		}
+
+		@Override
+		public int index() {
+			return index;
+		}
+
+		@SuppressWarnings("unchecked")
+		@Override
+		public T value() {
+			if(!open)
+				throw new IllegalStateException("Lease is closed");
+			return (T)entry.getData();
+		}
+
+		@Override
+		public Lease<T> retain() {
+			if(!open)
+				throw new IllegalStateException("Lease is closed");
+			if(shared == null)
+				shared = new SharedLeaseState(releaser, index, entry);
+			else
+				shared.retain();
+			return new LeaseAlias(shared);
+		}
+
+		@Override
+		public void close() {
+			if(!open)
+				return;
+			open = false;
+			if(shared == null)
+				releaser.release(index, entry);
+			else
+				shared.release();
+		}
+	}
+
+	private final class IndexedStoreReader implements IndexedReader<T>, RegisteredReader, LeaseReleaser {
+		private final Liveness liveness;
+		private final MemoryAllowance allowance;
+		private volatile boolean closed;
+
+		private IndexedStoreReader(Liveness liveness, MemoryAllowance allowance) {
+			this.liveness = liveness;
+			this.allowance = allowance;
+		}
+
+		@Override
+		public Liveness liveness() {
+			return liveness;
+		}
+
+		@Override
+		public boolean isClosed() {
+			return closed;
+		}
+
+		@Override
+		public OOCFuture<Lease<T>> request(int index) {
+			checkReady(index);
+			reserve(index);
+			OOCFuture<BlockEntry> pinned = new OOCFuture<>();
+			StorePinRetry.pinWithRetry(cache, streamId, index, allowance, () -> closed, pinned);
+			//complete a fresh future exactly once; a mapped view would create one lease per read
+			OOCFuture<Lease<T>> result = new OOCFuture<>();
+			pinned.whenComplete((entry, error) -> {
+				if(error != null) {
+					liveness.unreserve(index);
+					result.completeExceptionally(error);
+				}
+				else if(entry == null) {
+					liveness.unreserve(index);
+					result.complete(null);
+				}
+				else
+					result.complete(new LeaseAlias(this, index, entry));
+			});
+			return result;
+		}
+
+		@Override
+		public Lease<T> requestIfLive(int index) {
+			checkReady(index);
+			reserve(index);
+			BlockEntry entry = cache.pinIfLive(streamId, index, allowance);
+			if(entry == null) {
+				liveness.unreserve(index);
+				return null;
+			}
+			return new LeaseAlias(this, index, entry);
+		}
+
+		@Override
+		public void close() {
+			if(closed)
+				return;
+			closed = true;
+			forgetAfterReaderClose();
+		}
+
+		@Override
+		public void release(int index, BlockEntry entry) {
+			cache.unpin(entry, allowance);
+			liveness.consumed(index);
+			tryForget(index);
+		}
+
+		private void reserve(int index) {
+			if(!liveness.reserve(index))
+				throw new IllegalStateException("Index is no longer live for this reader: " + index);
+		}
+
+		private void checkReady(int index) {
+			if(closed)
+				throw new IllegalStateException("Reader is closed");
+			if(!readersSealed)
+				throw new IllegalStateException("All readers must be registered and sealed before reading");
+			if(index < 0 || index >= completedSize)
+				throw new IndexOutOfBoundsException("Invalid requested index: " + index);
+		}
+	}
+
+	private final class StoreReader implements Reader<T>, RegisteredReader, LeaseReleaser {
 		private final AccessPattern pattern;
 		private final MemoryAllowance allowance;
 		private final int maxPrefetch;
@@ -196,7 +398,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		}
 
 		@Override
-		public AccessPattern pattern() {
+		public Liveness liveness() {
 			return pattern;
 		}
 
@@ -222,7 +424,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 			BlockEntry entry = awaitEntry(request);
 			requests.removeFirst();
 			fill();
-			return new LeaseAlias(request.index, entry);
+			return new LeaseAlias(this, request.index, entry);
 		}
 
 		@Override
@@ -237,6 +439,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 						cache.unpin(entry, allowance);
 				});
 			}
+			forgetAfterReaderClose();
 		}
 
 		private void checkReady() {
@@ -255,103 +458,29 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		}
 
 		private BlockEntry awaitEntry(Request request) throws InterruptedException {
-			OOCFuture<BlockEntry> future = request.future;
-			while(true) {
-				try {
-					BlockEntry entry = future.get();
-					if(entry != null)
-						return entry;
-					Thread.sleep(1);
-					future = cache.pin(streamId, request.index, allowance);
-					request.future = future;
+			try {
+				BlockEntry entry = request.future.get();
+				if(entry == null) {
+					//admission failed; retry asynchronously with backoff instead of polling here
+					OOCFuture<BlockEntry> retried = new OOCFuture<>();
+					StorePinRetry.pinWithRetry(cache, streamId, request.index, allowance, () -> closed, retried);
+					request.future = retried;
+					entry = retried.get();
+					if(entry == null)
+						throw new IllegalStateException("Reader is closed");
 				}
-				catch(ExecutionException e) {
-					throw DMLRuntimeException.of(e.getCause());
-				}
+				return entry;
+			}
+			catch(ExecutionException e) {
+				throw DMLRuntimeException.of(e.getCause());
 			}
 		}
 
-		private void release(int index, BlockEntry entry) {
+		@Override
+		public void release(int index, BlockEntry entry) {
 			cache.unpin(entry, allowance);
 			pattern.consumed(index);
 			tryForget(index);
-		}
-
-		private final class SharedLeaseState {
-			private final int index;
-			private final BlockEntry entry;
-			private final AtomicInteger references;
-
-			private SharedLeaseState(int index, BlockEntry entry) {
-				this.index = index;
-				this.entry = entry;
-				references = new AtomicInteger(2);
-			}
-
-			private void retain() {
-				references.incrementAndGet();
-			}
-
-			private void release() {
-				if(references.decrementAndGet() != 0)
-					return;
-				StoreReader.this.release(index, entry);
-			}
-		}
-
-		private final class LeaseAlias implements Lease<T> {
-			private final int index;
-			private final BlockEntry entry;
-			private boolean open;
-			private SharedLeaseState shared;
-
-			private LeaseAlias(int index, BlockEntry entry) {
-				this.index = index;
-				this.entry = entry;
-				open = true;
-			}
-
-			private LeaseAlias(SharedLeaseState shared) {
-				index = shared.index;
-				entry = shared.entry;
-				this.shared = shared;
-				open = true;
-			}
-
-			@Override
-			public int index() {
-				return index;
-			}
-
-			@SuppressWarnings("unchecked")
-			@Override
-			public T value() {
-				if(!open)
-					throw new IllegalStateException("Lease is closed");
-				return (T)entry.getData();
-			}
-
-			@Override
-			public Lease<T> retain() {
-				if(!open)
-					throw new IllegalStateException("Lease is closed");
-				if(shared == null)
-					shared = new SharedLeaseState(index, entry);
-				else
-					shared.retain();
-				return new LeaseAlias(shared);
-			}
-
-			@Override
-			public void close() {
-				if(!open)
-					return;
-				open = false;
-				if(shared == null)
-					StoreReader.this.release(index, entry);
-				else
-					shared.release();
-			}
 		}
 
 		private static final class Request {
@@ -391,7 +520,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		}
 
 		@Override
-		public AccessPattern pattern() {
+		public Liveness liveness() {
 			return pattern;
 		}
 
@@ -441,6 +570,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 			synchronized(this) {
 				blocked.clear();
 			}
+			forgetAfterReaderClose();
 		}
 
 		private void checkReady() {

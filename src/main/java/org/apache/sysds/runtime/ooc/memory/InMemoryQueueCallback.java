@@ -280,6 +280,43 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 		return _handle.takeManagedResultForHandover();
 	}
 
+	/**
+	 * Atomically extracts the value and its detached allowance reservation as a {@link ManagedPayload}.
+	 * The extraction is exclusive and one-shot: it fails if any other callback alias exists, if the
+	 * callback is attached to a cached-allowance slot, or if it carries a failure. After successful
+	 * extraction the callback is empty and closing it is harmless; the reservation stays charged to the
+	 * owning allowance and must be settled exactly once through the returned payload (transfer to the
+	 * cache ownership protocol, or release on failed publication).
+	 *
+	 * @return the extracted value with its byte count and owning allowance
+	 */
+	public synchronized ManagedPayload<IndexedMatrixValue> extractManagedPayload() {
+		if(_closed)
+			throw new IllegalStateException("Cannot extract a managed payload from a closed callback.");
+		CallbackHandle handle = _handle;
+		synchronized(handle) {
+			if(handle._failure != null)
+				throw handle._failure;
+			if(!handle.isExclusiveToRoot())
+				throw new IllegalStateException("Cannot extract a managed payload while callback aliases exist.");
+			if(handle._cacheIdx >= 0)
+				throw new IllegalStateException("Cannot extract a managed payload from a cached-slot callback.");
+			IndexedMatrixValue result = handle._result;
+			if(result == null)
+				throw new IllegalStateException("Cannot extract a managed payload from an empty callback.");
+			long bytes = handle._reservedBytes;
+			MemoryAllowance owner = handle._allow;
+			handle._result = null;
+			handle._reservedBytes = 0;
+			OOCDebug.trace(() -> "[CB-EXTRACT-PAYLOAD] handle=" + System.identityHashCode(handle)
+				+ " cb=" + System.identityHashCode(this)
+				+ " bytes=" + bytes
+				+ " allow=" + (owner == null ? "null" : owner.getClass().getSimpleName() + "@"
+					+ System.identityHashCode(owner)));
+			return new ManagedPayload<>(result, bytes, owner);
+		}
+	}
+
 	private static String creationOrigin() {
 		StackTraceElement[] trace = Thread.currentThread().getStackTrace();
 		for(int i = 0; i < trace.length; i++) {

@@ -24,6 +24,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
 import org.apache.sysds.api.DMLScript;
@@ -71,13 +72,13 @@ public class MaterializedStoreImplStressTest {
 	private static final long TIMEOUT_SECONDS =
 		Long.getLong("sysds.test.ooc.materializedStore.timeoutSeconds", 1800L);
 
-	@Ignore("Manual configurable 16 GiB stress test with real spill IO.")
+	@Ignore("Manual configurable multi-GiB stress test with real spill IO.")
 	@Test
 	public void testSequentialReaders() throws Exception {
 		runStress(false);
 	}
 
-	@Ignore("Manual configurable 16 GiB stress test with real spill IO.")
+	@Ignore("Manual configurable multi-GiB stress test with real spill IO.")
 	@Test
 	public void testOpportunisticReaders() throws Exception {
 		runStress(true);
@@ -133,16 +134,26 @@ public class MaterializedStoreImplStressTest {
 
 	private static void publishAsync(MaterializedStoreImpl<IndexedMatrixValue> store,
 		SyncMemoryAllowance producer, int blocks, long tileBytes, ExecutorService producers) throws Exception {
+		int batchTiles = Math.max(1, Math.toIntExact(PACK_BYTES / tileBytes));
+		AtomicInteger nextIndex = new AtomicInteger();
 		Future<?>[] tasks = new Future<?>[PRODUCER_WORKERS];
 		for(int worker = 0; worker < PRODUCER_WORKERS; worker++) {
-			int first = worker;
 			tasks[worker] = producers.submit(() -> {
 				MatrixBlock tile = new MatrixBlock(TILE_ROWS, TILE_COLS, 1.0);
-				for(int index = first; index < blocks; index += PRODUCER_WORKERS) {
-					producer.reserveBlocking(tileBytes);
-					store.publishPinned(index,
-						new IndexedMatrixValue(new MatrixIndexes(index + 1L, 1), tile),
-						tileBytes, producer);
+				int[] indices = new int[batchTiles];
+				IndexedMatrixValue[] values = new IndexedMatrixValue[batchTiles];
+				long[] sizes = new long[batchTiles];
+				int first;
+				while((first = nextIndex.getAndAdd(batchTiles)) < blocks) {
+					int len = Math.min(batchTiles, blocks - first);
+					for(int i = 0; i < len; i++) {
+						int index = first + i;
+						indices[i] = index;
+						values[i] = new IndexedMatrixValue(new MatrixIndexes(index + 1L, 1), tile);
+						sizes[i] = tileBytes;
+					}
+					producer.reserveBlocking(Math.multiplyExact(tileBytes, len));
+					store.publishPackPinned(indices, values, sizes, 0, len, producer);
 				}
 			});
 		}
