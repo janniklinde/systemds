@@ -25,11 +25,40 @@ interface PackedCacheLocation {
 record PendingPackLocation(PackBuilder builder, int slot) implements PackedCacheLocation {
 }
 
-record SealedPackLocation(PackedPinState state, int slot) implements PackedCacheLocation {
+final class SealedPackLocation implements PackedCacheLocation {
+	private final PackedPinState state;
+	private final int slot;
+	private int references;
+
+	SealedPackLocation(PackedPinState state, int slot) {
+		this.state = state;
+		this.slot = slot;
+		references = 1;
+	}
+
+	PackedPinState state() {
+		return state;
+	}
+
+	int slot() {
+		return slot;
+	}
+
+	synchronized int retain() {
+		if(references <= 0)
+			throw new IllegalStateException("Cannot retain a forgotten packed location.");
+		return ++references;
+	}
+
+	synchronized int release() {
+		if(references <= 0)
+			return 0;
+		return --references;
+	}
 }
 
 record PendingLogicalPin(PackBuilder builder, int slot) {
 }
 
-record PackedLogicalPin(PackedPinState state) {
+record PackedLogicalPin(SealedPackLocation location) {
 }

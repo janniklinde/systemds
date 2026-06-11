@@ -85,8 +85,9 @@ public interface OOCCache {
 	UnpinHandle unpin(BlockEntry entry, MemoryAllowance allowance);
 
 	/**
-	 * References a specific entry, guaranteeing metadata persistence until dereferenced. Referencing does not affect
-	 * resident-memory ownership; ownership remains with the current owner, either the cache or an allowance.
+	 * References the logical value represented by a pinned entry, guaranteeing that its key remains
+	 * addressable until dereferenced. Referencing does not affect resident-memory ownership; ownership
+	 * remains with the current owner, either the cache or an allowance.
 	 *
 	 * @param entry
 	 * @return
@@ -98,8 +99,9 @@ public interface OOCCache {
 	}
 
 	/**
-	 * Dereferences a specific entry. This causes the item metadata and backing storage to become removable if no further
-	 * reference exists. Removal may happen later if the item is still pinned or has a deferred unpin transfer.
+	 * Dereferences the logical value represented by an entry. This causes its metadata and backing
+	 * storage to become removable if no further reference exists. Removal may happen later if the
+	 * physical item is still pinned or has a deferred unpin transfer.
 	 *
 	 * @param entry
 	 * @return
@@ -107,7 +109,8 @@ public interface OOCCache {
 	int dereference(BlockEntry entry);
 
 	/**
-	 * Dereferences the logical entry identified by the key without requiring callers to retain a BlockEntry.
+	 * Dereferences the logical entry identified by the key. A referenced logical key must remain
+	 * sufficient to pin the value, including when the value resides in a physical pack.
 	 */
 	int dereference(BlockKey key);
 

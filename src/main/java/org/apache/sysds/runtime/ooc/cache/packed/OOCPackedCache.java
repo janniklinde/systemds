@@ -284,9 +284,9 @@ public final class OOCPackedCache implements OOCCache {
 	public int reference(BlockEntry entry) {
 		Object meta = entry.getCacheMeta();
 		if(meta instanceof PackedLogicalPin packed)
-			return _physical.reference(packed.state().physicalEntry);
-		if(meta instanceof PendingLogicalPin)
-			return entry.addReference();
+			return packed.location().retain();
+		if(meta instanceof PendingLogicalPin pending)
+			return forceSeal(new PendingPackLocation(pending.builder(), pending.slot())).retain();
 		return _physical.reference(entry);
 	}
 
@@ -294,9 +294,10 @@ public final class OOCPackedCache implements OOCCache {
 	public int dereference(BlockEntry entry) {
 		Object meta = entry.getCacheMeta();
 		if(meta instanceof PackedLogicalPin packed)
-			return _physical.dereference(packed.state().physicalEntry);
-		if(meta instanceof PendingLogicalPin)
-			return entry.forget();
+			return releaseLocation(entry.getKey(), packed.location());
+		if(meta instanceof PendingLogicalPin pending)
+			return releaseLocation(entry.getKey(),
+				forceSeal(new PendingPackLocation(pending.builder(), pending.slot())));
 		return _physical.dereference(entry);
 	}
 
@@ -309,11 +310,7 @@ public final class OOCPackedCache implements OOCCache {
 			location = forceSeal(pending);
 		if(!(location instanceof SealedPackLocation packed))
 			return _physical.dereference(key);
-		if(!clearLocation(key))
-			return 0;
-		if(packed.state().forgetLocation())
-			return _physical.dereference(packed.state().physicalEntry);
-		return 1;
+		return releaseLocation(key, packed);
 	}
 
 	@Override
@@ -375,7 +372,7 @@ public final class OOCPackedCache implements OOCCache {
 		}
 		entry.unpin();
 		entry.setCacheMeta(null);
-		return pin.state().unpin(this, _packReleaseDelayMs, allowance);
+		return pin.location().state().unpin(this, _packReleaseDelayMs, allowance);
 	}
 
 	void enqueueRelease(PackedPinState state) {
@@ -447,8 +444,19 @@ public final class OOCPackedCache implements OOCCache {
 		long size = block.sizes[location.slot()];
 		BlockEntry logical = new BlockEntry(logicalKey, size, data, BlockState.REMOVED);
 		logical.pin();
-		logical.setCacheMeta(new PackedLogicalPin(location.state()));
+		logical.setCacheMeta(new PackedLogicalPin(location));
 		return logical;
+	}
+
+	private int releaseLocation(BlockKey key, SealedPackLocation location) {
+		int references = location.release();
+		if(references > 0)
+			return references;
+		if(!clearLocation(key))
+			return 0;
+		if(location.state().forgetLocation())
+			return _physical.dereference(location.state().physicalEntry);
+		return 0;
 	}
 
 	private PackBuilder getOpenBuilder(long streamId, MemoryAllowance allowance, long nextSize) {

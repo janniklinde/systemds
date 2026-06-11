@@ -38,8 +38,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * onto one cache stream id (so eviction policy sees the table as one population), and slot contents are
  * swapped by key replacement with a per-table generation counter, never by mutating a cache entry.
  *
- * Values enter through {@link ManagedPayload} (bytes stay charged to the producer allowance until the
- * cache unpin commits) and leave as {@link StateLease}s pinned under the table's region allowance.
+ * Private values enter through {@link ManagedPayload} (bytes stay charged to the producer allowance
+ * until the cache unpin commits). Shared canonical values increment the logical reference of an
+ * already pinned cache entry. Every installed slot stores only a {@link BlockKey}; values leave as
+ * {@link StateLease}s pinned under the table's region allowance.
  *
  * Slot transitions are serialized on the table monitor; they are O(1) metadata updates, and all cache
  * I/O (putPinned, pin loading, unpin) happens outside the lock. If the single monitor becomes a
@@ -85,6 +87,23 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 	}
 
 	/**
+	 * Retains an already pinned canonical cache entry in an empty slot. The caller remains responsible
+	 * for unpinning the supplied entry; this method adds only a logical lifetime reference.
+	 */
+	public void installReference(int index, BlockEntry pinned) {
+		Slot slot;
+		synchronized(this) {
+			checkOpen();
+			ensureCapacity(index);
+			if(_slots[index] != null)
+				throw new IllegalStateException("State table slot " + index + " is already occupied.");
+			slot = new Slot();
+			_slots[index] = slot;
+		}
+		finishReferenceInstall(index, slot, pinned);
+	}
+
+	/**
 	 * Atomic install-or-take: if the slot is empty the payload is installed and the future completes
 	 * with null; otherwise the previously installed value is removed from the slot and returned as a
 	 * lease while the payload remains owned by the caller. Slot transitions are atomic (on the table
@@ -120,6 +139,44 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			return pinTaken(taken);
 		OOCFuture<StateLease<T>> result = new OOCFuture<>();
 		waitFor.whenComplete((ignored, error) -> retry(() -> installOrTake(index, payload), result));
+		return result;
+	}
+
+	/**
+	 * Atomic reference install-or-take. If the slot is empty, the pinned logical entry is retained and
+	 * the future completes with null. Otherwise the existing slot value is removed and returned while
+	 * the supplied pinned entry remains untouched. The caller must keep the supplied entry pinned until
+	 * the returned future completes.
+	 */
+	public OOCFuture<StateLease<T>> installReferenceOrTake(int index, BlockEntry pinned) {
+		Slot installing = null;
+		Slot taken = null;
+		OOCFuture<Void> waitFor = null;
+		synchronized(this) {
+			checkOpen();
+			ensureCapacity(index);
+			Slot existing = _slots[index];
+			if(existing == null) {
+				installing = new Slot();
+				_slots[index] = installing;
+			}
+			else if(existing._state == Slot.INSTALLED) {
+				_slots[index] = null;
+				taken = existing;
+			}
+			else {
+				waitFor = existing._installFuture;
+			}
+		}
+		if(installing != null) {
+			finishReferenceInstall(index, installing, pinned);
+			return OOCFuture.completed(null);
+		}
+		if(taken != null)
+			return pinTaken(taken);
+		OOCFuture<StateLease<T>> result = new OOCFuture<>();
+		waitFor.whenComplete((ignored, error) ->
+			retry(() -> installReferenceOrTake(index, pinned), result));
 		return result;
 	}
 
@@ -176,7 +233,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 	 * Removes the slot and drops its value.
 	 */
 	public void clear(int index) {
-		BlockKey toDereference = null;
+		Slot removed = null;
 		synchronized(this) {
 			if(index < 0 || index >= _slots.length)
 				return;
@@ -186,19 +243,19 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			_slots[index] = null;
 			if(slot._state == Slot.INSTALLED) {
 				slot._state = Slot.REMOVED;
-				toDereference = slot._key;
+				removed = slot;
 			}
 			else if(slot._state == Slot.INSTALLING) {
 				slot._cleared = true;
 			}
 		}
-		if(toDereference != null)
-			_cache.dereference(toDereference);
+		if(removed != null)
+			releaseSlot(removed);
 	}
 
 	@Override
 	public void close() {
-		List<BlockKey> toDereference = new ArrayList<>();
+		List<Slot> toRelease = new ArrayList<>();
 		synchronized(this) {
 			if(_closed)
 				return;
@@ -210,15 +267,15 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 				_slots[i] = null;
 				if(slot._state == Slot.INSTALLED) {
 					slot._state = Slot.REMOVED;
-					toDereference.add(slot._key);
+					toRelease.add(slot);
 				}
 				else if(slot._state == Slot.INSTALLING) {
 					slot._cleared = true;
 				}
 			}
 		}
-		for(BlockKey key : toDereference)
-			_cache.dereference(key);
+		for(Slot slot : toRelease)
+			releaseSlot(slot);
 	}
 
 	public boolean isClosed() {
@@ -262,6 +319,29 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		installFuture.complete(null);
 	}
 
+	private void finishReferenceInstall(int index, Slot slot, BlockEntry pinned) {
+		try {
+			_cache.reference(pinned);
+		}
+		catch(RuntimeException ex) {
+			failInstall(index, slot, ex);
+			throw ex;
+		}
+
+		boolean cleared;
+		OOCFuture<Void> installFuture;
+		synchronized(this) {
+			slot._key = pinned.getKey();
+			cleared = slot._cleared;
+			slot._state = cleared ? Slot.REMOVED : Slot.INSTALLED;
+			installFuture = slot._installFuture;
+			slot._installFuture = null;
+		}
+		if(cleared)
+			_cache.dereference(pinned.getKey());
+		installFuture.complete(null);
+	}
+
 	private void failInstall(int index, Slot slot, RuntimeException ex) {
 		OOCFuture<Void> installFuture;
 		synchronized(this) {
@@ -282,15 +362,33 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		//complete a fresh future exactly once; a mapped view would re-run the side effects per read
 		OOCFuture<StateLease<T>> result = new OOCFuture<>();
 		pinned.whenComplete((entry, error) -> {
-			if(error != null) {
-				result.completeExceptionally(error);
+			Throwable completionError = error;
+			try {
+				releaseSlot(slot);
+			}
+			catch(Throwable releaseError) {
+				if(completionError == null)
+					completionError = releaseError;
+			}
+			if(completionError != null) {
+				if(entry != null) {
+					try {
+						_cache.unpin(entry, _allowance);
+					}
+					catch(Throwable ignored) {
+						// Preserve the original pin/release failure.
+					}
+				}
+				result.completeExceptionally(completionError);
 				return;
 			}
-			//drop the logical reference; the entry is freed once the lease unpins
-			_cache.dereference(slot._key);
 			result.complete(entry == null ? null : new TableLease(entry));
 		});
 		return result;
+	}
+
+	private void releaseSlot(Slot slot) {
+		_cache.dereference(slot._key);
 	}
 
 	private void checkOpen() {
