@@ -24,10 +24,14 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 public interface MaterializedStore<T extends SpillableObject> extends AutoCloseable {
 	/**
-	 * Publishes a sequential logical index whose resident bytes are already owned by the supplied allowance.
+	 * Publishes a logical index whose resident bytes are already owned by the supplied allowance. Calls may be
+	 * concurrent and out of order. Completed publication must contain every index in [0, size) exactly once.
 	 */
 	void publishPinned(int index, T value, long bytes, MemoryAllowance allowance);
 
+	/**
+	 * Completes publication after all publisher tasks have joined.
+	 */
 	void complete();
 
 	Reader<T> openReader(AccessPattern pattern, MemoryAllowance allowance, int maxPrefetch);

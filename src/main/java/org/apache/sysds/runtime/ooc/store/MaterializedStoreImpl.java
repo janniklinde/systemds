@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.collections.ConcurrentBitSet;
+import org.apache.sysds.runtime.ooc.cache.collections.ConcurrentGrowableBitSet;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 import org.apache.sysds.runtime.ooc.cache.packed.OOCPackedCache;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
@@ -41,10 +42,11 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 	private final OOCCache cache;
 	private final long streamId;
 	private final ArrayList<RegisteredReader> registeredReaders;
+	private final ConcurrentGrowableBitSet forgotten;
+	private final AtomicInteger published;
 
 	private volatile List<RegisteredReader> readers;
-	private volatile ConcurrentBitSet forgotten;
-	private volatile int published;
+	private volatile int completedSize;
 	private volatile boolean complete;
 	private volatile boolean readersSealed;
 	private volatile boolean closed;
@@ -53,18 +55,20 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		this.cache = cache;
 		this.streamId = streamId;
 		registeredReaders = new ArrayList<>();
+		forgotten = new ConcurrentGrowableBitSet();
+		published = new AtomicInteger();
 		readers = Collections.emptyList();
 	}
 
 	@Override
-	public synchronized void publishPinned(int index, T value, long bytes, MemoryAllowance allowance) {
+	public void publishPinned(int index, T value, long bytes, MemoryAllowance allowance) {
 		if(complete || closed)
 			throw new IllegalStateException("Store no longer accepts published items");
-		if(index != published)
-			throw new IllegalArgumentException("Expected sequential index " + published + " but received " + index);
+		if(index < 0 || index == Integer.MAX_VALUE)
+			throw new IndexOutOfBoundsException("Invalid index: " + index);
 		BlockEntry entry = cache.putPinned(streamId, index, value, bytes, allowance);
 		cache.unpin(entry, allowance);
-		published++;
+		updatePublished(index + 1);
 	}
 
 	@Override
@@ -73,7 +77,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 			return;
 		if(cache instanceof OOCPackedCache packed)
 			packed.flushPacks();
-		forgotten = new ConcurrentBitSet(published);
+		completedSize = published.get();
 		complete = true;
 	}
 
@@ -115,7 +119,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 
 	@Override
 	public int size() {
-		return published;
+		return complete ? completedSize : published.get();
 	}
 
 	@Override
@@ -126,12 +130,9 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		List<RegisteredReader> localReaders = readers;
 		for(int i = 0; i < localReaders.size(); i++)
 			localReaders.get(i).close();
-		ConcurrentBitSet localForgotten = forgotten;
-		if(localForgotten != null) {
-			for(int i = 0; i < published; i++)
-				if(localForgotten.set(i))
-					cache.dereference(new BlockKey(streamId, i));
-		}
+		for(int i = 0; i < size(); i++)
+			if(forgotten.set(i))
+				cache.dereference(new BlockKey(streamId, i));
 	}
 
 	private void tryForget(int index) {
@@ -143,6 +144,12 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		}
 		if(forgotten.set(index))
 			cache.dereference(new BlockKey(streamId, index));
+	}
+
+	private void updatePublished(int size) {
+		int current = published.get();
+		while(current < size && !published.compareAndSet(current, size))
+			current = published.get();
 	}
 
 	private interface RegisteredReader extends AutoCloseable {
@@ -358,7 +365,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 			this.allowance = allowance;
 			this.maxPrefetch = maxPrefetch;
 			claimedGroups = new ConcurrentBitSet(Math.max(1, packed.getPackGroupCount()));
-			consumedIndices = new ConcurrentBitSet(Math.max(1, published));
+			consumedIndices = new ConcurrentBitSet(Math.max(1, completedSize));
 			ready = new LinkedBlockingQueue<>();
 			blocked = new ArrayDeque<>();
 		}
@@ -446,7 +453,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		private OOCPackedCache.PackGroup nextUnclaimedGroup() {
 			while(pattern.hasNext()) {
 				int index = pattern.next();
-				if(index < 0 || index >= published)
+				if(index < 0 || index >= completedSize)
 					throw new IndexOutOfBoundsException("Invalid requested index: " + index);
 				if(consumedIndices.get(index))
 					continue;
@@ -492,7 +499,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 			int selected = 0;
 			for(int slot = 0; slot < lease.size(); slot++) {
 				int index = lease.index(slot);
-				if(index >= 0 && index < published && !consumedIndices.get(index) && pattern.needs(index))
+				if(index >= 0 && index < completedSize && !consumedIndices.get(index) && pattern.needs(index))
 					slots[selected++] = slot;
 			}
 			if(selected == 0) {
