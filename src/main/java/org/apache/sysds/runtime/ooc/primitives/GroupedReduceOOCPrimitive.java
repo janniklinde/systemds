@@ -26,18 +26,27 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
+import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
 public class GroupedReduceOOCPrimitive extends OOCPrimitive {
+	//migration toggle (TODO Step 3): the OperatorStateTable path is the default; the legacy
+	//CachedAllowance path stays selectable until the full migration (Step 5) removes it
+	private static volatile boolean USE_STATE_TABLE =
+		Boolean.parseBoolean(System.getProperty("sysds.ooc.groupedReduce.stateTable", "true"));
+
 	private final OOCStreamable<IndexedMatrixValue> _inputStreamable;
 	private final OOCStreamable<IndexedMatrixValue> _outputStreamable;
 	private final Grouping _grouping;
@@ -48,6 +57,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 	@SuppressWarnings("unused")
 	private final StreamContext _sc;
 	private CachedAllowance _cache;
+	private OperatorStateTable<IndexedMatrixValue> _table;
 
 	private GroupedReduceOOCPrimitive(OOCPrimitive inputPrimitive, OOCStreamable<IndexedMatrixValue> inputStreamable,
 		OOCStreamable<IndexedMatrixValue> outputStreamable, Grouping grouping, int accumulatorsPerGroup,
@@ -100,8 +110,28 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	public boolean requiresStateTable() {
+		return USE_STATE_TABLE;
+	}
+
+	@Override
+	public void bindStateTable(OperatorStateTable<IndexedMatrixValue> table) {
+		_table = table;
+	}
+
+	/**
+	 * Selects the accumulator backend for primitives planned AFTER this call; already compiled
+	 * pipelines keep their binding. Test/migration hook only.
+	 */
+	public static void setUseStateTable(boolean useStateTable) {
+		USE_STATE_TABLE = useStateTable;
+	}
+
+	@Override
 	public void onComplete() {
 		try {
+			if(_table != null)
+				_table.close();
 			if(_cache != null)
 				_cache.shutdown();
 		}
@@ -149,7 +179,10 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 			MatrixIndexes outputIndex = outputIndex(group);
 			MatrixBlock partial = _partialFn.apply((MatrixBlock) input.getValue());
 
-			mergeIntoAccumulator(slot, newTrackedCallback(outputIndex, partial));
+			if(_table != null)
+				mergeIntoTable(slot, outputIndex, partial);
+			else
+				mergeIntoAccumulator(slot, newTrackedCallback(outputIndex, partial));
 
 			if(consumedPerGroup.incrementAndGet(group) == groupSize &&
 				emittedPerGroup.compareAndSet(group, 0, 1)) {
@@ -193,7 +226,77 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		}
 	}
 
+	/**
+	 * The accumulator loop on the new contract: install, or take the existing value, merge outside
+	 * the slot, retry with the merged payload. The candidate reservation transfers into the cache on
+	 * install; a taken value is consumed exactly once through its lease.
+	 */
+	private void mergeIntoTable(int slot, MatrixIndexes index, MatrixBlock block) {
+		ManagedPayload<IndexedMatrixValue> candidate = newPayload(index, block);
+		try {
+			while(true) {
+				OperatorStateTable.StateLease<IndexedMatrixValue> existing =
+					await(_table.installOrTake(slot, candidate));
+				if(existing == null)
+					return; //installed
+				MatrixBlock merged;
+				try(existing) {
+					merged = _mergeFn.apply((MatrixBlock) existing.value().getValue(),
+						(MatrixBlock) candidate.value().getValue());
+				}
+				candidate.release();
+				candidate = newPayload(index, merged);
+			}
+		}
+		catch(RuntimeException ex) {
+			candidate.release();
+			throw ex;
+		}
+	}
+
+	private void finalizeGroupFromTable(int group, OOCStream<IndexedMatrixValue> out) {
+		MatrixIndexes outputIndex = outputIndex(group);
+		MatrixBlock accumulator = null;
+		for(int stripe = 0; stripe < _accumulatorsPerGroup; stripe++) {
+			OperatorStateTable.StateLease<IndexedMatrixValue> current =
+				await(_table.take(accumulatorSlot(group, stripe)));
+			if(current == null)
+				continue;
+			try(current) {
+				MatrixBlock value = (MatrixBlock) current.value().getValue();
+				accumulator = accumulator == null ? value : _mergeFn.apply(accumulator, value);
+			}
+		}
+		if(accumulator == null)
+			return;
+		MatrixBlock result = _finalizeFn.apply(accumulator);
+		out.enqueue(outputCallback(outputIndex, result));
+	}
+
+	private ManagedPayload<IndexedMatrixValue> newPayload(MatrixIndexes index, MatrixBlock block) {
+		long bytes = _allocFn.applyAsLong(index);
+		_allowance.reserveBlocking(bytes);
+		return new ManagedPayload<>(new IndexedMatrixValue(index, block), bytes, _allowance);
+	}
+
+	private static <T> T await(OOCFuture<T> future) {
+		try {
+			return future.get();
+		}
+		catch(InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new DMLRuntimeException(e);
+		}
+		catch(ExecutionException e) {
+			throw DMLRuntimeException.of(e.getCause());
+		}
+	}
+
 	private void finalizeGroup(int group, OOCStream<IndexedMatrixValue> out) {
+		if(_table != null) {
+			finalizeGroupFromTable(group, out);
+			return;
+		}
 		MatrixIndexes outputIndex = outputIndex(group);
 		OOCStream.QueueCallback<IndexedMatrixValue> accumulator = null;
 		try {
