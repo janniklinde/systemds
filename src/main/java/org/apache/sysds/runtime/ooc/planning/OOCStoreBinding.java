@@ -20,11 +20,12 @@
 package org.apache.sysds.runtime.ooc.planning;
 
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.ToIntFunction;
 
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
+import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
@@ -42,14 +43,22 @@ import org.apache.sysds.runtime.ooc.store.MaterializedStoreImpl;
  * registered — consumers never need a global barrier or knowledge of each other. The last
  * {@link #release()} closes the store (dropping whatever forgetting has not reclaimed yet).
  *
- * Consumers must await {@link #completion()} before opening readers (readers require a completed
- * store) and must not bypass the binding via {@link #store()} for registration.
+ * One binding is shared by ALL consumers of a boundary. {@link #attach} is first-wins so only the
+ * first consumer wires the sink; late-planned consumers can still join via {@link #tryRegister} as
+ * long as the reader set has not sealed (a consumer joining after sealing is a planning error — the
+ * store may already have started forgetting). Consumers must await {@link #completion()} before
+ * opening readers (readers require a completed store), await {@link #readersSealed()} before
+ * demand-driven reading (the store rejects reads before the full reader set is known), and must not
+ * bypass the binding via {@link #store()} for registration.
  */
 public final class OOCStoreBinding {
 	private final MaterializedStore<IndexedMatrixValue> _store;
 	private final MaterializationSink _sink;
-	private final AtomicInteger _pendingReaders;
-	private final AtomicInteger _refCtr;
+	private final AtomicBoolean _attached;
+	private final OOCFuture<Void> _readersSealed;
+	private int _pendingReaders;
+	private int _refCtr;
+	private boolean _sealed;
 
 	public OOCStoreBinding(OOCCache cache, long streamId, ToIntFunction<MatrixIndexes> linearize,
 		MemoryAllowance sinkAllowance, int expectedReaders, int consumers) {
@@ -64,12 +73,46 @@ public final class OOCStoreBinding {
 				+ ", consumers=" + consumers);
 		_store = new MaterializedStoreImpl<>(cache, streamId);
 		_sink = new MaterializationSink(_store, linearize, sinkAllowance, liveConsumers);
-		_pendingReaders = new AtomicInteger(expectedReaders);
-		_refCtr = new AtomicInteger(consumers);
+		_attached = new AtomicBoolean(false);
+		_readersSealed = new OOCFuture<>();
+		_pendingReaders = expectedReaders;
+		_refCtr = consumers;
 	}
 
+	/**
+	 * Wires the sink to the boundary's source stream. First-wins: with a shared binding every
+	 * consumer may call this, but only the first call subscribes — the boundary is materialized
+	 * exactly once and later consumers find it already (being) materialized.
+	 */
 	public void attach(OOCStream<IndexedMatrixValue> source) {
-		_sink.attach(source);
+		if(_attached.compareAndSet(false, true))
+			_sink.attach(source);
+	}
+
+	/**
+	 * First-wins attach that resolves the read stream only for the winning consumer, so losing
+	 * consumers never register a stream consumption they will not perform.
+	 */
+	public void attach(OOCStreamable<IndexedMatrixValue> source) {
+		if(_attached.compareAndSet(false, true))
+			_sink.attach(source.getReadStream());
+	}
+
+	/**
+	 * Joins a late-planned consumer onto this boundary: grows the declared reader and consumer
+	 * counts. Succeeds only while the reader set has not sealed and the binding has not been fully
+	 * released; afterwards the boundary's data may already be partially reclaimed, so joining is a
+	 * planning error and the caller must fail.
+	 */
+	public synchronized boolean tryRegister(int expectedReaders, int consumers) {
+		if(expectedReaders < 0 || consumers <= 0)
+			throw new IllegalArgumentException("Invalid registration counts: readers=" + expectedReaders
+				+ ", consumers=" + consumers);
+		if(_sealed || _refCtr <= 0)
+			return false;
+		_pendingReaders += expectedReaders;
+		_refCtr += consumers;
+		return true;
 	}
 
 	public MaterializationSink sink() {
@@ -82,6 +125,15 @@ public final class OOCStoreBinding {
 	 */
 	public OOCFuture<Void> completion() {
 		return _sink.completion();
+	}
+
+	/**
+	 * Completes when the declared reader set has fully registered and the store sealed. Demand-driven
+	 * consumers must await this before issuing reads; the store rejects reads while unsealed because
+	 * forgetting decisions need the complete reader population.
+	 */
+	public OOCFuture<Void> readersSealed() {
+		return _readersSealed;
 	}
 
 	public MaterializedStore<IndexedMatrixValue> store() {
@@ -114,18 +166,37 @@ public final class OOCStoreBinding {
 	 * Releases one consumer; the last release closes the store.
 	 */
 	public void release() {
-		int remaining = _refCtr.decrementAndGet();
-		if(remaining < 0)
-			throw new IllegalStateException("Store binding released more often than declared consumers.");
-		if(remaining == 0)
+		boolean close;
+		synchronized(this) {
+			if(_refCtr <= 0)
+				throw new IllegalStateException("Store binding released more often than declared consumers.");
+			close = --_refCtr == 0;
+		}
+		if(close)
 			_store.close();
 	}
 
+	/**
+	 * Whether every declared consumer has released (the store is closed). A released binding cannot
+	 * serve new consumers; the planner replaces it with a fresh materialization if the source can be
+	 * consumed again.
+	 */
+	public synchronized boolean isReleased() {
+		return _refCtr <= 0;
+	}
+
 	private void sealIfLastRegistration() {
-		int remaining = _pendingReaders.decrementAndGet();
-		if(remaining < 0)
-			throw new IllegalStateException("More reader registrations than declared for this binding.");
-		if(remaining == 0)
+		boolean seal;
+		synchronized(this) {
+			if(_pendingReaders <= 0)
+				throw new IllegalStateException("More reader registrations than declared for this binding.");
+			seal = --_pendingReaders == 0;
+			if(seal)
+				_sealed = true;
+		}
+		if(seal) {
 			_store.sealReaders();
+			_readersSealed.complete(null);
+		}
 	}
 }

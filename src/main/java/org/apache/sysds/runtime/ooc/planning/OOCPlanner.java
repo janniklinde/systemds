@@ -112,15 +112,12 @@ public class OOCPlanner {
 			primitive.bindRegion(binding, crossBoundaries, startsRegion);
 			//migrated primitives get an OperatorStateTable over the global cache (one fresh stream id
 			//per table so eviction sees one population); unmigrated primitives keep CachedAllowance.
-			//A boundary consumer additionally declares its input store; the binding gets a fresh
-			//stream id and the region allowance as sink allowance. With multi-consumer boundaries
-			//(post Step 4) the requests of all consumers aggregate into one shared binding.
+			//A boundary consumer additionally declares its input store. The registry hands out ONE
+			//binding per boundary: the first consumer materializes (fresh stream id, this region
+			//allowance as sink allowance), later consumers share the existing store.
 			OOCStoreRequest storeRequest = primitive.requiresStore();
-			if(storeRequest != null) {
-				primitive.bindStore(new OOCStoreBinding(OOCCacheManager.getGlobalCache(),
-					CachingStream._streamSeq.getNextID(), storeRequest.linearize(), allowance,
-					storeRequest.expectedReaders(), storeRequest.consumers()));
-			}
+			if(storeRequest != null)
+				primitive.bindStore(OOCStoreBindingRegistry.acquire(storeRequest, primitive, allowance));
 			if(primitive.requiresStateTable()) {
 				primitive.bindStateTable(new OperatorStateTable<>(OOCCacheManager.getGlobalCache(),
 					CachingStream._streamSeq.getNextID(), allowance));

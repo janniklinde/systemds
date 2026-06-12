@@ -38,6 +38,7 @@ import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreBindingRegistry;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.utils.Statistics;
 
@@ -77,6 +78,7 @@ public class OOCCacheManager {
 	public static void reset() {
 		dumpOutstandingMemoryState("before-reset");
 		TeeOOCInstruction.reset();
+		OOCStoreBindingRegistry.reset();
 		OOCIOHandler ioHandler = _ioHandler.getAndSet(null);
 		OOCCacheScheduler cacheScheduler = _scheduler.getAndSet(null);
 		OOCPackedCache globalCache = _globalCache.getAndSet(null);

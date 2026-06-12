@@ -21,27 +21,38 @@ package org.apache.sysds.runtime.ooc.planning;
 
 import java.util.function.ToIntFunction;
 
+import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 
 /**
  * Declaration of a materialized input boundary by a migrated consumer primitive (the
- * {@code requiresStore()}/{@code bindStore()} seam): the linearization of the boundary's tile
- * indexes to the store's dense int range and the registration counts the binding enforces. The
- * planner owns everything else (cache, stream id, sink allowance). A single consumer declares
- * 1 reader / 1 consumer; once shared boundaries are migrated, the planner aggregates the requests
- * of all consumers of a boundary into one binding.
+ * {@code requiresStore()}/{@code bindStore()} seam): the boundary handle (source streamable), the
+ * linearization of the boundary's tile indexes to the store's dense int range, and the registration
+ * counts the binding enforces for THIS consumer. The planner owns everything else (cache, stream id,
+ * sink allowance) and aggregates the requests of all consumers of one boundary into one shared
+ * {@link OOCStoreBinding} — a consumer whose boundary is already materialized receives the existing
+ * binding and finds {@code completion()} already done. A null source declares an anonymous boundary
+ * that is never shared.
  */
 public final class OOCStoreRequest {
+	private final OOCStreamable<IndexedMatrixValue> _source;
 	private final ToIntFunction<MatrixIndexes> _linearize;
 	private final int _expectedReaders;
 	private final int _consumers;
 
-	public OOCStoreRequest(ToIntFunction<MatrixIndexes> linearize, int expectedReaders, int consumers) {
+	public OOCStoreRequest(OOCStreamable<IndexedMatrixValue> source, ToIntFunction<MatrixIndexes> linearize,
+		int expectedReaders, int consumers) {
 		if(linearize == null)
 			throw new IllegalArgumentException("Store request requires a linearization function.");
+		_source = source;
 		_linearize = linearize;
 		_expectedReaders = expectedReaders;
 		_consumers = consumers;
+	}
+
+	public OOCStreamable<IndexedMatrixValue> source() {
+		return _source;
 	}
 
 	public ToIntFunction<MatrixIndexes> linearize() {

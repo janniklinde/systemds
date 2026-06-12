@@ -42,8 +42,10 @@ import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreRequest;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
+import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
 import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 import org.apache.sysds.runtime.ooc.store.SequentialAccessPattern;
 import org.apache.sysds.runtime.ooc.store.StoreBackedStream;
@@ -203,6 +205,83 @@ public class OOCPlannerSeamTest {
 		}
 	}
 
+	@Test
+	public void testSharedBoundaryConsumersShareOneBindingAndSealTogether() throws Exception {
+		SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
+		SourceStub producer = new SourceStub();
+		source.assignPrimitive(producer);
+		ConsumerStub first = new ConsumerStub(producer, source);
+		ConsumerStub second = new ConsumerStub(producer, source);
+		SyncMemoryAllowance payloads = new SyncMemoryAllowance(GlobalMemoryBroker.get());
+		payloads.setTargetMemory(1L << 26);
+		SyncMemoryAllowance reader = new SyncMemoryAllowance(GlobalMemoryBroker.get());
+		reader.setTargetMemory(1L << 26);
+		long bytes = tileBytes();
+		try {
+			first.start();
+			second.start();
+			Assert.assertNotNull(first.binding);
+			Assert.assertSame("Consumers of one boundary must share one store binding.",
+				first.binding, second.binding);
+
+			//the boundary is materialized once through the shared binding
+			first.binding.attach(source);
+			second.binding.attach(source); //no-op: attach is first-wins
+			for(int i = 0; i < 2; i++) {
+				payloads.reserveBlocking(bytes);
+				source.enqueue(new InMemoryQueueCallback(tile(i, i + 1.0), null, payloads, bytes));
+			}
+			source.closeInput();
+			first.binding.completion().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+
+			//pre-counted reader set: the store seals only after BOTH consumers registered
+			MaterializedStore.IndexedReader<IndexedMatrixValue> readerA =
+				first.binding.openIndexedReader(new MultiplicityLiveness(2, 1), reader);
+			Assert.assertFalse("Sealing must wait for the full declared reader set.",
+				first.binding.readersSealed().isDone());
+			MaterializedStore.IndexedReader<IndexedMatrixValue> readerB =
+				second.binding.openIndexedReader(new MultiplicityLiveness(2, 1), reader);
+			first.binding.readersSealed().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+
+			try(MaterializedStore.Lease<IndexedMatrixValue> lease =
+				readerA.request(0).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
+				Assert.assertEquals(1.0 * ROWS * COLS, sum(lease.value()), 0.0);
+			}
+			try(MaterializedStore.Lease<IndexedMatrixValue> lease =
+				readerB.request(1).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
+				Assert.assertEquals(2.0 * ROWS * COLS, sum(lease.value()), 0.0);
+			}
+
+			//a consumer constructed after sealing cannot join the boundary anymore
+			ConsumerStub late = new ConsumerStub(producer, source);
+			try {
+				late.start();
+				Assert.fail("A late consumer must not join a sealed boundary store.");
+			}
+			catch(RuntimeException expected) {
+				//expected: the registry rejects joining after the reader set sealed
+			}
+
+			readerA.close();
+			readerB.close();
+			first.binding.release();
+			second.binding.release();
+			awaitOwnedCache(OOCCacheManager.getGlobalCache(), 0);
+
+			//after the last release the boundary can be materialized afresh (re-consumable source)
+			ConsumerStub next = new ConsumerStub(producer, source);
+			next.start();
+			Assert.assertNotNull(next.binding);
+			Assert.assertNotSame("A released binding must be replaced by a fresh materialization.",
+				first.binding, next.binding);
+			next.binding.release();
+		}
+		finally {
+			payloads.destroy();
+			reader.destroy();
+		}
+	}
+
 	private static Map<Integer, Double> consume(StoreBackedStream stream) {
 		Map<Integer, Double> tiles = new HashMap<>();
 		while(true) {
@@ -242,6 +321,88 @@ public class OOCPlannerSeamTest {
 		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_TIMEOUT_SEC);
 		while(!condition.getAsBoolean() && System.nanoTime() < deadline)
 			Thread.sleep(1);
+	}
+
+	/**
+	 * Leaf producer stub so a shared source streamable has a primitive whose parents are the
+	 * boundary's consumers (the registry discovers the consumer set through them).
+	 */
+	private static final class SourceStub extends OOCPrimitive {
+		private SourceStub() {
+			super(List.of());
+		}
+
+		@Override
+		public void startExecution() {
+		}
+
+		@Override
+		public List<OOCStreamable<?>> getInputStreams() {
+			return List.of();
+		}
+
+		@Override
+		public List<OOCStreamable<?>> getOutputStreams() {
+			return List.of();
+		}
+
+		@Override
+		public void inferPatterns() {
+			_pattern = OOCAccessPattern.ANY;
+		}
+
+		@Override
+		public void requestPattern(OOCAccessPattern accessPattern) {
+			_pattern = accessPattern;
+		}
+	}
+
+	/**
+	 * Boundary consumer stub: declares a store request over the shared source and records the
+	 * binding the planner supplied.
+	 */
+	private static final class ConsumerStub extends OOCPrimitive {
+		private final OOCStreamable<IndexedMatrixValue> source;
+		private OOCStoreBinding binding;
+
+		private ConsumerStub(OOCPrimitive producer, OOCStreamable<IndexedMatrixValue> source) {
+			super(List.of(producer));
+			this.source = source;
+		}
+
+		@Override
+		public OOCStoreRequest requiresStore() {
+			return new OOCStoreRequest(source, ix -> (int) ix.getRowIndex() - 1, 1, 1);
+		}
+
+		@Override
+		public void bindStore(OOCStoreBinding store) {
+			binding = store;
+		}
+
+		@Override
+		public void startExecution() {
+		}
+
+		@Override
+		public List<OOCStreamable<?>> getInputStreams() {
+			return List.of(source);
+		}
+
+		@Override
+		public List<OOCStreamable<?>> getOutputStreams() {
+			return List.of();
+		}
+
+		@Override
+		public void inferPatterns() {
+			_pattern = OOCAccessPattern.ANY;
+		}
+
+		@Override
+		public void requestPattern(OOCAccessPattern accessPattern) {
+			_pattern = accessPattern;
+		}
 	}
 
 	/**

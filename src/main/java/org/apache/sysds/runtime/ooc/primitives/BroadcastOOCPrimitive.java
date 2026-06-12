@@ -134,7 +134,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	public OOCStoreRequest requiresStore() {
-		return _useStore ? new OOCStoreRequest(this::broadcastTileIndex, 1, 1) : null;
+		return _useStore ? new OOCStoreRequest(_broadcastStreamable, this::broadcastTileIndex, 1, 1) : null;
 	}
 
 	@Override
@@ -211,10 +211,10 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	public void startExecution() {
-		final OOCStream<IndexedMatrixValue> broadcastStream = getBroadcastStreamable().getReadStream();
+		//the broadcast read stream is resolved only where it is actually consumed: by the legacy
+		//dequeue thread, or by the winning attach of a shared store binding (inside the binding)
 		final OOCStream<IndexedMatrixValue> streamedStream = getStreamedStreamable().getReadStream();
 		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
-		final DataCharacteristics dcBroadcast = broadcastStream.getDataCharacteristics();
 		final DataCharacteristics dc = streamedStream.getDataCharacteristics();
 		_maxCount = _maxBroadcastCount > 0 ? _maxBroadcastCount :
 			(int)(_rowBroadcast ? OOCUtils.getNumRowBlocks(dc) : OOCUtils.getNumColBlocks(dc));
@@ -225,8 +225,10 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		final CompletableFuture<Void> buildFuture = new CompletableFuture<>();
 
 		if(_storeBinding != null) {
-			//store path: the sink materializes the broadcast side; the indexed reader is opened once
-			//the store completed (registering the single declared reader also seals the reader set)
+			//store path: the binding is shared by all consumers of the boundary — attach is
+			//first-wins (the boundary is materialized once; a later consumer finds the store already
+			//materialized and its completion callback fires immediately), and probing must wait for
+			//the FULL declared reader set to register (readersSealed), not just our own reader
 			final int broadcastTiles = nBroadcastTiles;
 			_storeBinding.completion().whenComplete((ignored, error) -> {
 				if(error != null) {
@@ -239,17 +241,27 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 				try {
 					_reader = _storeBinding.openIndexedReader(
 						new MultiplicityLiveness(broadcastTiles, _maxCount), _allowance);
-					buildFuture.complete(null);
 				}
 				catch(RuntimeException ex) {
 					out.propagateFailure(DMLRuntimeException.of(ex));
 					releaseStore();
 					buildFuture.completeExceptionally(ex);
+					return;
 				}
+				_storeBinding.readersSealed().whenComplete((sl, sealError) -> {
+					if(sealError != null) {
+						out.propagateFailure(DMLRuntimeException.of(sealError));
+						releaseStore();
+						buildFuture.completeExceptionally(sealError);
+					}
+					else
+						buildFuture.complete(null);
+				});
 			});
-			_storeBinding.attach(broadcastStream);
+			_storeBinding.attach(getBroadcastStreamable());
 		}
 		else {
+			final OOCStream<IndexedMatrixValue> broadcastStream = getBroadcastStreamable().getReadStream();
 			new Thread(() -> {
 				try {
 					OOCStream.QueueCallback<IndexedMatrixValue> cb;
