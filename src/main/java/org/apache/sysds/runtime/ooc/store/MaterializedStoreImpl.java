@@ -75,6 +75,18 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 	}
 
 	@Override
+	public LiveLease<T> publishPinnedLive(int index, T value, long bytes, MemoryAllowance allowance) {
+		if(complete || closed)
+			throw new IllegalStateException("Store no longer accepts published items");
+		if(index < 0 || index == Integer.MAX_VALUE)
+			throw new IndexOutOfBoundsException("Invalid index: " + index);
+		BlockEntry entry = cache.putPinned(streamId, index, value, bytes, allowance);
+		publishedCount.incrementAndGet();
+		updatePublished(index + 1);
+		return new LiveLeaseAlias(new LiveLeaseState(index, entry, allowance));
+	}
+
+	@Override
 	public void publishPackPinned(int[] indices, T[] values, long[] bytes, int off, int len,
 		MemoryAllowance allowance) {
 		if(complete || closed)
@@ -295,6 +307,81 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 				releaser.release(index, entry);
 			else
 				shared.release();
+		}
+	}
+
+	/**
+	 * Shared pin lifetime of a live fan-out publication: aliases serve concurrent live consumers, the
+	 * last alias close unpins (resident ownership to the cache, possibly deferred). No consumption or
+	 * forgetting is involved — readers and reclamation start only after completion and sealing.
+	 */
+	private final class LiveLeaseState {
+		private final int index;
+		private final BlockEntry entry;
+		private final MemoryAllowance allowance;
+		private final AtomicInteger references;
+
+		private LiveLeaseState(int index, BlockEntry entry, MemoryAllowance allowance) {
+			this.index = index;
+			this.entry = entry;
+			this.allowance = allowance;
+			references = new AtomicInteger(1);
+		}
+
+		private void retain() {
+			if(references.getAndIncrement() <= 0)
+				throw new IllegalStateException("Live lease is already fully closed");
+		}
+
+		private void release() {
+			if(references.decrementAndGet() == 0)
+				cache.unpin(entry, allowance);
+		}
+	}
+
+	private final class LiveLeaseAlias implements LiveLease<T> {
+		private final LiveLeaseState state;
+		private boolean open;
+
+		private LiveLeaseAlias(LiveLeaseState state) {
+			this.state = state;
+			open = true;
+		}
+
+		@Override
+		public int index() {
+			return state.index;
+		}
+
+		@SuppressWarnings("unchecked")
+		@Override
+		public T value() {
+			if(!open)
+				throw new IllegalStateException("Lease is closed");
+			return (T)state.entry.getData();
+		}
+
+		@Override
+		public BlockEntry entry() {
+			if(!open)
+				throw new IllegalStateException("Lease is closed");
+			return state.entry;
+		}
+
+		@Override
+		public LiveLease<T> retain() {
+			if(!open)
+				throw new IllegalStateException("Lease is closed");
+			state.retain();
+			return new LiveLeaseAlias(state);
+		}
+
+		@Override
+		public void close() {
+			if(!open)
+				return;
+			open = false;
+			state.release();
 		}
 	}
 

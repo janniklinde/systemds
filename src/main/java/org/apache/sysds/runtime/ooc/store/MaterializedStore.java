@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.ooc.store;
 
+import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
@@ -41,6 +42,28 @@ public interface MaterializedStore<T extends SpillableObject> extends AutoClosea
 		payload.transfer();
 		try {
 			publishPinned(index, payload.value(), payload.bytes(), payload.owner());
+		}
+		catch(RuntimeException ex) {
+			//the payload was already marked transferred; return the bytes to the producer directly
+			if(payload.bytes() > 0)
+				payload.owner().release(payload.bytes());
+			throw ex;
+		}
+	}
+
+	/**
+	 * Publishes a logical index and keeps the canonical entry pinned for production-time fan-out. The
+	 * returned lease serves concurrent live consumers through {@link Lease#retain()} aliases; the LAST
+	 * alias close unpins, transferring resident ownership to the cache (possibly deferred). While live,
+	 * {@link LiveLease#entry()} exposes the still-pinned canonical entry so a consumer can park a
+	 * logical reference to it (e.g. {@code OperatorStateTable.installReference}).
+	 */
+	LiveLease<T> publishPinnedLive(int index, T value, long bytes, MemoryAllowance allowance);
+
+	default LiveLease<T> publishPinnedLive(int index, ManagedPayload<T> payload) {
+		payload.transfer();
+		try {
+			return publishPinnedLive(index, payload.value(), payload.bytes(), payload.owner());
 		}
 		catch(RuntimeException ex) {
 			//the payload was already marked transferred; return the bytes to the producer directly
@@ -187,5 +210,16 @@ public interface MaterializedStore<T extends SpillableObject> extends AutoClosea
 
 		@Override
 		void close();
+	}
+
+	interface LiveLease<T extends SpillableObject> extends Lease<T> {
+		/**
+		 * The still-pinned canonical cache entry of a live publication. Valid only while this lease is
+		 * open; the pin it relies on is dropped when the last alias closes.
+		 */
+		BlockEntry entry();
+
+		@Override
+		LiveLease<T> retain();
 	}
 }
