@@ -105,39 +105,57 @@ public class CachedAllowance extends SyncMemoryAllowance {
 		if(entry == null)
 			return null;
 
-		OOCCacheUtils.TileHandle handle = null;
+		OOCCacheUtils.TileHandle slotHandle = null;
+		OOCCacheUtils.TileHandle readHandle = null;
 		synchronized(entry) {
 			if(entry._local != null)
 				return entry._local.keepOpen();
-			if(entry._state == SlotEntry.STATE_HANDLE && entry._handle != null)
-				handle = entry._handle;
+			if(entry._state == SlotEntry.STATE_HANDLE && entry._handle != null) {
+				slotHandle = entry._handle;
+				readHandle = slotHandle.retain();
+			}
 			else
 				return null;
 		}
 
-		if(!super.tryReserve(handle.bytes()))
+		if(!super.tryReserve(readHandle.bytes())) {
+			readHandle.close();
 			return null;
+		}
 
 		try {
-			CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> future = handle.read(this);
+			CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> future;
+			try {
+				future = readHandle.read(this);
+			}
+			finally {
+				readHandle.close();
+			}
 			if(!future.isDone()) {
-				release(handle.bytes());
+				long bytes = slotHandle.bytes();
+				future.whenComplete((callback, error) -> {
+					if(callback != null)
+						callback.close();
+					else
+						release(bytes);
+				});
 				return null;
 			}
 
 			OOCStream.QueueCallback<IndexedMatrixValue> callback = future.join();
 			if(callback == null) {
-				release(handle.bytes());
+				release(slotHandle.bytes());
 				return null;
 			}
-			OOCStream.QueueCallback<IndexedMatrixValue> installed = installReadResult(entry, handle, callback);
+			OOCStream.QueueCallback<IndexedMatrixValue> installed =
+				installReadResult(entry, slotHandle, callback);
 			if(installed != null) {
 				OOCCacheUtils.noteEscape(installed, "CachedAllowance.tryGet[index=" + index + "]");
 				return installed;
 			}
 		}
 		catch(RuntimeException ex) {
-			release(handle.bytes());
+			release(slotHandle.bytes());
 			throw ex;
 		}
 
@@ -155,7 +173,8 @@ public class CachedAllowance extends SyncMemoryAllowance {
 
 		CompletableFuture<Void> reservationFuture = null;
 		CompletableFuture<OOCCacheUtils.TileHandle> spillFuture = null;
-		OOCCacheUtils.TileHandle handle = null;
+		OOCCacheUtils.TileHandle slotHandle = null;
+		OOCCacheUtils.TileHandle readHandle = null;
 		synchronized(entry) {
 			if(entry._local != null)
 				return CompletableFuture.completedFuture(entry._local.keepOpen());
@@ -163,33 +182,52 @@ public class CachedAllowance extends SyncMemoryAllowance {
 				reservationFuture = entry._reservationFuture;
 			else if(entry._state == SlotEntry.STATE_SPILLING)
 				spillFuture = entry._spillFuture;
-			else if(entry._state == SlotEntry.STATE_HANDLE)
-				handle = entry._handle;
+			else if(entry._state == SlotEntry.STATE_HANDLE) {
+				slotHandle = entry._handle;
+				readHandle = slotHandle.retain();
+			}
 		}
 
 		if(reservationFuture != null)
 			return reservationFuture.thenCompose(ignored -> get(index));
 		if(spillFuture != null)
 			return spillFuture.handle((ignored, ex) -> true).thenCompose(ignored -> get(index));
-		if(handle == null)
+		if(readHandle == null)
 			return CompletableFuture.completedFuture(null);
 
-		final OOCCacheUtils.TileHandle mHandle = handle;
-		return reserve(mHandle.bytes())
-			.thenCompose(ignored -> mHandle.read(this))
+		final OOCCacheUtils.TileHandle mSlotHandle = slotHandle;
+		final OOCCacheUtils.TileHandle mReadHandle = readHandle;
+		return reserve(mReadHandle.bytes())
+			.thenCompose(ignored -> {
+				try {
+					return mReadHandle.read(this).whenComplete((callback, error) -> {
+						if(error != null)
+							release(mReadHandle.bytes());
+					});
+				}
+				catch(RuntimeException ex) {
+					release(mReadHandle.bytes());
+					throw ex;
+				}
+				finally {
+					mReadHandle.close();
+				}
+			})
 			.thenCompose(callback -> {
 				if(callback == null) {
-					release(mHandle.bytes());
+					release(mSlotHandle.bytes());
 					return CompletableFuture.completedFuture(null);
 				}
 
-				OOCStream.QueueCallback<IndexedMatrixValue> installed = installReadResult(entry, mHandle, callback);
+				OOCStream.QueueCallback<IndexedMatrixValue> installed =
+					installReadResult(entry, mSlotHandle, callback);
 				if(installed != null) {
 					OOCCacheUtils.noteEscape(installed, "CachedAllowance.get[index=" + index + "]");
 					return CompletableFuture.completedFuture(installed);
 				}
 				return get(index);
-			});
+			})
+			.whenComplete((ignored, error) -> mReadHandle.close());
 	}
 
 	public CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> take(int index) {

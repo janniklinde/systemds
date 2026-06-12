@@ -168,6 +168,18 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		final DataCharacteristics dc = _inputStreamable.getDataCharacteristics();
 		final int numGroups = _grouping.numGroups(dc);
 		final int groupSize = _grouping.groupSize(dc);
+		if(groupSize == 1) {
+			OOCInstructionUtils.submitOOCTasks(in, cb -> {
+				IndexedMatrixValue input = cb.get();
+				int group = group(input.getIndexes());
+				MatrixBlock result = _finalizeFn.apply(_partialFn.apply((MatrixBlock) input.getValue()));
+				out.enqueue(outputCallback(outputIndex(group), result));
+			}, _allowance, _allocFn, _sc).thenRun(out::closeInput).exceptionally(t -> {
+				out.propagateFailure(DMLRuntimeException.of(t));
+				return null;
+			}).thenRun(() -> out.getPrimitive().onComplete());
+			return;
+		}
 		final AtomicIntegerArray consumedPerGroup = new AtomicIntegerArray(numGroups);
 		final AtomicIntegerArray emittedPerGroup = new AtomicIntegerArray(numGroups);
 

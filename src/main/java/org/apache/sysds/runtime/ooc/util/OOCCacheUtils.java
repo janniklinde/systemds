@@ -32,33 +32,106 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import java.lang.ref.SoftReference;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class OOCCacheUtils {
 	private static final long HANDOVER_STREAM_ID = CachingStream._streamSeq.getNextID();
 	private static final AtomicLong HANDOVER_BLOCK_ID = new AtomicLong();
 
-	public record TileHandle(BlockKey key, long bytes, Kind kind)
-		implements AutoCloseable {
+	public static final class TileHandle implements AutoCloseable {
 		public enum Kind {
 			CACHE,
 			BACKEND
 		}
 
-		public CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> read(MemoryAllowance owner) {
-			if(kind() == Kind.CACHE)
-				return OOCCacheManager.requestBlockBacked(key(), owner, bytes());
+		private final SharedTileHandle _shared;
+		private final AtomicBoolean _closed = new AtomicBoolean(false);
 
-			return OOCCacheManager.getTileStoreBackend().read(key())
-				.thenApply(imv -> imv == null ? null : new InMemoryQueueCallback(imv, null, owner, bytes()));
+		public TileHandle(BlockKey key, long bytes, Kind kind) {
+			_shared = new SharedTileHandle(key, bytes, kind);
+		}
+
+		private TileHandle(SharedTileHandle shared) {
+			_shared = shared;
+		}
+
+		public BlockKey key() {
+			return _shared.key;
+		}
+
+		public long bytes() {
+			return _shared.bytes;
+		}
+
+		public Kind kind() {
+			return _shared.kind;
+		}
+
+		public TileHandle retain() {
+			if(_closed.get())
+				throw new IllegalStateException("Cannot retain a closed tile handle.");
+			_shared.retain();
+			return new TileHandle(_shared);
+		}
+
+		public CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> read(MemoryAllowance owner) {
+			TileHandle readLease = retain();
+			try {
+				CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> future =
+					kind() == Kind.CACHE ?
+						OOCCacheManager.requestBlockBacked(key(), owner, bytes()) :
+						OOCCacheManager.getTileStoreBackend().read(key())
+							.thenApply(imv -> imv == null ? null :
+								new InMemoryQueueCallback(imv, null, owner, bytes()));
+				future.whenComplete((ignored, error) -> readLease.close());
+				return future;
+			}
+			catch(RuntimeException ex) {
+				readLease.close();
+				throw ex;
+			}
 		}
 
 		@Override
 		public void close() {
-			if(kind() == Kind.CACHE)
-				OOCCacheManager.getCache().forget(key());
-			else
-				OOCCacheManager.getTileStoreBackend().delete(key());
+			if(_closed.compareAndSet(false, true))
+				_shared.release();
+		}
+
+		private static final class SharedTileHandle {
+			private final BlockKey key;
+			private final long bytes;
+			private final Kind kind;
+			private final AtomicInteger references = new AtomicInteger(1);
+
+			private SharedTileHandle(BlockKey key, long bytes, Kind kind) {
+				this.key = key;
+				this.bytes = bytes;
+				this.kind = kind;
+			}
+
+			private void retain() {
+				int refs;
+				do {
+					refs = references.get();
+					if(refs <= 0)
+						throw new IllegalStateException("Cannot retain a released tile handle.");
+				}
+				while(!references.compareAndSet(refs, refs + 1));
+			}
+
+			private void release() {
+				int refs = references.decrementAndGet();
+				if(refs > 0)
+					return;
+				if(refs < 0)
+					throw new IllegalStateException("Tile handle released too often.");
+				if(kind == Kind.CACHE)
+					OOCCacheManager.getCache().forget(key);
+				else
+					OOCCacheManager.getTileStoreBackend().delete(key);
+			}
 		}
 	}
 
