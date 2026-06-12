@@ -25,6 +25,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
@@ -34,10 +35,10 @@ import org.apache.sysds.runtime.ooc.store.TableRendezvous;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
-import scala.Tuple3;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
@@ -162,7 +163,7 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 		OOCStream<IndexedMatrixValue> l = _inputStreamables.get(0).getReadStream();
 		OOCStream<IndexedMatrixValue> r = _inputStreamables.get(1).getReadStream();
 		OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
-		OOCStream<Tuple3<OOCStream.QueueCallback<IndexedMatrixValue>, OOCStream.QueueCallback<IndexedMatrixValue>, Integer>> intermediate = new SubscribableTaskQueue<>();
+		OOCStream<JoinWork> intermediate = new SubscribableTaskQueue<>();
 
 		if(_table != null) {
 			startTableDriver(l, r, intermediate, out);
@@ -189,8 +190,9 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 							}
 							else {
 								try(cb) {
-									intermediate.enqueue(nextLeft ? new Tuple3<>(next.keepOpen(), cb.keepOpen(), idx) :
-										new Tuple3<>(cb.keepOpen(), next.keepOpen(), idx));
+									intermediate.enqueue(nextLeft ?
+										new JoinWork(next.keepOpen(), cb.keepOpen(), idx, 0) :
+										new JoinWork(cb.keepOpen(), next.keepOpen(), idx, 0));
 								}
 							}
 						}
@@ -204,8 +206,8 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 										throw DMLRuntimeException.of(err);
 									try(cb; pinned) {
 										intermediate.enqueue(
-											isLeft ? new Tuple3<>(pinned.keepOpen(), cb.keepOpen(), idx) :
-												new Tuple3<>(cb.keepOpen(), pinned.keepOpen(), idx));
+											isLeft ? new JoinWork(pinned.keepOpen(), cb.keepOpen(), idx, 0) :
+												new JoinWork(cb.keepOpen(), pinned.keepOpen(), idx, 0));
 									}
 								}
 								catch(Throwable t) {
@@ -236,23 +238,32 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 
 		OOCInstructionUtils.submitOOCTasks(intermediate, cb -> {
 			var t = cb.get();
-			var qL = t._1();
-			var qR = t._2();
+			var qL = t._left;
+			var qR = t._right;
+			long bytes = t._outputBytes;
+			boolean reservationOwned = bytes > 0;
 			try(qL; qR) {
 				var imv = new IndexedMatrixValue(qL.get().getIndexes(),
 					_fn.apply(List.of((MatrixBlock)qL.get().getValue(), (MatrixBlock)qR.get().getValue())));
-				long bytes = _allocFn.applyAsLong(imv.getIndexes());
-				if(_startsRegion)
+				if(bytes == 0)
+					bytes = _allocFn.applyAsLong(imv.getIndexes());
+				if(_startsRegion && !reservationOwned) {
 					_allowance.reserveBlocking(bytes);
-				if(_crossBoundaries)
+					reservationOwned = true;
+				}
+				if(_crossBoundaries) {
 					out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, bytes));
+					reservationOwned = false;
+				}
 				else
 					out.enqueue(new OOCStream.SimpleQueueCallback<>(imv, null));
 			}
 			finally {
+				if(reservationOwned)
+					_allowance.release(bytes);
 				//the table path has nothing to clear: the take already removed the slot
 				if(_cache != null)
-					_cache.clear(t._3());
+					_cache.clear(t._index);
 			}
 		}, _sc).thenRun(out::closeInput).exceptionally(t -> {
 			out.propagateFailure(DMLRuntimeException.of(t));
@@ -264,18 +275,25 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	 * The rendezvous driver on the new contract: one thread alternates dequeues between both inputs
 	 * (the legacy idiom), and every tile goes through {@link TableRendezvous#installOrTake} — install
 	 * when the partner has not arrived, take-and-pair when it has. Both inputs share the ONE bound
-	 * table (one cache stream id), so eviction sees one population. The helper owns each callback
-	 * (exclusive payload extraction); resolved matches feed the unchanged compute pipeline.
+	 * table (one cache stream id), so eviction sees one population. The driver keeps one worst-case
+	 * output reservation prepaid; a resolved match takes that reservation and the driver replenishes
+	 * it before admitting another tile.
 	 */
 	private void startTableDriver(OOCStream<IndexedMatrixValue> l, OOCStream<IndexedMatrixValue> r,
-		OOCStream<Tuple3<OOCStream.QueueCallback<IndexedMatrixValue>, OOCStream.QueueCallback<IndexedMatrixValue>, Integer>> intermediate,
+		OOCStream<JoinWork> intermediate,
 		OOCStream<IndexedMatrixValue> out) {
 		new Thread(() -> {
 			OOCStream.QueueCallback<IndexedMatrixValue> next = null;
+			long outputBytes = 0;
+			boolean reservationOwned = false;
 			try {
 				long cols = OOCUtils.getNumColBlocks(r.getDataCharacteristics());
 				boolean nextLeft = true;
-				AtomicInteger pendingRequests = new AtomicInteger(1);
+				if(_startsRegion) {
+					outputBytes = _allocFn.applyAsLong(new MatrixIndexes(1, 1));
+					_allowance.reserveBlocking(outputBytes);
+					reservationOwned = true;
+				}
 
 				while((next = (nextLeft ? l : r).dequeueCB()) != null && !next.isEos()) {
 					IndexedMatrixValue nextValue = next.get();
@@ -284,41 +302,75 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 					final int idx = (int) (rIdx * cols + cIdx);
 					long bytes = _allocFn.applyAsLong(nextValue.getIndexes());
 					final boolean isLeft = nextLeft;
-					pendingRequests.incrementAndGet();
 					OOCFuture<TableRendezvous.Match> rendezvous =
 						TableRendezvous.installOrTake(_table, idx, next, _allowance, bytes);
 					next = null; //ownership transferred to the helper
-					rendezvous.whenComplete((match, error) -> {
+					TableRendezvous.Match match = getRendezvous(rendezvous);
+					if(match != null) {
+						long reservedBytes = reservationOwned ? outputBytes : 0;
+						JoinWork work = isLeft ?
+							new JoinWork(match.own(), match.partner(), idx, reservedBytes) :
+							new JoinWork(match.partner(), match.own(), idx, reservedBytes);
 						try {
-							if(error != null)
-								throw DMLRuntimeException.of(error);
-							if(match != null) {
-								intermediate.enqueue(isLeft ?
-									new Tuple3<>(match.own(), match.partner(), idx) :
-									new Tuple3<>(match.partner(), match.own(), idx));
-							}
+							intermediate.enqueue(work);
 						}
 						catch(Throwable t) {
-							failJoin(t, intermediate, out);
+							work.closeInputs();
+							throw t;
 						}
-						finally {
-							if(pendingRequests.decrementAndGet() == 0)
-								intermediate.closeInput();
+						reservationOwned = false;
+						if(_startsRegion) {
+							_allowance.reserveBlocking(outputBytes);
+							reservationOwned = true;
 						}
-					});
+					}
 					nextLeft = !nextLeft;
 				}
 				if(next != null)
 					next.close();
-				if(pendingRequests.decrementAndGet() == 0)
-					intermediate.closeInput();
+				intermediate.closeInput();
 			}
 			catch(Throwable t) {
 				if(next != null)
 					next.close();
 				failJoin(t, intermediate, out);
 			}
+			finally {
+				if(reservationOwned)
+					_allowance.release(outputBytes);
+			}
 		}).start();
+	}
+
+	private static TableRendezvous.Match getRendezvous(OOCFuture<TableRendezvous.Match> rendezvous)
+		throws InterruptedException {
+		try {
+			return rendezvous.get();
+		}
+		catch(ExecutionException ex) {
+			throw DMLRuntimeException.of(ex.getCause());
+		}
+	}
+
+	private static final class JoinWork {
+		private final OOCStream.QueueCallback<IndexedMatrixValue> _left;
+		private final OOCStream.QueueCallback<IndexedMatrixValue> _right;
+		private final int _index;
+		private final long _outputBytes;
+
+		private JoinWork(OOCStream.QueueCallback<IndexedMatrixValue> left,
+			OOCStream.QueueCallback<IndexedMatrixValue> right, int index, long outputBytes) {
+			_left = left;
+			_right = right;
+			_index = index;
+			_outputBytes = outputBytes;
+		}
+
+		private void closeInputs() {
+			try(_left; _right) {
+				// Closing both callbacks releases the matched input ownership.
+			}
+		}
 	}
 
 	private void failJoin(Throwable t, OOCStream<?> intermediate, OOCStream<IndexedMatrixValue> out) {
