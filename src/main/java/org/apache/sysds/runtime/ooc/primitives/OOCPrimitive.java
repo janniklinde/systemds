@@ -21,12 +21,15 @@ package org.apache.sysds.runtime.ooc.primitives;
 
 import org.apache.commons.lang3.NotImplementedException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
 import org.apache.sysds.runtime.ooc.planning.OOCRegionBinding;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
+import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -118,6 +121,34 @@ public abstract class OOCPrimitive {
 	}
 
 	public void bindCache(CachedAllowance cache) {
+		throw new UnsupportedOperationException();
+	}
+
+	/**
+	 * Capability seam of the new architecture: a migrated primitive requests an
+	 * {@link OperatorStateTable} (rendezvous, accumulators, retention slots over the global cache)
+	 * instead of a {@link CachedAllowance}. Takes precedence over {@link #requiresCache()} so a
+	 * primitive can keep both paths selectable during migration. The planner supplies a table over
+	 * the global cache with the region allowance and a fresh stream id, so eviction sees the table
+	 * as one population. The primitive owns the table lifecycle and closes it in {@code onComplete}.
+	 */
+	public boolean requiresStateTable() {
+		return false;
+	}
+
+	public void bindStateTable(OperatorStateTable<IndexedMatrixValue> table) {
+		throw new UnsupportedOperationException();
+	}
+
+	/**
+	 * Capability seam for primitives consuming a materialized boundary: the planner hands the shared
+	 * {@link OOCStoreBinding} of an input store (created once per boundary; reader registration goes
+	 * through the binding so {@code sealReaders()} fires exactly when the declared consumer set has
+	 * registered). The primitive must await {@code binding.completion()} before opening readers and
+	 * call {@code binding.release()} when done. Long-term, primitives declare strategy variants here
+	 * (join RENDEZVOUS vs INDEXED_LOOKUP, replay ordered vs opportunistic) and the planner picks.
+	 */
+	public void bindStore(OOCStoreBinding store) {
 		throw new UnsupportedOperationException();
 	}
 

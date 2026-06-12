@@ -19,14 +19,17 @@
 
 package org.apache.sysds.runtime.ooc.planning;
 
+import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -107,7 +110,15 @@ public class OOCPlanner {
 			boolean crossBoundaries = i == 0;
 			boolean startsRegion = i == activeRegion.size() - 1;
 			primitive.bindRegion(binding, crossBoundaries, startsRegion);
-			if(primitive.requiresCache()) {
+			//migrated primitives get an OperatorStateTable over the global cache (one fresh stream id
+			//per table so eviction sees one population); unmigrated primitives keep CachedAllowance.
+			//Store bindings (OOCStoreBinding: counted reader registration + sealReaders) are created
+			//where the materialization boundary is built, once boundaries are migrated (Steps 3-4).
+			if(primitive.requiresStateTable()) {
+				primitive.bindStateTable(new OperatorStateTable<>(OOCCacheManager.getGlobalCache(),
+					CachingStream._streamSeq.getNextID(), allowance));
+			}
+			else if(primitive.requiresCache()) {
 				primitive.bindCache(new CachedAllowance(GlobalMemoryBroker.get()));
 			}
 		}
