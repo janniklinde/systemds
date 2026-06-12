@@ -293,6 +293,85 @@ public class OperatorStateTableTest {
 		}
 	}
 
+	@Test
+	public void testInstallReferenceRequiresPinnedEntry() throws Exception {
+		Fixture f = new Fixture();
+		BlockKey key = new BlockKey(19, 0);
+		try {
+			f.producer.reserveBlocking(BYTES);
+			BlockEntry source = f.cache.putPinned(key, value(2.0), BYTES, f.producer);
+			await(f.cache.unpin(source, f.producer));
+			try {
+				f.table.installReference(7, source);
+				Assert.fail("installReference must reject an unpinned entry");
+			}
+			catch(IllegalArgumentException expected) {
+				//expected
+			}
+			try {
+				f.table.installReferenceOrTake(7, source);
+				Assert.fail("installReferenceOrTake must reject an unpinned entry");
+			}
+			catch(IllegalArgumentException expected) {
+				//expected
+			}
+			Assert.assertNull(f.table.take(7).get(10, TimeUnit.SECONDS));
+			f.cache.dereference(key);
+		}
+		finally {
+			f.close();
+		}
+	}
+
+	@Test
+	public void testPipelinedReferencesShareOnePack() throws Exception {
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(1L << 32);
+		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker);
+		SyncMemoryAllowance region = new SyncMemoryAllowance(broker);
+		producer.setTargetMemory(1L << 30);
+		region.setTargetMemory(1L << 30);
+		//large pack target and disabled seal timer: only forced seals could fragment
+		OOCPackedCache cache = new OOCPackedCache(
+			new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30),
+			2 * BYTES, 100 * BYTES, -1, 0);
+		OperatorStateTable<IndexedMatrixValue> table =
+			new OperatorStateTable<>(cache, STREAM_ID, region);
+		try {
+			//producer unpins of pending tiles stay deferred until the pack seals and transfers
+			OOCCache.UnpinHandle[] unpins = new OOCCache.UnpinHandle[3];
+			for(int i = 0; i < 3; i++) {
+				//live consumer after a materialization boundary: park a reference per arriving tile
+				producer.reserveBlocking(BYTES);
+				BlockEntry tile = cache.putPinned(new BlockKey(22, i), value(i + 1.0), BYTES, producer);
+				table.installReference(i, tile);
+				unpins[i] = cache.unpin(tile, producer);
+				cache.dereference(new BlockKey(22, i));
+				Assert.assertEquals("Reference installs on pending tiles must not seal packs.",
+					0, cache.getPackGroupCount());
+			}
+			cache.flushPacks();
+			for(OOCCache.UnpinHandle unpin : unpins)
+				await(unpin);
+			Assert.assertEquals("Pipelined parked tiles must share one pack.", 1, cache.getPackGroupCount());
+
+			for(int i = 0; i < 3; i++) {
+				try(OperatorStateTable.StateLease<IndexedMatrixValue> lease =
+					table.take(i).get(10, TimeUnit.SECONDS)) {
+					Assert.assertNotNull(lease);
+					Assert.assertEquals(i + 1.0, scalar(lease.value()), 0.0);
+				}
+			}
+			awaitUsedMemory(region, 0);
+			awaitOwnedCache(cache, 0);
+		}
+		finally {
+			table.close();
+			cache.shutdown();
+			producer.destroy();
+			region.destroy();
+		}
+	}
+
 	/**
 	 * The accumulator loop of GroupedReduce/MapMMChain on the new contract: install, or take the
 	 * existing value, merge outside the slot, retry with the merged payload.

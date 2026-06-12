@@ -91,6 +91,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 	 * for unpinning the supplied entry; this method adds only a logical lifetime reference.
 	 */
 	public void installReference(int index, BlockEntry pinned) {
+		checkPinned(pinned);
 		Slot slot;
 		synchronized(this) {
 			checkOpen();
@@ -149,6 +150,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 	 * the returned future completes.
 	 */
 	public OOCFuture<StateLease<T>> installReferenceOrTake(int index, BlockEntry pinned) {
+		checkPinned(pinned);
 		Slot installing = null;
 		Slot taken = null;
 		OOCFuture<Void> waitFor = null;
@@ -394,6 +396,12 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 	private void checkOpen() {
 		if(_closed)
 			throw new IllegalStateException("State table is closed.");
+	}
+
+	private static void checkPinned(BlockEntry pinned) {
+		if(!pinned.isPinned())
+			throw new IllegalArgumentException(
+				"Reference install requires the supplied entry to be pinned: " + pinned.getKey());
 	}
 
 	private void ensureCapacity(int index) {

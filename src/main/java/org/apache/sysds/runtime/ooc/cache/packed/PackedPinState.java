@@ -41,9 +41,9 @@ final class PackedPinState {
 	private int liveLocations;
 
 	@SuppressWarnings("unchecked")
-	PackedPinState(BlockEntry physicalEntry, long streamId, long[] tileIds, int off, int liveLocations) {
+	PackedPinState(BlockEntry physicalEntry, long streamId, long[] tileIds, int off, int count, int liveLocations) {
 		this.physicalEntry = physicalEntry;
-		group = new OOCPackedCache.PackGroup(this, streamId, tileIds, off, liveLocations);
+		group = new OOCPackedCache.PackGroup(this, streamId, tileIds, off, count);
 		this.liveLocations = liveLocations;
 		allowances = new MemoryAllowance[2];
 		counts = new int[2];
@@ -53,9 +53,9 @@ final class PackedPinState {
 	}
 
 	@SuppressWarnings("unchecked")
-	PackedPinState(BlockEntry physicalEntry, long streamId, int[] tileIds, int off, int liveLocations) {
+	PackedPinState(BlockEntry physicalEntry, long streamId, int[] tileIds, int off, int count, int liveLocations) {
 		this.physicalEntry = physicalEntry;
-		group = new OOCPackedCache.PackGroup(this, streamId, tileIds, off, liveLocations);
+		group = new OOCPackedCache.PackGroup(this, streamId, tileIds, off, count);
 		this.liveLocations = liveLocations;
 		allowances = new MemoryAllowance[2];
 		counts = new int[2];

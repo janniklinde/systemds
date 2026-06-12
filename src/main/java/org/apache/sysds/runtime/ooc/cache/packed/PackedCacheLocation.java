@@ -31,9 +31,15 @@ final class SealedPackLocation implements PackedCacheLocation {
 	private int references;
 
 	SealedPackLocation(PackedPinState state, int slot) {
+		this(state, slot, 1);
+	}
+
+	SealedPackLocation(PackedPinState state, int slot, int references) {
+		if(references <= 0)
+			throw new IllegalArgumentException("Sealed location requires a positive reference count.");
 		this.state = state;
 		this.slot = slot;
-		references = 1;
+		this.references = references;
 	}
 
 	PackedPinState state() {
@@ -51,8 +57,11 @@ final class SealedPackLocation implements PackedCacheLocation {
 	}
 
 	synchronized int release() {
-		if(references <= 0)
+		if(references <= 0) {
+			//tolerated for legacy double-forget callers; assertion surfaces it in debug runs
+			assert false : "Packed location slot " + slot + " dereferenced below zero.";
 			return 0;
+		}
 		return --references;
 	}
 }

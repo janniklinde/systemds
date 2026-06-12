@@ -192,7 +192,7 @@ public final class OOCPackedCache implements OOCCache {
 			checkRunning();
 			BlockEntry physicalEntry = putSealedBlockPinned(new PackedBlock(packedData, packedSizes, totalSize),
 				allowance);
-			PackedPinState state = new PackedPinState(physicalEntry, sId, tIds, off, len);
+			PackedPinState state = new PackedPinState(physicalEntry, sId, tIds, off, len, len);
 			for(int i = 0; i < len; i++)
 				putLocation(new BlockKey(sId, tIds[off + i]), new SealedPackLocation(state, i));
 			return physicalEntry;
@@ -215,7 +215,7 @@ public final class OOCPackedCache implements OOCCache {
 			checkRunning();
 			BlockEntry physicalEntry = putSealedBlockPinned(new PackedBlock(packedData, packedSizes, totalSize),
 				allowance);
-			PackedPinState state = new PackedPinState(physicalEntry, sId, tIds, off, len);
+			PackedPinState state = new PackedPinState(physicalEntry, sId, tIds, off, len, len);
 			for(int i = 0; i < len; i++)
 				putLocation(new BlockKey(sId, tIds[off + i]), new SealedPackLocation(state, i));
 			return physicalEntry;
@@ -286,7 +286,7 @@ public final class OOCPackedCache implements OOCCache {
 		if(meta instanceof PackedLogicalPin packed)
 			return packed.location().retain();
 		if(meta instanceof PendingLogicalPin pending)
-			return forceSeal(new PendingPackLocation(pending.builder(), pending.slot())).retain();
+			return referencePending(pending.builder(), pending.slot());
 		return _physical.reference(entry);
 	}
 
@@ -296,8 +296,7 @@ public final class OOCPackedCache implements OOCCache {
 		if(meta instanceof PackedLogicalPin packed)
 			return releaseLocation(entry.getKey(), packed.location());
 		if(meta instanceof PendingLogicalPin pending)
-			return releaseLocation(entry.getKey(),
-				forceSeal(new PendingPackLocation(pending.builder(), pending.slot())));
+			return dereferencePending(pending.builder(), pending.slot());
 		return _physical.dereference(entry);
 	}
 
@@ -307,10 +306,37 @@ public final class OOCPackedCache implements OOCCache {
 		if(location == null)
 			return _physical.dereference(key);
 		if(location instanceof PendingPackLocation pending)
-			location = forceSeal(pending);
+			return dereferencePending(pending.builder(), pending.slot());
 		if(!(location instanceof SealedPackLocation packed))
 			return _physical.dereference(key);
 		return releaseLocation(key, packed);
+	}
+
+	/**
+	 * References/dereferences on tiles in open builders are counted on the builder slot instead of
+	 * forcing a seal, so pipelined consumers that park references (state tables, store readers) do not
+	 * fragment packs into per-tile physical entries. Slot counts carry over into the
+	 * SealedPackLocation at seal time; only physical access (pin, pack group) forces a seal.
+	 */
+	private synchronized int referencePending(PackBuilder builder, int slot) {
+		if(!builder.sealed)
+			return builder.retainSlot(slot);
+		PackedCacheLocation location = getLocation(builder.streamIds[slot], builder.tileIds[slot]);
+		if(!(location instanceof SealedPackLocation packed))
+			throw new IllegalStateException("Cannot retain a forgotten packed location.");
+		return packed.retain();
+	}
+
+	private synchronized int dereferencePending(PackBuilder builder, int slot) {
+		BlockKey key = new BlockKey(builder.streamIds[slot], builder.tileIds[slot]);
+		if(builder.sealed) {
+			PackedCacheLocation location = getLocation(key.getStreamId(), key.getSequenceNumber());
+			return location instanceof SealedPackLocation packed ? releaseLocation(key, packed) : 0;
+		}
+		int references = builder.releaseSlot(slot);
+		if(references == 0)
+			clearLocation(key);
+		return references;
 	}
 
 	@Override
@@ -524,15 +550,22 @@ public final class OOCPackedCache implements OOCCache {
 
 		PackedBlock block = builder.createBlock();
 		BlockEntry physicalEntry = putSealedBlockPinned(block, builder.allowance);
+		int liveSlots = builder.countLiveSlots();
 		PackedPinState state = new PackedPinState(physicalEntry, builder.streamIds[0],
-			builder.tileIds, 0, builder.count);
+			builder.tileIds, 0, builder.count, liveSlots);
 		builder.state = state;
 
+		//slots forgotten while pending stay in the physical pack (uncompacted, like sealed packs)
+		//but get no location; their builder-side reference counts seed the sealed locations
 		for(int i = 0; i < builder.count; i++)
-			putLocation(new BlockKey(builder.streamIds[i], builder.tileIds[i]), new SealedPackLocation(state, i));
+			if(builder.refCounts[i] > 0)
+				putLocation(new BlockKey(builder.streamIds[i], builder.tileIds[i]),
+					new SealedPackLocation(state, i, builder.refCounts[i]));
 
 		if(builder.activePins == 0)
 			builder.transferProducerOwnership(_physical);
+		if(liveSlots == 0)
+			_physical.dereference(physicalEntry);
 	}
 
 	private BlockEntry putSealedBlockPinned(PackedBlock block, MemoryAllowance allowance) {

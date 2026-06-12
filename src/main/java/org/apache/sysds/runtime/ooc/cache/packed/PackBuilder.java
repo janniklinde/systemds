@@ -37,6 +37,7 @@ final class PackBuilder {
 	long[] tileIds = new long[16];
 	private Object[] values = new Object[16];
 	long[] sizes = new long[16];
+	int[] refCounts = new int[16];
 	long bytes;
 	int count;
 	int activePins;
@@ -58,9 +59,37 @@ final class PackBuilder {
 		tileIds[slot] = tileId;
 		values[slot] = value;
 		sizes[slot] = size;
+		refCounts[slot] = 1;
 		bytes += size;
 		activePins++;
 		return slot;
+	}
+
+	/**
+	 * Logical lifetime references of a staged slot (initial 1 for the canonical publisher), kept on the
+	 * builder so referencing a pending tile does not force a premature seal. Transferred into the
+	 * slot's SealedPackLocation at seal time. Guarded by the OOCPackedCache monitor.
+	 */
+	int retainSlot(int slot) {
+		int references = refCounts[slot];
+		if(references <= 0)
+			throw new IllegalStateException("Cannot retain a forgotten packed location.");
+		return refCounts[slot] = references + 1;
+	}
+
+	int releaseSlot(int slot) {
+		int references = refCounts[slot];
+		if(references <= 0)
+			return 0;
+		return refCounts[slot] = references - 1;
+	}
+
+	int countLiveSlots() {
+		int live = 0;
+		for(int i = 0; i < count; i++)
+			if(refCounts[i] > 0)
+				live++;
+		return live;
 	}
 
 	long getBytes() {
@@ -101,6 +130,7 @@ final class PackBuilder {
 		tileIds = Arrays.copyOf(tileIds, len);
 		values = Arrays.copyOf(values, len);
 		sizes = Arrays.copyOf(sizes, len);
+		refCounts = Arrays.copyOf(refCounts, len);
 	}
 
 	private void completeDeferredUnpins(boolean committed) {
