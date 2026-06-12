@@ -25,9 +25,12 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
+import org.apache.sysds.runtime.ooc.store.TableRendezvous;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -39,11 +42,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 public class JoinOOCPrimitive extends OOCPrimitive {
+	//migration toggle (TODO Step 4): the OperatorStateTable rendezvous is the default; the legacy
+	//CachedAllowance path stays selectable until the full migration (Step 5) removes it
+	private static volatile boolean USE_STATE_TABLE =
+		Boolean.parseBoolean(System.getProperty("sysds.ooc.join.stateTable", "true"));
+
 	private final List<OOCStreamable<IndexedMatrixValue>> _inputStreamables;
 	private final OOCStreamable<IndexedMatrixValue> _outputStreamable;
 	private final Function<List<MatrixBlock>, MatrixBlock> _fn;
 	private final StreamContext _sc;
 	private CachedAllowance _cache;
+	private OperatorStateTable<IndexedMatrixValue> _table;
 
 	private JoinOOCPrimitive(List<OOCPrimitive> inputPrimitives, List<OOCStreamable<IndexedMatrixValue>> inputs, OOCStreamable<IndexedMatrixValue> output, Function<List<MatrixBlock>, MatrixBlock> fn, StreamContext sc) {
 		super(inputPrimitives);
@@ -88,8 +97,28 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	public boolean requiresStateTable() {
+		return USE_STATE_TABLE;
+	}
+
+	@Override
+	public void bindStateTable(OperatorStateTable<IndexedMatrixValue> table) {
+		_table = table;
+	}
+
+	/**
+	 * Selects the rendezvous backend for primitives planned AFTER this call; already compiled
+	 * pipelines keep their binding. Test/migration hook only.
+	 */
+	public static void setUseStateTable(boolean useStateTable) {
+		USE_STATE_TABLE = useStateTable;
+	}
+
+	@Override
 	public void onComplete() {
 		try {
+			if(_table != null)
+				_table.close();
 			if(_cache != null)
 				_cache.shutdown();
 		}
@@ -135,7 +164,10 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 		OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
 		OOCStream<Tuple3<OOCStream.QueueCallback<IndexedMatrixValue>, OOCStream.QueueCallback<IndexedMatrixValue>, Integer>> intermediate = new SubscribableTaskQueue<>();
 
-		new Thread(() -> {
+		if(_table != null) {
+			startTableDriver(l, r, intermediate, out);
+		}
+		else new Thread(() -> {
 			try {
 				long cols = OOCUtils.getNumColBlocks(r.getDataCharacteristics());
 				OOCStream.QueueCallback<IndexedMatrixValue> next;
@@ -218,12 +250,75 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 					out.enqueue(new OOCStream.SimpleQueueCallback<>(imv, null));
 			}
 			finally {
-				_cache.clear(t._3());
+				//the table path has nothing to clear: the take already removed the slot
+				if(_cache != null)
+					_cache.clear(t._3());
 			}
 		}, _sc).thenRun(out::closeInput).exceptionally(t -> {
 			out.propagateFailure(DMLRuntimeException.of(t));
 			return null;
 		}).thenRun(this::onComplete);
+	}
+
+	/**
+	 * The rendezvous driver on the new contract: one thread alternates dequeues between both inputs
+	 * (the legacy idiom), and every tile goes through {@link TableRendezvous#installOrTake} — install
+	 * when the partner has not arrived, take-and-pair when it has. Both inputs share the ONE bound
+	 * table (one cache stream id), so eviction sees one population. The helper owns each callback
+	 * (exclusive payload extraction); resolved matches feed the unchanged compute pipeline.
+	 */
+	private void startTableDriver(OOCStream<IndexedMatrixValue> l, OOCStream<IndexedMatrixValue> r,
+		OOCStream<Tuple3<OOCStream.QueueCallback<IndexedMatrixValue>, OOCStream.QueueCallback<IndexedMatrixValue>, Integer>> intermediate,
+		OOCStream<IndexedMatrixValue> out) {
+		new Thread(() -> {
+			OOCStream.QueueCallback<IndexedMatrixValue> next = null;
+			try {
+				long cols = OOCUtils.getNumColBlocks(r.getDataCharacteristics());
+				boolean nextLeft = true;
+				AtomicInteger pendingRequests = new AtomicInteger(1);
+
+				while((next = (nextLeft ? l : r).dequeueCB()) != null && !next.isEos()) {
+					IndexedMatrixValue nextValue = next.get();
+					long rIdx = nextValue.getIndexes().getRowIndex() - 1;
+					long cIdx = nextValue.getIndexes().getColumnIndex() - 1;
+					final int idx = (int) (rIdx * cols + cIdx);
+					long bytes = _allocFn.applyAsLong(nextValue.getIndexes());
+					final boolean isLeft = nextLeft;
+					pendingRequests.incrementAndGet();
+					OOCFuture<TableRendezvous.Match> rendezvous =
+						TableRendezvous.installOrTake(_table, idx, next, _allowance, bytes);
+					next = null; //ownership transferred to the helper
+					rendezvous.whenComplete((match, error) -> {
+						try {
+							if(error != null)
+								throw DMLRuntimeException.of(error);
+							if(match != null) {
+								intermediate.enqueue(isLeft ?
+									new Tuple3<>(match.own(), match.partner(), idx) :
+									new Tuple3<>(match.partner(), match.own(), idx));
+							}
+						}
+						catch(Throwable t) {
+							failJoin(t, intermediate, out);
+						}
+						finally {
+							if(pendingRequests.decrementAndGet() == 0)
+								intermediate.closeInput();
+						}
+					});
+					nextLeft = !nextLeft;
+				}
+				if(next != null)
+					next.close();
+				if(pendingRequests.decrementAndGet() == 0)
+					intermediate.closeInput();
+			}
+			catch(Throwable t) {
+				if(next != null)
+					next.close();
+				failJoin(t, intermediate, out);
+			}
+		}).start();
 	}
 
 	private void failJoin(Throwable t, OOCStream<?> intermediate, OOCStream<IndexedMatrixValue> out) {
