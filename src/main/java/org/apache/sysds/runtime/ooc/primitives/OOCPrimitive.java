@@ -29,6 +29,7 @@ import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
 import org.apache.sysds.runtime.ooc.planning.OOCRegionBinding;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreRequest;
 import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 
 import java.util.ArrayList;
@@ -138,6 +139,18 @@ public abstract class OOCPrimitive {
 
 	public void bindStateTable(OperatorStateTable<IndexedMatrixValue> table) {
 		throw new UnsupportedOperationException();
+	}
+
+	/**
+	 * Declares a materialized store over one of this primitive's boundary inputs, or null when the
+	 * primitive does not consume a store (or keeps its legacy path). The request carries only what
+	 * the planner cannot know — the boundary's index linearization and the registration counts —
+	 * while the planner supplies cache, stream id, and sink allowance, and answers with
+	 * {@link #bindStore(OOCStoreBinding)}. The primitive attaches the binding's sink to its input
+	 * stream when execution starts.
+	 */
+	public OOCStoreRequest requiresStore() {
+		return null;
 	}
 
 	/**
