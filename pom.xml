@@ -82,7 +82,7 @@
 		<doc.skip>false</doc.skip>
 		<jacoco.include>**</jacoco.include>
 		<automatedtestbase.outputbuffering>false</automatedtestbase.outputbuffering>
-		<argLine>-Xms16000m -Xmx16000m -Xmn1600m</argLine>
+        <argLine>-Xms3000m -Xmx3000m -Xmn300m</argLine>
 		<enableStats>false</enableStats>
 
 		<!-- Dependent on Spark open to access deprecated api components from <= Java 11. Should be removed once Spark updates fully to Java 17 -->
