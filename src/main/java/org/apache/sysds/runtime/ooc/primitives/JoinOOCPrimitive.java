@@ -27,7 +27,6 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
-import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
@@ -39,20 +38,13 @@ import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 public class JoinOOCPrimitive extends OOCPrimitive {
-	//migration toggle (TODO Step 4): the OperatorStateTable rendezvous is the default; the legacy
-	//CachedAllowance path stays selectable until the full migration (Step 5) removes it
-	private static volatile boolean USE_STATE_TABLE =
-		Boolean.parseBoolean(System.getProperty("sysds.ooc.join.stateTable", "true"));
-
 	private final List<OOCStreamable<IndexedMatrixValue>> _inputStreamables;
 	private final OOCStreamable<IndexedMatrixValue> _outputStreamable;
 	private final Function<List<MatrixBlock>, MatrixBlock> _fn;
 	private final StreamContext _sc;
-	private CachedAllowance _cache;
 	private OperatorStateTable<IndexedMatrixValue> _table;
 
 	private JoinOOCPrimitive(List<OOCPrimitive> inputPrimitives, List<OOCStreamable<IndexedMatrixValue>> inputs, OOCStreamable<IndexedMatrixValue> output, Function<List<MatrixBlock>, MatrixBlock> fn, StreamContext sc) {
@@ -89,17 +81,12 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	public boolean requiresCache() {
-		return true;
-	}
-
-	@Override
-	public void bindCache(CachedAllowance cache) {
-		_cache = cache;
+		return false;
 	}
 
 	@Override
 	public boolean requiresStateTable() {
-		return USE_STATE_TABLE;
+		return true;
 	}
 
 	@Override
@@ -107,21 +94,11 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 		_table = table;
 	}
 
-	/**
-	 * Selects the rendezvous backend for primitives planned AFTER this call; already compiled
-	 * pipelines keep their binding. Test/migration hook only.
-	 */
-	public static void setUseStateTable(boolean useStateTable) {
-		USE_STATE_TABLE = useStateTable;
-	}
-
 	@Override
 	public void onComplete() {
 		try {
 			if(_table != null)
 				_table.close();
-			if(_cache != null)
-				_cache.shutdown();
 		}
 		finally {
 			super.onComplete();
@@ -165,76 +142,7 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 		OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
 		OOCStream<JoinWork> intermediate = new SubscribableTaskQueue<>();
 
-		if(_table != null) {
-			startTableDriver(l, r, intermediate, out);
-		}
-		else new Thread(() -> {
-			try {
-				long cols = OOCUtils.getNumColBlocks(r.getDataCharacteristics());
-				OOCStream.QueueCallback<IndexedMatrixValue> next;
-				IndexedMatrixValue nextValue;
-				boolean nextLeft = true;
-				AtomicInteger pendingRequests = new AtomicInteger(1);
-
-					while((next = (nextLeft ? l : r).dequeueCB()) != null && !next.isEos()) {
-						try {
-							nextValue = next.get();
-							long rIdx = nextValue.getIndexes().getRowIndex()-1;
-							long cIdx =  nextValue.getIndexes().getColumnIndex()-1;
-							int idx = (int) (rIdx * cols + cIdx);
-						var future = _cache.get(idx);
-						if(future.isDone()) {
-							var cb = future.getNow(null);
-							if(cb == null) {
-								_cache.handover(next, idx);
-							}
-							else {
-								try(cb) {
-									intermediate.enqueue(nextLeft ?
-										new JoinWork(next.keepOpen(), cb.keepOpen(), idx, 0) :
-										new JoinWork(cb.keepOpen(), next.keepOpen(), idx, 0));
-								}
-							}
-						}
-						else {
-							pendingRequests.incrementAndGet();
-							final var pinned = next.keepOpen();
-							final boolean isLeft = nextLeft;
-							future.whenComplete((cb, err) -> {
-								try {
-									if(err != null)
-										throw DMLRuntimeException.of(err);
-									try(cb; pinned) {
-										intermediate.enqueue(
-											isLeft ? new JoinWork(pinned.keepOpen(), cb.keepOpen(), idx, 0) :
-												new JoinWork(cb.keepOpen(), pinned.keepOpen(), idx, 0));
-									}
-								}
-								catch(Throwable t) {
-									failJoin(t, intermediate, out);
-								}
-								finally {
-									if(pendingRequests.decrementAndGet() == 0)
-										intermediate.closeInput();
-								}
-							});
-						}
-
-						nextLeft = !nextLeft;
-					}
-						finally {
-							next.close();
-						}
-					}
-
-				if(pendingRequests.decrementAndGet() == 0) {
-					intermediate.closeInput();
-				}
-			}
-			catch(Throwable t) {
-				failJoin(t, intermediate, out);
-			}
-		}).start();
+		startTableDriver(l, r, intermediate, out);
 
 		OOCInstructionUtils.submitOOCTasks(intermediate, cb -> {
 			var t = cb.get();
@@ -247,10 +155,8 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 					_fn.apply(List.of((MatrixBlock)qL.get().getValue(), (MatrixBlock)qR.get().getValue())));
 				if(bytes == 0)
 					bytes = _allocFn.applyAsLong(imv.getIndexes());
-				if(_startsRegion && !reservationOwned) {
-					_allowance.reserveBlocking(bytes);
-					reservationOwned = true;
-				}
+				if(_startsRegion && !reservationOwned)
+					throw new IllegalStateException("Join output reservation was not pre-admitted.");
 				if(_crossBoundaries) {
 					out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, bytes));
 					reservationOwned = false;
@@ -262,8 +168,6 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 				if(reservationOwned)
 					_allowance.release(bytes);
 				//the table path has nothing to clear: the take already removed the slot
-				if(_cache != null)
-					_cache.clear(t._index);
 			}
 		}, _sc).thenRun(out::closeInput).exceptionally(t -> {
 			out.propagateFailure(DMLRuntimeException.of(t));
@@ -309,8 +213,8 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 					if(match != null) {
 						long reservedBytes = reservationOwned ? outputBytes : 0;
 						JoinWork work = isLeft ?
-							new JoinWork(match.own(), match.partner(), idx, reservedBytes) :
-							new JoinWork(match.partner(), match.own(), idx, reservedBytes);
+							new JoinWork(match.own(), match.partner(), reservedBytes) :
+							new JoinWork(match.partner(), match.own(), reservedBytes);
 						try {
 							intermediate.enqueue(work);
 						}
@@ -355,14 +259,12 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	private static final class JoinWork {
 		private final OOCStream.QueueCallback<IndexedMatrixValue> _left;
 		private final OOCStream.QueueCallback<IndexedMatrixValue> _right;
-		private final int _index;
 		private final long _outputBytes;
 
 		private JoinWork(OOCStream.QueueCallback<IndexedMatrixValue> left,
-			OOCStream.QueueCallback<IndexedMatrixValue> right, int index, long outputBytes) {
+			OOCStream.QueueCallback<IndexedMatrixValue> right, long outputBytes) {
 			_left = left;
 			_right = right;
-			_index = index;
 			_outputBytes = outputBytes;
 		}
 

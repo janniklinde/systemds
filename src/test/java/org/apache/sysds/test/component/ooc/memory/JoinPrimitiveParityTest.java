@@ -24,11 +24,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
 import org.apache.sysds.common.Types.FileFormat;
 import org.apache.sysds.common.Types.ValueType;
+import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.functionobjects.Plus;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
@@ -40,8 +43,14 @@ import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
+import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
+import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.planning.OOCRegionBinding;
 import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
+import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -50,8 +59,8 @@ import org.junit.Assert;
 import org.junit.Test;
 
 /**
- * Parity of the migrated equi-join (OperatorStateTable rendezvous over the global cache via
- * TableRendezvous) with the legacy CachedAllowance path, through the real planner pipeline.
+ * Correctness of the migrated equi-join (OperatorStateTable rendezvous over the global cache via
+ * TableRendezvous) through the real planner pipeline.
  */
 public class JoinPrimitiveParityTest {
 	private static final int ROWS = 2000;
@@ -63,18 +72,13 @@ public class JoinPrimitiveParityTest {
 
 	@After
 	public void tearDown() {
-		JoinOOCPrimitive.setUseStateTable(true);
 		OOCCacheManager.reset();
 	}
 
 	@Test
-	public void testTablePathMatchesLegacyPath() throws Exception {
-		Map<MatrixIndexes, Double> legacy = run(false);
-		OOCCacheManager.reset();
-		Map<MatrixIndexes, Double> table = run(true);
+	public void testTablePathProducesExpectedJoin() throws Exception {
+		Map<MatrixIndexes, Double> table = run();
 
-		Assert.assertEquals("Both rendezvous backends must produce identical join results.",
-			legacy, table);
 		Assert.assertEquals(ROW_BLOCKS * COL_BLOCKS, table.size());
 		for(int rb = 1; rb <= ROW_BLOCKS; rb++) {
 			for(int cb = 1; cb <= COL_BLOCKS; cb++) {
@@ -87,9 +91,86 @@ public class JoinPrimitiveParityTest {
 		awaitOwnedCache(OOCCacheManager.getGlobalCache(), 0);
 	}
 
-	private Map<MatrixIndexes, Double> run(boolean useStateTable) throws Exception {
-		JoinOOCPrimitive.setUseStateTable(useStateTable);
+	@Test
+	public void testTablePathPreReservesOutputBeforeAdmittingNextMatch() throws Exception {
+		final int tiles = 3;
+		final int rows = tiles * BLEN;
+		final int cols = BLEN;
+		final long bytes = new MatrixBlock(BLEN, BLEN, 1.0).getExactSerializedSize();
+		CappedAllowance region = new CappedAllowance(3 * bytes);
+		CappedAllowance producer = new CappedAllowance(16 * bytes);
+		OOCCache cache = new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30);
+		OperatorStateTable<IndexedMatrixValue> table = new OperatorStateTable<>(cache, 77, region);
+		OOCStream<IndexedMatrixValue> left = createMatrixStream(rows, cols);
+		OOCStream<IndexedMatrixValue> right = createMatrixStream(rows, cols);
+		OOCStream<IndexedMatrixValue> out = createMatrixStream(rows, cols);
+		CountDownLatch firstComputeEntered = new CountDownLatch(1);
+		CountDownLatch releaseCompute = new CountDownLatch(1);
+		AtomicInteger enteredComputes = new AtomicInteger();
+		AtomicInteger outputs = new AtomicInteger();
+		CompletableFuture<Void> done = new CompletableFuture<>();
 
+		try {
+			for(int i = 1; i <= tiles; i++) {
+				enqueueManaged(left, i, 3.0, producer, bytes);
+				enqueueManaged(right, i, 5.0, producer, bytes);
+			}
+			left.closeInput();
+			right.closeInput();
+			out.setSubscriber(cb -> {
+				try {
+					if(cb.isEos()) {
+						done.complete(null);
+						return;
+					}
+					outputs.incrementAndGet();
+				}
+				catch(Throwable t) {
+					done.completeExceptionally(t);
+				}
+				finally {
+					cb.close();
+				}
+			});
+
+			JoinOOCPrimitive primitive = new JoinOOCPrimitive(List.of(left, right), out, blocks -> {
+				enteredComputes.incrementAndGet();
+				firstComputeEntered.countDown();
+				awaitLatch(releaseCompute);
+				BinaryOperator plus = new BinaryOperator(Plus.getPlusFnObject());
+				return blocks.get(0).binaryOperations(plus, blocks.get(1));
+			}, new StreamContext(0, "op_join_prepaid_regression").addOutStream(out));
+			primitive.bindRegion(new OOCRegionBinding(region, ix -> bytes, new AtomicInteger(1)), true, true);
+			primitive.bindStateTable(table);
+			primitive.startExecution();
+
+			Assert.assertTrue("Expected the first matched pair to reach compute.",
+				firstComputeEntered.await(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS));
+			waitFor(() -> region.getUsedMemory() == 3 * bytes);
+			Assert.assertEquals(3 * bytes, region.getUsedMemory());
+			Thread.sleep(200);
+			Assert.assertEquals("The table driver must stop before pinning another partner when only the "
+				+ "next output reservation is available.", 1, enteredComputes.get());
+
+			releaseCompute.countDown();
+			done.get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			Assert.assertEquals(tiles, outputs.get());
+			awaitOwnedCache(cache, 0);
+			waitFor(() -> region.getUsedMemory() == 0);
+			Assert.assertEquals(0, region.getUsedMemory());
+			waitFor(() -> producer.getUsedMemory() == 0);
+			Assert.assertEquals(0, producer.getUsedMemory());
+		}
+		finally {
+			releaseCompute.countDown();
+			table.close();
+			cache.shutdown();
+			region.shutdown();
+			producer.shutdown();
+		}
+	}
+
+	private Map<MatrixIndexes, Double> run() throws Exception {
 		OOCStream<IndexedMatrixValue> left = createMatrixStream(ROWS, COLS);
 		OOCInstructionUtils.dataGen(left, ix -> new MatrixBlock(OOCUtils.getNumRowsOfTile(ix, ROWS, BLEN),
 			OOCUtils.getNumColsOfTile(ix, COLS, BLEN), 3.0),
@@ -137,6 +218,24 @@ public class JoinPrimitiveParityTest {
 		return stream;
 	}
 
+	private static void enqueueManaged(OOCStream<IndexedMatrixValue> stream, int row, double value,
+		MemoryAllowance allowance, long bytes) {
+		allowance.reserveBlocking(bytes);
+		stream.enqueue(new InMemoryQueueCallback(new IndexedMatrixValue(new MatrixIndexes(row, 1),
+			new MatrixBlock(BLEN, BLEN, value)), null, allowance, bytes));
+	}
+
+	private static void awaitLatch(CountDownLatch latch) {
+		try {
+			if(!latch.await(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS))
+				throw new DMLRuntimeException("Timed out waiting for join regression latch.");
+		}
+		catch(InterruptedException ex) {
+			Thread.currentThread().interrupt();
+			throw new DMLRuntimeException(ex);
+		}
+	}
+
 	private static void awaitOwnedCache(OOCCache cache, long expected) throws Exception {
 		waitFor(() -> cache.getOwnedCacheSize() == expected);
 		Assert.assertEquals(expected, cache.getOwnedCacheSize());
@@ -146,5 +245,85 @@ public class JoinPrimitiveParityTest {
 		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_TIMEOUT_SEC);
 		while(!condition.getAsBoolean() && System.nanoTime() < deadline)
 			Thread.sleep(1);
+	}
+
+	private static final class CappedAllowance implements MemoryAllowance {
+		private final long _limit;
+		private long _used;
+		private boolean _shutdown;
+
+		private CappedAllowance(long limit) {
+			_limit = limit;
+		}
+
+		@Override
+		public synchronized boolean tryReserve(long bytes) {
+			if(_shutdown)
+				return false;
+			if(bytes < 0 || bytes > _limit || _used + bytes > _limit)
+				return false;
+			_used += bytes;
+			notifyAll();
+			return true;
+		}
+
+		@Override
+		public synchronized void reserveBlocking(long bytes) {
+			while(!tryReserve(bytes)) {
+				if(_shutdown)
+					throw new IllegalStateException("Cannot reserve memory on closed allowance.");
+				try {
+					wait();
+				}
+				catch(InterruptedException ex) {
+					Thread.currentThread().interrupt();
+					throw new DMLRuntimeException(ex);
+				}
+			}
+		}
+
+		@Override
+		public CompletableFuture<Void> reserve(long bytes) {
+			return CompletableFuture.runAsync(() -> reserveBlocking(bytes));
+		}
+
+		@Override
+		public synchronized void release(long bytes) {
+			if(bytes < 0 || bytes > _used)
+				throw new IllegalArgumentException("Invalid allowance release: " + bytes + ", used=" + _used);
+			_used -= bytes;
+			notifyAll();
+		}
+
+		@Override
+		public synchronized long getUsedMemory() {
+			return _used;
+		}
+
+		@Override
+		public long getGrantedMemory() {
+			return _limit;
+		}
+
+		@Override
+		public long getTargetMemory() {
+			return _limit;
+		}
+
+		@Override
+		public void setTargetMemory(long targetMemory) {
+			// Fixed-capacity test allowance.
+		}
+
+		@Override
+		public synchronized void shutdown() {
+			_shutdown = true;
+			notifyAll();
+		}
+
+		@Override
+		public synchronized boolean isShutdown() {
+			return _shutdown;
+		}
 	}
 }

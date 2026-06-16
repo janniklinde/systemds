@@ -27,7 +27,6 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
-import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
@@ -37,22 +36,15 @@ import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
-import scala.Tuple2;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.function.BiFunction;
 import java.util.function.ToIntFunction;
 
 public class BroadcastOOCPrimitive extends OOCPrimitive {
-	//migration toggle (TODO Step 4): the MaterializedStore/IndexedReader path is the default; the
-	//legacy CachedAllowance path stays selectable until the full migration (Step 5) removes it
-	private static volatile boolean USE_STORE =
-		Boolean.parseBoolean(System.getProperty("sysds.ooc.broadcast.store", "true"));
-
 	private final OOCStreamable<IndexedMatrixValue> _broadcastStreamable;
 	private final OOCStreamable<IndexedMatrixValue> _streamedStreamable;
 	private final OOCStreamable<IndexedMatrixValue> _outputStreamable;
@@ -63,8 +55,6 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	private final int _maxBroadcastCount;
 	private final boolean _rowBroadcast;
 	private final StreamContext _sc;
-	private final boolean _useStore;
-	private CachedAllowance _cache;
 	private OOCStoreBinding _storeBinding;
 	private volatile MaterializedStore.IndexedReader<IndexedMatrixValue> _reader;
 	private final AtomicBoolean _storeReleased = new AtomicBoolean(false);
@@ -85,7 +75,6 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		_rowBroadcast = rowBroadcast;
 		_mergeFn = mergeFn;
 		_sc = sc;
-		_useStore = USE_STORE;
 	}
 
 	public BroadcastOOCPrimitive(OOCStreamable<IndexedMatrixValue> broadcastStreamable,
@@ -124,17 +113,12 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	public boolean requiresCache() {
-		return !_useStore;
-	}
-
-	@Override
-	public void bindCache(CachedAllowance cache) {
-		_cache = cache;
+		return false;
 	}
 
 	@Override
 	public OOCStoreRequest requiresStore() {
-		return _useStore ? new OOCStoreRequest(_broadcastStreamable, this::broadcastTileIndex, 1, 1) : null;
+		return new OOCStoreRequest(_broadcastStreamable, this::broadcastTileIndex, 1, 1);
 	}
 
 	@Override
@@ -142,20 +126,10 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		_storeBinding = store;
 	}
 
-	/**
-	 * Selects the broadcast lookup backend for primitives CONSTRUCTED after this call. Test/migration
-	 * hook only.
-	 */
-	public static void setUseStore(boolean useStore) {
-		USE_STORE = useStore;
-	}
-
 	@Override
 	public void onComplete() {
 		try {
 			releaseStore();
-			if(_cache != null)
-				_cache.shutdown();
 		}
 		finally {
 			super.onComplete();
@@ -206,166 +180,160 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		});
 	}
 
-	private AtomicIntegerArray _broadcastCount;
-	private int _maxCount;
-
 	@Override
 	public void startExecution() {
-		//the broadcast read stream is resolved only where it is actually consumed: by the legacy
-		//dequeue thread, or by the winning attach of a shared store binding (inside the binding)
+		if(_storeBinding == null)
+			throw new IllegalStateException("Broadcast requires a bound MaterializedStore.");
 		final OOCStream<IndexedMatrixValue> streamedStream = getStreamedStreamable().getReadStream();
 		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
 		final DataCharacteristics dc = streamedStream.getDataCharacteristics();
-		_maxCount = _maxBroadcastCount > 0 ? _maxBroadcastCount :
+		final int maxCount = _maxBroadcastCount > 0 ? _maxBroadcastCount :
 			(int)(_rowBroadcast ? OOCUtils.getNumRowBlocks(dc) : OOCUtils.getNumColBlocks(dc));
 		final int nBroadcastTiles = _numBroadcastTiles > 0 ? _numBroadcastTiles :
 			(int)(_rowBroadcast ? OOCUtils.getNumColBlocks(dc) : OOCUtils.getNumRowBlocks(dc));
-		_broadcastCount = new AtomicIntegerArray(nBroadcastTiles);
 
 		final CompletableFuture<Void> buildFuture = new CompletableFuture<>();
 
-		if(_storeBinding != null) {
-			//store path: the binding is shared by all consumers of the boundary — attach is
-			//first-wins (the boundary is materialized once; a later consumer finds the store already
-			//materialized and its completion callback fires immediately), and probing must wait for
-			//the FULL declared reader set to register (readersSealed), not just our own reader
-			final int broadcastTiles = nBroadcastTiles;
-			_storeBinding.completion().whenComplete((ignored, error) -> {
-				if(error != null) {
-					DMLRuntimeException re = DMLRuntimeException.of(error);
-					out.propagateFailure(re);
+		//the binding is shared by all consumers of the boundary — attach is first-wins (the boundary
+		//is materialized once; a later consumer finds the store already materialized and its completion
+		//callback fires immediately), and probing waits for the FULL declared reader set to register
+		//(readersSealed), not just this reader
+		_storeBinding.completion().whenComplete((ignored, error) -> {
+			if(error != null) {
+				DMLRuntimeException re = DMLRuntimeException.of(error);
+				out.propagateFailure(re);
+				releaseStore();
+				buildFuture.completeExceptionally(re);
+				return;
+			}
+			try {
+				_reader = _storeBinding.openIndexedReader(
+					new MultiplicityLiveness(nBroadcastTiles, maxCount), _allowance);
+			}
+			catch(RuntimeException ex) {
+				out.propagateFailure(DMLRuntimeException.of(ex));
+				releaseStore();
+				buildFuture.completeExceptionally(ex);
+				return;
+			}
+			_storeBinding.readersSealed().whenComplete((sl, sealError) -> {
+				if(sealError != null) {
+					out.propagateFailure(DMLRuntimeException.of(sealError));
 					releaseStore();
-					buildFuture.completeExceptionally(re);
-					return;
+					buildFuture.completeExceptionally(sealError);
 				}
-				try {
-					_reader = _storeBinding.openIndexedReader(
-						new MultiplicityLiveness(broadcastTiles, _maxCount), _allowance);
-				}
-				catch(RuntimeException ex) {
-					out.propagateFailure(DMLRuntimeException.of(ex));
-					releaseStore();
-					buildFuture.completeExceptionally(ex);
-					return;
-				}
-				_storeBinding.readersSealed().whenComplete((sl, sealError) -> {
-					if(sealError != null) {
-						out.propagateFailure(DMLRuntimeException.of(sealError));
-						releaseStore();
-						buildFuture.completeExceptionally(sealError);
-					}
-					else
-						buildFuture.complete(null);
-				});
-			});
-			_storeBinding.attach(getBroadcastStreamable());
-		}
-		else {
-			final OOCStream<IndexedMatrixValue> broadcastStream = getBroadcastStreamable().getReadStream();
-			new Thread(() -> {
-				try {
-					OOCStream.QueueCallback<IndexedMatrixValue> cb;
-
-					while((cb = broadcastStream.dequeueCB()) != null && !cb.isEos()) {
-						try {
-							IndexedMatrixValue imv = cb.get();
-							int idx = _broadcastKeyFn != null ? _broadcastKeyFn.applyAsInt(imv) :
-								(int) (_rowBroadcast ? imv.getIndexes().getColumnIndex() - 1 :
-								imv.getIndexes().getRowIndex() - 1);
-							_cache.handover(cb.keepOpen(), idx);
-						}
-						finally {
-							cb.close();
-						}
-					}
-					if(cb != null)
-						cb.close();
+				else
 					buildFuture.complete(null);
-				}
-				catch(Throwable t) {
-					DMLRuntimeException re = DMLRuntimeException.of(t);
-					out.propagateFailure(re);
-					buildFuture.completeExceptionally(re);
-				}
-			}).start();
-		}
+			});
+		});
+		_storeBinding.attach(getBroadcastStreamable());
 
 		buildFuture.thenRun(() -> {
 			final SubscribableTaskQueue<IndexedMatrixValue> intermediate = new SubscribableTaskQueue<>();
-			final SubscribableTaskQueue<Tuple2<OOCStream.QueueCallback<IndexedMatrixValue>, OOCStream.QueueCallback<IndexedMatrixValue>>> int2 = new SubscribableTaskQueue<>();
+			final SubscribableTaskQueue<ProbeWork> int2 = new SubscribableTaskQueue<>();
 			final AtomicInteger inflightCtr = new AtomicInteger(1);
 			CompletableFuture<Void> future = new CompletableFuture<>();
-				OOCInstructionUtils.submitOOCTasks(streamedStream, cb -> {
-					IndexedMatrixValue result;
-					long bytesToReserve;
-					try(cb) {
-						bytesToReserve = _allocFn.applyAsLong(cb.get().getIndexes());
-						if(_startsRegion && !_allowance.tryReserve(bytesToReserve)) {
+			OOCInstructionUtils.submitOOCTasks(streamedStream, cb -> {
+				IndexedMatrixValue result;
+				long bytesToReserve = 0;
+				boolean reserved = false;
+				try(cb) {
+					bytesToReserve = _allocFn.applyAsLong(cb.get().getIndexes());
+					if(_startsRegion) {
+						if(!_allowance.tryReserve(bytesToReserve)) {
 							intermediate.enqueue(cb.keepOpen());
 							return;
 						}
-						int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(cb.get()) :
-							(int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
-							cb.get().getIndexes().getRowIndex() - 1);
-						var broadcast = broadcastTile(idx);
-						if(!broadcast.isDone()) {
-							final var fCb = cb.keepOpen();
-							inflightCtr.incrementAndGet();
-							broadcast.whenComplete((bcb, error) -> {
-								if(error != null) {
-									fCb.close();
-									out.propagateFailure(DMLRuntimeException.of(error));
-								}
-								else
-									int2.enqueue(new Tuple2<>(bcb, fCb));
-								if(inflightCtr.decrementAndGet() == 0)
-									future.complete(null);
-							});
-							return;
-						}
-						try(var bcb = broadcast.getNow(null)) {
-							result = process(idx, bcb, cb);
-						}
+						reserved = true;
 					}
-					out.enqueue(callbackOf(result, bytesToReserve));
-				}, _allowance, _allocFn, _sc).thenRun(() -> {
-					if(inflightCtr.decrementAndGet() == 0)
-						future.complete(null);
-				});
+					int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(cb.get()) :
+						(int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
+						cb.get().getIndexes().getRowIndex() - 1);
+					var broadcast = broadcastTile(idx);
+					if(!broadcast.isDone()) {
+						final var fCb = cb.keepOpen();
+						final long ownedBytes = reserved ? bytesToReserve : 0;
+						final boolean ownedReservation = reserved;
+						reserved = false;
+						inflightCtr.incrementAndGet();
+						broadcast.whenComplete((bcb, error) -> {
+							if(error != null) {
+								fCb.close();
+								if(ownedReservation)
+									_allowance.release(ownedBytes);
+								out.propagateFailure(DMLRuntimeException.of(error));
+							}
+							else
+								int2.enqueue(new ProbeWork(bcb, fCb, ownedBytes, ownedReservation));
+							if(inflightCtr.decrementAndGet() == 0)
+								future.complete(null);
+						});
+						return;
+					}
+					try(var bcb = broadcast.getNow(null)) {
+						result = process(idx, bcb, cb);
+					}
+				}
+				catch(Throwable t) {
+					if(reserved)
+						_allowance.release(bytesToReserve);
+					throw t;
+				}
+				enqueueOutput(out, result, reserved ? bytesToReserve : 0, reserved);
+			}, _allowance, _allocFn, _sc).thenRun(() -> {
+				if(inflightCtr.decrementAndGet() == 0)
+					future.complete(null);
+			});
 			future.thenRun(intermediate::closeInput);
 			var future2 = OOCInstructionUtils.submitOOCTasks(int2, c -> {
-				var bcb = c.get()._1;
-				var cb = c.get()._2;
+				ProbeWork work = c.get();
+				var bcb = work._broadcast;
+				var cb = work._streamed;
 				IndexedMatrixValue result;
+				boolean reservationOwned = work._reserved;
 				try(bcb; cb) {
 					int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(cb.get()) :
 						(int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
 						cb.get().getIndexes().getRowIndex() - 1);
 					result = process(idx, bcb, cb);
 				}
-				out.enqueue(callbackOf(result, _allocFn.applyAsLong(result.getIndexes())));
+				try {
+					reservationOwned = false;
+					enqueueOutput(out, result, work._bytes, work._reserved);
+				}
+				finally {
+					if(reservationOwned && work._bytes > 0)
+						_allowance.release(work._bytes);
+				}
 			}, _sc);
 			CompletableFuture<Void> future3 = new CompletableFuture<>();
-				new Thread(() -> {
-					OOCStream.QueueCallback<IndexedMatrixValue> tmp;
-					AtomicInteger ctr = new AtomicInteger(1);
-					while((tmp = intermediate.dequeueCB()) != null && !tmp.isEos()) {
-						long bytesToReserve = _allocFn.applyAsLong(tmp.get().getIndexes());
-						if(_startsRegion)
-							_allowance.reserveBlocking(bytesToReserve);
-						int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(tmp.get()) :
-							(int) (_rowBroadcast ? tmp.get().getIndexes().getColumnIndex() - 1 :
-							tmp.get().getIndexes().getRowIndex() - 1);
+			new Thread(() -> {
+				OOCStream.QueueCallback<IndexedMatrixValue> tmp;
+				AtomicInteger ctr = new AtomicInteger(1);
+				while((tmp = intermediate.dequeueCB()) != null && !tmp.isEos()) {
+					long bytesToReserve = _allocFn.applyAsLong(tmp.get().getIndexes());
+					boolean reserved = false;
+					if(_startsRegion) {
+						_allowance.reserveBlocking(bytesToReserve);
+						reserved = true;
+					}
+					int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(tmp.get()) :
+						(int) (_rowBroadcast ? tmp.get().getIndexes().getColumnIndex() - 1 :
+						tmp.get().getIndexes().getRowIndex() - 1);
 					var bcbFuture = broadcastTile(idx);
 					final var fCb = tmp.keepOpen();
+					final long ownedBytes = reserved ? bytesToReserve : 0;
+					final boolean ownedReservation = reserved;
 					ctr.incrementAndGet();
 					bcbFuture.whenComplete((bcb, error) -> {
 						if(error != null) {
 							fCb.close();
+							if(ownedReservation)
+								_allowance.release(ownedBytes);
 							out.propagateFailure(DMLRuntimeException.of(error));
 						}
 						else
-							int2.enqueue(new Tuple2<>(bcb, fCb));
+							int2.enqueue(new ProbeWork(bcb, fCb, ownedBytes, ownedReservation));
 						if(ctr.decrementAndGet() == 0)
 							future3.complete(null);
 					});
@@ -387,8 +355,6 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	 * consumption driving multiplicity-based forgetting (no manual counting or clearing).
 	 */
 	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> broadcastTile(int idx) {
-		if(_reader == null)
-			return _cache.get(idx);
 		MaterializedStore.Lease<IndexedMatrixValue> live = _reader.requestIfLive(idx);
 		if(live != null)
 			return CompletableFuture.completedFuture(new LeaseQueueCallback(live));
@@ -407,19 +373,29 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 
 	private IndexedMatrixValue process(int idx, OOCStream.QueueCallback<IndexedMatrixValue> bcb,
 		OOCStream.QueueCallback<IndexedMatrixValue> cb) {
-		var imv = new IndexedMatrixValue(cb.get().getIndexes(), _mergeFn.apply(bcb.get(), cb.get()));
-		if(_cache != null) {
-			int cnt = _broadcastCount.incrementAndGet(idx);
-			if(cnt == _maxCount)
-				_cache.clear(idx);
-		}
-		return imv;
+		return new IndexedMatrixValue(cb.get().getIndexes(), _mergeFn.apply(bcb.get(), cb.get()));
 	}
 
-	private OOCStream.QueueCallback<IndexedMatrixValue> callbackOf(IndexedMatrixValue imv, long attachedBytes) {
-		if(_crossBoundaries)
-			return new InMemoryQueueCallback(imv, null, _allowance, attachedBytes);
-		return new OOCStream.SimpleQueueCallback<>(imv, null);
+	private void enqueueOutput(OOCStream<IndexedMatrixValue> out, IndexedMatrixValue imv, long attachedBytes,
+		boolean reserved) {
+		OOCStream.QueueCallback<IndexedMatrixValue> output = null;
+		boolean reservationOwned = reserved && attachedBytes > 0;
+		try {
+			if(_crossBoundaries) {
+				output = new InMemoryQueueCallback(imv, null, _allowance, reservationOwned ? attachedBytes : 0);
+				reservationOwned = false;
+			}
+			else
+				output = new OOCStream.SimpleQueueCallback<>(imv, null);
+			out.enqueue(output);
+			output = null;
+		}
+		finally {
+			if(output != null)
+				output.close();
+			if(reservationOwned)
+				_allowance.release(attachedBytes);
+		}
 	}
 
 	public OOCStreamable<IndexedMatrixValue> getBroadcastStreamable() {
@@ -482,6 +458,21 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		@Override
 		public boolean isFailure() {
 			return _failure != null;
+		}
+	}
+
+	private static final class ProbeWork {
+		private final OOCStream.QueueCallback<IndexedMatrixValue> _broadcast;
+		private final OOCStream.QueueCallback<IndexedMatrixValue> _streamed;
+		private final long _bytes;
+		private final boolean _reserved;
+
+		private ProbeWork(OOCStream.QueueCallback<IndexedMatrixValue> broadcast,
+			OOCStream.QueueCallback<IndexedMatrixValue> streamed, long bytes, boolean reserved) {
+			_broadcast = broadcast;
+			_streamed = streamed;
+			_bytes = bytes;
+			_reserved = reserved;
 		}
 	}
 }

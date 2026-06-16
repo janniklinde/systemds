@@ -40,7 +40,6 @@ import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
-import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -49,9 +48,9 @@ import org.junit.Assert;
 import org.junit.Test;
 
 /**
- * Parity of the migrated Broadcast (MaterializedStore + IndexedReader with multiplicity-based
- * forgetting over the global cache) with the legacy CachedAllowance path, through the real planner
- * pipeline: a row vector is broadcast and added to every row block of a streamed matrix.
+ * Correctness of the migrated Broadcast (MaterializedStore + IndexedReader with multiplicity-based
+ * forgetting over the global cache) through the real planner pipeline: a row vector is broadcast
+ * and added to every row block of a streamed matrix.
  */
 public class BroadcastPrimitiveParityTest {
 	private static final int ROWS = 4000;
@@ -63,17 +62,13 @@ public class BroadcastPrimitiveParityTest {
 
 	@After
 	public void tearDown() {
-		BroadcastOOCPrimitive.setUseStore(true);
 		OOCCacheManager.reset();
 	}
 
 	@Test
-	public void testStorePathMatchesLegacyPath() throws Exception {
-		Map<MatrixIndexes, Double> legacy = run(false);
-		OOCCacheManager.reset();
-		Map<MatrixIndexes, Double> store = run(true);
+	public void testStorePathProducesExpectedBroadcast() throws Exception {
+		Map<MatrixIndexes, Double> store = run();
 
-		Assert.assertEquals("Both broadcast backends must produce identical results.", legacy, store);
 		Assert.assertEquals(ROW_BLOCKS * COL_BLOCKS, store.size());
 		for(int rb = 1; rb <= ROW_BLOCKS; rb++) {
 			for(int cb = 1; cb <= COL_BLOCKS; cb++) {
@@ -87,9 +82,7 @@ public class BroadcastPrimitiveParityTest {
 		awaitOwnedCache(OOCCacheManager.getGlobalCache(), 0);
 	}
 
-	private Map<MatrixIndexes, Double> run(boolean useStore) throws Exception {
-		BroadcastOOCPrimitive.setUseStore(useStore);
-
+	private Map<MatrixIndexes, Double> run() throws Exception {
 		OOCStream<IndexedMatrixValue> broadcast = createMatrixStream(1, COLS);
 		StreamContext bGenSc = new StreamContext(0, "op_datagen_bcast").addOutStream(broadcast);
 		OOCInstructionUtils.dataGen(broadcast, ix -> new MatrixBlock(1,

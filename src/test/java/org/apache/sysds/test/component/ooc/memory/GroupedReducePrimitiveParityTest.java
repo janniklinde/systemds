@@ -26,8 +26,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
-import org.apache.sysds.api.DMLScript;
-import org.apache.sysds.api.mlcontext.Matrix;
 import org.apache.sysds.common.Types.FileFormat;
 import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
@@ -42,76 +40,44 @@ import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
-import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
-import org.apache.sysds.utils.Statistics;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Test;
 
 /**
- * Parity of the migrated GroupedReduce (OperatorStateTable accumulators over the global cache)
- * with the legacy CachedAllowance path, through the real planner pipeline.
+ * Correctness of the migrated GroupedReduce (OperatorStateTable accumulators over the global cache)
+ * through the real planner pipeline.
  */
 public class GroupedReducePrimitiveParityTest {
-	private static final int ROWS = 2048 * 40 * 100;
-	private static final int COLS = 501;//2048 * 40;
+	private static final int ROWS = 16000;
+	private static final int COLS = 2000;
 	private static final int BLEN = 250;
 	private static final int GROUPS = ROWS / BLEN;
-	private static final int COL_BLOCKS = COLS / BLEN;
 	private static final long WAIT_TIMEOUT_SEC = 60;
 
 	@After
 	public void tearDown() {
-		GroupedReduceOOCPrimitive.setUseStateTable(true);
 		OOCCacheManager.reset();
 	}
 
 	@Test
-	public void testTablePathMatchesLegacyPath() throws Exception {
-		int WARMUP = 1;
-		int K = 3;
-		DMLScript.OOC_STATISTICS = true;
-		long start = System.currentTimeMillis();
-		long sum = 0;
-		Map<MatrixIndexes, Double> legacy = null;
-		for(int i = 0; i < K; i++) {
-			legacy = run(false);
-			System.out.println(Statistics.displayOOCEvictionStats());
-			sum += i < WARMUP ? 0 : System.currentTimeMillis() - start;
-			OOCCacheManager.reset();
-			start = System.currentTimeMillis();
-		}
-		System.out.println("Finished in " + (sum/(K-WARMUP)) + "ms");
-		Map<MatrixIndexes, Double> table = null;
-		sum = 0;
-		for(int i = 0; i < K; i++) {
-			table = run(true);
-			System.out.println(Statistics.displayOOCEvictionStats());
-			sum += i < WARMUP ? 0 : System.currentTimeMillis() - start;
-			OOCCacheManager.reset();
-			start = System.currentTimeMillis();
-		}
-		System.out.println("Finished in " + (sum/(K-WARMUP)) + "ms");
+	public void testTablePathProducesExpectedGroups() throws Exception {
+		Map<MatrixIndexes, Double> table = run();
 
-		Assert.assertEquals("Both accumulator backends must produce identical group results.",
-			legacy, table);
 		Assert.assertEquals(GROUPS, table.size());
-		double expectedTileSum = 5.0 * COL_BLOCKS * BLEN * BLEN;
 		for(int group = 0; group < GROUPS; group++) {
-			Double dsum = table.get(new MatrixIndexes(group + 1L, 1L));
-			Assert.assertNotNull("Missing output tile for group " + group, dsum);
-			//Assert.assertEquals(expectedTileSum, dsum, 1e-9);
+			Double sum = table.get(new MatrixIndexes(group + 1L, 1L));
+			Assert.assertNotNull("Missing output tile for group " + group, sum);
+			Assert.assertEquals(5.0 * BLEN * COLS, sum, 1e-9);
 		}
 		//all accumulator slots were taken at finalize and the table closed: nothing stays cached
 		awaitOwnedCache(OOCCacheManager.getGlobalCache(), 0);
 	}
 
-	private Map<MatrixIndexes, Double> run(boolean useStateTable) throws Exception {
-		GroupedReduceOOCPrimitive.setUseStateTable(useStateTable);
-
+	private Map<MatrixIndexes, Double> run() throws Exception {
 		OOCStream<IndexedMatrixValue> in = createMatrixStream(ROWS, COLS);
 		StreamContext genSc = new StreamContext(0, "op_datagen").addOutStream(in);
 		OOCInstructionUtils.dataGen(in, ix -> new MatrixBlock(OOCUtils.getNumRowsOfTile(ix, ROWS, BLEN),
@@ -119,7 +85,7 @@ public class GroupedReducePrimitiveParityTest {
 
 		OOCStream<IndexedMatrixValue> out = createMatrixStream(ROWS, BLEN);
 		StreamContext reduceSc = new StreamContext(0, "op_row_reduce").addOutStream(out);
-		OOCInstructionUtils.rowGroupedReduce(in, out, 2, mb -> mb,
+		OOCInstructionUtils.rowGroupedReduce(in, out, 2, GroupedReducePrimitiveParityTest::padPartialBlock,
 			(left, right) -> left.binaryOperations(new BinaryOperator(Plus.getPlusFnObject()), right),
 			mb -> mb, reduceSc);
 
@@ -145,6 +111,14 @@ public class GroupedReducePrimitiveParityTest {
 		out.start();
 		done.get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 		return new HashMap<>(results);
+	}
+
+	private static MatrixBlock padPartialBlock(MatrixBlock block) {
+		if(block.getNumColumns() == BLEN)
+			return block;
+		MatrixBlock padded = new MatrixBlock(block.getNumRows(), BLEN, false);
+		padded.copy(0, block.getNumRows() - 1, 0, block.getNumColumns() - 1, block, false);
+		return padded;
 	}
 
 	private static OOCStream<IndexedMatrixValue> createMatrixStream(int rows, int cols) {
