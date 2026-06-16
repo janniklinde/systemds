@@ -47,9 +47,7 @@ import org.apache.sysds.runtime.ooc.store.MaterializedStoreImpl;
  * first consumer wires the sink; late-planned consumers can still join via {@link #tryRegister} as
  * long as the reader set has not sealed (a consumer joining after sealing is a planning error — the
  * store may already have started forgetting). Consumers must await {@link #completion()} before
- * opening readers (readers require a completed store), await {@link #readersSealed()} before
- * demand-driven reading (the store rejects reads before the full reader set is known), and must not
- * bypass the binding via {@link #store()} for registration.
+ * opening readers (readers require a completed store).
  */
 public final class OOCStoreBinding {
 	private final MaterializedStore<IndexedMatrixValue> _store;

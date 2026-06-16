@@ -126,7 +126,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		if(!complete || closed)
 			throw new IllegalStateException("Readers require a completed store");
 		if(readersSealed)
-			throw new IllegalStateException("Reader set is already sealed");
+			throw new IllegalStateException("Store no longer accepts new readers");
 		StoreReader reader = new StoreReader(pattern, allowance, Math.max(1, maxPrefetch));
 		registeredReaders.add(reader);
 		return reader;
@@ -138,7 +138,7 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		if(!complete || closed)
 			throw new IllegalStateException("Readers require a completed store");
 		if(readersSealed)
-			throw new IllegalStateException("Reader set is already sealed");
+			throw new IllegalStateException("Store no longer accepts new readers");
 		if(!(cache instanceof OOCPackedCache packed))
 			throw new IllegalStateException("Opportunistic pack reading requires OOCPackedCache");
 		OpportunisticPackReader reader =
@@ -152,10 +152,30 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		if(!complete || closed)
 			throw new IllegalStateException("Readers require a completed store");
 		if(readersSealed)
-			throw new IllegalStateException("Reader set is already sealed");
+			throw new IllegalStateException("Store no longer accepts new readers");
 		IndexedStoreReader reader = new IndexedStoreReader(liveness, allowance);
 		registeredReaders.add(reader);
 		return reader;
+	}
+
+	@Override
+	public OOCFuture<Lease<T>> requestPublished(int index, MemoryAllowance allowance) {
+		if(closed)
+			throw new IllegalStateException("Store is closed");
+		if(index < 0 || index >= published.get())
+			throw new IndexOutOfBoundsException("Invalid requested index: " + index);
+		OOCFuture<BlockEntry> pinned = new OOCFuture<>();
+		StorePinRetry.pinWithRetry(cache, streamId, index, allowance, () -> closed, pinned);
+		OOCFuture<Lease<T>> result = new OOCFuture<>();
+		pinned.whenComplete((entry, error) -> {
+			if(error != null)
+				result.completeExceptionally(error);
+			else if(entry == null)
+				result.complete(null);
+			else
+				result.complete(new LeaseAlias((idx, current) -> cache.unpin(current, allowance), index, entry));
+		});
+		return result;
 	}
 
 	@Override
@@ -166,6 +186,8 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 			return;
 		readers = new ArrayList<>(registeredReaders);
 		readersSealed = true;
+		for(int i = 0; i < completedSize; i++)
+			tryForget(i);
 	}
 
 	@Override
@@ -175,10 +197,13 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 
 	@Override
 	public void close() {
-		if(closed)
-			return;
-		closed = true;
-		List<RegisteredReader> localReaders = readers;
+		List<RegisteredReader> localReaders;
+		synchronized(this) {
+			if(closed)
+				return;
+			closed = true;
+			localReaders = readersSealed ? readers : new ArrayList<>(registeredReaders);
+		}
 		for(int i = 0; i < localReaders.size(); i++)
 			localReaders.get(i).close();
 		for(int i = 0; i < size(); i++)
@@ -187,6 +212,8 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 	}
 
 	private void tryForget(int index) {
+		if(!readersSealed)
+			return;
 		List<RegisteredReader> localReaders = readers;
 		for(int i = 0; i < localReaders.size(); i++) {
 			RegisteredReader reader = localReaders.get(i);
@@ -200,7 +227,8 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 	/**
 	 * Re-evaluates forgetting for the full logical range after a reader closed early; without this,
 	 * entries only needed by the closed reader would stay referenced until store closure. Closing the
-	 * store sweeps itself, and before sealing there is no reader set to evaluate against.
+	 * store sweeps itself. Before sealing, rmvar has not closed the streamable yet, so future
+	 * readers may still be added and no tile may be forgotten solely from current readers.
 	 */
 	private void forgetAfterReaderClose() {
 		if(closed || !readersSealed)
@@ -463,8 +491,6 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		private void checkReady(int index) {
 			if(closed)
 				throw new IllegalStateException("Reader is closed");
-			if(!readersSealed)
-				throw new IllegalStateException("All readers must be registered and sealed before reading");
 			if(index < 0 || index >= completedSize)
 				throw new IndexOutOfBoundsException("Invalid requested index: " + index);
 		}
@@ -532,8 +558,6 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		private void checkReady() {
 			if(closed)
 				throw new IllegalStateException("Reader is closed");
-			if(!readersSealed)
-				throw new IllegalStateException("All readers must be registered and sealed before reading");
 		}
 
 		private void fill() {
@@ -663,8 +687,6 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		private void checkReady() {
 			if(closed)
 				throw new IllegalStateException("Reader is closed");
-			if(!readersSealed)
-				throw new IllegalStateException("All readers must be registered and sealed before reading");
 		}
 
 		private void fill() {

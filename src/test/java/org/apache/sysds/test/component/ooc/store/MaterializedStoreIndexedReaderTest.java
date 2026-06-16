@@ -279,17 +279,15 @@ public class MaterializedStoreIndexedReaderTest {
 	}
 
 	@Test
-	public void testRequestRequiresSealedReaders() throws Exception {
+	public void testRequestCanProceedBeforeSeal() throws Exception {
 		Fixture f = new Fixture(1L << 30);
 		try {
 			MaterializedStore.IndexedReader<IndexedMatrixValue> reader =
 				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1), f.reader);
-			try {
-				reader.request(0);
-				Assert.fail("Requests must fail before the reader set is sealed");
-			}
-			catch(IllegalStateException expected) {
-				//expected
+			try(MaterializedStore.Lease<IndexedMatrixValue> lease =
+				reader.request(0).get(10, TimeUnit.SECONDS)) {
+				Assert.assertNotNull(lease);
+				Assert.assertEquals(new MatrixIndexes(1, 1), lease.value().getIndexes());
 			}
 			f.store.sealReaders();
 			reader.close();

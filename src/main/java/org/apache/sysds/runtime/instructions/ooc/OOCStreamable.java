@@ -22,6 +22,7 @@ package org.apache.sysds.runtime.instructions.ooc;
 import org.apache.commons.lang3.NotImplementedException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
@@ -32,11 +33,22 @@ import java.util.function.Consumer;
 public interface OOCStreamable<T> {
 	OOCStream<T> getReadStream();
 
+	default OOCStream<T> getReadStream(OOCAccessPattern pattern) {
+		return getReadStream();
+	}
+
 	OOCStream<T> getWriteStream();
 
 	boolean hasStreamCache();
 
 	CachingStream getStreamCache();
+
+	default boolean hasMaterializedStore() {
+		return false;
+	}
+
+	default void scheduleMaterializedStoreDeletion() {
+	}
 
 	boolean isProcessed();
 

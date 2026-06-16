@@ -219,7 +219,7 @@ public final class MaterializationSink implements Consumer<OOCStream.QueueCallba
 		private DMLRuntimeException _failure;
 		private boolean _closed;
 
-		private PinnedLeaseCallback(MaterializedStore.LiveLease<IndexedMatrixValue> lease) {
+		public PinnedLeaseCallback(MaterializedStore.LiveLease<IndexedMatrixValue> lease) {
 			_lease = lease;
 		}
 

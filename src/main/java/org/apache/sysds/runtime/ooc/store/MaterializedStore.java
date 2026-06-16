@@ -101,7 +101,15 @@ public interface MaterializedStore<T extends SpillableObject> extends AutoClosea
 	IndexedReader<T> openIndexedReader(Liveness liveness, MemoryAllowance allowance);
 
 	/**
-	 * Freezes the reader set. Offline access and reclamation start only after this call.
+	 * Pins an already published item without registering a logical reader consumption. This is for
+	 * streamable live replay: the streamable owns logical lifetime, and rmvar-style sealing decides
+	 * when forgetting can begin.
+	 */
+	OOCFuture<Lease<T>> requestPublished(int index, MemoryAllowance allowance);
+
+	/**
+	 * Freezes the reader set against new readers and starts/sweeps forgetting. Readers may consume
+	 * before sealing; sealing represents rmvar/deletion closing the logical streamable.
 	 */
 	void sealReaders();
 

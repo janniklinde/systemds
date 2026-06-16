@@ -24,22 +24,24 @@ import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 
 import java.util.concurrent.ConcurrentHashMap;
 
 public class TeeOOCInstruction extends ComputationOOCInstruction {
 
-	private static final ConcurrentHashMap<CachingStream, Integer> refCtr = new ConcurrentHashMap<>();
+	private static final ConcurrentHashMap<OOCStreamable<IndexedMatrixValue>, Integer> refCtr = new ConcurrentHashMap<>();
 
 	public static void reset() {
 		if (!refCtr.isEmpty()) {
 			System.err.println("There are some dangling streams still in the cache: " + refCtr);
-			for(CachingStream cache : refCtr.keySet()) {
+			for(OOCStreamable<IndexedMatrixValue> stream : refCtr.keySet()) {
 				try {
-					cache.scheduleDeletion();
+					scheduleDeletion(stream);
 				}
 				catch(Exception ex) {
-					System.err.println("Failed to schedule deletion for dangling stream " + cache + ": " + ex.getMessage());
+					System.err.println("Failed to schedule deletion for dangling stream " + stream + ": "
+						+ ex.getMessage());
 				}
 			}
 			refCtr.clear();
@@ -50,11 +52,10 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 	 * Increments the reference counter of a stream by the set amount.
 	 */
 	public static void incrRef(OOCStreamable<IndexedMatrixValue> stream, int incr) {
-		if (!stream.hasStreamCache())
+		if (!stream.hasStreamCache() && !stream.hasMaterializedStore())
 			return;
-		CachingStream cache = stream.getStreamCache();
 
-		Integer ref = refCtr.compute(cache, (k, v) -> {
+		Integer ref = refCtr.compute(stream, (k, v) -> {
 			if (v == null)
 				v = 0;
 			v += incr;
@@ -62,7 +63,14 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 		});
 
 		if (ref == null)
-			cache.scheduleDeletion();
+			scheduleDeletion(stream);
+	}
+
+	private static void scheduleDeletion(OOCStreamable<IndexedMatrixValue> stream) {
+		if(stream.hasMaterializedStore())
+			stream.scheduleMaterializedStoreDeletion();
+		else if(stream.hasStreamCache())
+			stream.getStreamCache().scheduleDeletion();
 	}
 
 	protected TeeOOCInstruction(OOCType type, CPOperand in1, CPOperand out, String opcode, String istr) {
@@ -82,15 +90,15 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 		//get input stream
 		MatrixObject min = ec.getMatrixObject(input1);
 		OOCStreamable<IndexedMatrixValue> streamable = min.getStreamable();
-		CachingStream handle;
+		OOCStreamable<IndexedMatrixValue> handle;
 
-		if(streamable.hasStreamCache()) {
-			handle = streamable.getStreamCache();
+		if(streamable.hasStreamCache() || streamable.hasMaterializedStore()) {
+			handle = streamable.hasStreamCache() ? streamable.getStreamCache() : streamable;
 			incrRef(handle, 1);
 		}
 		else {
 			// We also set the input stream handle
-			handle = new CachingStream(min.getStreamHandle());
+			handle = new MaterializedStoreStreamable(min.getStreamHandle(), min);
 			min.setStreamHandle(handle);
 			incrRef(handle, 2);
 		}
