@@ -98,6 +98,9 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		}
 		SubscribableTaskQueue<IndexedMatrixValue> stream = new SubscribableTaskQueue<>();
 		stream.setData(_data);
+		OOCPrimitive sourcePrimitive = _source.getPrimitive();
+		if(sourcePrimitive != null)
+			stream.assignPrimitive(sourcePrimitive);
 		LiveReader reader = new LiveReader(stream);
 		int replayLimit;
 		synchronized(this) {

@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.ooc.cache.packed;
 
+import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
@@ -45,7 +46,7 @@ import java.util.concurrent.locks.LockSupport;
  * before being handed to OOCCacheImpl.
  */
 public final class OOCPackedCache implements OOCCache {
-	private static final int PACKED_STREAM_ID = 0;
+	private static final long PACKED_STREAM_ID = CachingStream._streamSeq.getNextID();
 	private static final long DEFAULT_PACK_THRESHOLD_BYTES = 64 * 1024;
 	private static final long DEFAULT_PACK_TARGET_BYTES = 1L << 19; // 512 KB tile packing
 	private static final long DEFAULT_MAX_STAGING_BYTES = 64L << 20;
