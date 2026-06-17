@@ -238,7 +238,13 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		});
 		_storeBinding.attach(getBroadcastStreamable());
 
-		buildFuture.thenRun(() -> {
+		buildFuture.whenComplete((ignored, buildError) -> {
+			if(buildError != null) {
+				out.propagateFailure(DMLRuntimeException.of(buildError));
+				releaseStore();
+				onComplete();
+				return;
+			}
 			final SubscribableTaskQueue<IndexedMatrixValue> intermediate = new SubscribableTaskQueue<>();
 			final SubscribableTaskQueue<ProbeWork> int2 = new SubscribableTaskQueue<>();
 			final AtomicInteger inflightCtr = new AtomicInteger(1);
@@ -273,8 +279,18 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 									_allowance.release(ownedBytes);
 								out.propagateFailure(DMLRuntimeException.of(error));
 							}
-							else
-								int2.enqueue(new ProbeWork(bcb, fCb, ownedBytes, ownedReservation));
+							else {
+								try {
+									int2.enqueue(new ProbeWork(bcb, fCb, ownedBytes, ownedReservation));
+								}
+								catch(RuntimeException ex) {
+									bcb.close();
+									fCb.close();
+									if(ownedReservation)
+										_allowance.release(ownedBytes);
+									out.propagateFailure(DMLRuntimeException.of(ex));
+								}
+							}
 							if(inflightCtr.decrementAndGet() == 0)
 								future.complete(null);
 						});
@@ -317,24 +333,49 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 				}
 			}, _sc);
 			CompletableFuture<Void> future3 = new CompletableFuture<>();
-			new Thread(() -> {
-				OOCStream.QueueCallback<IndexedMatrixValue> tmp;
-				AtomicInteger ctr = new AtomicInteger(1);
-				while((tmp = intermediate.dequeueCB()) != null && !tmp.isEos()) {
-					long bytesToReserve = _allocFn.applyAsLong(tmp.get().getIndexes());
-					boolean reserved = false;
-					if(_startsRegion) {
-						_allowance.reserveBlocking(bytesToReserve);
-						reserved = true;
+			AtomicInteger retryCtr = new AtomicInteger(1);
+			OOCInstructionUtils.submitOOCTasks(intermediate, tmp -> {
+				long bytesToReserve = _allocFn.applyAsLong(tmp.get().getIndexes());
+				int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(tmp.get()) :
+					(int) (_rowBroadcast ? tmp.get().getIndexes().getColumnIndex() - 1 :
+					tmp.get().getIndexes().getRowIndex() - 1);
+				final var fCb = tmp.keepOpen();
+				final long ownedBytes = _startsRegion ? bytesToReserve : 0;
+				final boolean ownedReservation = _startsRegion;
+				retryCtr.incrementAndGet();
+				CompletableFuture<Void> reservation;
+				try {
+					reservation = _startsRegion ? _allowance.reserve(bytesToReserve) :
+						CompletableFuture.completedFuture(null);
+				}
+				catch(RuntimeException ex) {
+					fCb.close();
+					out.propagateFailure(DMLRuntimeException.of(ex));
+					if(retryCtr.decrementAndGet() == 0)
+						future3.complete(null);
+					return;
+				}
+				reservation.whenComplete((reserved, reservationError) -> {
+					if(reservationError != null) {
+						fCb.close();
+						out.propagateFailure(DMLRuntimeException.of(reservationError));
+						if(retryCtr.decrementAndGet() == 0)
+							future3.complete(null);
+						return;
 					}
-					int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(tmp.get()) :
-						(int) (_rowBroadcast ? tmp.get().getIndexes().getColumnIndex() - 1 :
-						tmp.get().getIndexes().getRowIndex() - 1);
-					var bcbFuture = broadcastTile(idx);
-					final var fCb = tmp.keepOpen();
-					final long ownedBytes = reserved ? bytesToReserve : 0;
-					final boolean ownedReservation = reserved;
-					ctr.incrementAndGet();
+					CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> bcbFuture;
+					try {
+						bcbFuture = broadcastTile(idx);
+					}
+					catch(RuntimeException ex) {
+						fCb.close();
+						if(ownedReservation)
+							_allowance.release(ownedBytes);
+						out.propagateFailure(DMLRuntimeException.of(ex));
+						if(retryCtr.decrementAndGet() == 0)
+							future3.complete(null);
+						return;
+					}
 					bcbFuture.whenComplete((bcb, error) -> {
 						if(error != null) {
 							fCb.close();
@@ -342,20 +383,38 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 								_allowance.release(ownedBytes);
 							out.propagateFailure(DMLRuntimeException.of(error));
 						}
-						else
-							int2.enqueue(new ProbeWork(bcb, fCb, ownedBytes, ownedReservation));
-						if(ctr.decrementAndGet() == 0)
+						else {
+							try {
+								int2.enqueue(new ProbeWork(bcb, fCb, ownedBytes, ownedReservation));
+							}
+							catch(RuntimeException ex) {
+								bcb.close();
+								fCb.close();
+								if(ownedReservation)
+									_allowance.release(ownedBytes);
+								out.propagateFailure(DMLRuntimeException.of(ex));
+							}
+						}
+						if(retryCtr.decrementAndGet() == 0)
 							future3.complete(null);
 					});
-					tmp.close();
-				}
-				if(tmp != null)
-					tmp.close();
-				if(ctr.decrementAndGet() == 0)
+				});
+			}, _sc.addOutStream(int2)).thenRun(() -> {
+				if(retryCtr.decrementAndGet() == 0)
 					future3.complete(null);
-			}).start();
+			});
 			CompletableFuture.allOf(future, future3).thenRun(int2::closeInput);
-			future2.thenRun(out::closeInput).thenRun(this::onComplete);
+			future2.whenComplete((finished, probeError) -> {
+				try {
+					if(probeError != null)
+						out.propagateFailure(DMLRuntimeException.of(probeError));
+					else
+						out.closeInput();
+				}
+				finally {
+					onComplete();
+				}
+			});
 		});
 	}
 

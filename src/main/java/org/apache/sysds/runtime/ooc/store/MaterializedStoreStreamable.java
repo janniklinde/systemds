@@ -59,6 +59,8 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	private final CopyOnWriteArrayList<LiveReader> _liveReaders;
 	private final AtomicBoolean _complete;
 	private final AtomicBoolean _deleteScheduled;
+	private boolean _readersSealed;
+	private int _pendingReaderReservations;
 	private volatile CopyOnWriteArrayList<Consumer<OOCStreamMessage>> _downstreamRelays;
 	private volatile DMLRuntimeException _failure;
 	private CacheableData<?> _data;
@@ -88,10 +90,12 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		DMLRuntimeException failure = _failure;
 		if(failure != null)
 			throw failure;
-		if(_complete.get())
-			return replayStream(pattern);
-		if(_deleteScheduled.get())
-			throw new DMLRuntimeException("Cannot add reader to a materialized stream scheduled for deletion.");
+		consumeReaderReservation();
+		if(_complete.get()) {
+			OOCStream<IndexedMatrixValue> stream = replayStream(pattern);
+			trySealReaders();
+			return stream;
+		}
 		SubscribableTaskQueue<IndexedMatrixValue> stream = new SubscribableTaskQueue<>();
 		stream.setData(_data);
 		LiveReader reader = new LiveReader(stream);
@@ -197,8 +201,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		for(LiveReader reader : _liveReaders)
 			reader.closeWhenReplayDone();
 		_liveReaders.clear();
-		if(_deleteScheduled.get())
-			_store.sealReaders();
+		trySealReaders();
 	}
 
 	private void fail(DMLRuntimeException failure) {
@@ -231,10 +234,25 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 
 	@Override
 	public void scheduleMaterializedStoreDeletion() {
-		if(!_deleteScheduled.compareAndSet(false, true))
-			return;
-		if(_complete.get())
-			_store.sealReaders();
+		_deleteScheduled.compareAndSet(false, true);
+		trySealReaders();
+	}
+
+	@Override
+	public synchronized void reserveLazyHandle() {
+		if(_deleteScheduled.get())
+			throw new DMLRuntimeException("Cannot reserve a reader for a materialized stream scheduled for deletion.");
+		_pendingReaderReservations++;
+	}
+
+	@Override
+	public void discardHandle() {
+		synchronized(this) {
+			if(_pendingReaderReservations <= 0)
+				return;
+			_pendingReaderReservations--;
+		}
+		trySealReaders();
 	}
 
 	@Override
@@ -245,6 +263,28 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	@Override
 	public OOCPrimitive getPrimitive() {
 		return _source.getPrimitive();
+	}
+
+	private void consumeReaderReservation() {
+		synchronized(this) {
+			if(_pendingReaderReservations > 0) {
+				_pendingReaderReservations--;
+				return;
+			}
+			if(_deleteScheduled.get())
+				throw new DMLRuntimeException("Cannot add unreserved reader to materialized stream scheduled for deletion.");
+		}
+	}
+
+	private void trySealReaders() {
+		boolean seal;
+		synchronized(this) {
+			seal = _deleteScheduled.get() && _complete.get() && !_readersSealed && _pendingReaderReservations == 0;
+			if(seal)
+				_readersSealed = true;
+		}
+		if(seal)
+			_store.sealReaders();
 	}
 
 	@Override
