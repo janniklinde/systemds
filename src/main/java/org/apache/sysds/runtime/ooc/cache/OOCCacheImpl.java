@@ -25,6 +25,7 @@ import org.apache.sysds.runtime.ooc.cache.eviction.EvictController;
 import org.apache.sysds.runtime.ooc.cache.eviction.IndexedObjectPair;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.utils.Statistics;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -85,6 +86,7 @@ public class OOCCacheImpl implements OOCCache {
 			checkRunning();
 			putEntry(entry);
 		}
+		Statistics.incrementOOCEvictionPut();
 		return entry;
 	}
 
@@ -100,13 +102,16 @@ public class OOCCacheImpl implements OOCCache {
 			if(meta == null)
 				return OOCFuture.completed(null);
 			BlockEntry adopted = tryAdoptDeferredPin(meta, allowance);
-			if(adopted != null)
+			if(adopted != null) {
+				Statistics.incrementOOCEvictionGet();
 				return OOCFuture.completed(adopted);
+			}
 			if(entry.getDataUnsafe() != null && entry.getState() != BlockState.COLD &&
 				entry.getState() != BlockState.READING) {
 				if(!allowance.tryReserve(entry.getSize()))
 					return OOCFuture.completed(null);
 				pinResident(meta, allowance);
+				Statistics.incrementOOCEvictionGet();
 				return OOCFuture.completed(entry);
 			}
 		}
@@ -124,13 +129,16 @@ public class OOCCacheImpl implements OOCCache {
 			if(meta == null || entry.getDataUnsafe() == null)
 				return null;
 			BlockEntry adopted = tryAdoptDeferredPin(meta, allowance);
-			if(adopted != null)
+			if(adopted != null) {
+				Statistics.incrementOOCEvictionGet();
 				return adopted;
+			}
 			if(entry.getState() == BlockState.COLD || entry.getState() == BlockState.READING)
 				return null;
 			if(!allowance.tryReserve(entry.getSize()))
 				return null;
 			pinResident(meta, allowance);
+			Statistics.incrementOOCEvictionGet();
 			return entry;
 		}
 	}
@@ -232,6 +240,7 @@ public class OOCCacheImpl implements OOCCache {
 			}
 			if(meta.entry.getDataUnsafe() != null) {
 				pinResident(meta, allowance);
+				Statistics.incrementOOCEvictionGet();
 				return OOCFuture.completed(meta.entry);
 			}
 			if(meta.readFuture == null) {
@@ -270,6 +279,7 @@ public class OOCCacheImpl implements OOCCache {
 					}
 					else {
 						pinResident(meta, allowance);
+						Statistics.incrementOOCEvictionGet();
 						pinned = meta.entry;
 					}
 				}
