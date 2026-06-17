@@ -41,6 +41,7 @@ import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
@@ -239,6 +240,11 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	@Override
 	public boolean isProcessed() {
 		return false;
+	}
+
+	@Override
+	public OOCPrimitive getPrimitive() {
+		return _source.getPrimitive();
 	}
 
 	@Override

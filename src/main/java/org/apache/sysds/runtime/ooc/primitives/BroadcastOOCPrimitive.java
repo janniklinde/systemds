@@ -37,6 +37,7 @@ import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -64,7 +65,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		OOCStreamable<IndexedMatrixValue> outputStreamable, BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> mergeFn,
 		ToIntFunction<IndexedMatrixValue> broadcastKeyFn, ToIntFunction<IndexedMatrixValue> streamedKeyFn,
 		int numBroadcastTiles, int maxBroadcastCount, boolean rowBroadcast, StreamContext sc) {
-		super(List.of(broadcastPrimitive, streamedPrimitive));
+		super(childrenOf(broadcastPrimitive, streamedPrimitive));
 		_broadcastStreamable = reserveLazyHandle(broadcastStreamable);
 		_streamedStreamable = reserveLazyHandle(streamedStreamable);
 		_outputStreamable = outputStreamable;
@@ -75,6 +76,15 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		_rowBroadcast = rowBroadcast;
 		_mergeFn = mergeFn;
 		_sc = sc;
+	}
+
+	private static List<OOCPrimitive> childrenOf(OOCPrimitive broadcastPrimitive, OOCPrimitive streamedPrimitive) {
+		ArrayList<OOCPrimitive> children = new ArrayList<>(2);
+		if(broadcastPrimitive != null)
+			children.add(broadcastPrimitive);
+		if(streamedPrimitive != null)
+			children.add(streamedPrimitive);
+		return children;
 	}
 
 	public BroadcastOOCPrimitive(OOCStreamable<IndexedMatrixValue> broadcastStreamable,
