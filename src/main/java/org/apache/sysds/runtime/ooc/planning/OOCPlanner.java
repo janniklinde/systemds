@@ -61,8 +61,12 @@ public class OOCPlanner {
 				regions.add(region);
 		}
 
+		List<OOCStoreBinding> materializedInputs = new ArrayList<>();
 		for(List<OOCPrimitive> region : regions)
-			compileRegion(region);
+			compileRegion(region, materializedInputs);
+
+		for(OOCStoreBinding materializedInput : materializedInputs)
+			materializedInput.attachMaterializedInput();
 
 		for(int i = regions.size() - 1; i >= 0; i--)
 			startRegion(regions.get(i));
@@ -92,7 +96,7 @@ public class OOCPlanner {
 		}
 	}
 
-	private static void compileRegion(List<OOCPrimitive> region) {
+	private static void compileRegion(List<OOCPrimitive> region, List<OOCStoreBinding> materializedInputs) {
 		List<OOCPrimitive> activeRegion = new ArrayList<>();
 		for(OOCPrimitive primitive : region) {
 			if(!primitive.hasStartedExecution())
@@ -112,12 +116,15 @@ public class OOCPlanner {
 			primitive.bindRegion(binding, crossBoundaries, startsRegion);
 			//migrated primitives get an OperatorStateTable over the global cache (one fresh stream id
 			//per table so eviction sees one population); unmigrated primitives keep CachedAllowance.
-			//A boundary consumer additionally declares its input store. The registry hands out ONE
-			//binding per boundary: the first consumer materializes (fresh stream id, this region
-			//allowance as sink allowance), later consumers share the existing store.
-			OOCStoreRequest storeRequest = primitive.requiresStore();
-			if(storeRequest != null)
-				primitive.bindStore(OOCStoreBindingRegistry.acquire(storeRequest, primitive, allowance));
+			//A primitive may additionally declare an input that must be materialized. The registry
+			//hands out ONE binding per input; the planner attaches the source once after all regions
+			//are bound, and consumers only open readers on the binding they receive.
+			OOCMaterializedInputRequest inputRequest = primitive.requiresMaterializedInput();
+			if(inputRequest != null) {
+				OOCStoreBinding store = OOCStoreBindingRegistry.acquire(inputRequest, primitive, allowance);
+				primitive.bindMaterializedInput(store);
+				materializedInputs.add(store);
+			}
 			if(primitive.requiresStateTable()) {
 				primitive.bindStateTable(new OperatorStateTable<>(OOCCacheManager.getGlobalCache(),
 					CachingStream._streamSeq.getNextID(), allowance));

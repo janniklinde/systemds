@@ -29,8 +29,8 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
-import org.apache.sysds.runtime.ooc.planning.OOCStoreRequest;
 import org.apache.sysds.runtime.ooc.store.LeaseQueueCallbacks;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
@@ -128,12 +128,12 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
-	public OOCStoreRequest requiresStore() {
-		return new OOCStoreRequest(_broadcastStreamable, this::broadcastTileIndex, 1, 1);
+	public OOCMaterializedInputRequest requiresMaterializedInput() {
+		return new OOCMaterializedInputRequest(_broadcastStreamable, this::broadcastTileIndex, 1, 1);
 	}
 
 	@Override
-	public void bindStore(OOCStoreBinding store) {
+	public void bindMaterializedInput(OOCStoreBinding store) {
 		_storeBinding = store;
 	}
 
@@ -205,10 +205,8 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 
 		final CompletableFuture<Void> buildFuture = new CompletableFuture<>();
 
-		//the binding is shared by all consumers of the boundary — attach is first-wins (the boundary
-		//is materialized once; a later consumer finds the store already materialized and its completion
-		//callback fires immediately), and probing waits for the FULL declared reader set to register
-		//(readersSealed), not just this reader
+		//The planner owns materialization and source attachment. Probing waits for the FULL declared
+		//reader set to register (readersSealed), not just this reader.
 		_storeBinding.completion().whenComplete((ignored, error) -> {
 			if(error != null) {
 				DMLRuntimeException re = DMLRuntimeException.of(error);
@@ -237,8 +235,6 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 					buildFuture.complete(null);
 			});
 		});
-		_storeBinding.attach(getBroadcastStreamable());
-
 		buildFuture.whenComplete((ignored, buildError) -> {
 			if(buildError != null) {
 				out.propagateFailure(DMLRuntimeException.of(buildError));

@@ -26,10 +26,10 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
 import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
 import org.apache.sysds.runtime.ooc.planning.OOCRegionBinding;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
-import org.apache.sysds.runtime.ooc.planning.OOCStoreRequest;
 import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 
 import java.util.ArrayList;
@@ -152,26 +152,20 @@ public abstract class OOCPrimitive {
 	}
 
 	/**
-	 * Declares a materialized store over one of this primitive's boundary inputs, or null when the
-	 * primitive does not consume a store (or keeps its legacy path). The request carries only what
-	 * the planner cannot know — the boundary's index linearization and the registration counts —
-	 * while the planner supplies cache, stream id, and sink allowance, and answers with
-	 * {@link #bindStore(OOCStoreBinding)}. The primitive attaches the binding's sink to its input
-	 * stream when execution starts.
+	 * Declares that one input must be materialized before this primitive can consume it, or null when
+	 * no materialized input is required. The request carries the input and the primitive's preferred
+	 * physical layout; the planner owns store creation, source attachment, and sharing.
 	 */
-	public OOCStoreRequest requiresStore() {
+	public OOCMaterializedInputRequest requiresMaterializedInput() {
 		return null;
 	}
 
 	/**
-	 * Capability seam for primitives consuming a materialized boundary: the planner hands the shared
-	 * {@link OOCStoreBinding} of an input store (created once per boundary; reader registration goes
-	 * through the binding so {@code sealReaders()} fires exactly when the declared consumer set has
-	 * registered). The primitive must await {@code binding.completion()} before opening readers and
-	 * call {@code binding.release()} when done. Long-term, primitives declare strategy variants here
-	 * (join RENDEZVOUS vs INDEXED_LOOKUP, replay ordered vs opportunistic) and the planner picks.
+	 * Capability seam for primitives consuming a materialized input: the planner hands the shared
+	 * {@link OOCStoreBinding} of an input store. The primitive must await {@code binding.completion()}
+	 * before opening readers and call {@code binding.release()} when done.
 	 */
-	public void bindStore(OOCStoreBinding store) {
+	public void bindMaterializedInput(OOCStoreBinding store) {
 		throw new UnsupportedOperationException();
 	}
 

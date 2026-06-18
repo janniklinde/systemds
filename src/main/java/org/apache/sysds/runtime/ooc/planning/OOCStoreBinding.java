@@ -36,20 +36,21 @@ import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MaterializedStoreImpl;
 
 /**
- * Planner-owned coordination handle for one materialized boundary: the store, its publication sink,
- * counted reader registration, and the consumer refcount. The planner knows the consumer set of a
- * boundary, so it declares up front how many reader registrations to expect; registration goes
+ * Planner-owned coordination handle for one materialized input: the source, store, publication
+ * sink, counted reader registration, and the consumer refcount. The planner knows the consumer set
+ * of a boundary, so it declares up front how many reader registrations to expect; registration goes
  * through this binding and {@code sealReaders()} fires exactly when the declared count has
  * registered — consumers never need a global barrier or knowledge of each other. The last
  * {@link #release()} closes the store (dropping whatever forgetting has not reclaimed yet).
  *
- * One binding is shared by ALL consumers of a boundary. {@link #attach} is first-wins so only the
- * first consumer wires the sink; late-planned consumers can still join via {@link #tryRegister} as
- * long as the reader set has not sealed (a consumer joining after sealing is a planning error — the
- * store may already have started forgetting). Consumers must await {@link #completion()} before
- * opening readers (readers require a completed store).
+ * One binding is shared by ALL consumers of a materialized input. Attachment is planner-owned and
+ * first-wins so the source is materialized exactly once. Late-planned consumers can still join via
+ * {@link #tryRegister} as long as the reader set has not sealed (a consumer joining after sealing is
+ * a planning error — the store may already have started forgetting). Consumers must await
+ * {@link #completion()} before opening readers (readers require a completed store).
  */
 public final class OOCStoreBinding {
+	private final OOCStreamable<IndexedMatrixValue> _source;
 	private final MaterializedStore<IndexedMatrixValue> _store;
 	private final MaterializationSink _sink;
 	private final AtomicBoolean _attached;
@@ -58,17 +59,19 @@ public final class OOCStoreBinding {
 	private int _refCtr;
 	private boolean _sealed;
 
-	public OOCStoreBinding(OOCCache cache, long streamId, ToIntFunction<MatrixIndexes> linearize,
-		MemoryAllowance sinkAllowance, int expectedReaders, int consumers) {
-		this(cache, streamId, linearize, sinkAllowance, expectedReaders, consumers, List.of());
+	public OOCStoreBinding(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
+		ToIntFunction<MatrixIndexes> linearize, MemoryAllowance sinkAllowance, int expectedReaders,
+		int consumers) {
+		this(source, cache, streamId, linearize, sinkAllowance, expectedReaders, consumers, List.of());
 	}
 
-	public OOCStoreBinding(OOCCache cache, long streamId, ToIntFunction<MatrixIndexes> linearize,
-		MemoryAllowance sinkAllowance, int expectedReaders, int consumers,
+	public OOCStoreBinding(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
+		ToIntFunction<MatrixIndexes> linearize, MemoryAllowance sinkAllowance, int expectedReaders, int consumers,
 		List<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> liveConsumers) {
 		if(expectedReaders < 0 || consumers <= 0)
 			throw new IllegalArgumentException("Invalid binding counts: readers=" + expectedReaders
 				+ ", consumers=" + consumers);
+		_source = source;
 		_store = new MaterializedStoreImpl<>(cache, streamId);
 		_sink = new MaterializationSink(_store, linearize, sinkAllowance, liveConsumers);
 		_attached = new AtomicBoolean(false);
@@ -78,22 +81,12 @@ public final class OOCStoreBinding {
 	}
 
 	/**
-	 * Wires the sink to the boundary's source stream. First-wins: with a shared binding every
-	 * consumer may call this, but only the first call subscribes — the boundary is materialized
-	 * exactly once and later consumers find it already (being) materialized.
+	 * Planner-owned source attachment. First-wins to tolerate shared bindings appearing in multiple
+	 * regions, but primitives never call this directly.
 	 */
-	public void attach(OOCStream<IndexedMatrixValue> source) {
-		if(_attached.compareAndSet(false, true))
-			_sink.attach(source);
-	}
-
-	/**
-	 * First-wins attach that resolves the read stream only for the winning consumer, so losing
-	 * consumers never register a stream consumption they will not perform.
-	 */
-	public void attach(OOCStreamable<IndexedMatrixValue> source) {
-		if(_attached.compareAndSet(false, true))
-			_sink.attach(source.getReadStream());
+	void attachMaterializedInput() {
+		if(_source != null && _attached.compareAndSet(false, true))
+			_sink.attach(_source.getReadStream());
 	}
 
 	/**
@@ -111,10 +104,6 @@ public final class OOCStoreBinding {
 		_pendingReaders += expectedReaders;
 		_refCtr += consumers;
 		return true;
-	}
-
-	public MaterializationSink sink() {
-		return _sink;
 	}
 
 	/**

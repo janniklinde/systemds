@@ -42,8 +42,8 @@ import org.apache.sysds.runtime.ooc.cache.io.CloseableQueue;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
-import org.apache.sysds.runtime.ooc.planning.OOCStoreRequest;
 import org.apache.sysds.runtime.ooc.store.LeaseQueueCallbacks;
 import org.apache.sysds.runtime.ooc.store.MaterializationSink;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
@@ -157,12 +157,12 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	}
 
 	@Override
-	public OOCStoreRequest requiresStore() {
-		return new OOCStoreRequest(_vStreamable, ix -> Math.toIntExact(ix.getRowIndex() - 1), 1, 1);
+	public OOCMaterializedInputRequest requiresMaterializedInput() {
+		return new OOCMaterializedInputRequest(_vStreamable, ix -> Math.toIntExact(ix.getRowIndex() - 1), 1, 1);
 	}
 
 	@Override
-	public void bindStore(OOCStoreBinding store) {
+	public void bindMaterializedInput(OOCStoreBinding store) {
 		_storeBinding = store;
 	}
 
@@ -248,12 +248,6 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 				fail(t, out, null);
 			}
 		});
-		try {
-			_storeBinding.attach(_vStreamable);
-		}
-		catch(Throwable t) {
-			fail(t, out, null);
-		}
 	}
 
 	private void startXtXv(OOCStream<IndexedMatrixValue> x, OOCStream<IndexedMatrixValue> out,

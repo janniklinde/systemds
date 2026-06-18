@@ -33,18 +33,15 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 /**
- * One {@link OOCStoreBinding} per materialized boundary, keyed by the boundary's source streamable
- * (identity). A boundary is materialized exactly once: the first consumer's compile creates the
- * binding, every other consumer receives the SAME binding and finds the store already (being)
- * materialized — it opens its reader on the existing store and never attaches a second sink.
+ * One {@link OOCStoreBinding} per materialized input, keyed by the input streamable identity. An
+ * input is materialized exactly once: the first consumer's compile creates the binding, every other
+ * consumer receives the SAME binding and opens its reader on the existing store.
  *
  * Because all readers must register before the store seals (forgetting needs the full reader
- * population), the registry counts the boundary's consumer set UP FRONT at binding creation: it
- * walks the source's producer parents and aggregates the {@code requiresStore()} requests of every
- * already-constructed consumer of the same boundary. A consumer constructed later can still join
- * dynamically through {@link OOCStoreBinding#tryRegister} while the reader set is unsealed;
- * afterwards joining fails — the store may already have forgotten tiles, and the source stream is
- * consumed, so this is a planning error, not a recoverable state.
+ * population), the registry counts the input's consumer set UP FRONT at binding creation: it walks
+ * the producer parents and aggregates the {@code requiresMaterializedInput()} requests of every
+ * already-constructed consumer of the same input. If consumers prefer different physical layouts,
+ * the first request's layout wins; layout is a cache-locality hint, not a correctness contract.
  */
 public final class OOCStoreBindingRegistry {
 	private static final Map<OOCStreamable<?>, Entry> BINDINGS = new IdentityHashMap<>();
@@ -52,13 +49,13 @@ public final class OOCStoreBindingRegistry {
 	private OOCStoreBindingRegistry() {
 	}
 
-	public static OOCStoreBinding acquire(OOCStoreRequest request, OOCPrimitive requester,
+	public static OOCStoreBinding acquire(OOCMaterializedInputRequest request, OOCPrimitive requester,
 		MemoryAllowance sinkAllowance) {
-		OOCStreamable<IndexedMatrixValue> source = request.source();
+		OOCStreamable<IndexedMatrixValue> source = request.input();
 		if(source == null) {
 			//anonymous boundary: never shared
-			return new OOCStoreBinding(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID(),
-				request.linearize(), sinkAllowance, request.expectedReaders(), request.consumers());
+			return new OOCStoreBinding(null, OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID(),
+				request.preferredLayout(), sinkAllowance, request.expectedReaders(), request.consumers());
 		}
 		synchronized(BINDINGS) {
 			Entry entry = BINDINGS.get(source);
@@ -72,8 +69,8 @@ public final class OOCStoreBindingRegistry {
 				if(entry.counted.contains(requester))
 					return entry.binding;
 				if(!entry.binding.tryRegister(request.expectedReaders(), request.consumers()))
-					throw new DMLRuntimeException("A consumer joined boundary store after its reader set "
-						+ "sealed; all consumers of a boundary must be constructed before the declared "
+					throw new DMLRuntimeException("A consumer joined a materialized input after its reader set "
+						+ "sealed; all consumers of an input must be constructed before the declared "
 						+ "readers register (source=" + source + ").");
 				entry.counted.add(requester);
 				return entry.binding;
@@ -91,9 +88,9 @@ public final class OOCStoreBindingRegistry {
 		}
 	}
 
-	private static Entry createEntry(OOCStoreRequest request, OOCPrimitive requester,
+	private static Entry createEntry(OOCMaterializedInputRequest request, OOCPrimitive requester,
 		MemoryAllowance sinkAllowance, OOCStreamable<IndexedMatrixValue> source) {
-		//aggregate the requests of every already-constructed consumer of this boundary, so the
+		//aggregate the requests of every already-constructed consumer of this input, so the
 		//declared reader/consumer counts cover the full set before the first reader registers
 		Set<OOCPrimitive> counted = Collections.newSetFromMap(new IdentityHashMap<>());
 		int readers = 0;
@@ -102,11 +99,12 @@ public final class OOCStoreBindingRegistry {
 		if(producer != null) {
 			for(OOCPrimitive parent : producer.getParents()) {
 				//a consumer that already executed belongs to an earlier (released) materialization
-				//of this boundary; its reader registration will never arrive on this binding
+				//of this input; its reader registration will never arrive on this binding
 				if(parent != requester && parent.hasStartedExecution())
 					continue;
-				OOCStoreRequest parentRequest = parent == requester ? request : parent.requiresStore();
-				if(parentRequest == null || parentRequest.source() != source || !counted.add(parent))
+				OOCMaterializedInputRequest parentRequest = parent == requester ? request :
+					parent.requiresMaterializedInput();
+				if(parentRequest == null || parentRequest.input() != source || !counted.add(parent))
 					continue;
 				readers += parentRequest.expectedReaders();
 				consumers += parentRequest.consumers();
@@ -117,8 +115,8 @@ public final class OOCStoreBindingRegistry {
 			readers += request.expectedReaders();
 			consumers += request.consumers();
 		}
-		OOCStoreBinding binding = new OOCStoreBinding(OOCCacheManager.getGlobalCache(),
-			CachingStream._streamSeq.getNextID(), request.linearize(), sinkAllowance, readers, consumers);
+		OOCStoreBinding binding = new OOCStoreBinding(source, OOCCacheManager.getGlobalCache(),
+			CachingStream._streamSeq.getNextID(), request.preferredLayout(), sinkAllowance, readers, consumers);
 		return new Entry(binding, counted);
 	}
 
