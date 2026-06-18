@@ -41,11 +41,12 @@ import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
-import org.apache.sysds.runtime.ooc.planning.OOCStoreRequest;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
+import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 import org.apache.sysds.runtime.ooc.store.SequentialAccessPattern;
 import org.apache.sysds.runtime.ooc.store.StoreBackedStream;
@@ -166,16 +167,13 @@ public class OOCPlannerSeamTest {
 		int tiles = 4;
 		long bytes = tileBytes();
 		try {
-			OOCStoreBinding binding = new OOCStoreBinding(cache, 51,
+			OOCStoreBinding binding = new OOCStoreBinding(null, cache, 51,
 				ix -> (int)ix.getRowIndex() - 1, sinkAllowance, 2, 2);
-			SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
-			binding.attach(source);
 			for(int i = 0; i < tiles; i++) {
 				producer.reserveBlocking(bytes);
-				source.enqueue(new InMemoryQueueCallback(tile(i, i + 1.0), null, producer, bytes));
+				binding.store().publishPinned(i, tile(i, i + 1.0), bytes, producer);
 			}
-			source.closeInput();
-			binding.completion().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			binding.store().complete();
 			Assert.assertEquals(tiles, binding.store().size());
 
 			MaterializedStore.Reader<IndexedMatrixValue> first =
@@ -192,8 +190,8 @@ public class OOCPlannerSeamTest {
 
 			Assert.assertEquals(expectedTiles(tiles), consume(new StoreBackedStream(first)));
 			Assert.assertEquals(expectedTiles(tiles), consume(new StoreBackedStream(second)));
-			binding.release();
-			binding.release();
+			binding.close();
+			binding.close();
 			awaitOwnedCache(cache, 0);
 		}
 		finally {
@@ -220,28 +218,28 @@ public class OOCPlannerSeamTest {
 		try {
 			first.start();
 			second.start();
-			Assert.assertNotNull(first.binding);
-			Assert.assertSame("Consumers of one boundary must share one store binding.",
-				first.binding, second.binding);
+			OOCMaterializedView firstView = first.getInputStream(0).materializedView();
+			OOCMaterializedView secondView = second.getInputStream(0).materializedView();
+			Assert.assertNotNull(firstView);
+			Assert.assertSame("Consumers of one boundary must share one materialized input.",
+				firstView, secondView);
 
-			//the boundary is materialized once through the shared binding
-			first.binding.attach(source);
-			second.binding.attach(source); //no-op: attach is first-wins
+			//the planner materializes the boundary once through the shared binding
 			for(int i = 0; i < 2; i++) {
 				payloads.reserveBlocking(bytes);
 				source.enqueue(new InMemoryQueueCallback(tile(i, i + 1.0), null, payloads, bytes));
 			}
 			source.closeInput();
-			first.binding.completion().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			firstView.completion().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 
 			//pre-counted reader set: the store seals only after BOTH consumers registered
 			MaterializedStore.IndexedReader<IndexedMatrixValue> readerA =
-				first.binding.openIndexedReader(new MultiplicityLiveness(2, 1), reader);
+				firstView.openIndexedReader(new MultiplicityLiveness(2, 1), reader);
 			Assert.assertFalse("Sealing must wait for the full declared reader set.",
-				first.binding.readersSealed().isDone());
+				firstView.readersSealed().isDone());
 			MaterializedStore.IndexedReader<IndexedMatrixValue> readerB =
-				second.binding.openIndexedReader(new MultiplicityLiveness(2, 1), reader);
-			first.binding.readersSealed().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+				secondView.openIndexedReader(new MultiplicityLiveness(2, 1), reader);
+			firstView.readersSealed().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 
 			try(MaterializedStore.Lease<IndexedMatrixValue> lease =
 				readerA.request(0).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
@@ -256,7 +254,7 @@ public class OOCPlannerSeamTest {
 			ConsumerStub late = new ConsumerStub(producer, source);
 			try {
 				late.start();
-				Assert.fail("A late consumer must not join a sealed boundary store.");
+				Assert.fail("A late consumer must not join a sealed materialized input.");
 			}
 			catch(RuntimeException expected) {
 				//expected: the registry rejects joining after the reader set sealed
@@ -264,17 +262,9 @@ public class OOCPlannerSeamTest {
 
 			readerA.close();
 			readerB.close();
-			first.binding.release();
-			second.binding.release();
+			firstView.close();
+			secondView.close();
 			awaitOwnedCache(OOCCacheManager.getGlobalCache(), 0);
-
-			//after the last release the boundary can be materialized afresh (re-consumable source)
-			ConsumerStub next = new ConsumerStub(producer, source);
-			next.start();
-			Assert.assertNotNull(next.binding);
-			Assert.assertNotSame("A released binding must be replaced by a fresh materialization.",
-				first.binding, next.binding);
-			next.binding.release();
 		}
 		finally {
 			payloads.destroy();
@@ -358,43 +348,22 @@ public class OOCPlannerSeamTest {
 	}
 
 	/**
-	 * Boundary consumer stub: declares a store request over the shared source and records the
-	 * binding the planner supplied.
+	 * Boundary consumer stub: declares a materialized input over the shared source.
 	 */
 	private static final class ConsumerStub extends OOCPrimitive {
-		private final OOCStreamable<IndexedMatrixValue> source;
-		private OOCStoreBinding binding;
-
 		private ConsumerStub(OOCPrimitive producer, OOCStreamable<IndexedMatrixValue> source) {
-			super(List.of(producer));
-			this.source = source;
+			super(List.of(producer), List.of(source), List.of());
 		}
 
 		@Override
-		public OOCStoreRequest requiresStore() {
-			return new OOCStoreRequest(source, ix -> (int) ix.getRowIndex() - 1, 1, 1);
-		}
-
-		@Override
-		public void bindStore(OOCStoreBinding store) {
-			binding = store;
+		public OOCMaterializedInputRequest requiresMaterializedInput() {
+			return new OOCMaterializedInputRequest(0, ix -> (int) ix.getRowIndex() - 1, 1, 1);
 		}
 
 		@Override
 		public void startExecution() {
 		}
 
-		@Override
-		public List<OOCStreamable<?>> getInputStreams() {
-			return List.of(source);
-		}
-
-		@Override
-		public List<OOCStreamable<?>> getOutputStreams() {
-			return List.of();
-		}
-
-		@Override
 		public void inferPatterns() {
 			_pattern = OOCAccessPattern.ANY;
 		}

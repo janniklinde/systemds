@@ -24,6 +24,7 @@ import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
@@ -45,6 +46,14 @@ public interface OOCStreamable<T> {
 
 	default boolean hasMaterializedStore() {
 		return false;
+	}
+
+	default boolean hasMaterializedView() {
+		return false;
+	}
+
+	default OOCMaterializedView materializedView() {
+		throw new NotImplementedException();
 	}
 
 	default void scheduleMaterializedStoreDeletion() {

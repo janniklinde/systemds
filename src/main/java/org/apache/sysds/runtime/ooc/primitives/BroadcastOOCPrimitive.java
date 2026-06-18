@@ -30,10 +30,10 @@ import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
-import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
 import org.apache.sysds.runtime.ooc.store.LeaseQueueCallbacks;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
+import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -47,9 +47,6 @@ import java.util.function.BiFunction;
 import java.util.function.ToIntFunction;
 
 public class BroadcastOOCPrimitive extends OOCPrimitive {
-	private final OOCStreamable<IndexedMatrixValue> _broadcastStreamable;
-	private final OOCStreamable<IndexedMatrixValue> _streamedStreamable;
-	private final OOCStreamable<IndexedMatrixValue> _outputStreamable;
 	private final BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> _mergeFn;
 	private final ToIntFunction<IndexedMatrixValue> _broadcastKeyFn;
 	private final ToIntFunction<IndexedMatrixValue> _streamedKeyFn;
@@ -57,7 +54,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	private final int _maxBroadcastCount;
 	private final boolean _rowBroadcast;
 	private final StreamContext _sc;
-	private OOCStoreBinding _storeBinding;
+	private OOCMaterializedView _broadcastView;
 	private volatile MaterializedStore.IndexedReader<IndexedMatrixValue> _reader;
 	private final AtomicBoolean _storeReleased = new AtomicBoolean(false);
 
@@ -66,10 +63,8 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		OOCStreamable<IndexedMatrixValue> outputStreamable, BiFunction<IndexedMatrixValue, IndexedMatrixValue, MatrixBlock> mergeFn,
 		ToIntFunction<IndexedMatrixValue> broadcastKeyFn, ToIntFunction<IndexedMatrixValue> streamedKeyFn,
 		int numBroadcastTiles, int maxBroadcastCount, boolean rowBroadcast, StreamContext sc) {
-		super(childrenOf(broadcastPrimitive, streamedPrimitive));
-		_broadcastStreamable = reserveLazyHandle(broadcastStreamable);
-		_streamedStreamable = reserveLazyHandle(streamedStreamable);
-		_outputStreamable = outputStreamable;
+		super(childrenOf(broadcastPrimitive, streamedPrimitive),
+			List.of(broadcastStreamable, streamedStreamable), List.of(outputStreamable));
 		_broadcastKeyFn = broadcastKeyFn;
 		_streamedKeyFn = streamedKeyFn;
 		_numBroadcastTiles = numBroadcastTiles;
@@ -108,16 +103,6 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
-	public List<OOCStreamable<?>> getInputStreams() {
-		return List.of(_broadcastStreamable, _streamedStreamable);
-	}
-
-	@Override
-	public List<OOCStreamable<?>> getOutputStreams() {
-		return List.of(_outputStreamable);
-	}
-
-	@Override
 	public boolean isMaterializationBoundary() {
 		return true;
 	}
@@ -129,12 +114,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	public OOCMaterializedInputRequest requiresMaterializedInput() {
-		return new OOCMaterializedInputRequest(_broadcastStreamable, this::broadcastTileIndex, 1, 1);
-	}
-
-	@Override
-	public void bindMaterializedInput(OOCStoreBinding store) {
-		_storeBinding = store;
+		return new OOCMaterializedInputRequest(0, this::broadcastTileIndex, 1, 1);
 	}
 
 	@Override
@@ -148,11 +128,11 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	}
 
 	private void releaseStore() {
-		if(_storeBinding == null || !_storeReleased.compareAndSet(false, true))
+		if(_broadcastView == null || !_storeReleased.compareAndSet(false, true))
 			return;
 		if(_reader != null)
 			_reader.close();
-		_storeBinding.release();
+		_broadcastView.close();
 	}
 
 	/**
@@ -193,10 +173,9 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	public void startExecution() {
-		if(_storeBinding == null)
-			throw new IllegalStateException("Broadcast requires a bound MaterializedStore.");
+		_broadcastView = getInputStream(0).materializedView();
 		final OOCStream<IndexedMatrixValue> streamedStream = getStreamedStreamable().getReadStream();
-		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
+		final OOCStream<IndexedMatrixValue> out = getOutputStreamable().getWriteStream();
 		final DataCharacteristics dc = streamedStream.getDataCharacteristics();
 		final int maxCount = _maxBroadcastCount > 0 ? _maxBroadcastCount :
 			(int)(_rowBroadcast ? OOCUtils.getNumRowBlocks(dc) : OOCUtils.getNumColBlocks(dc));
@@ -207,7 +186,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 
 		//The planner owns materialization and source attachment. Probing waits for the FULL declared
 		//reader set to register (readersSealed), not just this reader.
-		_storeBinding.completion().whenComplete((ignored, error) -> {
+		_broadcastView.completion().whenComplete((ignored, error) -> {
 			if(error != null) {
 				DMLRuntimeException re = DMLRuntimeException.of(error);
 				out.propagateFailure(re);
@@ -216,7 +195,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 				return;
 			}
 			try {
-				_reader = _storeBinding.openIndexedReader(
+				_reader = _broadcastView.openIndexedReader(
 					new MultiplicityLiveness(nBroadcastTiles, maxCount), _allowance);
 			}
 			catch(RuntimeException ex) {
@@ -225,7 +204,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 				buildFuture.completeExceptionally(ex);
 				return;
 			}
-			_storeBinding.readersSealed().whenComplete((sl, sealError) -> {
+			_broadcastView.readersSealed().whenComplete((sl, sealError) -> {
 				if(sealError != null) {
 					out.propagateFailure(DMLRuntimeException.of(sealError));
 					releaseStore();
@@ -465,15 +444,15 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	}
 
 	public OOCStreamable<IndexedMatrixValue> getBroadcastStreamable() {
-		return _broadcastStreamable;
+		return getInputStream(0);
 	}
 
 	public OOCStreamable<IndexedMatrixValue> getStreamedStreamable() {
-		return _streamedStreamable;
+		return getInputStream(1);
 	}
 
 	public OOCStreamable<IndexedMatrixValue> getOutputStreamable() {
-		return _outputStreamable;
+		return getOutputStream(0);
 	}
 
 	private static final class ProbeWork {

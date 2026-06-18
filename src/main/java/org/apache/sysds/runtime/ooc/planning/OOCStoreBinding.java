@@ -34,6 +34,7 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.store.MaterializationSink;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MaterializedStoreImpl;
+import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
 
 /**
  * Planner-owned coordination handle for one materialized input: the source, store, publication
@@ -41,7 +42,7 @@ import org.apache.sysds.runtime.ooc.store.MaterializedStoreImpl;
  * of a boundary, so it declares up front how many reader registrations to expect; registration goes
  * through this binding and {@code sealReaders()} fires exactly when the declared count has
  * registered — consumers never need a global barrier or knowledge of each other. The last
- * {@link #release()} closes the store (dropping whatever forgetting has not reclaimed yet).
+ * {@link #close()} closes the store (dropping whatever forgetting has not reclaimed yet).
  *
  * One binding is shared by ALL consumers of a materialized input. Attachment is planner-owned and
  * first-wins so the source is materialized exactly once. Late-planned consumers can still join via
@@ -49,7 +50,7 @@ import org.apache.sysds.runtime.ooc.store.MaterializedStoreImpl;
  * a planning error — the store may already have started forgetting). Consumers must await
  * {@link #completion()} before opening readers (readers require a completed store).
  */
-public final class OOCStoreBinding {
+public final class OOCStoreBinding implements OOCMaterializedView {
 	private final OOCStreamable<IndexedMatrixValue> _source;
 	private final MaterializedStore<IndexedMatrixValue> _store;
 	private final MaterializationSink _sink;
@@ -152,7 +153,8 @@ public final class OOCStoreBinding {
 	/**
 	 * Releases one consumer; the last release closes the store.
 	 */
-	public void release() {
+	@Override
+	public void close() {
 		boolean close;
 		synchronized(this) {
 			if(_refCtr <= 0)

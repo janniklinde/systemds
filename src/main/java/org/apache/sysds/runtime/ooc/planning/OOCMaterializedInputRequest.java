@@ -21,34 +21,34 @@ package org.apache.sysds.runtime.ooc.planning;
 
 import java.util.function.ToIntFunction;
 
-import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
-import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 
 /**
- * Minimal primitive declaration for a planner-owned materialized input: the input stream that must
- * be materialized and the preferred physical store layout. The layout is a locality hint; when
+ * Minimal primitive declaration for a planner-owned materialized input: the input slot that must be
+ * materialized and the preferred physical store layout. The layout is a locality hint; when
  * several consumers of the same input disagree, the planner may choose any one layout and share the
  * resulting materialization.
  */
 public final class OOCMaterializedInputRequest {
-	private final OOCStreamable<IndexedMatrixValue> _input;
+	private final int _inputIndex;
 	private final ToIntFunction<MatrixIndexes> _preferredLayout;
 	private final int _expectedReaders;
 	private final int _consumers;
 
-	public OOCMaterializedInputRequest(OOCStreamable<IndexedMatrixValue> input,
-		ToIntFunction<MatrixIndexes> preferredLayout, int expectedReaders, int consumers) {
+	public OOCMaterializedInputRequest(int inputIndex, ToIntFunction<MatrixIndexes> preferredLayout,
+		int expectedReaders, int consumers) {
+		if(inputIndex < 0)
+			throw new IllegalArgumentException("Materialized input request requires a valid input slot.");
 		if(preferredLayout == null)
 			throw new IllegalArgumentException("Materialized input request requires a preferred layout.");
-		_input = input;
+		_inputIndex = inputIndex;
 		_preferredLayout = preferredLayout;
 		_expectedReaders = expectedReaders;
 		_consumers = consumers;
 	}
 
-	public OOCStreamable<IndexedMatrixValue> input() {
-		return _input;
+	public int inputIndex() {
+		return _inputIndex;
 	}
 
 	public ToIntFunction<MatrixIndexes> preferredLayout() {

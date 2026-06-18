@@ -50,8 +50,7 @@ public final class OOCStoreBindingRegistry {
 	}
 
 	public static OOCStoreBinding acquire(OOCMaterializedInputRequest request, OOCPrimitive requester,
-		MemoryAllowance sinkAllowance) {
-		OOCStreamable<IndexedMatrixValue> source = request.input();
+		OOCStreamable<IndexedMatrixValue> source, MemoryAllowance sinkAllowance) {
 		if(source == null) {
 			//anonymous boundary: never shared
 			return new OOCStoreBinding(null, OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID(),
@@ -104,7 +103,8 @@ public final class OOCStoreBindingRegistry {
 					continue;
 				OOCMaterializedInputRequest parentRequest = parent == requester ? request :
 					parent.requiresMaterializedInput();
-				if(parentRequest == null || parentRequest.input() != source || !counted.add(parent))
+				if(parentRequest == null || parent.getInputStream(parentRequest.inputIndex()) != source
+					|| !counted.add(parent))
 					continue;
 				readers += parentRequest.expectedReaders();
 				consumers += parentRequest.consumers();

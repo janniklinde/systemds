@@ -29,7 +29,6 @@ import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
 import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
 import org.apache.sysds.runtime.ooc.planning.OOCRegionBinding;
-import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
 import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 
 import java.util.ArrayList;
@@ -50,6 +49,8 @@ public abstract class OOCPrimitive {
 
 	private final List<OOCPrimitive> _children;
 	private final List<OOCPrimitive> _parents;
+	private final List<OOCStreamable<?>> _inputStreams;
+	private final List<OOCStreamable<?>> _outputStreams;
 	private final AtomicBoolean _started;
 	private final AtomicBoolean _executionStarted;
 	protected OOCAccessPattern _pattern;
@@ -60,6 +61,11 @@ public abstract class OOCPrimitive {
 	protected boolean _startsRegion;
 
 	public OOCPrimitive(List<OOCPrimitive> children) {
+		this(children, List.of(), List.of());
+	}
+
+	public OOCPrimitive(List<OOCPrimitive> children, List<? extends OOCStreamable<?>> inputs,
+		List<? extends OOCStreamable<?>> outputs) {
 		_children = new ArrayList<>();
 		if(children != null) {
 			for(OOCPrimitive child : children) {
@@ -70,6 +76,12 @@ public abstract class OOCPrimitive {
 			}
 		}
 		_parents = new ArrayList<>();
+		_inputStreams = new ArrayList<>();
+		if(inputs != null) {
+			for(OOCStreamable<?> input : inputs)
+				_inputStreams.add(reserveLazyHandle(input));
+		}
+		_outputStreams = outputs == null ? new ArrayList<>() : new ArrayList<>(outputs);
 		_started = new AtomicBoolean(false);
 		_executionStarted = new AtomicBoolean(false);
 		_pattern = OOCAccessPattern.UNSET;
@@ -160,15 +172,6 @@ public abstract class OOCPrimitive {
 		return null;
 	}
 
-	/**
-	 * Capability seam for primitives consuming a materialized input: the planner hands the shared
-	 * {@link OOCStoreBinding} of an input store. The primitive must await {@code binding.completion()}
-	 * before opening readers and call {@code binding.release()} when done.
-	 */
-	public void bindMaterializedInput(OOCStoreBinding store) {
-		throw new UnsupportedOperationException();
-	}
-
 	public long getDenseTileMemoryFactor() {
 		return 1;
 	}
@@ -240,8 +243,28 @@ public abstract class OOCPrimitive {
 		return primitive == null ? OOCAccessPattern.UNKNOWN : primitive.getAccessPattern();
 	}
 
-	public abstract List<OOCStreamable<?>> getInputStreams();
-	public abstract List<OOCStreamable<?>> getOutputStreams();
+	@SuppressWarnings("unchecked")
+	public <T extends OOCStreamable<?>> T getInputStream(int index) {
+		return (T) _inputStreams.get(index);
+	}
+
+	@SuppressWarnings("unchecked")
+	public <T extends OOCStreamable<?>> T getOutputStream(int index) {
+		return (T) _outputStreams.get(index);
+	}
+
+	public void replaceInputStream(int index, OOCStreamable<?> replacement) {
+		_inputStreams.set(index, replacement);
+	}
+
+	public List<OOCStreamable<?>> getInputStreams() {
+		return List.copyOf(_inputStreams);
+	}
+
+	public List<OOCStreamable<?>> getOutputStreams() {
+		return List.copyOf(_outputStreams);
+	}
+
 	public abstract void inferPatterns();
 	public abstract void requestPattern(OOCAccessPattern accessPattern);
 }

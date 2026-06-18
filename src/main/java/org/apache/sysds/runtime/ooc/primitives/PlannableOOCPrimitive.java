@@ -19,6 +19,8 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
+import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -27,6 +29,15 @@ public abstract class PlannableOOCPrimitive extends OOCPrimitive {
 
 	public PlannableOOCPrimitive(List<OOCPrimitive> children) {
 		super(children);
+		_keyPrimitives = new ArrayList<>(getChildren().size());
+		for(OOCPrimitive child : getChildren()) {
+			findKeyPrimitives(child);
+		}
+	}
+
+	public PlannableOOCPrimitive(List<OOCPrimitive> children, List<? extends OOCStreamable<?>> inputs,
+		List<? extends OOCStreamable<?>> outputs) {
+		super(children, inputs, outputs);
 		_keyPrimitives = new ArrayList<>(getChildren().size());
 		for(OOCPrimitive child : getChildren()) {
 			findKeyPrimitives(child);

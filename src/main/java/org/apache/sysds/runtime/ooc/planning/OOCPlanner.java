@@ -20,6 +20,8 @@
 package org.apache.sysds.runtime.ooc.planning;
 
 import org.apache.sysds.runtime.instructions.ooc.CachingStream;
+import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
@@ -121,8 +123,11 @@ public class OOCPlanner {
 			//are bound, and consumers only open readers on the binding they receive.
 			OOCMaterializedInputRequest inputRequest = primitive.requiresMaterializedInput();
 			if(inputRequest != null) {
-				OOCStoreBinding store = OOCStoreBindingRegistry.acquire(inputRequest, primitive, allowance);
-				primitive.bindMaterializedInput(store);
+				OOCStreamable<IndexedMatrixValue> source =
+					primitive.getInputStream(inputRequest.inputIndex());
+				OOCStoreBinding store = OOCStoreBindingRegistry.acquire(inputRequest, primitive, source, allowance);
+				primitive.replaceInputStream(inputRequest.inputIndex(),
+					new MaterializedInputStreamable(source, store));
 				materializedInputs.add(store);
 			}
 			if(primitive.requiresStateTable()) {

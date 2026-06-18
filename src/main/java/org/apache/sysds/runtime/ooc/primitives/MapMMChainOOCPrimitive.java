@@ -43,11 +43,11 @@ import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
-import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
 import org.apache.sysds.runtime.ooc.store.LeaseQueueCallbacks;
 import org.apache.sysds.runtime.ooc.store.MaterializationSink;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
+import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
@@ -63,26 +63,18 @@ import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.function.Consumer;
 
 public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
-	private final OOCStreamable<IndexedMatrixValue> _xStreamable;
-	private final OOCStreamable<IndexedMatrixValue> _vStreamable;
-	private final OOCStreamable<IndexedMatrixValue> _wStreamable;
-	private final OOCStreamable<IndexedMatrixValue> _outputStreamable;
 	private final ChainType _type;
 	private final StreamContext _sc;
 	private final AtomicBoolean _terminated = new AtomicBoolean(false);
 	private final AtomicBoolean _storeReleased = new AtomicBoolean(false);
 	private OperatorStateTable<IndexedMatrixValue> _table;
-	private OOCStoreBinding _storeBinding;
+	private OOCMaterializedView _vView;
 	private volatile MaterializedStore.IndexedReader<IndexedMatrixValue> _vReader;
 
 	private MapMMChainOOCPrimitive(List<OOCPrimitive> children, OOCStreamable<IndexedMatrixValue> xStreamable,
 		OOCStreamable<IndexedMatrixValue> vStreamable, OOCStreamable<IndexedMatrixValue> wStreamable,
 		OOCStreamable<IndexedMatrixValue> outputStreamable, ChainType type, StreamContext sc) {
-		super(children);
-		_xStreamable = reserveLazyHandle(xStreamable);
-		_vStreamable = reserveLazyHandle(vStreamable);
-		_wStreamable = reserveLazyHandle(wStreamable);
-		_outputStreamable = outputStreamable;
+		super(children, inputsOf(xStreamable, vStreamable, wStreamable), List.of(outputStreamable));
 		_type = type;
 		_sc = sc;
 	}
@@ -109,6 +101,16 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		return children;
 	}
 
+	private static List<OOCStreamable<IndexedMatrixValue>> inputsOf(OOCStreamable<IndexedMatrixValue> xStreamable,
+		OOCStreamable<IndexedMatrixValue> vStreamable, OOCStreamable<IndexedMatrixValue> wStreamable) {
+		ArrayList<OOCStreamable<IndexedMatrixValue>> inputs = new ArrayList<>(3);
+		inputs.add(xStreamable);
+		inputs.add(vStreamable);
+		if(wStreamable != null)
+			inputs.add(wStreamable);
+		return inputs;
+	}
+
 	private static void addPrimitive(List<OOCPrimitive> children, OOCStreamable<?> streamable) {
 		if(streamable == null)
 			return;
@@ -119,21 +121,6 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		}
 		catch(RuntimeException ignored) {
 		}
-	}
-
-	@Override
-	public List<OOCStreamable<?>> getInputStreams() {
-		ArrayList<OOCStreamable<?>> inputs = new ArrayList<>(3);
-		inputs.add(_xStreamable);
-		inputs.add(_vStreamable);
-		if(_wStreamable != null)
-			inputs.add(_wStreamable);
-		return inputs;
-	}
-
-	@Override
-	public List<OOCStreamable<?>> getOutputStreams() {
-		return List.of(_outputStreamable);
 	}
 
 	@Override
@@ -158,12 +145,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 
 	@Override
 	public OOCMaterializedInputRequest requiresMaterializedInput() {
-		return new OOCMaterializedInputRequest(_vStreamable, ix -> Math.toIntExact(ix.getRowIndex() - 1), 1, 1);
-	}
-
-	@Override
-	public void bindMaterializedInput(OOCStoreBinding store) {
-		_storeBinding = store;
+		return new OOCMaterializedInputRequest(1, ix -> Math.toIntExact(ix.getRowIndex() - 1), 1, 1);
 	}
 
 	@Override
@@ -179,11 +161,11 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	}
 
 	private void releaseStore() {
-		if(_storeBinding == null || !_storeReleased.compareAndSet(false, true))
+		if(_vView == null || !_storeReleased.compareAndSet(false, true))
 			return;
 		if(_vReader != null)
 			_vReader.close();
-		_storeBinding.release();
+		_vView.close();
 	}
 
 	@Override
@@ -214,16 +196,15 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 
 	@Override
 	public void startExecution() {
-		if(_type != ChainType.XtXv || _wStreamable != null)
+		if(_type != ChainType.XtXv || getWStreamable() != null)
 			throw new UnsupportedOperationException("MapMMChainOOCPrimitive currently only supports XtXv.");
 		if(_table == null)
 			throw new IllegalStateException("MapMMChain requires a bound OperatorStateTable.");
-		if(_storeBinding == null)
-			throw new IllegalStateException("MapMMChain requires a bound MaterializedStore for v.");
 
-		final OOCStream<IndexedMatrixValue> x = _xStreamable.getReadStream();
-		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
-		final int numVBlocks = Math.toIntExact(OOCUtils.getNumRowBlocks(_vStreamable.getDataCharacteristics()));
+		_vView = getVStreamable().materializedView();
+		final OOCStream<IndexedMatrixValue> x = getXStreamable().getReadStream();
+		final OOCStream<IndexedMatrixValue> out = getOutputStreamable().getWriteStream();
+		final int numVBlocks = Math.toIntExact(OOCUtils.getNumRowBlocks(getVStreamable().getDataCharacteristics()));
 		final int numColBlocks = Math.toIntExact(OOCUtils.getNumColBlocks(x.getDataCharacteristics()));
 		final int numRowBlocks = Math.toIntExact(OOCUtils.getNumRowBlocks(x.getDataCharacteristics()));
 		final int uBase = numVBlocks;
@@ -234,13 +215,13 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		final BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
 		final AtomicIntegerArray seenPerRow = new AtomicIntegerArray(numRowBlocks);
 
-		_storeBinding.completion().whenComplete((ignored, error) -> {
+		_vView.completion().whenComplete((ignored, error) -> {
 			if(error != null) {
 				fail(error, out, null);
 				return;
 			}
 			try {
-				_vReader = _storeBinding.openIndexedReader(
+				_vReader = _vView.openIndexedReader(
 					new MultiplicityLiveness(numVBlocks, numRowBlocks), _allowance);
 				startXtXv(x, out, numColBlocks, uBase, qBase, xBase, mmOp, plus, seenPerRow);
 			}
@@ -701,19 +682,19 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	}
 
 	public OOCStreamable<IndexedMatrixValue> getXStreamable() {
-		return _xStreamable;
+		return getInputStream(0);
 	}
 
 	public OOCStreamable<IndexedMatrixValue> getVStreamable() {
-		return _vStreamable;
+		return getInputStream(1);
 	}
 
 	public OOCStreamable<IndexedMatrixValue> getWStreamable() {
-		return _wStreamable;
+		return getInputStreams().size() > 2 ? getInputStream(2) : null;
 	}
 
 	public OOCStreamable<IndexedMatrixValue> getOutputStreamable() {
-		return _outputStreamable;
+		return getOutputStream(0);
 	}
 
 	public ChainType getType() {
