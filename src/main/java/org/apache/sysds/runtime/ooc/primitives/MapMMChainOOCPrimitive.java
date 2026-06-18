@@ -44,6 +44,7 @@ import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreRequest;
+import org.apache.sysds.runtime.ooc.store.LeaseQueueCallbacks;
 import org.apache.sysds.runtime.ooc.store.MaterializationSink;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
@@ -440,7 +441,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> vectorTile(int idx) {
 		MaterializedStore.Lease<IndexedMatrixValue> live = _vReader.requestIfLive(idx);
 		if(live != null)
-			return CompletableFuture.completedFuture(new StoreLeaseCallback(live));
+			return CompletableFuture.completedFuture(LeaseQueueCallbacks.store(live));
 		CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> pending = new CompletableFuture<>();
 		_vReader.request(idx).whenComplete((lease, error) -> {
 			if(error != null)
@@ -449,7 +450,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 				pending.completeExceptionally(
 					new DMLRuntimeException("MapMMChain v store reader closed before tile " + idx + " was served."));
 			else
-				pending.complete(new StoreLeaseCallback(lease));
+				pending.complete(LeaseQueueCallbacks.store(lease));
 		});
 		return pending;
 	}
@@ -521,7 +522,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		OperatorStateTable.StateLease<IndexedMatrixValue> uLease = await(_table.take(uBase + row));
 		if(uLease == null)
 			throw new IllegalStateException("Missing finalized XtXv row accumulator " + row);
-		try(StateLeaseCallback uCb = new StateLeaseCallback(uLease)) {
+		try(OOCStream.QueueCallback<IndexedMatrixValue> uCb = LeaseQueueCallbacks.state(uLease)) {
 			for(int col = 0; col < numColBlocks; col++) {
 				OperatorStateTable.StateLease<IndexedMatrixValue> xLease =
 					await(_table.take(xBase + row * numColBlocks + col));
@@ -529,7 +530,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 					throw new IllegalStateException("Missing retained XtXv input tile for row=" + row
 						+ ", col=" + col);
 				OOCStream.QueueCallback<IndexedMatrixValue> uAlias = uCb.keepOpen();
-				StateLeaseCallback xCb = new StateLeaseCallback(xLease);
+				OOCStream.QueueCallback<IndexedMatrixValue> xCb = LeaseQueueCallbacks.state(xLease);
 				boolean enqueued = false;
 				try {
 					phase2Stream.enqueue(new MMChainWorkload(uAlias, xCb));
@@ -727,102 +728,6 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 
 	public StreamContext getContext() {
 		return _sc;
-	}
-
-	private static final class StoreLeaseCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
-		private final MaterializedStore.Lease<IndexedMatrixValue> _lease;
-		private DMLRuntimeException _failure;
-		private boolean _closed;
-
-		private StoreLeaseCallback(MaterializedStore.Lease<IndexedMatrixValue> lease) {
-			_lease = lease;
-		}
-
-		@Override
-		public IndexedMatrixValue get() {
-			if(_failure != null)
-				throw _failure;
-			return _lease.value();
-		}
-
-		@Override
-		public synchronized OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
-			if(_closed)
-				throw new IllegalStateException("Cannot keep open a closed callback");
-			return new StoreLeaseCallback(_lease.retain());
-		}
-
-		@Override
-		public synchronized void close() {
-			if(_closed)
-				return;
-			_closed = true;
-			_lease.close();
-		}
-
-		@Override
-		public void fail(DMLRuntimeException failure) {
-			_failure = failure;
-		}
-
-		@Override
-		public boolean isEos() {
-			return false;
-		}
-
-		@Override
-		public boolean isFailure() {
-			return _failure != null;
-		}
-	}
-
-	private static final class StateLeaseCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
-		private final OperatorStateTable.StateLease<IndexedMatrixValue> _lease;
-		private DMLRuntimeException _failure;
-		private int _references = 1;
-		private boolean _closed;
-
-		private StateLeaseCallback(OperatorStateTable.StateLease<IndexedMatrixValue> lease) {
-			_lease = lease;
-		}
-
-		@Override
-		public IndexedMatrixValue get() {
-			if(_failure != null)
-				throw _failure;
-			return _lease.value();
-		}
-
-		@Override
-		public synchronized OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
-			if(_closed)
-				throw new IllegalStateException("Cannot keep open a closed callback");
-			_references++;
-			return this;
-		}
-
-		@Override
-		public synchronized void close() {
-			if(_closed || --_references > 0)
-				return;
-			_closed = true;
-			_lease.close();
-		}
-
-		@Override
-		public void fail(DMLRuntimeException failure) {
-			_failure = failure;
-		}
-
-		@Override
-		public boolean isEos() {
-			return false;
-		}
-
-		@Override
-		public boolean isFailure() {
-			return _failure != null;
-		}
 	}
 
 	private record MMChainWorkload(OOCStream.QueueCallback<IndexedMatrixValue> cb1, OOCStream.QueueCallback<IndexedMatrixValue> cb2){}

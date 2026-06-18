@@ -31,6 +31,7 @@ import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreRequest;
+import org.apache.sysds.runtime.ooc.store.LeaseQueueCallbacks;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
@@ -426,7 +427,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> broadcastTile(int idx) {
 		MaterializedStore.Lease<IndexedMatrixValue> live = _reader.requestIfLive(idx);
 		if(live != null)
-			return CompletableFuture.completedFuture(new LeaseQueueCallback(live));
+			return CompletableFuture.completedFuture(LeaseQueueCallbacks.store(live));
 		CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> pending = new CompletableFuture<>();
 		_reader.request(idx).whenComplete((lease, error) -> {
 			if(error != null)
@@ -435,7 +436,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 				pending.completeExceptionally(
 					new DMLRuntimeException("Broadcast store reader closed before tile " + idx + " was served."));
 			else
-				pending.complete(new LeaseQueueCallback(lease));
+				pending.complete(LeaseQueueCallbacks.store(lease));
 		});
 		return pending;
 	}
@@ -477,57 +478,6 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 
 	public OOCStreamable<IndexedMatrixValue> getOutputStreamable() {
 		return _outputStreamable;
-	}
-
-	/**
-	 * Wraps a store lease as a queue callback for the probe pipeline. Closing it (once across all
-	 * {@code keepOpen} aliases) counts the consumption against the tile's multiplicity.
-	 */
-	private static final class LeaseQueueCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
-		private final MaterializedStore.Lease<IndexedMatrixValue> _lease;
-		private DMLRuntimeException _failure;
-		private boolean _closed;
-
-		private LeaseQueueCallback(MaterializedStore.Lease<IndexedMatrixValue> lease) {
-			_lease = lease;
-		}
-
-		@Override
-		public IndexedMatrixValue get() {
-			if(_failure != null)
-				throw _failure;
-			return _lease.value();
-		}
-
-		@Override
-		public synchronized OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
-			if(_closed)
-				throw new IllegalStateException("Cannot keep open a closed callback");
-			return new LeaseQueueCallback(_lease.retain());
-		}
-
-		@Override
-		public synchronized void close() {
-			if(_closed)
-				return;
-			_closed = true;
-			_lease.close();
-		}
-
-		@Override
-		public void fail(DMLRuntimeException failure) {
-			_failure = failure;
-		}
-
-		@Override
-		public boolean isEos() {
-			return false;
-		}
-
-		@Override
-		public boolean isFailure() {
-			return _failure != null;
-		}
 	}
 
 	private static final class ProbeWork {

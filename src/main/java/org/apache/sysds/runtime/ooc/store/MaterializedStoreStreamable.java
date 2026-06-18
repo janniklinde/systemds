@@ -180,7 +180,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		}
 		try {
 			for(LiveReader reader : readers)
-				reader.enqueueLive(new MaterializationSink.PinnedLeaseCallback(lease.retain()));
+				reader.enqueueLive(LeaseQueueCallbacks.pinned(lease.retain()));
 		}
 		finally {
 			lease.close();
@@ -197,7 +197,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 				for(int i = 0; i < replayLimit; i++) {
 					MaterializedStore.Lease<IndexedMatrixValue> lease = _store.requestPublished(i, _allowance).get();
 					if(lease != null)
-						reader.enqueuePrefix(new LeaseQueueCallback(lease));
+						reader.enqueuePrefix(LeaseQueueCallbacks.store(lease));
 				}
 				reader.finishReplay();
 			}
@@ -392,53 +392,6 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	@Override
 	public BiFunction<Boolean, IndexRange, IndexRange> getIXTransform() {
 		return _source.getIXTransform();
-	}
-
-	private static final class LeaseQueueCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
-		private final MaterializedStore.Lease<IndexedMatrixValue> _lease;
-		private DMLRuntimeException _failure;
-		private boolean _closed;
-
-		private LeaseQueueCallback(MaterializedStore.Lease<IndexedMatrixValue> lease) {
-			_lease = lease;
-		}
-
-		@Override
-		public IndexedMatrixValue get() {
-			if(_failure != null)
-				throw _failure;
-			return _lease.value();
-		}
-
-		@Override
-		public synchronized OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
-			if(_closed)
-				throw new IllegalStateException("Cannot keep open a closed callback");
-			return new LeaseQueueCallback(_lease.retain());
-		}
-
-		@Override
-		public synchronized void close() {
-			if(_closed)
-				return;
-			_closed = true;
-			_lease.close();
-		}
-
-		@Override
-		public void fail(DMLRuntimeException failure) {
-			_failure = failure;
-		}
-
-		@Override
-		public boolean isEos() {
-			return false;
-		}
-
-		@Override
-		public boolean isFailure() {
-			return _failure != null;
-		}
 	}
 
 	private static final class LiveReader {

@@ -75,7 +75,7 @@ public final class TableRendezvous {
 			else if(lease == null)
 				result.complete(null); //installed: the reservation transferred into the table
 			else
-				result.complete(new Match(new PayloadCallback(payload), new StateLeaseCallback(lease)));
+				result.complete(new Match(new PayloadCallback(payload), LeaseQueueCallbacks.state(lease)));
 		});
 		return result;
 	}
@@ -100,7 +100,7 @@ public final class TableRendezvous {
 				result.complete(null);
 			}
 			else
-				result.complete(new Match(pinned, new StateLeaseCallback(lease)));
+				result.complete(new Match(pinned, LeaseQueueCallbacks.state(lease)));
 		});
 		return result;
 	}
@@ -182,64 +182,4 @@ public final class TableRendezvous {
 		}
 	}
 
-	/**
-	 * Wraps a taken {@link OperatorStateTable.StateLease} as a callback: the last close across all
-	 * {@code keepOpen} aliases is the exactly-once consumption of the taken value.
-	 */
-	private static final class StateLeaseCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
-		private final OperatorStateTable.StateLease<IndexedMatrixValue> _lease;
-		private DMLRuntimeException _failure;
-		private int _references = 1;
-		private boolean _closed;
-
-		private StateLeaseCallback(OperatorStateTable.StateLease<IndexedMatrixValue> lease) {
-			_lease = lease;
-		}
-
-		@Override
-		public IndexedMatrixValue get() {
-			if(_failure != null)
-				throw _failure;
-			return _lease.value();
-		}
-
-		@Override
-		public synchronized OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
-			if(_closed)
-				throw new IllegalStateException("Cannot keep open a closed callback");
-			_references++;
-			return this;
-		}
-
-		@Override
-		public synchronized void close() {
-			if(_closed || --_references > 0)
-				return;
-			_closed = true;
-			try {
-				_lease.close();
-			}
-			catch(RuntimeException ex) {
-				throw ex;
-			}
-			catch(Exception ex) {
-				throw new DMLRuntimeException(ex);
-			}
-		}
-
-		@Override
-		public void fail(DMLRuntimeException failure) {
-			_failure = failure;
-		}
-
-		@Override
-		public boolean isEos() {
-			return false;
-		}
-
-		@Override
-		public boolean isFailure() {
-			return _failure != null;
-		}
-	}
 }
