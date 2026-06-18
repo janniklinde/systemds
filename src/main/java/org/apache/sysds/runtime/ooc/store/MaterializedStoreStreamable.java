@@ -60,6 +60,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	private final AtomicBoolean _complete;
 	private final AtomicBoolean _deleteScheduled;
 	private boolean _readersSealed;
+	private int _openingReaders;
 	private int _pendingReaderReservations;
 	private volatile CopyOnWriteArrayList<Consumer<OOCStreamMessage>> _downstreamRelays;
 	private volatile DMLRuntimeException _failure;
@@ -76,6 +77,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		_liveReaders = new CopyOnWriteArrayList<>();
 		_complete = new AtomicBoolean(false);
 		_deleteScheduled = new AtomicBoolean(false);
+		_openingReaders = 0;
 		_source.setDownstreamMessageRelay(this::messageDownstream);
 		_source.setSubscriber(this::publish);
 	}
@@ -90,25 +92,35 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		DMLRuntimeException failure = _failure;
 		if(failure != null)
 			throw failure;
-		consumeReaderReservation();
-		if(_complete.get()) {
-			OOCStream<IndexedMatrixValue> stream = replayStream(pattern);
-			trySealReaders();
+		beginReaderOpen();
+		boolean readerOpenFinished = false;
+		try {
+			if(_complete.get()) {
+				OOCStream<IndexedMatrixValue> stream = replayStream(pattern);
+				finishReaderOpen();
+				readerOpenFinished = true;
+				return stream;
+			}
+			SubscribableTaskQueue<IndexedMatrixValue> stream = new SubscribableTaskQueue<>();
+			stream.setData(_data);
+			OOCPrimitive sourcePrimitive = _source.getPrimitive();
+			if(sourcePrimitive != null)
+				stream.assignPrimitive(sourcePrimitive);
+			LiveReader reader = new LiveReader(stream);
+			int replayLimit;
+			synchronized(this) {
+				_liveReaders.add(reader);
+				replayLimit = _nextIndex;
+			}
+			finishReaderOpen();
+			readerOpenFinished = true;
+			replayPublishedPrefix(reader, replayLimit);
 			return stream;
 		}
-		SubscribableTaskQueue<IndexedMatrixValue> stream = new SubscribableTaskQueue<>();
-		stream.setData(_data);
-		OOCPrimitive sourcePrimitive = _source.getPrimitive();
-		if(sourcePrimitive != null)
-			stream.assignPrimitive(sourcePrimitive);
-		LiveReader reader = new LiveReader(stream);
-		int replayLimit;
-		synchronized(this) {
-			_liveReaders.add(reader);
-			replayLimit = _nextIndex;
+		finally {
+			if(!readerOpenFinished)
+				finishReaderOpen();
 		}
-		replayPublishedPrefix(reader, replayLimit);
-		return stream;
 	}
 
 	private OOCStream<IndexedMatrixValue> replayStream(OOCAccessPattern pattern) {
@@ -145,14 +157,14 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	}
 
 	private void publishTile(OOCStream.QueueCallback<IndexedMatrixValue> callback) {
-		IndexedMatrixValue value = callback.get();
-		MaterializedStore.LiveLease<IndexedMatrixValue> lease;
 		List<LiveReader> readers;
 		int index;
 		synchronized(this) {
 			index = _nextIndex++;
 			readers = List.copyOf(_liveReaders);
 		}
+		IndexedMatrixValue value = callback.get();
+		MaterializedStore.LiveLease<IndexedMatrixValue> lease;
 		if(callback instanceof InMemoryQueueCallback managed)
 			lease = _store.publishPinnedLive(index, managed.extractManagedPayload());
 		else {
@@ -268,21 +280,30 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		return _source.getPrimitive();
 	}
 
-	private void consumeReaderReservation() {
+	private void beginReaderOpen() {
 		synchronized(this) {
-			if(_pendingReaderReservations > 0) {
+			if(_pendingReaderReservations > 0)
 				_pendingReaderReservations--;
-				return;
-			}
-			if(_deleteScheduled.get())
+			else if(_deleteScheduled.get())
 				throw new DMLRuntimeException("Cannot add unreserved reader to materialized stream scheduled for deletion.");
+			_openingReaders++;
 		}
+	}
+
+	private void finishReaderOpen() {
+		synchronized(this) {
+			_openingReaders--;
+			if(_openingReaders < 0)
+				throw new IllegalStateException("Materialized store opening-reader count underflow.");
+		}
+		trySealReaders();
 	}
 
 	private void trySealReaders() {
 		boolean seal;
 		synchronized(this) {
-			seal = _deleteScheduled.get() && _complete.get() && !_readersSealed && _pendingReaderReservations == 0;
+			seal = _deleteScheduled.get() && !_readersSealed && _pendingReaderReservations == 0
+				&& _openingReaders == 0;
 			if(seal)
 				_readersSealed = true;
 		}
