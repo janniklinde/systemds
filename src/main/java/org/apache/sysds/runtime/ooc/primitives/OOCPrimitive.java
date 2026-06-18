@@ -34,10 +34,20 @@ import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.ToLongFunction;
 
 public abstract class OOCPrimitive {
+	private static final AtomicInteger COORDINATOR_THREAD_ID = new AtomicInteger();
+	protected static final ExecutorService COORDINATOR_EXECUTOR = Executors.newCachedThreadPool(r -> {
+		Thread thread = new Thread(r, "ooc-primitive-coordinator-" + COORDINATOR_THREAD_ID.incrementAndGet());
+		thread.setDaemon(true);
+		return thread;
+	});
+
 	private final List<OOCPrimitive> _children;
 	private final List<OOCPrimitive> _parents;
 	private final AtomicBoolean _started;
@@ -197,6 +207,21 @@ public abstract class OOCPrimitive {
 
 	public void onComplete() {
 		_regionBinding.dereference();
+	}
+
+	protected static void runCoordinator(String name, Runnable task) {
+		COORDINATOR_EXECUTOR.execute(() -> {
+			Thread thread = Thread.currentThread();
+			String oldName = thread.getName();
+			if(name != null)
+				thread.setName(name);
+			try {
+				task.run();
+			}
+			finally {
+				thread.setName(oldName);
+			}
+		});
 	}
 
 	protected static OOCPrimitive safePrimitive(OOCStreamable<?> streamable) {

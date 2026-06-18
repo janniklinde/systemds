@@ -101,7 +101,7 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 		_out = _outputStream.getWriteStream();
 		final long targetAlloc = Math.max(_bulkAlloc, _allocFn.applyAsLong(new MatrixIndexes(1, 1)));
 
-		new Thread(OOCInstructionUtils.oocTask(() -> {
+		runCoordinator("ooc-uncoordinated-datagen", OOCInstructionUtils.oocTask(() -> {
 			while(!_shutdown) {
 				if(_startsRegion)
 					topUpBudget(targetAlloc);
@@ -114,7 +114,7 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 				_allowance.release(remaining);
 			}
 			finish();
-		}, new CompletableFuture<>(), _sc)).start();
+		}, new CompletableFuture<>(), _sc));
 	}
 
 	public void emit(IndexedMatrixValue imv) {

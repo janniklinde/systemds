@@ -89,14 +89,14 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	public void startExecution() {
 		final OOCStream<MatrixIndexes> stream = new SubscribableTaskQueue<>();
 		final OOCStream<IndexedMatrixValue> out = _outputStream.getWriteStream();
-		new Thread(() -> {
+		runCoordinator("ooc-datagen-index-driver", () -> {
 			for(MatrixIndexes ix : OOCUtils.getAccessPattern(_outputStream.getDataCharacteristics(), _pattern)) {
 				if(_startsRegion)
 					_allowance.reserveBlocking(_allocFn.applyAsLong(ix));
 				stream.enqueue(ix);
 			}
 			stream.closeInput();
-		}).start();
+		});
 
 		OOCInstructionUtils.submitOOCTasks(stream, cb -> {
 			var imv = new IndexedMatrixValue(cb.get(), _fn.apply(cb.get()));

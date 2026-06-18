@@ -332,7 +332,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 				fail(error, out, null);
 		});
 
-		new Thread(() -> {
+		runCoordinator("ooc-mapmmchain-q-coordinator", () -> {
 			try {
 				Phase2Result result;
 				while((result = phase2Results.take()) != null)
@@ -344,9 +344,9 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 			catch(Throwable t) {
 				fail(t, out, null);
 			}
-		}, "ooc-mapmmchain-q-coordinator").start();
+		});
 
-		new Thread(() -> {
+		runCoordinator("ooc-mapmmchain-u-coordinator", () -> {
 			try {
 				Phase1Result result;
 				while((result = phase1Results.take()) != null) {
@@ -369,7 +369,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 			catch(Throwable t) {
 				fail(t, out, phase2Stream);
 			}
-		}, "ooc-mapmmchain-u-coordinator").start();
+		});
 
 		final AtomicInteger inflightCtr = new AtomicInteger(1);
 		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> xSubscriber = xcb -> {

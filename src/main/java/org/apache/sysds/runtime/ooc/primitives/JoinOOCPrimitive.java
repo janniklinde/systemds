@@ -186,7 +186,7 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	private void startTableDriver(OOCStream<IndexedMatrixValue> l, OOCStream<IndexedMatrixValue> r,
 		OOCStream<JoinWork> intermediate,
 		OOCStream<IndexedMatrixValue> out) {
-		new Thread(() -> {
+		runCoordinator("ooc-join-table-driver", () -> {
 			OOCStream.QueueCallback<IndexedMatrixValue> next = null;
 			long outputBytes = 0;
 			boolean reservationOwned = false;
@@ -243,7 +243,7 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 				if(reservationOwned)
 					_allowance.release(outputBytes);
 			}
-		}).start();
+		});
 	}
 
 	private static TableRendezvous.Match getRendezvous(OOCFuture<TableRendezvous.Match> rendezvous)
