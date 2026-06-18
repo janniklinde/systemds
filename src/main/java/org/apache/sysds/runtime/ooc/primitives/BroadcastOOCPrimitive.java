@@ -27,6 +27,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
@@ -339,7 +340,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 							future3.complete(null);
 						return;
 					}
-					CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> bcbFuture;
+					OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> bcbFuture;
 					try {
 						bcbFuture = broadcastTile(idx);
 					}
@@ -399,11 +400,11 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	 * the returned callback wraps an {@code IndexedReader} lease whose close is the exactly-once
 	 * consumption driving multiplicity-based forgetting (no manual counting or clearing).
 	 */
-	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> broadcastTile(int idx) {
+	private OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> broadcastTile(int idx) {
 		MaterializedStore.Lease<IndexedMatrixValue> live = _reader.requestIfLive(idx);
 		if(live != null)
-			return CompletableFuture.completedFuture(LeaseQueueCallbacks.store(live));
-		CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> pending = new CompletableFuture<>();
+			return OOCFuture.completed(LeaseQueueCallbacks.store(live));
+		OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> pending = new OOCFuture<>();
 		_reader.request(idx).whenComplete((lease, error) -> {
 			if(error != null)
 				pending.completeExceptionally(error);

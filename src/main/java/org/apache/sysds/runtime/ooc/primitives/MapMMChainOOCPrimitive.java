@@ -361,7 +361,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 				inflightCtr.incrementAndGet();
 				inflightRetained = true;
 				int col = Math.toIntExact(xcb.get().getIndexes().getColumnIndex() - 1);
-				CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> vFuture = vectorTile(col);
+				OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> vFuture = vectorTile(col);
 				final var fXcb = retainedX;
 				retainedX = null;
 				vFuture.whenComplete((vcb, error) -> {
@@ -413,11 +413,11 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		}
 	}
 
-	private CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> vectorTile(int idx) {
+	private OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> vectorTile(int idx) {
 		MaterializedStore.Lease<IndexedMatrixValue> live = _vReader.requestIfLive(idx);
 		if(live != null)
-			return CompletableFuture.completedFuture(LeaseQueueCallbacks.store(live));
-		CompletableFuture<OOCStream.QueueCallback<IndexedMatrixValue>> pending = new CompletableFuture<>();
+			return OOCFuture.completed(LeaseQueueCallbacks.store(live));
+		OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> pending = new OOCFuture<>();
 		_vReader.request(idx).whenComplete((lease, error) -> {
 			if(error != null)
 				pending.completeExceptionally(error);
