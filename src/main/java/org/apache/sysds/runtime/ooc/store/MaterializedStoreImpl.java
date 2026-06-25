@@ -84,7 +84,6 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		BlockEntry entry = cache.putPinned(streamId, index, value, bytes, allowance);
 		publishedCount.incrementAndGet();
 		updatePublished(index + 1);
-		tryForget(index);
 		return new LiveLeaseAlias(new LiveLeaseState(index, entry, allowance));
 	}
 
@@ -367,8 +366,10 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		}
 
 		private void release() {
-			if(references.decrementAndGet() == 0)
+			if(references.decrementAndGet() == 0) {
 				cache.unpin(entry, allowance);
+				tryForget(index);
+			}
 		}
 	}
 

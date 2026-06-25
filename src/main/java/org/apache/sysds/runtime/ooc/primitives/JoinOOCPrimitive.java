@@ -206,9 +206,18 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 					final int idx = (int) (rIdx * cols + cIdx);
 					long bytes = _allocFn.applyAsLong(nextValue.getIndexes());
 					final boolean isLeft = nextLeft;
-					OOCFuture<TableRendezvous.Match> rendezvous =
-						TableRendezvous.installOrTake(_table, idx, next, _allowance, bytes);
-					next = null; //ownership transferred to the helper
+					OOCStream.QueueCallback<IndexedMatrixValue> ownedNext = next.keepOpen();
+					next.close();
+					next = null; // detach from dequeueCB auto-close before handing ownership to rendezvous
+					OOCFuture<TableRendezvous.Match> rendezvous;
+					try {
+						rendezvous = TableRendezvous.installOrTake(_table, idx, ownedNext, _allowance, bytes);
+						ownedNext = null; //ownership transferred to the helper
+					}
+					finally {
+						if(ownedNext != null)
+							ownedNext.close();
+					}
 					TableRendezvous.Match match = getRendezvous(rendezvous);
 					if(match != null) {
 						long reservedBytes = reservationOwned ? outputBytes : 0;
