@@ -48,7 +48,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _outputStreamable;
 	private final Grouping _grouping;
 	private final int _accumulatorsPerGroup;
-	private final Function<MatrixBlock, MatrixBlock> _partialFn;
+	private final Function<IndexedMatrixValue, MatrixBlock> _partialFn;
 	private final BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> _mergeFn;
 	private final Function<MatrixBlock, MatrixBlock> _finalizeFn;
 	@SuppressWarnings("unused")
@@ -57,7 +57,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 
 	private GroupedReduceOOCPrimitive(OOCPrimitive inputPrimitive, OOCStreamable<IndexedMatrixValue> inputStreamable,
 		OOCStreamable<IndexedMatrixValue> outputStreamable, Grouping grouping, int accumulatorsPerGroup,
-		Function<MatrixBlock, MatrixBlock> partialFn, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> mergeFn,
+		Function<IndexedMatrixValue, MatrixBlock> partialFn, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> mergeFn,
 		Function<MatrixBlock, MatrixBlock> finalizeFn, StreamContext sc) {
 		super(inputPrimitive == null ? List.of() : List.of(inputPrimitive));
 		if(accumulatorsPerGroup <= 0)
@@ -77,6 +77,16 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		Function<MatrixBlock, MatrixBlock> partialFn, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> mergeFn,
 		Function<MatrixBlock, MatrixBlock> finalizeFn, StreamContext sc) {
 		this(safePrimitive(inputStreamable), inputStreamable, outputStreamable,
+			grouping, accumulatorsPerGroup, imv -> partialFn.apply((MatrixBlock) imv.getValue()),
+			mergeFn, finalizeFn, sc);
+	}
+
+	public static GroupedReduceOOCPrimitive indexedPartial(OOCStreamable<IndexedMatrixValue> inputStreamable,
+		OOCStreamable<IndexedMatrixValue> outputStreamable, Grouping grouping, int accumulatorsPerGroup,
+		Function<IndexedMatrixValue, MatrixBlock> partialFn,
+		BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> mergeFn,
+		Function<MatrixBlock, MatrixBlock> finalizeFn, StreamContext sc) {
+		return new GroupedReduceOOCPrimitive(safePrimitive(inputStreamable), inputStreamable, outputStreamable,
 			grouping, accumulatorsPerGroup, partialFn, mergeFn, finalizeFn, sc);
 	}
 
@@ -359,7 +369,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		@Override
 		public void process(WorkCoordinator coordinator) {
 			try(_input) {
-				MatrixBlock result = _finalizeFn.apply(_partialFn.apply((MatrixBlock) _input.get().getValue()));
+				MatrixBlock result = _finalizeFn.apply(_partialFn.apply(_input.get()));
 				coordinator._out.enqueue(outputCallback(_outputIndex, result, _bytes, true));
 			}
 			finally {
@@ -394,7 +404,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		public void process(WorkCoordinator coordinator) {
 			boolean submitted = false;
 			try(_input) {
-				MatrixBlock partial = _partialFn.apply((MatrixBlock) _input.get().getValue());
+				MatrixBlock partial = _partialFn.apply(_input.get());
 				ManagedPayload<IndexedMatrixValue> candidate = payload(_outputIndex, partial, _bytes);
 				coordinator.submitPayload(_group, _slot, _outputIndex, candidate);
 				submitted = true;
@@ -547,7 +557,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		return _accumulatorsPerGroup;
 	}
 
-	public Function<MatrixBlock, MatrixBlock> getPartialFn() {
+	public Function<IndexedMatrixValue, MatrixBlock> getPartialFn() {
 		return _partialFn;
 	}
 

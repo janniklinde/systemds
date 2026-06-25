@@ -29,17 +29,14 @@ import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.cp.DoubleObject;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
-import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.data.OperationsOnMatrixValues;
 import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.AggregateUnaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
-import org.apache.sysds.runtime.ooc.stream.StreamContext;
+import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.util.IndexRange;
-
-import java.util.HashMap;
 
 public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 	private AggregateOperator _aop = null;
@@ -78,21 +75,16 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 		//setup operators and input queue
 		AggregateUnaryOperator aggun = (AggregateUnaryOperator) getOperator(); 
 		MatrixObject min = ec.getMatrixObject(input1);
-		OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
 		int blen = ConfigurationManager.getBlocksize();
 
 		if (aggun.isRowAggregate() || aggun.isColAggregate()) {
 			DataCharacteristics chars = ec.getDataCharacteristics(input1.getName());
 			// number of blocks to process per aggregation idx (row or column dim)
 			long emitThreshold = aggun.isRowAggregate()? chars.getNumColBlocks() : chars.getNumRowBlocks();
-			OOCMatrixBlockTracker aggTracker = new OOCMatrixBlockTracker(emitThreshold);
-			HashMap<Long, MatrixBlock> corrs = new HashMap<>(); // correction blocks
-
 			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
-			OOCStream<IndexedMatrixValue> qLocal = createWritableStream();
-
 			ec.getMatrixObject(output).setStreamHandle(qOut);
 
+			OOCStreamable<IndexedMatrixValue> qIn = min.getStreamable();
 			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
 			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
 			qOut.setIXTransform((downstream, range) -> {
@@ -108,54 +100,18 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 					return new IndexRange(1, min.getNumRows() - 1, range.colStart, range.colEnd);
 			});
 
-			// per-block aggregation (parallel map)
-			mapOOC(qIn, qLocal, tmp -> {
-				MatrixIndexes midx = aggun.isRowAggregate() ?
-					new MatrixIndexes(tmp.getIndexes().getRowIndex(), 1) :
-					new MatrixIndexes(1, tmp.getIndexes().getColumnIndex());
-
-				MatrixBlock ltmp = (MatrixBlock) ((MatrixBlock) tmp.getValue())
-					.aggregateUnaryOperations(aggun, new MatrixBlock(), blen, tmp.getIndexes());
-				return new IndexedMatrixValue(midx, ltmp);
-			});
-
-			// global reduce
-			OOCInstructionUtils.submitOOCTask(() -> {
-				IndexedMatrixValue partial;
-				while ((partial = qLocal.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
-					long idx = aggun.isRowAggregate() ? partial.getIndexes().getRowIndex() : partial.getIndexes()
-						.getColumnIndex();
-
-					MatrixBlock ret = aggTracker.get(idx);
-					boolean ready;
-					if(ret != null) {
-						MatrixBlock corr = corrs.get(idx);
-						OperationsOnMatrixValues.incrementalAggregation(ret,
-							_aop.existsCorrection() ? corr : null, (MatrixBlock) partial.getValue(), _aop,
-							true);
-						ready = aggTracker.incrementCount(idx);
-					}
-					else {
-						ret = (MatrixBlock) partial.getValue();
-						MatrixBlock corr = _aop.existsCorrection() ? new MatrixBlock(ret.getNumRows(),
-							ret.getNumColumns(), false) : null;
-						ready = aggTracker.putAndIncrementCount(idx, ret);
-						if(!ready && _aop.existsCorrection())
-							corrs.put(idx, corr);
-					}
-
-					if(ready) {
-						ret.dropLastRowsOrColumns(_aop.correction);
-						qOut.enqueue(new IndexedMatrixValue(partial.getIndexes(), ret));
-						aggTracker.remove(idx);
-						corrs.remove(idx);
-					}
-				}
-				qOut.closeInput();
-			}, new StreamContext(_callerId, getExtendedOpcode()).addOutStream(qOut));
+			GroupedReduceOOCPrimitive.Grouping grouping = aggun.isRowAggregate() ?
+				GroupedReduceOOCPrimitive.Grouping.ROW_BLOCKS :
+				GroupedReduceOOCPrimitive.Grouping.COL_BLOCKS;
+			int accumulatorsPerGroup = Math.toIntExact(Math.max(1, Math.min(8L, emitThreshold)));
+			OOCInstructionUtils.groupedReduceIndexed(qIn, qOut, grouping, accumulatorsPerGroup,
+				tmp -> (MatrixBlock) tmp.getValue()
+					.aggregateUnaryOperations(aggun, new MatrixBlock(), blen, tmp.getIndexes()),
+				this::mergeAggregate, this::finalizeAggregate, getContext().addOutStream(qOut));
 		}
 		// full aggregation
 		else {
+			OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
 			OOCStream<MatrixBlock> qLocal = createWritableStream();
 
 			mapOOC(qIn, qLocal, tmp -> (MatrixBlock) tmp.getValue()
@@ -174,5 +130,15 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 			//create scalar output
 			ec.setScalarOutput(output.getName(), new DoubleObject(ret.get(0, 0)));
 		}
+	}
+
+	private MatrixBlock mergeAggregate(MatrixBlock left, MatrixBlock right) {
+		OperationsOnMatrixValues.incrementalAggregation(left, null, right, _aop, true);
+		return left;
+	}
+
+	private MatrixBlock finalizeAggregate(MatrixBlock block) {
+		block.dropLastRowsOrColumns(_aop.correction);
+		return block;
 	}
 }
