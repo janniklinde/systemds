@@ -90,6 +90,16 @@ public class OOCInstructionUtils {
 		out.assignPrimitive(primitive);
 	}
 
+	public static void groupedReduceIndexed(OOCStreamable<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out,
+		GroupedReduceOOCPrimitive.Grouping grouping, int accumulatorsPerGroup,
+		Function<IndexedMatrixValue, MatrixBlock> partialFn,
+		BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> mergeFn,
+		Function<MatrixBlock, MatrixBlock> finalizeFn, StreamContext sc) {
+		OOCPrimitive primitive = GroupedReduceOOCPrimitive.indexedPartial(in, out, grouping, accumulatorsPerGroup,
+			partialFn, mergeFn, finalizeFn, sc);
+		out.assignPrimitive(primitive);
+	}
+
 	public static void groupedReduce(OOCStream<IndexedMatrixValue> in, OOCStream<IndexedMatrixValue> out,
 		GroupedReduceOOCPrimitive.Grouping grouping, int accumulatorsPerGroup,
 		Function<MatrixBlock, MatrixBlock> partialFn, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> mergeFn,
