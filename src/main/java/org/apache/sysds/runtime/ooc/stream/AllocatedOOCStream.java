@@ -75,7 +75,9 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 				return;
 			}
 			long bytes = _reserve ? _allocFn.applyAsLong(callback.get()) : 0;
-			if(!_reserve || _allowance.tryReserve(bytes)) {
+			if(bytes < 0)
+				throw new IllegalArgumentException("Cannot allocate negative bytes: " + bytes);
+			if(!_reserve || bytes == 0 || _allowance.tryReserve(bytes)) {
 				forward(callback, bytes);
 				return;
 			}

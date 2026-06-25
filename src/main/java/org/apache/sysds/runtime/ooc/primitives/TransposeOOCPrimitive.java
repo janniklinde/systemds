@@ -19,15 +19,12 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
-import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
-import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
-import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
@@ -98,40 +95,14 @@ public class TransposeOOCPrimitive extends OOCPrimitive {
 	public void startExecution() {
 		final OOCStream<IndexedMatrixValue> in = _inputStreamable.getReadStream();
 		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
-		final OOCStream<IndexedMatrixValue> allocated =
-			new AllocatedOOCStream<>(in, _allowance, value -> {
-				MatrixIndexes ix = value.getIndexes();
-				return _allocFn.applyAsLong(new MatrixIndexes(ix.getColumnIndex(), ix.getRowIndex()));
-			}, _startsRegion);
+		OOCInstructionUtils.submitAdmittedOOCTasks(in, out, input -> {
+			MatrixIndexes outIx = outputIndex(input);
+			return new IndexedMatrixValue(outIx, _fn.apply((MatrixBlock) input.getValue()));
+		}, this::outputIndex, _allowance, _allocFn, _startsRegion, _crossBoundaries, _sc);
+	}
 
-		OOCInstructionUtils.submitOOCTasks(allocated, cb -> {
-			IndexedMatrixValue input = cb.get();
-			MatrixIndexes inIx = input.getIndexes();
-			MatrixIndexes outIx = new MatrixIndexes(inIx.getColumnIndex(), inIx.getRowIndex());
-			MatrixBlock outBlock = _fn.apply((MatrixBlock) input.getValue());
-			IndexedMatrixValue imv = new IndexedMatrixValue(outIx, outBlock);
-			OOCStream.QueueCallback<IndexedMatrixValue> cbOut = null;
-			long bytes = _startsRegion ? _allocFn.applyAsLong(outIx) : 0;
-			boolean reservationOwned = bytes > 0;
-			try {
-				if(_crossBoundaries) {
-					cbOut = new InMemoryQueueCallback(imv, null, _allowance, bytes);
-					reservationOwned = false;
-				}
-				else
-					cbOut = new OOCStream.SimpleQueueCallback<>(imv, null);
-				out.enqueue(cbOut);
-				cbOut = null;
-			}
-			finally {
-				if(cbOut != null)
-					cbOut.close();
-				if(reservationOwned)
-					_allowance.release(bytes);
-			}
-		}, _allowance, _allocFn, _sc).thenRun(out::closeInput).exceptionally(t -> {
-			out.propagateFailure(DMLRuntimeException.of(t));
-			return null;
-		}).thenRun(() -> out.getPrimitive().onComplete());
+	private MatrixIndexes outputIndex(IndexedMatrixValue input) {
+		MatrixIndexes ix = input.getIndexes();
+		return new MatrixIndexes(ix.getColumnIndex(), ix.getRowIndex());
 	}
 }

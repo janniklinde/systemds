@@ -26,6 +26,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
@@ -35,6 +36,7 @@ import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.PlannableDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TransposeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
+import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.stream.TaskContext;
 import org.apache.sysds.runtime.util.CommonThreadPool;
@@ -143,6 +145,54 @@ public class OOCInstructionUtils {
 		Consumer<OOCStream.QueueCallback<T>> consumer, StreamContext sc) {
 		return OOCInstructionUtils.submitOOCTasks(List.of(queue), (i, tmp) -> consumer.accept(tmp), null, null, null,
 			null, sc);
+	}
+
+	public static CompletableFuture<Void> submitAdmittedOOCTasks(OOCStream<IndexedMatrixValue> in,
+		OOCStream<IndexedMatrixValue> out, Function<IndexedMatrixValue, IndexedMatrixValue> op,
+		Function<IndexedMatrixValue, MatrixIndexes> outputIndexFn, MemoryAllowance allowance,
+		ToLongFunction<MatrixIndexes> allocFn, boolean startsRegion, boolean crossBoundaries, StreamContext sc) {
+		final OOCStream<IndexedMatrixValue> admitted = startsRegion ?
+			new AllocatedOOCStream<>(in, allowance, value -> allocFn.applyAsLong(outputIndexFn.apply(value)), true) :
+			in;
+		return submitOOCTasks(List.of(admitted), (i, cb) -> {
+			IndexedMatrixValue input = cb.get();
+			MatrixIndexes outputIndex = outputIndexFn.apply(input);
+			long bytes = startsRegion ? allocFn.applyAsLong(outputIndex) : 0;
+			boolean reservationOwned = bytes > 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> output = null;
+			try {
+				IndexedMatrixValue result = op.apply(input);
+				if(crossBoundaries) {
+					output = new InMemoryQueueCallback(result, null, allowance, bytes);
+					reservationOwned = false;
+				}
+				else
+					output = new OOCStream.SimpleQueueCallback<>(result, null);
+				out.enqueue(output);
+				output = null;
+			}
+			finally {
+				if(output != null)
+					output.close();
+				if(reservationOwned)
+					allowance.release(bytes);
+			}
+		}, (i, cb) -> true, (i, cb) ->
+			releaseAdmittedReservation(cb, outputIndexFn, allowance, allocFn, startsRegion),
+			allowance, allocFn, sc).thenRun(out::closeInput).exceptionally(t -> {
+			out.propagateFailure(DMLRuntimeException.of(t));
+			return null;
+		}).thenRun(() -> out.getPrimitive().onComplete());
+	}
+
+	private static void releaseAdmittedReservation(OOCStream.QueueCallback<IndexedMatrixValue> cb,
+		Function<IndexedMatrixValue, MatrixIndexes> outputIndexFn, MemoryAllowance allowance,
+		ToLongFunction<MatrixIndexes> allocFn, boolean startsRegion) {
+		if(!startsRegion || cb.isEos() || cb.isFailure())
+			return;
+		long bytes = allocFn.applyAsLong(outputIndexFn.apply(cb.get()));
+		if(bytes > 0)
+			allowance.release(bytes);
 	}
 
 	public static <T> CompletableFuture<Void> submitOOCTasks(OOCStream<T> queue,
