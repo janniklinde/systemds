@@ -252,6 +252,9 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 				int col = Math.toIntExact(xIx.getColumnIndex() - 1);
 				MatrixBlock xb = (MatrixBlock)xCb.get().getValue();
 				MatrixBlock vb = (MatrixBlock)vCb.get().getValue();
+				// TODO OOC: ub/qb and merge intermediates are currently reserved only when installed
+				// into the state table. Pre-admit these allocations if MapMMChain needs strict
+				// allowance bounds under tight memory pressure.
 				MatrixBlock ub = xb.aggregateBinaryOperations(xb, vb, new MatrixBlock(), mmOp);
 				retainedX = xCb.keepOpen();
 				phase1Results.enqueueIfOpen(new Phase1Result(row, col, ub, retainedX));
