@@ -21,6 +21,8 @@ package org.apache.sysds.runtime.ooc.memory;
 
 import java.util.concurrent.CompletableFuture;
 
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
+
 public interface MemoryAllowance {
 	boolean tryReserve(long bytes);
 	void reserveBlocking(long bytes);
@@ -43,5 +45,18 @@ public interface MemoryAllowance {
 
 	default boolean isUnderPressure() {
 		return getGrantedMemory() > getTargetMemory();
+	}
+
+	default OOCFuture<Void> reserveAsync(long bytes) {
+		if(tryReserve(bytes))
+			return OOCFuture.completed(null);
+		OOCFuture<Void> future = new OOCFuture<>();
+		reserve(bytes).whenComplete((ignored, error) -> {
+			if(error != null)
+				future.completeExceptionally(error);
+			else
+				future.complete(null);
+		});
+		return future;
 	}
 }

@@ -26,6 +26,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
@@ -101,21 +102,33 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 	public void startExecution() {
 		final OOCStream<IndexedMatrixValue> in = _inputStreamable.getReadStream();
 		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
+		final OOCStream<IndexedMatrixValue> allocated =
+			new AllocatedOOCStream<>(in, _allowance,
+				value -> _allocFn.applyAsLong(value.getIndexes()), _startsRegion);
 
-		OOCInstructionUtils.submitOOCTasks(in, cb -> {
-			OOCStream.QueueCallback<IndexedMatrixValue> cbOut;
-			try(cb) {
-				var imv = new IndexedMatrixValue(cb.get().getIndexes(),
-					_fn.apply((MatrixBlock) cb.get().getValue()));
-				long bytes = _allocFn.applyAsLong(cb.get().getIndexes());
-				if(_startsRegion)
-					_allowance.reserveBlocking(bytes);
-				if(_crossBoundaries)
+		OOCInstructionUtils.submitOOCTasks(allocated, cb -> {
+			IndexedMatrixValue input = cb.get();
+			IndexedMatrixValue imv = new IndexedMatrixValue(input.getIndexes(),
+				_fn.apply((MatrixBlock) input.getValue()));
+			OOCStream.QueueCallback<IndexedMatrixValue> cbOut = null;
+			long bytes = _startsRegion ? _allocFn.applyAsLong(input.getIndexes()) : 0;
+			boolean reservationOwned = bytes > 0;
+			try {
+				if(_crossBoundaries) {
 					cbOut = new InMemoryQueueCallback(imv, null, _allowance, bytes);
+					reservationOwned = false;
+				}
 				else
 					cbOut = new OOCStream.SimpleQueueCallback<>(imv, null);
+				out.enqueue(cbOut);
+				cbOut = null;
 			}
-			out.enqueue(cbOut);
+			finally {
+				if(cbOut != null)
+					cbOut.close();
+				if(reservationOwned)
+					_allowance.release(bytes);
+			}
 		}, _allowance, _allocFn, _sc).thenRun(out::closeInput).exceptionally(t -> {
 			out.propagateFailure(DMLRuntimeException.of(t));
 			return null;
