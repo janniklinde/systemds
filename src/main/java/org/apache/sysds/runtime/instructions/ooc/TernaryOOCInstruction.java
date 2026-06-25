@@ -107,21 +107,18 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 		MatrixBlock s2 = input2.isMatrix() ? null : getScalarInputBlock(ec, input2);
 		MatrixBlock s3 = input3.isMatrix() ? null : getScalarInputBlock(ec, input3);
 
-		OOCStream<IndexedMatrixValue> qIn = mo.getStreamHandle();
+		OOCStreamable<IndexedMatrixValue> qIn = mo.getStreamable();
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 		ec.getMatrixObject(output).setStreamHandle(qOut);
 		qIn.setDownstreamMessageRelay(qOut::messageDownstream);
 		qOut.setUpstreamMessageRelay(qIn::messageUpstream);
 
-		mapOOC(qIn, qOut, tmp -> {
-			IndexedMatrixValue outVal = new IndexedMatrixValue();
+		OOCInstructionUtils.equiMap(qIn, qOut, tmp -> {
 			MatrixBlock op1 = resolveOperandBlock(1, tmp, null, matrixPos, -1, s1, s2, s3);
 			MatrixBlock op2 = resolveOperandBlock(2, tmp, null, matrixPos, -1, s1, s2, s3);
 			MatrixBlock op3 = resolveOperandBlock(3, tmp, null, matrixPos, -1, s1, s2, s3);
-			outVal.set(tmp.getIndexes(),
-				op1.ternaryOperations((TernaryOperator)_optr, op2, op3, new MatrixBlock()));
-			return outVal;
-		});
+			return op1.ternaryOperations((TernaryOperator)_optr, op2, op3, new MatrixBlock());
+		}, getContext().addOutStream(qOut));
 	}
 
 	private void processTwoMatrixInstruction(ExecutionContext ec, int leftPos, int rightPos) {
@@ -135,7 +132,7 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 		ec.getMatrixObject(output).setStreamHandle(qOut);
 
-		if(OOC_NEW_SYSTEM && getOpcode().equals("+*")) {
+		if(OOC_NEW_SYSTEM) {
 			OOCStreamable<IndexedMatrixValue> leftStream = left.getStreamable();
 			OOCStreamable<IndexedMatrixValue> rightStream = right.getStreamable();
 			qOut.setUpstreamMessageRelay(msg -> {
@@ -180,6 +177,17 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 		ec.getMatrixObject(output).setStreamHandle(qOut);
+
+		if(OOC_NEW_SYSTEM) {
+			List<OOCStreamable<IndexedMatrixValue>> streams = List.of(
+				m1.getStreamable(), m2.getStreamable(), m3.getStreamable());
+			streams.forEach(s -> s.setDownstreamMessageRelay(qOut::messageDownstream));
+			qOut.setUpstreamMessageRelay(msg -> streams.forEach(s -> s.messageUpstream(msg.split())));
+			OOCInstructionUtils.equiJoin(streams, qOut, blocks -> blocks.get(0)
+				.ternaryOperations((TernaryOperator)_optr, blocks.get(1), blocks.get(2), new MatrixBlock()),
+				getContext().addOutStream(qOut));
+			return;
+		}
 
 		List<OOCStream<IndexedMatrixValue>> streams = List.of(
 			m1.getStreamHandle(), m2.getStreamHandle(), m3.getStreamHandle());

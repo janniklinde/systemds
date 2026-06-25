@@ -35,6 +35,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.UnaryOperator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class UnaryOOCInstruction extends ComputationOOCInstruction {
 	private UnaryOperator _uop = null;
@@ -69,27 +70,25 @@ public class UnaryOOCInstruction extends ComputationOOCInstruction {
 		boolean cumSumProd = Builtin.isBuiltinCode(uop.fn, BuiltinCode.CUMSUMPROD);
 		ec.getDataCharacteristics(output.getName()).set(min.getNumRows(), cumSumProd ? 1 : min.getNumColumns(),
 			min.getBlocksize(), -1);
-		OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
 		OOCStream<IndexedMatrixValue> qOut;
 		boolean cumulative = isCumulativeUnary(uop);
 
 		if(cumulative) {
+			OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
 			qOut = processCumulativeUnaryInstruction(ec, uop, qIn);
 		}
 		else {
 			qOut = createWritableStream();
-			mapOOC(qIn, qOut, tmp -> {
-				IndexedMatrixValue tmpOut = new IndexedMatrixValue();
-				tmpOut.set(tmp.getIndexes(), tmp.getValue().unaryOperations(uop, new MatrixBlock()));
-				return tmpOut;
-			});
+			ec.getMatrixObject(output).setStreamHandle(qOut);
+			OOCStreamable<IndexedMatrixValue> qIn = min.getStreamable();
+			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
+			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
+			OOCInstructionUtils.equiMap(qIn, qOut, tmp -> tmp.unaryOperations(uop, new MatrixBlock()),
+				getContext().addOutStream(qOut));
+			return;
 		}
 
 		ec.getMatrixObject(output).setStreamHandle(qOut);
-		if(!cumulative) {
-			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
-			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
-		}
 	}
 
 	private OOCStream<IndexedMatrixValue> processCumulativeUnaryInstruction(ExecutionContext ec, UnaryOperator uop,
