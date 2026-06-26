@@ -231,33 +231,51 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 				int group = group(inputIndex);
 				MatrixIndexes outputIndex = outputIndex(group);
 				long bytes = _allocFn.applyAsLong(outputIndex);
+				if(!_allowance.tryReserve(bytes)) {
+					MatrixBlock partial = _partialFn.apply(input);
+					retainPending();
+					try {
+						_allowance.reserveAsync(bytes).whenComplete((ignored, error) -> {
+							try {
+								if(error != null) {
+									fail(error);
+									return;
+								}
+								if(_groupSize == 1)
+									enqueue(new PrecomputedSingleGroupWork(partial, outputIndex, bytes));
+								else
+									enqueue(new PrecomputedPartialWork(partial, group, accumulatorSlot(inputIndex),
+										outputIndex, bytes));
+							}
+							catch(Throwable t) {
+								fail(t);
+							}
+							finally {
+								releasePending();
+							}
+						});
+					}
+					catch(Throwable t) {
+						releasePending();
+						throw t;
+					}
+					return;
+				}
 				OOCStream.QueueCallback<IndexedMatrixValue> retained = cb.keepOpen();
 				retainPending();
 				try {
-					_allowance.reserveAsync(bytes).whenComplete((ignored, error) -> {
-						try {
-							if(error != null) {
-								retained.close();
-								fail(error);
-								return;
-							}
-							if(_groupSize == 1)
-								enqueue(new SingleGroupWork(retained, outputIndex, bytes));
-							else
-								enqueue(new PartialWork(retained, group, accumulatorSlot(inputIndex), outputIndex, bytes));
-						}
-						catch(Throwable t) {
-							fail(t);
-						}
-						finally {
-							releasePending();
-						}
-					});
+					if(_groupSize == 1)
+						enqueue(new SingleGroupWork(retained, outputIndex, bytes));
+					else
+						enqueue(new PartialWork(retained, group, accumulatorSlot(inputIndex), outputIndex, bytes));
 				}
 				catch(Throwable t) {
 					retained.close();
-					releasePending();
+					_allowance.release(bytes);
 					throw t;
+				}
+				finally {
+					releasePending();
 				}
 			}
 			catch(Throwable t) {
@@ -423,6 +441,38 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		}
 	}
 
+	private final class PrecomputedSingleGroupWork implements GroupedWork {
+		private final MatrixBlock _partial;
+		private final MatrixIndexes _outputIndex;
+		private final long _bytes;
+
+		private PrecomputedSingleGroupWork(MatrixBlock partial, MatrixIndexes outputIndex, long bytes) {
+			_partial = partial;
+			_outputIndex = outputIndex;
+			_bytes = bytes;
+		}
+
+		@Override
+		public void process(WorkCoordinator coordinator) {
+			boolean outputSubmitted = false;
+			try {
+				MatrixBlock result = _finalizeFn.apply(_partial);
+				coordinator._out.enqueue(outputCallback(_outputIndex, result, _bytes, true));
+				outputSubmitted = true;
+			}
+			finally {
+				if(!outputSubmitted)
+					_allowance.release(_bytes);
+				coordinator.finishWork();
+			}
+		}
+
+		@Override
+		public void close() {
+			_allowance.release(_bytes);
+		}
+	}
+
 	private final class PartialWork implements GroupedWork {
 		private final OOCStream.QueueCallback<IndexedMatrixValue> _input;
 		private final int _group;
@@ -458,6 +508,43 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		@Override
 		public void close() {
 			_input.close();
+			_allowance.release(_bytes);
+		}
+	}
+
+	private final class PrecomputedPartialWork implements GroupedWork {
+		private final MatrixBlock _partial;
+		private final int _group;
+		private final int _slot;
+		private final MatrixIndexes _outputIndex;
+		private final long _bytes;
+
+		private PrecomputedPartialWork(MatrixBlock partial, int group, int slot, MatrixIndexes outputIndex,
+			long bytes) {
+			_partial = partial;
+			_group = group;
+			_slot = slot;
+			_outputIndex = outputIndex;
+			_bytes = bytes;
+		}
+
+		@Override
+		public void process(WorkCoordinator coordinator) {
+			boolean submitted = false;
+			try {
+				ManagedPayload<IndexedMatrixValue> candidate = payload(_outputIndex, _partial, _bytes);
+				coordinator.submitPayload(_group, _slot, _outputIndex, candidate);
+				submitted = true;
+			}
+			finally {
+				if(!submitted)
+					_allowance.release(_bytes);
+				coordinator.finishWork();
+			}
+		}
+
+		@Override
+		public void close() {
 			_allowance.release(_bytes);
 		}
 	}

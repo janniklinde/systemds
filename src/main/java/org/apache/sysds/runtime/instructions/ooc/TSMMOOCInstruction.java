@@ -35,6 +35,7 @@ import org.apache.sysds.runtime.matrix.operators.AggregateBinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
+import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class TSMMOOCInstruction extends ComputationOOCInstruction {
@@ -66,7 +67,6 @@ public class TSMMOOCInstruction extends ComputationOOCInstruction {
 		int nCols = (int) min.getDataCharacteristics().getCols();
 		int bLen = min.getDataCharacteristics().getBlocksize();
 		
-		OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
 		BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
 
 		//validation check TODO extend compiler to not create OOC otherwise
@@ -77,14 +77,15 @@ public class TSMMOOCInstruction extends ComputationOOCInstruction {
 		}
 
 		if(OOC_NEW_SYSTEM) {
+			OOCStreamable<IndexedMatrixValue> qIn = min.getStreamable();
 			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 			ec.getMatrixObject(output).setStreamHandle(qOut);
 			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
 			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
 
-			OOCInstructionUtils.singleGroupedReduce(qIn, qOut,
+			OOCInstructionUtils.groupedReduceIndexed(qIn, qOut, GroupedReduceOOCPrimitive.Grouping.SINGLE,
 				Math.toIntExact(Math.max(1, Math.min(8L, min.getDataCharacteristics().getNumBlocks()))),
-				tmp -> tmp.transposeSelfMatrixMultOperations(new MatrixBlock(), _type),
+				tmp -> ((MatrixBlock) tmp.getValue()).transposeSelfMatrixMultOperations(new MatrixBlock(), _type),
 				(left, right) -> left.binaryOperationsInPlace(plus, right),
 				java.util.function.Function.identity(),
 				getContext().addOutStream(qOut));
@@ -94,6 +95,7 @@ public class TSMMOOCInstruction extends ComputationOOCInstruction {
 		//int dim = _type.isLeft() ? nCols : nRows;
 		MatrixBlock resultBlock = null;
 
+		OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
 		OOCStream<MatrixBlock> tmpStream = createWritableStream();
 
 		mapOOC(qIn, tmpStream,
