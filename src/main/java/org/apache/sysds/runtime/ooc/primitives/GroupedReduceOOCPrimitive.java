@@ -22,12 +22,10 @@ package org.apache.sysds.runtime.ooc.primitives;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
-import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
-import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
@@ -35,13 +33,13 @@ import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 public class GroupedReduceOOCPrimitive extends OOCPrimitive {
@@ -162,22 +160,165 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		final int numGroups = _grouping.numGroups(dc);
 		final int groupSize = _grouping.groupSize(dc);
 		final AtomicIntegerArray consumedPerGroup = new AtomicIntegerArray(numGroups);
-		final AtomicIntegerArray emittedPerGroup = new AtomicIntegerArray(numGroups);
+		final AtomicInteger pending = new AtomicInteger(1);
+		final AtomicBoolean completed = new AtomicBoolean(false);
+		final AtomicReference<Throwable> failure = new AtomicReference<>();
+		final Runnable releasePending = () -> {
+			if(pending.decrementAndGet() == 0 && completed.compareAndSet(false, true)) {
+				if(failure.get() == null)
+					out.closeInput();
+				onComplete();
+			}
+		};
+		final Consumer<Throwable> fail = t -> {
+			if(failure.compareAndSet(null, t)) {
+				DMLRuntimeException re = DMLRuntimeException.of(t);
+				out.propagateFailure(re);
+				if(_sc != null)
+					_sc.failAll(re);
+			}
+		};
 
 		OOCInstructionUtils.submitOOCTasks(in, cb -> {
-			int group = group(cb.get().getIndexes());
-			long reservedBytes = _allocFn.applyAsLong(cb.get().getIndexes());
+			IndexedMatrixValue input = cb.get();
+			int group = group(input.getIndexes());
+			long reservedBytes = _allocFn.applyAsLong(input.getIndexes());
 			ManagedPayload<IndexedMatrixValue> p = new ManagedPayload<>(new IndexedMatrixValue(outputIndex(group),
-				_partialFn.apply(cb.get())), reservedBytes, _allowance);
-			_table.merge(group, p, (l, r) ->
-				new IndexedMatrixValue(l.getIndexes(), _mergeFn.apply((MatrixBlock)l.getValue(),
-				(MatrixBlock)r.getValue())))
-				.thenAccept(ignored -> {
-					if(consumedPerGroup.incrementAndGet(group) == groupSize) {
-						// TODO finalize and emit
+				_partialFn.apply(input)), reservedBytes, _allowance);
+			pending.incrementAndGet();
+			try {
+				_table.merge(group, p, (l, r) -> new IndexedMatrixValue(l.getIndexes(),
+					_mergeFn.apply((MatrixBlock) l.getValue(), (MatrixBlock) r.getValue())))
+					.whenComplete((ignored, error) -> {
+						try {
+							if(error != null) {
+								fail.accept(error);
+								return;
+							}
+							if(consumedPerGroup.incrementAndGet(group) == groupSize)
+								finalizeGroup(group, out, pending, releasePending, fail);
+						}
+						finally {
+							releasePending.run();
+						}
+					});
+			}
+			catch(Throwable t) {
+				p.release();
+				releasePending.run();
+				throw t;
+			}
+		}, _sc).whenComplete((ignored, error) -> {
+			if(error != null)
+				fail.accept(error);
+			releasePending.run();
+		});
+	}
+
+	private void finalizeGroup(int group, OOCStream<IndexedMatrixValue> out, AtomicInteger pending,
+		Runnable releasePending, Consumer<Throwable> fail) {
+		pending.incrementAndGet();
+		try {
+			_table.take(group).whenComplete((lease, error) -> {
+				try {
+					if(error != null) {
+						fail.accept(error);
+						return;
 					}
-				});
-		}, _sc);
+					if(lease == null)
+						throw new IllegalStateException("Missing grouped-reduce accumulator for group " + group);
+					MatrixBlock value = (MatrixBlock) lease.value().getValue();
+					MatrixBlock result = _finalizeFn.apply(value);
+					out.enqueue(new LeaseBackedOutputCallback(new IndexedMatrixValue(outputIndex(group), result), lease));
+				}
+				catch(Throwable t) {
+					if(lease != null)
+						lease.close();
+					fail.accept(t);
+				}
+				finally {
+					releasePending.run();
+				}
+			});
+		}
+		catch(Throwable t) {
+			fail.accept(t);
+			releasePending.run();
+		}
+	}
+
+	private static final class LeaseBackedOutputCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
+		private final SharedLease _shared;
+		private final IndexedMatrixValue _value;
+		private DMLRuntimeException _failure;
+		private boolean _closed;
+
+		private LeaseBackedOutputCallback(IndexedMatrixValue value,
+			OperatorStateTable.StateLease<IndexedMatrixValue> lease) {
+			_shared = new SharedLease(lease);
+			_value = value;
+		}
+
+		private LeaseBackedOutputCallback(IndexedMatrixValue value, SharedLease shared) {
+			_shared = shared;
+			_value = value;
+		}
+
+		@Override
+		public IndexedMatrixValue get() {
+			if(_failure != null)
+				throw _failure;
+			return _value;
+		}
+
+		@Override
+		public synchronized OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
+			if(_closed)
+				throw new IllegalStateException("Cannot keep open a closed callback.");
+			_shared.retain();
+			return new LeaseBackedOutputCallback(_value, _shared);
+		}
+
+		@Override
+		public synchronized void close() {
+			if(_closed)
+				return;
+			_closed = true;
+			_shared.release();
+		}
+
+		@Override
+		public void fail(DMLRuntimeException failure) {
+			_failure = failure;
+		}
+
+		@Override
+		public boolean isEos() {
+			return false;
+		}
+
+		@Override
+		public boolean isFailure() {
+			return _failure != null;
+		}
+	}
+
+	private static final class SharedLease {
+		private final OperatorStateTable.StateLease<IndexedMatrixValue> _lease;
+		private final AtomicInteger _refs = new AtomicInteger(1);
+
+		private SharedLease(OperatorStateTable.StateLease<IndexedMatrixValue> lease) {
+			_lease = lease;
+		}
+
+		private void retain() {
+			_refs.incrementAndGet();
+		}
+
+		private void release() {
+			if(_refs.decrementAndGet() == 0)
+				_lease.close();
+		}
 	}
 
 	private void requestPreferredInputPattern() {

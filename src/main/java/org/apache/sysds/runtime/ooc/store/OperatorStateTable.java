@@ -107,10 +107,39 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 
 	/**
 	 * Merges the state at the given index. This operation does not reserve bytes and may be viewed as non-blocking.
-	 * Note that the resulting payload cannot occupy more bytes than the bytes of the new payload plus the old payload.
+	 * The first payload installs a merge-owned pinned slot. Subsequent merges must produce a value that fits in the
+	 * existing slot budget; the incoming payload reservation is released after the merge.
 	 */
 	public OOCFuture<Void> merge(int index, ManagedPayload<T> payload, BiFunction<T, T, T> mergeFn) {
-		// TODO similar to installOrTake
+		Slot installing = null;
+		Slot merging = null;
+		OOCFuture<Void> waitFor = null;
+		synchronized(this) {
+			checkOpen();
+			ensureCapacity(index);
+			Slot existing = _slots[index];
+			if(existing == null) {
+				installing = new Slot();
+				_slots[index] = installing;
+			}
+			else if(existing._state == Slot.INSTALLED) {
+				merging = existing;
+				merging._state = Slot.INSTALLING;
+				merging._installFuture = new OOCFuture<>();
+			}
+			else {
+				waitFor = existing._installFuture;
+			}
+		}
+		if(installing != null) {
+			finishMergeInstall(index, installing, payload);
+			return OOCFuture.completed(null);
+		}
+		if(merging != null)
+			return finishMerge(merging, payload, mergeFn);
+		OOCFuture<Void> result = new OOCFuture<>();
+		waitFor.whenComplete((ignored, error) -> retry(() -> merge(index, payload, mergeFn), result));
+		return result;
 	}
 
 	/**
@@ -261,7 +290,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			}
 		}
 		if(removed != null)
-			releaseSlot(removed);
+			dropSlot(removed);
 	}
 
 	@Override
@@ -286,7 +315,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			}
 		}
 		for(Slot slot : toRelease)
-			releaseSlot(slot);
+			dropSlot(slot);
 	}
 
 	public boolean isClosed() {
@@ -330,6 +359,82 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		installFuture.complete(null);
 	}
 
+	private void finishMergeInstall(int index, Slot slot, ManagedPayload<T> payload) {
+		BlockKey key = new BlockKey(_streamId, _nextGeneration.getAndIncrement());
+		BlockEntry entry;
+		try {
+			payload.transfer();
+		}
+		catch(RuntimeException ex) {
+			failInstall(index, slot, ex);
+			throw ex;
+		}
+		try {
+			entry = _cache.putPinned(key.getStreamId(), key.getSequenceNumber(), payload.value(), payload.bytes(),
+				payload.owner());
+		}
+		catch(RuntimeException ex) {
+			if(payload.bytes() > 0)
+				payload.owner().release(payload.bytes());
+			failInstall(index, slot, ex);
+			throw ex;
+		}
+
+		boolean cleared;
+		OOCFuture<Void> installFuture;
+		synchronized(this) {
+			slot._key = key;
+			slot._entry = entry;
+			cleared = slot._cleared;
+			slot._state = cleared ? Slot.REMOVED : Slot.INSTALLED;
+			installFuture = slot._installFuture;
+			slot._installFuture = null;
+		}
+		if(cleared)
+			dropSlot(slot);
+		installFuture.complete(null);
+	}
+
+	private OOCFuture<Void> finishMerge(Slot slot, ManagedPayload<T> payload, BiFunction<T, T, T> mergeFn) {
+		OOCFuture<Void> result = new OOCFuture<>();
+		OOCFuture<Void> installFuture;
+		boolean cleared;
+		try {
+			if(slot._entry == null)
+				throw new IllegalStateException("State table merge requires a merge-owned slot.");
+			@SuppressWarnings("unchecked")
+			T old = (T)slot._entry.getData();
+			T merged = mergeFn.apply(old, payload.value());
+			slot._entry.replaceDataUnsafe(old, merged);
+			payload.release();
+			synchronized(this) {
+				cleared = slot._cleared;
+				slot._state = cleared ? Slot.REMOVED : Slot.INSTALLED;
+				installFuture = slot._installFuture;
+				slot._installFuture = null;
+			}
+			if(cleared)
+				dropSlot(slot);
+			installFuture.complete(null);
+			result.complete(null);
+		}
+		catch(Throwable t) {
+			boolean clearedOnError;
+			payload.release();
+			synchronized(this) {
+				clearedOnError = slot._cleared;
+				slot._state = clearedOnError ? Slot.REMOVED : Slot.INSTALLED;
+				installFuture = slot._installFuture;
+				slot._installFuture = null;
+			}
+			if(clearedOnError)
+				dropSlot(slot);
+			installFuture.completeExceptionally(t);
+			result.completeExceptionally(t);
+		}
+		return result;
+	}
+
 	private void finishReferenceInstall(int index, Slot slot, BlockEntry pinned) {
 		try {
 			_cache.reference(pinned);
@@ -367,6 +472,10 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 	}
 
 	private OOCFuture<StateLease<T>> pinTaken(Slot slot) {
+		if(slot._entry != null) {
+			releaseSlot(slot);
+			return OOCFuture.completed(new TableLease(slot._entry));
+		}
 		OOCFuture<BlockEntry> pinned = new OOCFuture<>();
 		StorePinRetry.pinWithRetry(_cache, slot._key.getStreamId(), slot._key.getSequenceNumber(), _allowance,
 			() -> _closed, pinned);
@@ -400,6 +509,12 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 
 	private void releaseSlot(Slot slot) {
 		_cache.dereference(slot._key);
+	}
+
+	private void dropSlot(Slot slot) {
+		releaseSlot(slot);
+		if(slot._entry != null)
+			_cache.unpin(slot._entry, _allowance);
 	}
 
 	private void checkOpen() {
@@ -496,6 +611,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		private byte _state;
 		private boolean _cleared;
 		private BlockKey _key;
+		private BlockEntry _entry;
 		private OOCFuture<Void> _installFuture;
 
 		private Slot() {
