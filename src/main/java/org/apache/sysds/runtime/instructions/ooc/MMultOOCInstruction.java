@@ -66,8 +66,8 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 			&& vin.getDataCharacteristics().dimsKnown()
 			&& min.getDataCharacteristics().getRows() == 1
 			&& min.getDataCharacteristics().getCols() == vin.getDataCharacteristics().getRows()) {
-			OOCStream<IndexedMatrixValue> qBroadcast = min.getStreamHandle();
-			OOCStream<IndexedMatrixValue> qStreamed = vin.getStreamHandle();
+			OOCStreamable<IndexedMatrixValue> qBroadcast = min.getStreamable();
+			OOCStreamable<IndexedMatrixValue> qStreamed = vin.getStreamable();
 			OOCStream<IndexedMatrixValue> qPartial = createWritableStream();
 			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 			qPartial.setData(vin);
@@ -101,10 +101,10 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 
 		if(OOC_NEW_SYSTEM && min.getDataCharacteristics().dimsKnown()
 			&& vin.getDataCharacteristics().dimsKnown()
-			&& vin.getDataCharacteristics().getCols() == 1
+			&& vin.getDataCharacteristics().getNumColBlocks() == 1
 			&& min.getDataCharacteristics().getCols() == vin.getDataCharacteristics().getRows()) {
-			OOCStream<IndexedMatrixValue> qBroadcast = vin.getStreamHandle();
-			OOCStream<IndexedMatrixValue> qStreamed = min.getStreamHandle();
+			OOCStreamable<IndexedMatrixValue> qBroadcast = vin.getStreamable();
+			OOCStreamable<IndexedMatrixValue> qStreamed = min.getStreamable();
 			OOCStream<IndexedMatrixValue> qPartial = createWritableStream();
 			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 			qPartial.setData(min);

@@ -231,11 +231,34 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 				int group = group(inputIndex);
 				MatrixIndexes outputIndex = outputIndex(group);
 				long bytes = _allocFn.applyAsLong(outputIndex);
-				_allowance.reserveBlocking(bytes);
-				if(_groupSize == 1)
-					enqueue(new SingleGroupWork(cb.keepOpen(), outputIndex, bytes));
-				else
-					enqueue(new PartialWork(cb.keepOpen(), group, accumulatorSlot(inputIndex), outputIndex, bytes));
+				OOCStream.QueueCallback<IndexedMatrixValue> retained = cb.keepOpen();
+				retainPending();
+				try {
+					_allowance.reserveAsync(bytes).whenComplete((ignored, error) -> {
+						try {
+							if(error != null) {
+								retained.close();
+								fail(error);
+								return;
+							}
+							if(_groupSize == 1)
+								enqueue(new SingleGroupWork(retained, outputIndex, bytes));
+							else
+								enqueue(new PartialWork(retained, group, accumulatorSlot(inputIndex), outputIndex, bytes));
+						}
+						catch(Throwable t) {
+							fail(t);
+						}
+						finally {
+							releasePending();
+						}
+					});
+				}
+				catch(Throwable t) {
+					retained.close();
+					releasePending();
+					throw t;
+				}
 			}
 			catch(Throwable t) {
 				fail(t);
@@ -257,14 +280,30 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 						return;
 					}
 					long bytes = _allocFn.applyAsLong(index);
-					_allowance.reserveBlocking(bytes);
+					retainPending();
 					try {
-						enqueue(new MergeWork(existing, candidate, group, slot, index, bytes));
+						_allowance.reserveAsync(bytes).whenComplete((ignored, reserveError) -> {
+							try {
+								if(reserveError != null) {
+									existing.close();
+									candidate.release();
+									fail(reserveError);
+									return;
+								}
+								enqueue(new MergeWork(existing, candidate, group, slot, index, bytes));
+							}
+							catch(Throwable t) {
+								fail(t);
+							}
+							finally {
+								releasePending();
+							}
+						});
 					}
 					catch(Throwable t) {
 						existing.close();
 						candidate.release();
-						_allowance.release(bytes);
+						releasePending();
 						throw t;
 					}
 				}
@@ -489,16 +528,34 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 			if(_leases.isEmpty())
 				return;
 			long bytes = _startsRegion ? _allocFn.applyAsLong(_outputIndex) : 0;
-			if(bytes > 0)
-				_allowance.reserveBlocking(bytes);
-			try {
+			if(bytes <= 0) {
 				_coordinator.enqueue(new FinalizeWork(new ArrayList<>(_leases), _outputIndex, bytes));
+				return;
+			}
+			_coordinator.retainPending();
+			try {
+				_allowance.reserveAsync(bytes).whenComplete((ignored, error) -> {
+					try {
+						if(error != null) {
+							for(OperatorStateTable.StateLease<IndexedMatrixValue> current : _leases)
+								current.close();
+							_coordinator.fail(error);
+							return;
+						}
+						_coordinator.enqueue(new FinalizeWork(new ArrayList<>(_leases), _outputIndex, bytes));
+					}
+					catch(Throwable t) {
+						_coordinator.fail(t);
+					}
+					finally {
+						_coordinator.releasePending();
+					}
+				});
 			}
 			catch(Throwable t) {
 				for(OperatorStateTable.StateLease<IndexedMatrixValue> current : _leases)
 					current.close();
-				if(bytes > 0)
-					_allowance.release(bytes);
+				_coordinator.releasePending();
 				throw t;
 			}
 		}

@@ -56,6 +56,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	private final OOCStream<IndexedMatrixValue> _source;
 	private final MaterializedStore<IndexedMatrixValue> _store;
 	private final MemoryAllowance _allowance;
+	private final OOCPrimitive _primitive;
 	private final CopyOnWriteArrayList<LiveReader> _liveReaders;
 	private final AtomicBoolean _complete;
 	private final AtomicBoolean _deleteScheduled;
@@ -74,6 +75,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		_dataCharacteristics = data == null ? source.getDataCharacteristics() : data.getDataCharacteristics();
 		_store = new MaterializedStoreImpl<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
 		_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), 200_000_000);
+		_primitive = new MaterializedStoreBoundaryPrimitive(this, safePrimitive(source));
 		_liveReaders = new CopyOnWriteArrayList<>();
 		_complete = new AtomicBoolean(false);
 		_deleteScheduled = new AtomicBoolean(false);
@@ -103,9 +105,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			}
 			SubscribableTaskQueue<IndexedMatrixValue> stream = new SubscribableTaskQueue<>();
 			stream.setData(_data);
-			OOCPrimitive sourcePrimitive = _source.getPrimitive();
-			if(sourcePrimitive != null)
-				stream.assignPrimitive(sourcePrimitive);
+			stream.assignPrimitive(_primitive);
 			LiveReader reader = new LiveReader(stream);
 			int replayLimit;
 			synchronized(this) {
@@ -277,7 +277,16 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 
 	@Override
 	public OOCPrimitive getPrimitive() {
-		return _source.getPrimitive();
+		return _primitive;
+	}
+
+	private static OOCPrimitive safePrimitive(OOCStream<IndexedMatrixValue> source) {
+		try {
+			return source.getPrimitive();
+		}
+		catch(RuntimeException ex) {
+			return null;
+		}
 	}
 
 	private void beginReaderOpen() {
@@ -450,6 +459,53 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 				callback.close();
 			_bufferedLive.clear();
 			_stream.propagateFailure(failure);
+		}
+	}
+
+	private static final class MaterializedStoreBoundaryPrimitive extends OOCPrimitive {
+		private final MaterializedStoreStreamable _owner;
+
+		private MaterializedStoreBoundaryPrimitive(MaterializedStoreStreamable owner, OOCPrimitive sourcePrimitive) {
+			super(sourcePrimitive == null ? List.of() : List.of(sourcePrimitive), List.of(), List.of(owner));
+			_owner = owner;
+		}
+
+		@Override
+		public boolean isMaterializationBoundary() {
+			return true;
+		}
+
+		@Override
+		public void startExecution() {
+			onComplete();
+		}
+
+		@Override
+		public void inferPatterns() {
+			if(_pattern.isUnset())
+				_pattern = OOCAccessPattern.ROW_MAJOR;
+			getChildren().forEach(child -> {
+				if(!child.hasStartedExecution())
+					child.requestPattern(_pattern);
+			});
+			inferPatterns(getParents());
+		}
+
+		@Override
+		public void requestPattern(OOCAccessPattern accessPattern) {
+			if(_pattern == accessPattern)
+				return;
+			_pattern = _pattern.isUnset() ? accessPattern : _pattern.preferred(accessPattern);
+			getChildren().forEach(child -> {
+				if(!child.hasStartedExecution())
+					child.requestPattern(_pattern);
+			});
+		}
+
+		@Override
+		public String toString() {
+			return getClass().getSimpleName() + "@" + System.identityHashCode(this)
+				+ "[store=" + System.identityHashCode(_owner) + "]";
 		}
 	}
 }

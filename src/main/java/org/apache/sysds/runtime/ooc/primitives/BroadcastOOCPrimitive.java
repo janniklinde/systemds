@@ -175,9 +175,9 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	@Override
 	public void startExecution() {
 		_broadcastView = getInputStream(0).materializedView();
-		final OOCStream<IndexedMatrixValue> streamedStream = getStreamedStreamable().getReadStream();
+		final OOCStreamable<IndexedMatrixValue> streamedStreamable = getStreamedStreamable();
 		final OOCStream<IndexedMatrixValue> out = getOutputStreamable().getWriteStream();
-		final DataCharacteristics dc = streamedStream.getDataCharacteristics();
+		final DataCharacteristics dc = streamedStreamable.getDataCharacteristics();
 		final int maxCount = _maxBroadcastCount > 0 ? _maxBroadcastCount :
 			(int)(_rowBroadcast ? OOCUtils.getNumRowBlocks(dc) : OOCUtils.getNumColBlocks(dc));
 		final int nBroadcastTiles = _numBroadcastTiles > 0 ? _numBroadcastTiles :
@@ -222,6 +222,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 				onComplete();
 				return;
 			}
+			final OOCStream<IndexedMatrixValue> streamedStream = streamedStreamable.getReadStream();
 			final SubscribableTaskQueue<IndexedMatrixValue> intermediate = new SubscribableTaskQueue<>();
 			final SubscribableTaskQueue<ProbeWork> int2 = new SubscribableTaskQueue<>();
 			final AtomicInteger inflightCtr = new AtomicInteger(1);
