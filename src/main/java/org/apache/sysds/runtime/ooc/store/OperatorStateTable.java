@@ -30,6 +30,7 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiFunction;
 
 /**
  * Mutable online indexed coordination over the global cache: join rendezvous, reduction accumulators,
@@ -102,6 +103,14 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			_slots[index] = slot;
 		}
 		finishReferenceInstall(index, slot, pinned);
+	}
+
+	/**
+	 * Merges the state at the given index. This operation does not reserve bytes and may be viewed as non-blocking.
+	 * Note that the resulting payload cannot occupy more bytes than the bytes of the new payload plus the old payload.
+	 */
+	public OOCFuture<Void> merge(int index, ManagedPayload<T> payload, BiFunction<T, T, T> mergeFn) {
+		// TODO similar to installOrTake
 	}
 
 	/**

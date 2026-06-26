@@ -38,6 +38,8 @@ import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
+import java.util.function.Function;
+
 public class TSMMOOCInstruction extends ComputationOOCInstruction {
 	private final MMTSJType _type;
 
@@ -84,10 +86,10 @@ public class TSMMOOCInstruction extends ComputationOOCInstruction {
 			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
 
 			OOCInstructionUtils.groupedReduceIndexed(qIn, qOut, GroupedReduceOOCPrimitive.Grouping.SINGLE,
-				Math.toIntExact(Math.max(1, Math.min(8L, min.getDataCharacteristics().getNumBlocks()))),
+				1,
 				tmp -> ((MatrixBlock) tmp.getValue()).transposeSelfMatrixMultOperations(new MatrixBlock(), _type),
 				(left, right) -> left.binaryOperationsInPlace(plus, right),
-				java.util.function.Function.identity(),
+				Function.identity(),
 				getContext().addOutStream(qOut));
 			return;
 		}
