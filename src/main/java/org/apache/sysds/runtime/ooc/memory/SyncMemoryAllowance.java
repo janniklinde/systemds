@@ -70,8 +70,6 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		synchronized(this) {
 			if(_shutdown || _destroyed)
 				return false;
-			if(_usedBytes + bytes > _targetBytes)
-				return false;
 			if(_usedBytes + bytes <= _grantedBytes) {
 				usedBefore = _usedBytes;
 				grantedBefore = _grantedBytes;
@@ -83,6 +81,8 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 						+ " target=" + targetBefore);
 				return true;
 			}
+			if(_usedBytes + bytes > _targetBytes)
+				return false;
 			minRequest = _usedBytes + bytes - _grantedBytes;
 			maxRequest = Math.max(minRequest, Math.max(_grantedBytes, bytes) * 2);
 		}
@@ -343,6 +343,18 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	@Override
 	public boolean isShutdown() {
 		return _shutdown || _destroyed;
+	}
+
+	void onBrokerMemoryAvailable() {
+		boolean drainWaiters;
+		synchronized(this) {
+			if(_shutdown || _destroyed)
+				return;
+			drainWaiters = !_reservationWaiters.isEmpty();
+			notifyAll();
+		}
+		if(drainWaiters)
+			requestReservationDrain();
 	}
 
 	private String dbgId() {
