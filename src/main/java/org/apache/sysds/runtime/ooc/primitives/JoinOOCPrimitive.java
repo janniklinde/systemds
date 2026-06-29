@@ -179,9 +179,10 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	 * The rendezvous driver on the new contract: one thread alternates dequeues between both inputs
 	 * (the legacy idiom), and every tile goes through {@link TableRendezvous#installOrTake} — install
 	 * when the partner has not arrived, take-and-pair when it has. Both inputs share the ONE bound
-	 * table (one cache stream id), so eviction sees one population. The driver keeps one worst-case
-	 * output reservation prepaid; a resolved match takes that reservation and the driver replenishes
-	 * it before admitting another tile.
+	 * table (one cache stream id), so eviction sees one population. The driver admits one worst-case
+	 * output reservation after dequeuing an input tile but before install/take can pin a partner.
+	 * Delaying the first reservation until input is available prevents idle downstream joins in long
+	 * lazy pipelines from consuming allowance before upstream producers can make progress.
 	 */
 	private void startTableDriver(OOCStream<IndexedMatrixValue> l, OOCStream<IndexedMatrixValue> r,
 		OOCStream<JoinWork> intermediate,
@@ -193,14 +194,15 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 			try {
 				long cols = OOCUtils.getNumColBlocks(r.getDataCharacteristics());
 				boolean nextLeft = true;
-				if(_startsRegion) {
-					outputBytes = _allocFn.applyAsLong(new MatrixIndexes(1, 1));
-					_allowance.reserveBlocking(outputBytes);
-					reservationOwned = true;
-				}
 
 				while((next = (nextLeft ? l : r).dequeueCB()) != null && !next.isEos()) {
 					IndexedMatrixValue nextValue = next.get();
+					if(_startsRegion && !reservationOwned) {
+						if(outputBytes == 0)
+							outputBytes = _allocFn.applyAsLong(new MatrixIndexes(1, 1));
+						_allowance.reserveBlocking(outputBytes);
+						reservationOwned = true;
+					}
 					long rIdx = nextValue.getIndexes().getRowIndex() - 1;
 					long cIdx = nextValue.getIndexes().getColumnIndex() - 1;
 					final int idx = (int) (rIdx * cols + cIdx);
@@ -232,10 +234,6 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 							throw t;
 						}
 						reservationOwned = false;
-						if(_startsRegion) {
-							_allowance.reserveBlocking(outputBytes);
-							reservationOwned = true;
-						}
 					}
 					nextLeft = !nextLeft;
 				}

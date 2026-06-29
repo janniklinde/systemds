@@ -39,6 +39,7 @@ import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreBindingRegistry;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.utils.Statistics;
 
@@ -82,12 +83,17 @@ public class OOCCacheManager {
 		OOCIOHandler ioHandler = _ioHandler.getAndSet(null);
 		OOCCacheScheduler cacheScheduler = _scheduler.getAndSet(null);
 		OOCPackedCache globalCache = _globalCache.getAndSet(null);
+		OOCPrimitive.resetCoordinatorExecutor();
 		if (ioHandler != null)
 			ioHandler.shutdown();
 		if (cacheScheduler != null)
 			cacheScheduler.shutdown();
 		if (globalCache != null)
 			globalCache.shutdown();
+		GlobalMemoryBroker.get().shutdownAllAllowances();
+		if(GlobalMemoryBroker.get().hasActiveAllowances())
+			throw new DMLRuntimeException("Failed to shut down all OOC memory allowances during cache reset:\n"
+				+ GlobalMemoryBroker.get().dumpOutstandingAllowances());
 
 		if (DMLScript.OOC_STATISTICS)
 			Statistics.resetOOCEvictionStats();

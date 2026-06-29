@@ -305,6 +305,16 @@ public class CachedAllowance extends SyncMemoryAllowance {
 	}
 
 	@Override
+	public void shutdown() {
+		AtomicReferenceArray<SlotEntry> slots = _slots;
+		if(slots != null) {
+			for(int i = 0; i < slots.length(); i++)
+				clear(i);
+		}
+		super.shutdown();
+	}
+
+	@Override
 	public boolean tryReserve(long bytes) {
 		return super.tryReserve(bytes);
 	}

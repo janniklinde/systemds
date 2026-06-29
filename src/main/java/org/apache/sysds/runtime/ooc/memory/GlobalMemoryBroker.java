@@ -174,6 +174,22 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		allowance.setTargetMemory(_allowedBytes);
 	}
 
+	public void shutdownAllAllowances() {
+		List<MemoryAllowance> snapshot;
+		synchronized(this) {
+			snapshot = new ArrayList<>(_allowances);
+		}
+		for(MemoryAllowance allowance : snapshot)
+			allowance.shutdown();
+	}
+
+	public synchronized boolean hasActiveAllowances() {
+		for(MemoryAllowance allowance : _allowances)
+			if(!allowance.isShutdown())
+				return true;
+		return false;
+	}
+
 	private List<TargetUpdate> rebalance(boolean force) {
 		long free = _allowedBytes - _usedBytes;
 		if(force)
@@ -224,7 +240,16 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	}
 
 	private long getEqualShare() {
-		return _allowances.isEmpty() ? _allowedBytes : _allowedBytes / _allowances.size();
+		int active = getActiveAllowanceCount();
+		return active == 0 ? _allowedBytes : _allowedBytes / active;
+	}
+
+	private int getActiveAllowanceCount() {
+		int active = 0;
+		for(MemoryAllowance allowance : _allowances)
+			if(!allowance.isShutdown())
+				active++;
+		return active;
 	}
 
 	private void addOverconsumer(MemoryAllowance allowance) {
@@ -264,6 +289,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		sb.append("GlobalMemoryBroker used=").append(_usedBytes)
 			.append(" allowed=").append(_allowedBytes)
 			.append(" allowances=").append(_allowances.size())
+			.append(" active=").append(getActiveAllowanceCount())
 			.append(" overconsumers=").append(_overconsumers.size())
 			.append('\n');
 		for(MemoryAllowance allowance : _allowances) {
