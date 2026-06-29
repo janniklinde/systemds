@@ -25,6 +25,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 
 import java.util.ArrayDeque;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 
 public class SyncMemoryAllowance implements MemoryAllowance {
 	private static final long RELEASE_TRIM_BUFFER_BYTES = 20_000_000L;
@@ -125,25 +126,15 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 
 	@Override
 	public void reserveBlocking(long bytes) {
-		if(_shutdown || _destroyed)
-			throw new IllegalStateException("Cannot reserve memory on closed allowance.");
-		while(true) {
-			if(tryReserve(bytes)) {
-				synchronized(this) {
-					notifyAll();
-				}
-				return;
-			}
-			synchronized(this) {
-				if(_shutdown || _destroyed)
-					throw new IllegalStateException("Cannot reserve memory on closed allowance.");
-				try {
-					wait();
-				}
-				catch(InterruptedException e) {
-					throw new DMLRuntimeException(e);
-				}
-			}
+		try {
+			reserveAsync(bytes).get();
+		}
+		catch(InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new DMLRuntimeException(e);
+		}
+		catch(ExecutionException e) {
+			throw DMLRuntimeException.of(e.getCause());
 		}
 	}
 
@@ -298,6 +289,31 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			_broker.freeMemory(this, freedMemory);
 		if(drainWaiters)
 			requestReservationDrain();
+	}
+
+	@Override
+	public long reclaimUnused() {
+		long freedMemory;
+		long usedBefore;
+		long grantedBefore;
+		long targetBefore;
+		synchronized(this) {
+			if(_shutdown || _destroyed)
+				return 0;
+			usedBefore = _usedBytes;
+			grantedBefore = _grantedBytes;
+			targetBefore = _targetBytes;
+			if(_grantedBytes <= _usedBytes)
+				return 0;
+			_grantedBytes = _usedBytes;
+			freedMemory = grantedBefore - _grantedBytes;
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[ALLOW-RECLAIM] allowance=" + dbgId()
+					+ " used=" + usedBefore + " granted=" + grantedBefore + "->" + _grantedBytes
+					+ " target=" + targetBefore + " freedMemory=" + freedMemory);
+			notifyAll();
+		}
+		return freedMemory;
 	}
 
 	@Override

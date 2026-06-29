@@ -22,11 +22,16 @@ package org.apache.sysds.runtime.ooc.memory;
 import org.apache.sysds.runtime.ooc.OOCDebug;
 
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedList;
 import java.util.List;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class GlobalMemoryBroker implements MemoryBroker {
+	private static final long RECLAIM_RETRY_DELAY_MS = 5;
+	private static final double RECLAIM_PRESSURE = 0.85;
+	private static final ScheduledThreadPoolExecutor RECLAIM_EXECUTOR = createReclaimExecutor();
+
 	private enum BrokerMode {
 		RELAXED, STRICT
 	}
@@ -39,17 +44,29 @@ public class GlobalMemoryBroker implements MemoryBroker {
 
 	private final long _allowedBytes;
 	private final List<MemoryAllowance> _allowances;
-	private final LinkedList<MemoryAllowance> _overconsumers;
+	private final AtomicBoolean _reclaimRunning;
 	private long _usedBytes;
 	private BrokerMode _brokerMode;
+	private final AtomicBoolean _forceReclaimRequested;
 
 	private record TargetUpdate(MemoryAllowance _allowance, long _target) {}
+
+	private static ScheduledThreadPoolExecutor createReclaimExecutor() {
+		ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1, r -> {
+			Thread t = new Thread(r, "ooc-memory-broker-reclaimer");
+			t.setDaemon(true);
+			return t;
+		});
+		executor.setRemoveOnCancelPolicy(true);
+		return executor;
+	}
 
 	public GlobalMemoryBroker(long allowedBytes) {
 		_allowedBytes = allowedBytes;
 		_usedBytes = 0;
 		_allowances = new ArrayList<>();
-		_overconsumers = new LinkedList<>();
+		_reclaimRunning = new AtomicBoolean(false);
+		_forceReclaimRequested = new AtomicBoolean(false);
 	}
 
 	@Override
@@ -57,23 +74,24 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		List<TargetUpdate> updates = null;
 		long allow = 0;
 		long usedBefore;
+		int allowanceCount;
+		boolean requestReclaim;
 		synchronized(this) {
 			usedBefore = _usedBytes;
 			if(minSize < 0 || maxSize < minSize)
 				throw new IllegalArgumentException();
 			long share = getEqualShare();
 			long free = _allowedBytes - _usedBytes;
+			requestReclaim = free < minSize || hasReclaimPressureLocked();
 			if(free < minSize) {
 				if(allowance.getGrantedMemory() > share && allowance.getTargetMemory() > allowance.getGrantedMemory())
 					updates = List.of(new TargetUpdate(allowance, allowance.getUsedMemory()));
 				else {
-					MemoryAllowance largestConsumer = findAndRemoveLargestConsumer();
+					MemoryAllowance largestConsumer = findLargestShrinkCandidate(share);
 					if(largestConsumer != null) {
 						long newTarget = (long) (largestConsumer.getGrantedMemory() * 0.8);
 						if(newTarget <= share)
 							newTarget = share;
-						else
-							addOverconsumer(largestConsumer);
 						updates = List.of(new TargetUpdate(largestConsumer, newTarget));
 					}
 				}
@@ -82,29 +100,105 @@ public class GlobalMemoryBroker implements MemoryBroker {
 				allow = Math.min(free, maxSize);
 				_usedBytes += allow;
 				updates = rebalance(false);
-				if(allowance.getGrantedMemory() <= share && allowance.getGrantedMemory() + allow > share)
-					addOverconsumer(allowance);
 			}
+			allowanceCount = _allowances.size();
 		}
 		if(OOCDebug.TRACE_HOT_PATH)
 			System.out.println("[BROKER-REQUEST] allowance=" + dbgId(allowance) + " min=" + minSize + " max=" + maxSize
 				+ " granted=" + allow + " used=" + usedBefore + "->" + _usedBytes
-				+ " allowances=" + _allowances.size() + " overconsumers=" + _overconsumers.size());
+				+ " allowances=" + allowanceCount);
 		if(updates != null)
 			applyTargetUpdates(updates);
+		if(requestReclaim)
+			scheduleReclaimIfNeeded(allow < minSize);
 		return allow;
 	}
 
-	private MemoryAllowance findAndRemoveLargestConsumer() {
-		long largest = Long.MIN_VALUE;
-		MemoryAllowance allowance = null;
-		for(MemoryAllowance largestConsumer : _overconsumers) {
-			if(largestConsumer.getGrantedMemory() > largest) {
-				largest = largestConsumer.getGrantedMemory();
-				allowance = largestConsumer;
+	private void scheduleReclaimIfNeeded(boolean force) {
+		if(force)
+			_forceReclaimRequested.set(true);
+		if(!force && !hasReclaimPressure())
+			return;
+		if(!_reclaimRunning.compareAndSet(false, true))
+			return;
+		RECLAIM_EXECUTOR.execute(this::runReclaim);
+	}
+
+	private synchronized boolean hasReclaimPressure() {
+		return hasReclaimPressureLocked();
+	}
+
+	private boolean hasReclaimPressureLocked() {
+		return _usedBytes >= (_allowedBytes * RECLAIM_PRESSURE);
+	}
+
+	private void runReclaim() {
+		boolean reschedule = false;
+		try {
+			boolean force = _forceReclaimRequested.getAndSet(false);
+			reclaimUnusedGrantedMemory(force);
+			reschedule = hasReclaimPressure();
+		}
+		catch(Throwable t) {
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[BROKER-RECLAIM-ERROR] " + t.getMessage());
+		}
+		finally {
+			if(reschedule) {
+				RECLAIM_EXECUTOR.schedule(this::runReclaim, RECLAIM_RETRY_DELAY_MS, TimeUnit.MILLISECONDS);
+			}
+			else {
+				_reclaimRunning.set(false);
+				if(_forceReclaimRequested.get() || hasReclaimPressure())
+					scheduleReclaimIfNeeded(_forceReclaimRequested.get());
 			}
 		}
-		_overconsumers.remove(allowance);
+	}
+
+	private long reclaimUnusedGrantedMemory(boolean force) {
+		List<MemoryAllowance> snapshot;
+		synchronized(this) {
+			if(!force && !hasReclaimPressureLocked())
+				return 0;
+			snapshot = new ArrayList<>(_allowances);
+		}
+
+		long reclaimed = 0;
+		for(MemoryAllowance allowance : snapshot) {
+			if(allowance.isShutdown())
+				continue;
+			reclaimed += allowance.reclaimUnused();
+		}
+		if(reclaimed <= 0)
+			return 0;
+
+		List<TargetUpdate> updates;
+		long usedBefore;
+		synchronized(this) {
+			usedBefore = _usedBytes;
+			_usedBytes = Math.max(0, _usedBytes - reclaimed);
+			updates = rebalance(false);
+		}
+		if(OOCDebug.TRACE_HOT_PATH)
+			System.out.println("[BROKER-RECLAIM] reclaimed=" + reclaimed + " used=" + usedBefore + "->" + _usedBytes);
+		if(updates != null)
+			applyTargetUpdates(updates);
+		notifyReservationWaiters();
+		return reclaimed;
+	}
+
+	private MemoryAllowance findLargestShrinkCandidate(long share) {
+		long largest = Long.MIN_VALUE;
+		MemoryAllowance allowance = null;
+		for(MemoryAllowance candidate : _allowances) {
+			if(candidate.isShutdown())
+				continue;
+			long granted = candidate.getGrantedMemory();
+			if(granted > share && granted > largest) {
+				largest = granted;
+				allowance = candidate;
+			}
+		}
 		return allowance;
 	}
 
@@ -113,6 +207,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		List<TargetUpdate> updates = null;
 		boolean notifyWaiters;
 		long usedBefore;
+		int allowanceCount;
 		synchronized(this) {
 			if(freedMemory < 0)
 				throw new IllegalArgumentException();
@@ -120,17 +215,12 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			_usedBytes -= freedMemory;
 			if(allowance.isShutdown())
 				updates = rebalance(false);
-			long share = getEqualShare();
-			if(allowance.getGrantedMemory() <= share && allowance.getGrantedMemory() + freedMemory > share)
-				_overconsumers.remove(allowance);
-			else if(allowance.getGrantedMemory() <= allowance.getTargetMemory() && allowance.getGrantedMemory() > share)
-				addOverconsumer(allowance);
 			notifyWaiters = freedMemory > 0;
+			allowanceCount = _allowances.size();
 		}
 		if(OOCDebug.TRACE_HOT_PATH)
 			System.out.println("[BROKER-FREE] allowance=" + dbgId(allowance) + " freed=" + freedMemory
-				+ " used=" + usedBefore + "->" + _usedBytes + " allowances=" + _allowances.size()
-				+ " overconsumers=" + _overconsumers.size());
+				+ " used=" + usedBefore + "->" + _usedBytes + " allowances=" + allowanceCount);
 		if(updates != null)
 			applyTargetUpdates(updates);
 		if(notifyWaiters)
@@ -141,12 +231,11 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	public void shutdownAllowance(MemoryAllowance allowance) {
 		List<TargetUpdate> updates;
 		synchronized(this) {
-			_overconsumers.remove(allowance);
 			updates = rebalance(true);
 		}
 		if(OOCDebug.TRACE_HOT_PATH)
 			System.out.println("[BROKER-SHUTDOWN] allowance=" + dbgId(allowance) + " used=" + _usedBytes
-				+ " allowances=" + _allowances.size() + " overconsumers=" + _overconsumers.size());
+				+ " allowances=" + _allowances.size());
 		applyTargetUpdates(updates);
 		notifyReservationWaiters();
 	}
@@ -155,19 +244,19 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	public void destroyAllowance(MemoryAllowance allowance, long freedMemory) {
 		List<TargetUpdate> updates;
 		long usedBefore;
+		int allowanceCount;
 		synchronized(this) {
 			if(freedMemory < 0)
 				throw new IllegalArgumentException();
 			usedBefore = _usedBytes;
 			_allowances.remove(allowance);
-			_overconsumers.remove(allowance);
 			_usedBytes -= freedMemory;
 			updates = rebalance(true);
+			allowanceCount = _allowances.size();
 		}
 		if(OOCDebug.TRACE_HOT_PATH)
 			System.out.println("[BROKER-DESTROY] allowance=" + dbgId(allowance) + " freed=" + freedMemory
-				+ " used=" + usedBefore + "->" + _usedBytes + " allowances=" + _allowances.size()
-				+ " overconsumers=" + _overconsumers.size());
+				+ " used=" + usedBefore + "->" + _usedBytes + " allowances=" + allowanceCount);
 		applyTargetUpdates(updates);
 		notifyReservationWaiters();
 	}
@@ -230,7 +319,6 @@ public class GlobalMemoryBroker implements MemoryBroker {
 					Math.min(allowance.getTargetMemory(), share + (long) ((allowance.getUsedMemory() - share) * 0.9))));
 			}
 		}
-		refreshOverconsumers(updates);
 		return updates;
 	}
 
@@ -242,7 +330,6 @@ public class GlobalMemoryBroker implements MemoryBroker {
 				continue;
 			updates.add(new TargetUpdate(allowance, allowance.getGrantedMemory() + free));
 		}
-		refreshOverconsumers(updates);
 		return updates;
 	}
 
@@ -257,29 +344,6 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			if(!allowance.isShutdown())
 				active++;
 		return active;
-	}
-
-	private void addOverconsumer(MemoryAllowance allowance) {
-		if(!_overconsumers.contains(allowance))
-			_overconsumers.add(allowance);
-	}
-
-	private void refreshOverconsumers(List<TargetUpdate> updates) {
-		_overconsumers.clear();
-		long share = getEqualShare();
-		for(MemoryAllowance allowance : _allowances) {
-			if(allowance.isShutdown())
-				continue;
-			long target = allowance.getTargetMemory();
-			for(TargetUpdate update : updates) {
-				if(update._allowance == allowance) {
-					target = update._target;
-					break;
-				}
-			}
-			if(allowance.getGrantedMemory() > share && allowance.getGrantedMemory() <= target)
-				_overconsumers.add(allowance);
-		}
 	}
 
 	private static void applyTargetUpdates(List<TargetUpdate> updates) {

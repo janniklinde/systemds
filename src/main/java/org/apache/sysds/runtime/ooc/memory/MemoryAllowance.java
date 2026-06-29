@@ -47,6 +47,10 @@ public interface MemoryAllowance {
 		return getGrantedMemory() > getTargetMemory();
 	}
 
+	default long reclaimUnused() {
+		return 0;
+	}
+
 	default OOCFuture<Void> reserveAsync(long bytes) {
 		if(tryReserve(bytes))
 			return OOCFuture.completed(null);
