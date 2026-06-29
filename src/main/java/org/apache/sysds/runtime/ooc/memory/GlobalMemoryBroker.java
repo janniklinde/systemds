@@ -300,4 +300,14 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	private static String dbgId(MemoryAllowance allowance) {
 		return allowance.getClass().getSimpleName() + "@" + System.identityHashCode(allowance);
 	}
+
+	public synchronized boolean hasOutstandingUsage() {
+		if(_usedBytes != 0)
+			return true;
+		for(MemoryAllowance allowance : _allowances) {
+			if(allowance.getUsedMemory() != 0 || allowance.getGrantedMemory() != 0)
+				return true;
+		}
+		return false;
+	}
 }

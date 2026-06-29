@@ -92,8 +92,7 @@ public class OOCCacheManager {
 			globalCache.shutdown();
 		GlobalMemoryBroker.get().shutdownAllAllowances();
 		if(GlobalMemoryBroker.get().hasActiveAllowances())
-			throw new DMLRuntimeException("Failed to shut down all OOC memory allowances during cache reset:\n"
-				+ GlobalMemoryBroker.get().dumpOutstandingAllowances());
+			throw new DMLRuntimeException("Failed to shut down all OOC memory allowances during cache reset");
 
 		if (DMLScript.OOC_STATISTICS)
 			Statistics.resetOOCEvictionStats();
@@ -128,7 +127,6 @@ public class OOCCacheManager {
 			&& !hasLiveBackedCallbacks())
 			return;
 		System.out.println("[WARN] Outstanding OOC memory state at OOCCacheManager.reset() phase=" + phase);
-		System.out.print(broker.dumpOutstandingAllowances());
 		System.out.print(InMemoryQueueCallback.dumpLiveHandles());
 		System.out.print(dumpLiveBackedPins());
 		System.out.print(dumpLiveBackedCallbacks());
