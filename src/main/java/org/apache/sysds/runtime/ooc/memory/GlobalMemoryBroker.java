@@ -218,8 +218,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 				throw new IllegalArgumentException();
 			usedBefore = _usedBytes;
 			_usedBytes -= freedMemory;
-			if(allowance.isShutdown())
-				updates = rebalance(false);
+			updates = rebalance(false);
 			notifyWaiters = freedMemory > 0;
 			allowanceCount = _allowances.size();
 		}
