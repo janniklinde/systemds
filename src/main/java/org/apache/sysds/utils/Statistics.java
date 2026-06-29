@@ -233,6 +233,9 @@ public class Statistics
 	private static final LongAdder oocEvictionWriteCalls = new LongAdder();
 	private static final LongAdder oocEvictionWriteTimeNanos = new LongAdder();
 	private static final LongAdder oocEvictionWriteBytesSize = new LongAdder();
+	private static final LongAdder oocMemoryReclaimRuns = new LongAdder();
+	private static final LongAdder oocMemoryReclaimTime = new LongAdder();
+	private static final LongAdder oocMemoryReclaimBytes = new LongAdder();
 	private static final AtomicLong oocStatsStartTime = new AtomicLong(System.nanoTime());
 
 	public static long getNoOfExecutedSPInst() {
@@ -362,6 +365,9 @@ public class Statistics
 		oocEvictionWriteCalls.reset();
 		oocEvictionWriteTimeNanos.reset();
 		oocEvictionWriteBytesSize.reset();
+		oocMemoryReclaimRuns.reset();
+		oocMemoryReclaimTime.reset();
+		oocMemoryReclaimBytes.reset();
 		oocStatsStartTime.set(System.nanoTime());
 	}
 
@@ -373,9 +379,7 @@ public class Statistics
 		Map.Entry<String, LongAdder>[] tmp =
 			oocHeavyHitters.entrySet().toArray(new Map.Entry[0]);
 
-		Arrays.sort(tmp, (e1, e2) ->
-			Long.compare(e1.getValue().longValue(), e2.getValue().longValue())
-		);
+		Arrays.sort(tmp);
 
 		final String numCol   = "#";
 		final String instCol  = "Instruction";
@@ -481,6 +485,18 @@ public class Statistics
 		oocEvictionWriteBytesSize.add(bytes);
 	}
 
+	public static void incrementOOCMemoryReclaimRun() {
+		oocMemoryReclaimRuns.increment();
+	}
+
+	public static void accumulateOOCMemoryReclaimTime(long nanos) {
+		oocMemoryReclaimTime.add(nanos);
+	}
+
+	public static void accumulateOOCMemoryReclaimBytes(long bytes) {
+		oocMemoryReclaimBytes.add(bytes);
+	}
+
 	public static String displayOOCEvictionStats() {
 		long elapsedNanos = Math.max(1, System.nanoTime() - oocStatsStartTime.get());
 		double elapsedSeconds = elapsedNanos / 1e9;
@@ -499,6 +515,8 @@ public class Statistics
 			oocLoadFromDiskCalls.longValue(), oocLoadFromDiskTimeNanos.longValue() / 1e9, oocLoadFromDiskBytesSize.longValue() / 1e9));
 		sb.append(String.format(Locale.US, "  evict writes:\t\t%d (time %.3f sec, %.3f GB)\n",
 			oocEvictionWriteCalls.longValue(), oocEvictionWriteTimeNanos.longValue() / 1e9, oocEvictionWriteBytesSize.longValue() / 1e9));
+		sb.append(String.format(Locale.US, "  reclaim runs:\t\t%d (time %.3f sec, %.3f GB)\n",
+			oocMemoryReclaimRuns.longValue(), oocMemoryReclaimTime.longValue() / 1e9, oocMemoryReclaimBytes.longValue() / 1e9));
 		return sb.toString();
 	}
 	

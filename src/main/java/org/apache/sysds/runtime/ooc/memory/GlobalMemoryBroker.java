@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.ooc.memory;
 
 import org.apache.sysds.runtime.ooc.OOCDebug;
+import org.apache.sysds.utils.Statistics;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -133,10 +134,13 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	}
 
 	private void runReclaim() {
+		Statistics.incrementOOCMemoryReclaimRun();
+
+		long nanos = System.nanoTime();
 		boolean reschedule = false;
 		try {
 			boolean force = _forceReclaimRequested.getAndSet(false);
-			reclaimUnusedGrantedMemory(force);
+			Statistics.accumulateOOCMemoryReclaimBytes(reclaimUnusedGrantedMemory(force));
 			reschedule = hasReclaimPressure();
 		}
 		catch(Throwable t) {
@@ -153,6 +157,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 					scheduleReclaimIfNeeded(_forceReclaimRequested.get());
 			}
 		}
+		Statistics.accumulateOOCMemoryReclaimTime(System.nanoTime() - nanos);
 	}
 
 	private long reclaimUnusedGrantedMemory(boolean force) {
