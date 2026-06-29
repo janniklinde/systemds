@@ -83,7 +83,7 @@ public class UnaryOOCInstruction extends ComputationOOCInstruction {
 			OOCStreamable<IndexedMatrixValue> qIn = min.getStreamable();
 			qIn.setDownstreamMessageRelay(qOut::messageDownstream);
 			qOut.setUpstreamMessageRelay(qIn::messageUpstream);
-			OOCInstructionUtils.equiMap(qIn, qOut, tmp -> tmp.unaryOperations(uop, new MatrixBlock()),
+			OOCInstructionUtils.equiMapBlock(qIn, qOut, tmp -> tmp.unaryOperations(uop, new MatrixBlock()),
 				getContext().addOutStream(qOut));
 			return;
 		}

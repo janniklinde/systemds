@@ -103,7 +103,7 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 				qIn.setDownstreamMessageRelay(qOut::messageDownstream);
 				qOut.setUpstreamMessageRelay(qIn::messageUpstream);
 
-				OOCInstructionUtils.equiMap(qIn, qOut,
+				OOCInstructionUtils.equiMapBlock(qIn, qOut,
 					tmp -> tmp.replaceOperations(new MatrixBlock(), pattern, replacement),
 					getContext().addOutStream(qOut));
 

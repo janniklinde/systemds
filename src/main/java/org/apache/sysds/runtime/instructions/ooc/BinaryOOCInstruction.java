@@ -198,7 +198,7 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 			OOCStreamable<IndexedMatrixValue> sIn = min.getStreamable();
 			sIn.setDownstreamMessageRelay(qOut::messageDownstream);
 			qOut.setUpstreamMessageRelay(sIn::messageUpstream);
-			OOCInstructionUtils.equiMap(sIn, qOut, mb -> mb.scalarOperations(sc_op, new MatrixBlock()),
+			OOCInstructionUtils.equiMapBlock(sIn, qOut, mb -> mb.scalarOperations(sc_op, new MatrixBlock()),
 				getContext().addOutStream(qOut));
 			return;
 		}

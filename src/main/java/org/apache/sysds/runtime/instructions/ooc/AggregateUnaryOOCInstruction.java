@@ -19,8 +19,15 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.DoubleAccumulator;
+import java.util.concurrent.atomic.DoubleAdder;
+
+import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.common.Types.CorrectionLocationType;
 import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
@@ -29,6 +36,7 @@ import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.cp.DoubleObject;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.data.OperationsOnMatrixValues;
 import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.AggregateUnaryOperator;
@@ -111,24 +119,132 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 		}
 		// full aggregation
 		else {
-			OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
-			OOCStream<MatrixBlock> qLocal = createWritableStream();
+			if(processAtomicFullAggregate(ec, min, aggun, blen))
+				return;
 
-			mapOOC(qIn, qLocal, tmp -> (MatrixBlock) tmp.getValue()
-				.aggregateUnaryOperations(aggun, new MatrixBlock(), blen, tmp.getIndexes()));
+			OOCStream<IndexedMatrixValue> qIn = min.getStreamHandle();
+			OOCStream<IndexedMatrixValue> qLocal = createWritableStream();
+
+			OOCInstructionUtils.equiMap(qIn, qLocal, tmp -> (MatrixBlock)(tmp.getValue()
+				.aggregateUnaryOperations(aggun, new MatrixBlock(), blen, tmp.getIndexes())), getContext());
 			qIn.start();
 
-			MatrixBlock ltmp;
+			IndexedMatrixValue ltmp;
 			int extra = _aop.correction.getNumRemovedRowsColumns();
 			MatrixBlock ret = new MatrixBlock(1, 1 + extra, _aop.initialValue);
 			MatrixBlock corr = new MatrixBlock(1,1+extra,false);
 			while((ltmp = qLocal.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
 				OperationsOnMatrixValues.incrementalAggregation(
-					ret, _aop.existsCorrection() ? corr : null, ltmp, _aop, true);
+					ret, _aop.existsCorrection() ? corr : null, ltmp.getValue(), _aop, true);
 			}
 
 			//create scalar output
 			ec.setScalarOutput(output.getName(), new DoubleObject(ret.get(0, 0)));
+		}
+	}
+
+	private boolean processAtomicFullAggregate(ExecutionContext ec, MatrixObject min, AggregateUnaryOperator aggun,
+		int blen) {
+		FullScalarCollector collector = createFullScalarCollector(min);
+		if(collector == null)
+			return false;
+
+		OOCStream<IndexedMatrixValue> qIn = min.getStreamable().getReadStream();
+		CompletableFuture<Void> future = OOCInstructionUtils.submitOOCTasks(qIn,
+			tmp -> collector.accept((MatrixBlock)tmp.get().getValue(), aggun, blen, tmp.get().getIndexes()),
+			getContext().addOutStream());
+		qIn.start();
+		try {
+			future.get();
+		}
+		catch(InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new DMLRuntimeException(e);
+		}
+		catch(ExecutionException e) {
+			throw new DMLRuntimeException(e);
+		}
+
+		ec.setScalarOutput(output.getName(), new DoubleObject(collector.result()));
+		return true;
+	}
+
+	private FullScalarCollector createFullScalarCollector(MatrixObject input) {
+		String opcode = instOpcode.toLowerCase();
+		if(opcode.equals(Opcodes.UAKP.toString()) || opcode.equals(Opcodes.UAP.toString()) ||
+			opcode.equals(Opcodes.UASQKP.toString()) || opcode.equals(Opcodes.UATRACE.toString()) ||
+			opcode.equals(Opcodes.UAKTRACE.toString()))
+			return new AdditiveScalarCollector();
+		if(opcode.equals(Opcodes.UAMEAN.toString())) {
+			long rows = input.getNumRows();
+			long cols = input.getNumColumns();
+			return rows > 0 && cols > 0 ? new MeanScalarCollector((double)rows * cols) : null;
+		}
+		if(opcode.equals(Opcodes.UAM.toString()))
+			return new AccumulatingScalarCollector(1, (a, b) -> a * b);
+		if(opcode.equals(Opcodes.UAMAX.toString()))
+			return new AccumulatingScalarCollector(Double.NEGATIVE_INFINITY, Math::max);
+		if(opcode.equals(Opcodes.UAMIN.toString()))
+			return new AccumulatingScalarCollector(Double.POSITIVE_INFINITY, Math::min);
+		return null;
+	}
+
+	private interface FullScalarCollector {
+		void accept(MatrixBlock block, AggregateUnaryOperator aggun, int blen, MatrixIndexes ix);
+		double result();
+	}
+
+	private static class AdditiveScalarCollector implements FullScalarCollector {
+		private final DoubleAdder _sum = new DoubleAdder();
+
+		@Override
+		public void accept(MatrixBlock block, AggregateUnaryOperator aggun, int blen, MatrixIndexes ix) {
+			MatrixBlock partial = (MatrixBlock) block.aggregateUnaryOperations(aggun, new MatrixBlock(), blen, ix);
+			_sum.add(partial.get(0, 0));
+		}
+
+		@Override
+		public double result() {
+			return _sum.sum();
+		}
+	}
+
+	private static class MeanScalarCollector extends AdditiveScalarCollector {
+		private static final AggregateUnaryOperator SUM_OP =
+			InstructionUtils.parseBasicAggregateUnaryOperator(Opcodes.UAKP.toString());
+		private final double _count;
+
+		private MeanScalarCollector(double count) {
+			_count = count;
+		}
+
+		@Override
+		public void accept(MatrixBlock block, AggregateUnaryOperator aggun, int blen, MatrixIndexes ix) {
+			super.accept(block, SUM_OP, blen, ix);
+		}
+
+		@Override
+		public double result() {
+			return super.result() / _count;
+		}
+	}
+
+	private static class AccumulatingScalarCollector implements FullScalarCollector {
+		private final DoubleAccumulator _acc;
+
+		private AccumulatingScalarCollector(double identity, java.util.function.DoubleBinaryOperator op) {
+			_acc = new DoubleAccumulator(op, identity);
+		}
+
+		@Override
+		public void accept(MatrixBlock block, AggregateUnaryOperator aggun, int blen, MatrixIndexes ix) {
+			MatrixBlock partial = (MatrixBlock) block.aggregateUnaryOperations(aggun, new MatrixBlock(), blen, ix);
+			_acc.accumulate(partial.get(0, 0));
+		}
+
+		@Override
+		public double result() {
+			return _acc.get();
 		}
 	}
 

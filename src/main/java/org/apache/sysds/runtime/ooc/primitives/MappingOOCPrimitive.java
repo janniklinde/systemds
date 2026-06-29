@@ -31,11 +31,12 @@ import java.util.List;
 import java.util.function.Function;
 
 public class MappingOOCPrimitive extends OOCPrimitive {
-	private final Function<MatrixBlock, MatrixBlock> _fn;
+	private final Function<IndexedMatrixValue, MatrixBlock> _fn;
 	private final StreamContext _sc;
 
 	private MappingOOCPrimitive(OOCPrimitive inputPrimitive, OOCStreamable<IndexedMatrixValue> inputStreamable,
-		OOCStreamable<IndexedMatrixValue> outputStreamable, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
+		OOCStreamable<IndexedMatrixValue> outputStreamable, Function<IndexedMatrixValue, MatrixBlock> fn,
+		StreamContext sc) {
 		super(inputPrimitive == null ? List.of() : List.of(inputPrimitive), List.of(inputStreamable),
 			List.of(outputStreamable));
 		_fn = fn;
@@ -43,7 +44,7 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 	}
 
 	public MappingOOCPrimitive(OOCStreamable<IndexedMatrixValue> inputStreamable,
-		OOCStreamable<IndexedMatrixValue> outputStreamable, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
+		OOCStreamable<IndexedMatrixValue> outputStreamable, Function<IndexedMatrixValue, MatrixBlock> fn, StreamContext sc) {
 		this(safePrimitive(inputStreamable), inputStreamable, outputStreamable, fn, sc);
 	}
 
@@ -90,7 +91,7 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 		final OOCStream<IndexedMatrixValue> in = inputStreamable.getReadStream();
 		final OOCStream<IndexedMatrixValue> out = outputStreamable.getWriteStream();
 		OOCInstructionUtils.submitAdmittedOOCTasks(in, out,
-			input -> new IndexedMatrixValue(input.getIndexes(), _fn.apply((MatrixBlock) input.getValue())),
+			input -> new IndexedMatrixValue(input.getIndexes(), _fn.apply(input)),
 			IndexedMatrixValue::getIndexes, _allowance, _allocFn, _startsRegion, _crossBoundaries, _sc);
 	}
 }
