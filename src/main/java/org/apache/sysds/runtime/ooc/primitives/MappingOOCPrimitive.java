@@ -31,16 +31,13 @@ import java.util.List;
 import java.util.function.Function;
 
 public class MappingOOCPrimitive extends OOCPrimitive {
-	private final OOCStreamable<IndexedMatrixValue> _inputStreamable;
-	private final OOCStreamable<IndexedMatrixValue> _outputStreamable;
 	private final Function<MatrixBlock, MatrixBlock> _fn;
 	private final StreamContext _sc;
 
 	private MappingOOCPrimitive(OOCPrimitive inputPrimitive, OOCStreamable<IndexedMatrixValue> inputStreamable,
 		OOCStreamable<IndexedMatrixValue> outputStreamable, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
-		super(inputPrimitive == null ? List.of() : List.of(inputPrimitive));
-		_inputStreamable = reserveLazyHandle(inputStreamable);
-		_outputStreamable = outputStreamable;
+		super(inputPrimitive == null ? List.of() : List.of(inputPrimitive), List.of(inputStreamable),
+			List.of(outputStreamable));
 		_fn = fn;
 		_sc = sc;
 	}
@@ -48,16 +45,6 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 	public MappingOOCPrimitive(OOCStreamable<IndexedMatrixValue> inputStreamable,
 		OOCStreamable<IndexedMatrixValue> outputStreamable, Function<MatrixBlock, MatrixBlock> fn, StreamContext sc) {
 		this(safePrimitive(inputStreamable), inputStreamable, outputStreamable, fn, sc);
-	}
-
-	@Override
-	public List<OOCStreamable<?>> getInputStreams() {
-		return List.of(_inputStreamable);
-	}
-
-	@Override
-	public List<OOCStreamable<?>> getOutputStreams() {
-		return List.of(_outputStreamable);
 	}
 
 	@Override
@@ -82,7 +69,8 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	public void inferPatterns() {
-		_pattern = _pattern.preferred(getPattern(_inputStreamable));
+		OOCStreamable<IndexedMatrixValue> input = getInputStream(0);
+		_pattern = _pattern.preferred(getPattern(input));
 		inferPatterns(getParents());
 	}
 
@@ -97,8 +85,10 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	public void startExecution() {
-		final OOCStream<IndexedMatrixValue> in = _inputStreamable.getReadStream();
-		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
+		OOCStreamable<IndexedMatrixValue> inputStreamable = getInputStream(0);
+		OOCStreamable<IndexedMatrixValue> outputStreamable = getOutputStream(0);
+		final OOCStream<IndexedMatrixValue> in = inputStreamable.getReadStream();
+		final OOCStream<IndexedMatrixValue> out = outputStreamable.getWriteStream();
 		OOCInstructionUtils.submitAdmittedOOCTasks(in, out,
 			input -> new IndexedMatrixValue(input.getIndexes(), _fn.apply((MatrixBlock) input.getValue())),
 			IndexedMatrixValue::getIndexes, _allowance, _allocFn, _startsRegion, _crossBoundaries, _sc);
