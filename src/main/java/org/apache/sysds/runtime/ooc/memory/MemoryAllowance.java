@@ -31,6 +31,9 @@ public interface MemoryAllowance {
 	long getUsedMemory();
 	long getGrantedMemory();
 	long getTargetMemory();
+	default long getMinimumOperatingMemory() {
+		return 0;
+	}
 	void setTargetMemory(long targetMemory);
 	void shutdown();
 	boolean isShutdown();

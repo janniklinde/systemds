@@ -107,8 +107,10 @@ public class OOCPlanner {
 		if(activeRegion.isEmpty())
 			return;
 
-		MemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), 200_000_000);
 		ToLongFunction<MatrixIndexes> allocFn = buildAllocFn(region);
+		long minimumOperatingBytes = allocFn.applyAsLong(new MatrixIndexes(1, 1));
+		MemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), 100_000_000,
+			minimumOperatingBytes);
 		OOCRegionBinding binding = new OOCRegionBinding(allowance, allocFn, new AtomicInteger(activeRegion.size()));
 
 		for(int i = 0; i < activeRegion.size(); i++) {

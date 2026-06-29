@@ -74,7 +74,8 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		_data = data;
 		_dataCharacteristics = data == null ? source.getDataCharacteristics() : data.getDataCharacteristics();
 		_store = new MaterializedStoreImpl<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
-		_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), 200_000_000);
+		_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), 100_000_000,
+			estimateDenseTileBytes(_dataCharacteristics));
 		_primitive = new MaterializedStoreBoundaryPrimitive(this, safePrimitive(source));
 		_liveReaders = new CopyOnWriteArrayList<>();
 		_complete = new AtomicBoolean(false);
@@ -318,6 +319,16 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		}
 		if(seal)
 			_store.sealReaders();
+	}
+
+	private static long estimateDenseTileBytes(DataCharacteristics dc) {
+		if(dc == null || dc.getBlocksize() <= 0 || !dc.dimsKnown()) {
+			int blen = dc != null && dc.getBlocksize() > 0 ? dc.getBlocksize() : 1000;
+			return MatrixBlock.estimateSizeDenseInMemory(blen, blen);
+		}
+		long rows = Math.min(dc.getBlocksize(), dc.getRows());
+		long cols = Math.min(dc.getBlocksize(), dc.getCols());
+		return MatrixBlock.estimateSizeDenseInMemory(rows, cols);
 	}
 
 	@Override

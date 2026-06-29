@@ -32,6 +32,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 
 	protected final MemoryBroker _broker;
 	protected final long _consumptionLimit;
+	protected final long _minimumOperatingBytes;
 	protected volatile long _usedBytes;
 	protected volatile long _grantedBytes;
 	protected volatile long _targetBytes;
@@ -46,8 +47,17 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	}
 
 	public SyncMemoryAllowance(MemoryBroker broker, long consumptionLimit) {
+		this(broker, consumptionLimit, 0);
+	}
+
+	public SyncMemoryAllowance(MemoryBroker broker, long consumptionLimit, long minimumOperatingBytes) {
+		if(consumptionLimit < 0)
+			throw new IllegalArgumentException("Consumption limit must not be negative: " + consumptionLimit);
+		if(minimumOperatingBytes < 0)
+			throw new IllegalArgumentException("Minimum operating memory must not be negative: " + minimumOperatingBytes);
 		_broker = broker;
 		_consumptionLimit = consumptionLimit;
+		_minimumOperatingBytes = Math.min(minimumOperatingBytes, consumptionLimit);
 		_usedBytes = 0;
 		_grantedBytes = 0;
 		_targetBytes = 0;
@@ -258,6 +268,11 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	}
 
 	@Override
+	public long getMinimumOperatingMemory() {
+		return _minimumOperatingBytes;
+	}
+
+	@Override
 	public void setTargetMemory(long targetMemory) {
 		long freedMemory = 0;
 		long oldTarget;
@@ -271,7 +286,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			oldTarget = _targetBytes;
 			usedBefore = _usedBytes;
 			grantedBefore = _grantedBytes;
-			_targetBytes = Math.min(targetMemory, _consumptionLimit);
+			_targetBytes = clampTargetMemory(targetMemory);
 			targetAfter = _targetBytes;
 			if(_grantedBytes > _targetBytes) {
 				long oldGrantedBytes = _grantedBytes;
@@ -451,6 +466,12 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		if(Long.MAX_VALUE - left < right)
 			return Long.MAX_VALUE;
 		return left + right;
+	}
+
+	private long clampTargetMemory(long targetMemory) {
+		if(targetMemory < 0)
+			throw new IllegalArgumentException("Target memory must not be negative: " + targetMemory);
+		return Math.min(Math.max(targetMemory, _minimumOperatingBytes), _consumptionLimit);
 	}
 
 	private static final class ReservationWaiter {
