@@ -156,10 +156,8 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			return OOCFuture.completed(null);
 		if(bytes > _consumptionLimit)
 			return OOCFuture.failed(new IllegalArgumentException("Cannot reserve more memory than the consumption limit"));
-		if(tryReserve(bytes)) {
-			System.out.println("[OOC ALLOWANCE RESERVED] " + bytes/1000 + "KB (" + System.identityHashCode(this) + ")");
+		if(tryReserve(bytes))
 			return OOCFuture.completed(null);
-		}
 		OOCFuture<Void> future = new OOCFuture<>();
 		synchronized(this) {
 			if(_shutdown || _destroyed) {
@@ -168,7 +166,6 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			}
 			_reservationWaiters.addLast(new ReservationWaiter(bytes, future));
 		}
-		System.out.println("[OOC ALLOWANCE WAIT] " + bytes/1000 + "KB (" + System.identityHashCode(this) + ")");
 		requestReservationDrain();
 		return future;
 	}
@@ -194,7 +191,6 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		long usedBefore;
 		long grantedBefore;
 		long targetBefore;
-		System.out.println("[OOC ALLOWANCE RELEASE] " + bytes/1000 + "KB (" + System.identityHashCode(this) + ")");
 		synchronized(this) {
 			if(bytes < 0)
 				throw new IllegalArgumentException("Cannot release negative bytes: " + bytes);
@@ -202,11 +198,6 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			grantedBefore = _grantedBytes;
 			targetBefore = _targetBytes;
 			if(_usedBytes < bytes) {
-				if(OOCDebug.TRACE_HOT_PATH)
-					System.out.println("[ALLOW-UNDERFLOW] allowance=" + getClass().getSimpleName() + "@"
-						+ System.identityHashCode(this) + " release=" + bytes + " used=" + _usedBytes
-						+ " granted=" + _grantedBytes + " target=" + _targetBytes + " shutdown=" + _shutdown
-						+ " destroyed=" + _destroyed);
 				throw new IllegalArgumentException("Memory allowance underflow in " + getClass().getSimpleName()
 					+ ": release=" + bytes + ", used=" + _usedBytes + ", granted=" + _grantedBytes
 					+ ", target=" + _targetBytes + ", shutdown=" + _shutdown + ", destroyed=" + _destroyed);
@@ -446,10 +437,8 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			}
 			if(!admitted)
 				return;
-			if(removeReservationWaiter(waiter)) {
-				System.out.println("[OOC ALLOWANCE LATE RESERVE] " + waiter.bytes/1000 + "KB (" + System.identityHashCode(this) + ")");
+			if(removeReservationWaiter(waiter))
 				waiter.future.complete(null);
-			}
 			else
 				release(waiter.bytes);
 		}
