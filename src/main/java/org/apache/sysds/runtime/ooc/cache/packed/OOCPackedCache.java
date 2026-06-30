@@ -257,6 +257,23 @@ public final class OOCPackedCache implements OOCCache {
 	}
 
 	@Override
+	public OOCFuture<BlockEntry> pinAdmitted(long sId, long tId, MemoryAllowance allowance) {
+		PackedCacheLocation location = getLocation(sId, tId);
+		if(location == null)
+			return _physical.pinAdmitted(sId, tId, allowance);
+		if(location instanceof PendingPackLocation pending)
+			location = forceSeal(pending);
+		if(!(location instanceof SealedPackLocation packed))
+			return _physical.pinAdmitted(sId, tId, allowance);
+
+		return packed.state().pinAdmitted(_physical, allowance).map(physicalEntry -> {
+			if(physicalEntry == null)
+				return null;
+			return createLogicalPin(new BlockKey(sId, tId), packed);
+		});
+	}
+
+	@Override
 	public BlockEntry pinIfLive(long sId, long tId, MemoryAllowance allowance) {
 		PackedCacheLocation location = getLocation(sId, tId);
 		if(location == null)

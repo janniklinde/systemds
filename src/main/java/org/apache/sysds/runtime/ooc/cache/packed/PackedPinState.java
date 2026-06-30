@@ -83,6 +83,22 @@ final class PackedPinState {
 		return future;
 	}
 
+	synchronized OOCFuture<BlockEntry> pinAdmitted(OOCCacheImpl physical, MemoryAllowance allowance) {
+		int ix = indexOf(allowance);
+		if(ix >= 0) {
+			cancelRelease(ix);
+			counts[ix]++;
+			return futures[ix];
+		}
+		OOCFuture<BlockEntry> future = physical.pinAdmitted(physicalEntry.getKey(), allowance);
+		addAllowance(allowance, future);
+		future.whenComplete((entry, ex) -> {
+			if(entry == null || ex != null)
+				removeFailedAllowance(allowance, future);
+		});
+		return future;
+	}
+
 	BlockEntry pinIfLive(OOCCacheImpl physical, MemoryAllowance allowance) {
 		try {
 			return pin(physical, allowance, true).getNow(null);

@@ -90,6 +90,16 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	public long getDenseTileMemoryFactor() {
+		return 2;
+	}
+
+	@Override
+	public long getMinimumOperatingMemoryFactor() {
+		return 3;
+	}
+
+	@Override
 	public void bindStateTable(OperatorStateTable<IndexedMatrixValue> table) {
 		_table = table;
 	}
@@ -179,10 +189,8 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	 * The rendezvous driver on the new contract: one thread alternates dequeues between both inputs
 	 * (the legacy idiom), and every tile goes through {@link TableRendezvous#installOrTake} — install
 	 * when the partner has not arrived, take-and-pair when it has. Both inputs share the ONE bound
-	 * table (one cache stream id), so eviction sees one population. The driver admits one worst-case
-	 * output reservation after dequeuing an input tile but before install/take can pin a partner.
-	 * Delaying the first reservation until input is available prevents idle downstream joins in long
-	 * lazy pipelines from consuming allowance before upstream producers can make progress.
+	 * table (one cache stream id), so eviction sees one population. The driver admits output memory
+	 * only after a match exists, so unmatched lookup-table entries do not hold output reservations.
 	 */
 	private void startTableDriver(OOCStream<IndexedMatrixValue> l, OOCStream<IndexedMatrixValue> r,
 		OOCStream<JoinWork> intermediate,
@@ -190,24 +198,17 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 		runCoordinator("ooc-join-table-driver", () -> {
 			OOCStream.QueueCallback<IndexedMatrixValue> next = null;
 			long outputBytes = 0;
-			boolean reservationOwned = false;
 			try {
 				long cols = OOCUtils.getNumColBlocks(r.getDataCharacteristics());
 				boolean nextLeft = true;
 
 				while((next = (nextLeft ? l : r).dequeueCB()) != null && !next.isEos()) {
 					IndexedMatrixValue nextValue = next.get();
-					if(_startsRegion && !reservationOwned) {
-						if(outputBytes == 0)
-							outputBytes = _allocFn.applyAsLong(new MatrixIndexes(1, 1));
-						_allowance.reserveBlocking(outputBytes);
-						reservationOwned = true;
-					}
+					final boolean isLeft = nextLeft;
 					long rIdx = nextValue.getIndexes().getRowIndex() - 1;
 					long cIdx = nextValue.getIndexes().getColumnIndex() - 1;
 					final int idx = (int) (rIdx * cols + cIdx);
 					long bytes = _allocFn.applyAsLong(nextValue.getIndexes());
-					final boolean isLeft = nextLeft;
 					OOCStream.QueueCallback<IndexedMatrixValue> ownedNext = next.keepOpen();
 					next.close();
 					next = null; // detach from dequeueCB auto-close before handing ownership to rendezvous
@@ -222,18 +223,30 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 					}
 					TableRendezvous.Match match = getRendezvous(rendezvous);
 					if(match != null) {
-						long reservedBytes = reservationOwned ? outputBytes : 0;
-						JoinWork work = isLeft ?
-							new JoinWork(match.own(), match.partner(), reservedBytes) :
-							new JoinWork(match.partner(), match.own(), reservedBytes);
+						long reservedBytes = 0;
+						JoinWork work = null;
 						try {
+							if(_startsRegion) {
+								if(outputBytes == 0)
+									outputBytes = _allocFn.applyAsLong(new MatrixIndexes(1, 1));
+								_allowance.reserveBlocking(outputBytes);
+								reservedBytes = outputBytes;
+							}
+							work = isLeft ?
+								new JoinWork(match.own(), match.partner(), reservedBytes) :
+								new JoinWork(match.partner(), match.own(), reservedBytes);
 							intermediate.enqueue(work);
+							work = null;
 						}
 						catch(Throwable t) {
-							work.closeInputs();
+							if(work != null)
+								work.closeInputs();
+							else
+								closeMatch(match);
+							if(reservedBytes > 0)
+								_allowance.release(reservedBytes);
 							throw t;
 						}
-						reservationOwned = false;
 					}
 					nextLeft = !nextLeft;
 				}
@@ -246,11 +259,14 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 					next.close();
 				failJoin(t, intermediate, out);
 			}
-			finally {
-				if(reservationOwned)
-					_allowance.release(outputBytes);
-			}
 		});
+	}
+
+	private static void closeMatch(TableRendezvous.Match match) {
+		try(OOCStream.QueueCallback<IndexedMatrixValue> own = match.own();
+			OOCStream.QueueCallback<IndexedMatrixValue> partner = match.partner()) {
+			// Close both callbacks if the matched work cannot be handed to workers.
+		}
 	}
 
 	private static TableRendezvous.Match getRendezvous(OOCFuture<TableRendezvous.Match> rendezvous)

@@ -72,7 +72,7 @@ final class StorePinRetry {
 		}
 		OOCFuture<BlockEntry> pin;
 		try {
-			pin = cache.pin(streamId, sequenceNumber, allowance);
+			pin = cache.pinAdmitted(streamId, sequenceNumber, allowance);
 		}
 		catch(RuntimeException ex) {
 			//e.g. cache shutdown between retries; the result future must still complete
@@ -85,6 +85,14 @@ final class StorePinRetry {
 				return;
 			}
 			if(entry != null) {
+				if(attempt > 0)
+					System.out.println("[OOC PIN RETRY OK] key=(" + streamId + "," + sequenceNumber + ")"
+						+ " attempt=" + attempt
+						+ " allowance=" + System.identityHashCode(allowance)
+						+ " used=" + allowance.getUsedMemory()
+						+ " granted=" + allowance.getGrantedMemory()
+						+ " target=" + allowance.getTargetMemory()
+						+ " min=" + allowance.getMinimumOperatingMemory());
 				if(cancelled.getAsBoolean()) {
 					cache.unpin(entry, allowance);
 					result.complete(null);
@@ -97,6 +105,14 @@ final class StorePinRetry {
 				result.complete(null);
 				return;
 			}
+			if(attempt == 0 || attempt % 100 == 0)
+				System.out.println("[OOC PIN RETRY WAIT] key=(" + streamId + "," + sequenceNumber + ")"
+					+ " attempt=" + attempt
+					+ " allowance=" + System.identityHashCode(allowance)
+					+ " used=" + allowance.getUsedMemory()
+					+ " granted=" + allowance.getGrantedMemory()
+					+ " target=" + allowance.getTargetMemory()
+					+ " min=" + allowance.getMinimumOperatingMemory());
 			long delayNanos = Math.min(RETRY_MAX_NANOS, RETRY_BASE_NANOS << Math.min(attempt, 8));
 			try {
 				RETRY_EXECUTOR.schedule(

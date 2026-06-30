@@ -119,6 +119,52 @@ public class OOCCacheImpl implements OOCCache {
 	}
 
 	@Override
+	public OOCFuture<BlockEntry> pinAdmitted(long sId, long tId, MemoryAllowance allowance) {
+		OOCFuture<BlockEntry> immediate = pin(sId, tId, allowance);
+		if(!immediate.isDone())
+			return immediate;
+		try {
+			if(immediate.getNow(null) != null)
+				return immediate;
+		}
+		catch(RuntimeException ex) {
+			return OOCFuture.failed(ex);
+		}
+
+		BlockKey key = new BlockKey(sId, tId);
+		BlockEntry entry = findEntry(key);
+		EntryMeta meta;
+		synchronized(this) {
+			checkRunning();
+			meta = getMeta(entry);
+			if(meta == null)
+				return OOCFuture.completed(null);
+		}
+
+		long bytes = entry.getSize();
+		OOCFuture<BlockEntry> result = new OOCFuture<>();
+		allowance.reserveAsync(bytes).whenComplete((ignored, error) -> {
+			if(error != null) {
+				result.completeExceptionally(error);
+				return;
+			}
+			try {
+				pinReserved(key, allowance, bytes).whenComplete((pinned, pinError) -> {
+					if(pinError != null)
+						result.completeExceptionally(pinError);
+					else
+						result.complete(pinned);
+				});
+			}
+			catch(Throwable t) {
+				allowance.release(bytes);
+				result.completeExceptionally(t);
+			}
+		});
+		return result;
+	}
+
+	@Override
 	public BlockEntry pinIfLive(long sId, long tId, MemoryAllowance allowance) {
 		BlockEntry entry = findEntry(new BlockKey(sId, tId));
 		synchronized(this) {
@@ -231,11 +277,40 @@ public class OOCCacheImpl implements OOCCache {
 	private OOCFuture<BlockEntry> pinFromBacking(EntryMeta meta, MemoryAllowance allowance) {
 		if(!allowance.tryReserve(meta.entry.getSize()))
 			return OOCFuture.completed(null);
+		return pinFromBackingReserved(meta, allowance, meta.entry.getSize());
+	}
 
+	private OOCFuture<BlockEntry> pinReserved(BlockKey key, MemoryAllowance allowance, long reservedBytes) {
+		EntryMeta meta;
+		synchronized(this) {
+			checkRunning();
+			BlockEntry entry = findEntry(key);
+			meta = getMeta(entry);
+			if(meta == null) {
+				allowance.release(reservedBytes);
+				return OOCFuture.completed(null);
+			}
+			BlockEntry adopted = tryAdoptDeferredPinReserved(meta, allowance, reservedBytes);
+			if(adopted != null) {
+				Statistics.incrementOOCEvictionGet();
+				return OOCFuture.completed(adopted);
+			}
+			if(entry.getDataUnsafe() != null && entry.getState() != BlockState.COLD &&
+				entry.getState() != BlockState.READING) {
+				pinResident(meta, allowance);
+				Statistics.incrementOOCEvictionGet();
+				return OOCFuture.completed(entry);
+			}
+		}
+		return pinFromBackingReserved(meta, allowance, reservedBytes);
+	}
+
+	private OOCFuture<BlockEntry> pinFromBackingReserved(EntryMeta meta, MemoryAllowance allowance,
+		long reservedBytes) {
 		OOCFuture<BlockEntry> readFuture;
 		synchronized(this) {
 			if(!_running || getMeta(meta.entry) != meta) {
-				allowance.release(meta.entry.getSize());
+				allowance.release(reservedBytes);
 				return OOCFuture.completed(null);
 			}
 			if(meta.entry.getDataUnsafe() != null) {
@@ -265,14 +340,14 @@ public class OOCCacheImpl implements OOCCache {
 		readFuture.whenComplete((entry, ex) -> {
 			try {
 				if(ex != null) {
-					allowance.release(meta.entry.getSize());
+					allowance.release(reservedBytes);
 					result.completeExceptionally(ex);
 					return;
 				}
 				BlockEntry pinned;
 				synchronized(OOCCacheImpl.this) {
 					if(entry == null || getMeta(meta.entry) != meta || meta.entry.getDataUnsafe() == null) {
-						allowance.release(meta.entry.getSize());
+						allowance.release(reservedBytes);
 						if(meta.entry.getState() == BlockState.READING)
 							meta.entry.setState(BlockState.COLD);
 						pinned = null;
@@ -286,6 +361,7 @@ public class OOCCacheImpl implements OOCCache {
 				result.complete(pinned);
 			}
 			catch(Throwable t) {
+				allowance.release(reservedBytes);
 				result.completeExceptionally(t);
 			}
 		});
@@ -316,6 +392,20 @@ public class OOCCacheImpl implements OOCCache {
 			handle.complete(false);
 		}
 		else {
+			handle.complete(false);
+		}
+		meta.deferredUnpin = null;
+		return meta.entry;
+	}
+
+	private BlockEntry tryAdoptDeferredPinReserved(EntryMeta meta, MemoryAllowance allowance, long reservedBytes) {
+		if(meta == null || meta.deferredUnpin == null)
+			return null;
+		DeferredUnpinHandle handle = meta.deferredUnpin;
+		if(handle.allowance == allowance)
+			allowance.release(reservedBytes);
+		else {
+			handle.allowance.release(meta.entry.getSize());
 			handle.complete(false);
 		}
 		meta.deferredUnpin = null;

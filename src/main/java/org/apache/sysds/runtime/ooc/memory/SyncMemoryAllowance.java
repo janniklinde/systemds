@@ -156,8 +156,10 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			return OOCFuture.completed(null);
 		if(bytes > _consumptionLimit)
 			return OOCFuture.failed(new IllegalArgumentException("Cannot reserve more memory than the consumption limit"));
-		if(tryReserve(bytes))
+		if(tryReserve(bytes)) {
+			System.out.println("[OOC ALLOWANCE RESERVED] " + bytes/1000 + "KB (" + System.identityHashCode(this) + ")");
 			return OOCFuture.completed(null);
+		}
 		OOCFuture<Void> future = new OOCFuture<>();
 		synchronized(this) {
 			if(_shutdown || _destroyed) {
@@ -166,6 +168,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			}
 			_reservationWaiters.addLast(new ReservationWaiter(bytes, future));
 		}
+		System.out.println("[OOC ALLOWANCE WAIT] " + bytes/1000 + "KB (" + System.identityHashCode(this) + ")");
 		requestReservationDrain();
 		return future;
 	}
@@ -191,6 +194,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		long usedBefore;
 		long grantedBefore;
 		long targetBefore;
+		System.out.println("[OOC ALLOWANCE RELEASE] " + bytes/1000 + "KB (" + System.identityHashCode(this) + ")");
 		synchronized(this) {
 			if(bytes < 0)
 				throw new IllegalArgumentException("Cannot release negative bytes: " + bytes);
@@ -442,8 +446,10 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			}
 			if(!admitted)
 				return;
-			if(removeReservationWaiter(waiter))
+			if(removeReservationWaiter(waiter)) {
+				System.out.println("[OOC ALLOWANCE LATE RESERVE] " + waiter.bytes/1000 + "KB (" + System.identityHashCode(this) + ")");
 				waiter.future.complete(null);
+			}
 			else
 				release(waiter.bytes);
 		}

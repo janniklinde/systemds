@@ -70,6 +70,10 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		_slots = new Slot[Math.max(1, numSlots)];
 	}
 
+	public long getStreamId() {
+		return _streamId;
+	}
+
 	/**
 	 * Installs the payload into an empty slot, transferring its reservation into the cache ownership
 	 * protocol. Throws if the slot is occupied (including by a concurrent in-flight install).
@@ -476,6 +480,13 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			releaseSlot(slot);
 			return OOCFuture.completed(new TableLease(slot._entry));
 		}
+		System.out.println("[OOC TABLE TAKE] table=" + _streamId
+			+ " key=" + slot._key
+			+ " allowance=" + System.identityHashCode(_allowance)
+			+ " used=" + _allowance.getUsedMemory()
+			+ " granted=" + _allowance.getGrantedMemory()
+			+ " target=" + _allowance.getTargetMemory()
+			+ " min=" + _allowance.getMinimumOperatingMemory());
 		OOCFuture<BlockEntry> pinned = new OOCFuture<>();
 		StorePinRetry.pinWithRetry(_cache, slot._key.getStreamId(), slot._key.getSequenceNumber(), _allowance,
 			() -> _closed, pinned);

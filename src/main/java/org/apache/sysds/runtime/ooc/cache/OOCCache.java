@@ -28,6 +28,10 @@ public interface OOCCache {
 		return pin(key.getStreamId(), key.getSequenceNumber(), allowance);
 	}
 
+	default OOCFuture<BlockEntry> pinAdmitted(BlockKey key, MemoryAllowance allowance) {
+		return pinAdmitted(key.getStreamId(), key.getSequenceNumber(), allowance);
+	}
+
 	/**
 	 * Adds a new resident entry whose bytes are already owned by the supplied allowance. This creates cache metadata and
 	 * a physical pin, but does not transfer ownership to the cache. Ownership can later move only via pin/unpin.
@@ -57,6 +61,10 @@ public interface OOCCache {
 	 * @return a non-null future of the pinned block entry; the future result is null if the required memory could not be reserved
 	 */
 	OOCFuture<BlockEntry> pin(long sId, long tId, MemoryAllowance allowance);
+
+	default OOCFuture<BlockEntry> pinAdmitted(long sId, long tId, MemoryAllowance allowance) {
+		return pin(sId, tId, allowance);
+	}
 
 	/**
 	 * Pins an item backed by an allowance if it is already live in cache. A successful pin transfers resident-memory

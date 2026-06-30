@@ -108,8 +108,9 @@ public class OOCPlanner {
 			return;
 
 		ToLongFunction<MatrixIndexes> allocFn = buildAllocFn(region);
-		long minimumOperatingBytes = allocFn.applyAsLong(new MatrixIndexes(1, 1));
-		MemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), 100_000_000,
+		long minimumOperatingBytes = buildMinimumOperatingFactor(region) *
+			allocFn.applyAsLong(new MatrixIndexes(1, 1));
+		MemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), 200_000_000,
 			minimumOperatingBytes);
 		OOCRegionBinding binding = new OOCRegionBinding(allowance, allocFn, new AtomicInteger(activeRegion.size()));
 
@@ -216,6 +217,13 @@ public class OOCPlanner {
 		final DataCharacteristics outDc = dc;
 		final long factor = primitiveFactor;
 		return ix -> factor * estimateDenseTileBytes(outDc, ix);
+	}
+
+	private static long buildMinimumOperatingFactor(List<OOCPrimitive> region) {
+		long factor = 1;
+		for(OOCPrimitive primitive : region)
+			factor = Math.max(factor, primitive.getMinimumOperatingMemoryFactor());
+		return factor;
 	}
 
 	private static long estimateDenseTileBytes(DataCharacteristics dc, MatrixIndexes ix) {

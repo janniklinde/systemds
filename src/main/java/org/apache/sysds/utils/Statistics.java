@@ -379,7 +379,8 @@ public class Statistics
 		Map.Entry<String, LongAdder>[] tmp =
 			oocHeavyHitters.entrySet().toArray(new Map.Entry[0]);
 
-		Arrays.sort(tmp);
+		Arrays.sort(tmp, Comparator.comparingLong(e -> e.getValue().longValue())
+		);
 
 		final String numCol   = "#";
 		final String instCol  = "Instruction";

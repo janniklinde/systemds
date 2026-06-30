@@ -174,6 +174,10 @@ public abstract class OOCPrimitive {
 		return 1;
 	}
 
+	public long getMinimumOperatingMemoryFactor() {
+		return 1;
+	}
+
 	public boolean isLeaf() {
 		return _children.isEmpty();
 	}
