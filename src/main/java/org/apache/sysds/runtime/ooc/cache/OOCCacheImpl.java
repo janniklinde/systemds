@@ -195,24 +195,31 @@ public class OOCCacheImpl implements OOCCache {
 			allowance.release(entry.getSize());
 			return ImmediateUnpinHandle.committed(entry, allowance, entry.getSize());
 		}
+		UnpinHandle result;
+		long releaseBytes = 0;
 		synchronized(this) {
 			EntryMeta meta = getMeta(entry);
 			if(meta == null)
 				return ImmediateUnpinHandle.committed(entry, allowance, Math.max(0, entry.getSize()));
 			if(entry.getPinCount() > 1) {
 				entry.unpin();
-				allowance.release(entry.getSize());
-				return ImmediateUnpinHandle.committed(entry, allowance, entry.getSize());
+				releaseBytes = entry.getSize();
+				result = ImmediateUnpinHandle.committed(entry, allowance, releaseBytes);
 			}
-
-			if(canAcceptOwnedBytes(entry.getSize()))
-				return commitLastUnpin(meta, allowance);
-
-			DeferredUnpinHandle handle = new DeferredUnpinHandle(meta, allowance);
-			meta.deferredUnpin = handle;
-			_deferredUnpins.offer(entry.getKey());
-			return handle;
+			else if(canAcceptOwnedBytes(entry.getSize())) {
+				releaseBytes = entry.getSize();
+				result = commitLastUnpin(meta, allowance);
+			}
+			else {
+				DeferredUnpinHandle handle = new DeferredUnpinHandle(meta, allowance);
+				meta.deferredUnpin = handle;
+				_deferredUnpins.offer(entry.getKey());
+				return handle;
+			}
 		}
+		if(releaseBytes > 0)
+			allowance.release(releaseBytes);
+		return result;
 	}
 
 	@Override
@@ -415,7 +422,6 @@ public class OOCCacheImpl implements OOCCache {
 	private UnpinHandle commitLastUnpin(EntryMeta meta, MemoryAllowance allowance) {
 		BlockEntry entry = meta.entry;
 		entry.unpin();
-		allowance.release(entry.getSize());
 		if(entry.getReferenceCount() <= 0) {
 			removeEntry(entry.getKey());
 			entry.clear();
