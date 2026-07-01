@@ -78,6 +78,7 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 		if(opcode.equalsIgnoreCase(Opcodes.RIGHT_INDEX.toString())) {
 			OOCStream<IndexedMatrixValue> qIn = mo.getStreamHandle();
 			addInStream(qIn);
+			qIn.start();
 
 			if(output.isScalar()) {
 				if(!inRange)

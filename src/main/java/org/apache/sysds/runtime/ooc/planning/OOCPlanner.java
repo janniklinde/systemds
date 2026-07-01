@@ -45,7 +45,8 @@ import java.util.function.ToLongFunction;
 public class OOCPlanner {
 	public static void compile(OOCPrimitive root) {
 		Set<OOCPrimitive> leaves = new HashSet<>();
-		findLeaves(root, leaves);
+		Set<OOCPrimitive> visitedLeaves = Collections.newSetFromMap(new IdentityHashMap<>());
+		findLeaves(root, visitedLeaves, leaves);
 		inferAccessPatterns(leaves);
 
 		if(root.getAccessPattern() == OOCAccessPattern.ANY || root.getAccessPattern() == OOCAccessPattern.UNSET)
@@ -74,7 +75,10 @@ public class OOCPlanner {
 			startRegion(regions.get(i));
 	}
 
-	private static void findLeaves(OOCPrimitive primitive, Set<OOCPrimitive> leaves) {
+	private static void findLeaves(OOCPrimitive primitive, Set<OOCPrimitive> visited, Set<OOCPrimitive> leaves) {
+		if(!visited.add(primitive))
+			return;
+
 		if(primitive.hasStartedExecution()) {
 			leaves.add(primitive);
 			return;
@@ -86,7 +90,7 @@ public class OOCPlanner {
 		}
 
 		for(OOCPrimitive child : primitive.getChildren())
-			findLeaves(child, leaves);
+			findLeaves(child, visited, leaves);
 	}
 
 	private static void inferAccessPatterns(Set<OOCPrimitive> leaves) {

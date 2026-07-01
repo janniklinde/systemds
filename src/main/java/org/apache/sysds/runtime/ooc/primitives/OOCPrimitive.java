@@ -69,6 +69,8 @@ public abstract class OOCPrimitive {
 			for(OOCPrimitive child : children) {
 				if(child == null)
 					continue;
+				if(containsIdentity(_children, child))
+					continue;
 				_children.add(child);
 				child.addParent(this);
 			}
@@ -98,7 +100,8 @@ public abstract class OOCPrimitive {
 	}
 
 	public void addParent(OOCPrimitive p) {
-		_parents.add(p);
+		if(!containsIdentity(_parents, p))
+			_parents.add(p);
 	}
 
 	public List<OOCPrimitive> getParents() {
@@ -250,6 +253,13 @@ public abstract class OOCPrimitive {
 		if(streamable != null)
 			streamable.reserveLazyHandle();
 		return streamable;
+	}
+
+	private static boolean containsIdentity(List<OOCPrimitive> primitives, OOCPrimitive primitive) {
+		for(OOCPrimitive current : primitives)
+			if(current == primitive)
+				return true;
+		return false;
 	}
 
 	protected OOCAccessPattern getPattern(OOCStreamable<?> streamable) {

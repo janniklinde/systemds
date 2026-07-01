@@ -63,6 +63,7 @@ public class CentralMomentOOCInstruction extends AggregateUnaryOOCInstruction {
 
 		MatrixObject matObj = ec.getMatrixObject(input1.getName());
 		OOCStream<IndexedMatrixValue> qIn = matObj.getStreamHandle();
+		qIn.start();
 
 		CPOperand scalarInput = (input3 == null ? input2 : input3);
 		ScalarObject order = ec.getScalarInput(scalarInput);
@@ -90,6 +91,7 @@ public class CentralMomentOOCInstruction extends AggregateUnaryOOCInstruction {
 				throw new DMLRuntimeException("Different block sizes are not yet supported");
 
 			OOCStream<IndexedMatrixValue> wIn = wtObj.getStreamHandle();
+			wIn.start();
 
 			joinOOC(qIn, wIn, cmObjs,
 				(tmp, weights) ->
