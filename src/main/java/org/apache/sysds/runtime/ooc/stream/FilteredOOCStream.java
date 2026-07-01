@@ -116,6 +116,8 @@ public class FilteredOOCStream<T> implements OOCStream<T> {
 
 			if(_predicate.apply(cb.get()))
 				subscriber.accept(cb);
+			else
+				cb.close();
 		});
 	}
 

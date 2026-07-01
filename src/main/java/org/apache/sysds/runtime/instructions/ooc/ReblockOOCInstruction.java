@@ -88,7 +88,7 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 				if(cb.isEos())
 					return;
 
-				try {
+				try(cb) {
 					primitive.emit(cb.get());
 				}
 				catch(Throwable t) {

@@ -281,6 +281,38 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		}
 		for(MemoryAllowance allowance : snapshot)
 			allowance.shutdown();
+		warnOutstandingShutdownAllowances(snapshot);
+	}
+
+	private static void warnOutstandingShutdownAllowances(List<MemoryAllowance> allowances) {
+		int count = 0;
+		long used = 0;
+		long granted = 0;
+		StringBuilder details = new StringBuilder();
+		for(MemoryAllowance allowance : allowances) {
+			long allowanceUsed = allowance.getUsedMemory();
+			long allowanceGranted = allowance.getGrantedMemory();
+			if(allowanceUsed == 0 && allowanceGranted == 0)
+				continue;
+
+			count++;
+			used += allowanceUsed;
+			granted += allowanceGranted;
+			details.append("[WARN]   ")
+				.append(dbgId(allowance))
+				.append(" used=").append(allowanceUsed)
+				.append(" granted=").append(allowanceGranted)
+				.append(" target=").append(allowance.getTargetMemory())
+				.append(" minimum=").append(allowance.getMinimumOperatingMemory())
+				.append(" shutdown=").append(allowance.isShutdown())
+				.append('\n');
+		}
+		if(count == 0)
+			return;
+
+		System.out.println("[WARN] OOC memory allowance shutdown left live memory: count=" + count
+			+ ", used=" + used + ", granted=" + granted);
+		System.out.print(details);
 	}
 
 	public synchronized boolean hasActiveAllowances() {

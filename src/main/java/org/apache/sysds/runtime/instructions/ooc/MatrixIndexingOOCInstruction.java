@@ -24,7 +24,6 @@ import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
-import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.cp.DoubleObject;
@@ -88,13 +87,19 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 							mo.getNumRows() + "x" + mo.getNumColumns() + "].");
 
 				Double scalarOut = null;
-				IndexedMatrixValue tmp;
+				OOCStream.QueueCallback<IndexedMatrixValue> cb;
 
-				while((tmp = qIn.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
-					if(tmp.getIndexes().getRowIndex() == firstBlockRow + 1 &&
-						tmp.getIndexes().getColumnIndex() == firstBlockCol + 1) {
-						scalarOut = ((MatrixBlock) tmp.getValue()).get((int) (ix.rowStart % blocksize),
-							(int) (ix.colStart % blocksize));
+				while((cb = qIn.dequeueCB()) != null) {
+					try {
+						IndexedMatrixValue tmp = cb.get();
+						if(tmp.getIndexes().getRowIndex() == firstBlockRow + 1 &&
+							tmp.getIndexes().getColumnIndex() == firstBlockCol + 1) {
+							scalarOut = ((MatrixBlock) tmp.getValue()).get((int) (ix.rowStart % blocksize),
+								(int) (ix.colStart % blocksize));
+						}
+					}
+					finally {
+						cb.close();
 					}
 				}
 				if(scalarOut == null)
