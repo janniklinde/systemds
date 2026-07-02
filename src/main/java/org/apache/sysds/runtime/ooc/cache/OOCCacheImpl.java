@@ -36,6 +36,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongUnaryOperator;
 
 public class OOCCacheImpl implements OOCCache {
 	private static final int MIN_EVICTION_CANDIDATES = 1024;
@@ -263,6 +264,12 @@ public class OOCCacheImpl implements OOCCache {
 		_hardLimit = hardLimit;
 		_evictionLimit = evictionLimit;
 		processDeferredUnpins();
+		scheduleEvictionIfNeeded();
+	}
+
+	@Override
+	public synchronized void addEvictionPolicy(long streamId, LongUnaryOperator scoreFn) {
+		getOrCreateEvictController(streamId).addEvictionPolicy(scoreFn);
 		scheduleEvictionIfNeeded();
 	}
 
@@ -611,6 +618,16 @@ public class OOCCacheImpl implements OOCCache {
 			return _defaultEvictController;
 		EvictController controller = controllers.get(0);
 		return controller == null ? _defaultEvictController : controller;
+	}
+
+	private EvictController getOrCreateEvictController(long streamId) {
+		MaskedOnceArrayList<EvictController> controllers = _evictControllers.getOrCreate(streamId);
+		EvictController controller = controllers.get(0);
+		if(controller != null)
+			return controller;
+		controller = new EvictController();
+		controllers.put(0, controller);
+		return controller;
 	}
 
 	private void removeIfUnused(EntryMeta meta) {

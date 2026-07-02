@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 
 import java.util.ArrayList;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -40,6 +41,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.LongUnaryOperator;
 
 /**
  * Logical-to-physical packing adapter. Small logical blocks are packed into larger physical cache entries
@@ -62,11 +64,14 @@ public final class OOCPackedCache implements OOCCache {
 	private final long _sealDelayMs;
 	private final long _packReleaseDelayMs;
 	private final SegmentedStreamTableList<PackedCacheLocation> _locations;
+	private final MaskedOnceArrayList<PackedPinState> _packedStates;
 	private final ScheduledExecutorService _sealExecutor;
 	private final ExecutorService _releaseExecutor;
 	private final ConcurrentLinkedQueue<PackedPinState> _releaseQueue;
 	private final AtomicBoolean _releaseRunning;
+	private final AtomicBoolean _packedPolicyInstalled;
 	private final AtomicInteger _nextPackedId;
+	private final ArrayList<CopyOnWriteArrayList<LongUnaryOperator>> _logicalEvictionPolicies;
 
 	private PackBuilder[] _builders;
 	private long _stagingBytes;
@@ -105,9 +110,12 @@ public final class OOCPackedCache implements OOCCache {
 		_sealDelayMs = sealDelayMs;
 		_packReleaseDelayMs = packReleaseDelayMs;
 		_locations = new SegmentedStreamTableList<>();
+		_packedStates = new MaskedOnceArrayList<>();
 		_nextPackedId = new AtomicInteger();
 		_releaseQueue = new ConcurrentLinkedQueue<>();
 		_releaseRunning = new AtomicBoolean(false);
+		_packedPolicyInstalled = new AtomicBoolean(false);
+		_logicalEvictionPolicies = new ArrayList<>();
 		_builders = new PackBuilder[16];
 		_stagingBytes = 0;
 		_openBuilderCount = 0;
@@ -194,6 +202,7 @@ public final class OOCPackedCache implements OOCCache {
 			BlockEntry physicalEntry = putSealedBlockPinned(new PackedBlock(packedData, packedSizes, totalSize),
 				allowance);
 			PackedPinState state = new PackedPinState(physicalEntry, sId, tIds, off, len, len);
+			registerPackedState(state);
 			for(int i = 0; i < len; i++)
 				putLocation(new BlockKey(sId, tIds[off + i]), new SealedPackLocation(state, i));
 			return physicalEntry;
@@ -217,6 +226,7 @@ public final class OOCPackedCache implements OOCCache {
 			BlockEntry physicalEntry = putSealedBlockPinned(new PackedBlock(packedData, packedSizes, totalSize),
 				allowance);
 			PackedPinState state = new PackedPinState(physicalEntry, sId, tIds, off, len, len);
+			registerPackedState(state);
 			for(int i = 0; i < len; i++)
 				putLocation(new BlockKey(sId, tIds[off + i]), new SealedPackLocation(state, i));
 			return physicalEntry;
@@ -360,6 +370,14 @@ public final class OOCPackedCache implements OOCCache {
 	@Override
 	public void updateLimits(long hardLimit, long evictionLimit) {
 		_physical.updateLimits(hardLimit, evictionLimit);
+	}
+
+	@Override
+	public void addEvictionPolicy(long streamId, LongUnaryOperator scoreFn) {
+		_physical.addEvictionPolicy(streamId, scoreFn);
+		addLogicalEvictionPolicy(streamId, scoreFn);
+		if(_packedPolicyInstalled.compareAndSet(false, true))
+			_physical.addEvictionPolicy(PACKED_STREAM_ID, this::scorePackedBlock);
 	}
 
 	@Override
@@ -518,8 +536,10 @@ public final class OOCPackedCache implements OOCCache {
 			return references;
 		if(!clearLocation(key))
 			return 0;
-		if(location.state().forgetLocation())
+		if(location.state().forgetLocation()) {
+			_packedStates.clear(blockIndex(location.state().physicalEntry.getKey().getSequenceNumber()));
 			return _physical.dereference(location.state().physicalEntry);
+		}
 		return 0;
 	}
 
@@ -592,6 +612,8 @@ public final class OOCPackedCache implements OOCCache {
 		PackedPinState state = new PackedPinState(physicalEntry, builder.streamIds[0],
 			builder.tileIds, 0, builder.count, liveSlots);
 		builder.state = state;
+		if(liveSlots > 0)
+			registerPackedState(state);
 
 		//slots forgotten while pending stay in the physical pack (uncompacted, like sealed packs)
 		//but get no location; their builder-side reference counts seed the sealed locations
@@ -609,6 +631,44 @@ public final class OOCPackedCache implements OOCCache {
 	private BlockEntry putSealedBlockPinned(PackedBlock block, MemoryAllowance allowance) {
 		BlockKey packedKey = new BlockKey(PACKED_STREAM_ID, _nextPackedId.getAndIncrement());
 		return _physical.putPinned(packedKey, block, block.totalSize, allowance);
+	}
+
+	private void registerPackedState(PackedPinState state) {
+		_packedStates.put(blockIndex(state.physicalEntry.getKey().getSequenceNumber()), state);
+	}
+
+	private long scorePackedBlock(long packId) {
+		PackedPinState state = _packedStates.get(blockIndex(packId));
+		if(state == null)
+			return packId;
+		PackGroup group = state.group;
+		CopyOnWriteArrayList<LongUnaryOperator> policies = getLogicalEvictionPolicies(group.streamId());
+		if(policies == null || policies.isEmpty())
+			return packId;
+		long score = Long.MAX_VALUE;
+		for(int i = 0; i < group.size(); i++) {
+			long tileId = group.index(i);
+			for(LongUnaryOperator policy : policies)
+				score = Math.min(score, policy.applyAsLong(tileId));
+		}
+		return score;
+	}
+
+	private synchronized void addLogicalEvictionPolicy(long streamId, LongUnaryOperator scoreFn) {
+		int sid = asIntStreamId(streamId);
+		while(sid >= _logicalEvictionPolicies.size())
+			_logicalEvictionPolicies.add(null);
+		CopyOnWriteArrayList<LongUnaryOperator> policies = _logicalEvictionPolicies.get(sid);
+		if(policies == null) {
+			policies = new CopyOnWriteArrayList<>();
+			_logicalEvictionPolicies.set(sid, policies);
+		}
+		policies.add(scoreFn);
+	}
+
+	private synchronized CopyOnWriteArrayList<LongUnaryOperator> getLogicalEvictionPolicies(long streamId) {
+		int sid = asIntStreamId(streamId);
+		return sid < _logicalEvictionPolicies.size() ? _logicalEvictionPolicies.get(sid) : null;
 	}
 
 	private void scheduleSeal(PackBuilder builder) {

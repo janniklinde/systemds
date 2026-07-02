@@ -31,6 +31,12 @@ public class EvictController {
 	private final CopyOnWriteArrayList<LongUnaryOperator> _op = new CopyOnWriteArrayList<>();
 	private final CopyOnWriteArrayList<LongUnaryOperator> _futureOp = new CopyOnWriteArrayList<>();
 
+	public void addEvictionPolicy(LongUnaryOperator op) {
+		if(op == null)
+			throw new IllegalArgumentException("Eviction policy must not be null.");
+		_op.add(op);
+	}
+
 	public void findEvictionCandidates(MaskedOnceArrayList<BlockEntry> list,
 		PriorityQueue<IndexedObjectPair<BlockEntry>> candidates, int k, long estimatedReuseTimestamp) {
 		if(_op.isEmpty() && _futureOp.isEmpty()) {

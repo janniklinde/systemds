@@ -22,6 +22,7 @@ package org.apache.sysds.runtime.ooc.cache;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.function.LongUnaryOperator;
 
 public interface OOCCache {
 	default OOCFuture<BlockEntry> pin(BlockKey key, MemoryAllowance allowance) {
@@ -126,6 +127,13 @@ public interface OOCCache {
 	 * Updates the cache limits.
 	 */
 	void updateLimits(long hardLimit, long evictionLimit);
+
+	/**
+	 * Adds an eviction scoring policy for one logical cache stream. Larger scores are selected for
+	 * eviction first; {@link Long#MAX_VALUE} remains reserved as the "no immediate policy score"
+	 * sentinel used by the eviction controller.
+	 */
+	void addEvictionPolicy(long streamId, LongUnaryOperator scoreFn);
 
 	/**
 	 * Returns the current cache-owned resident size in bytes. This excludes bytes currently owned by operator

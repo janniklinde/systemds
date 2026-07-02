@@ -48,6 +48,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
@@ -325,17 +327,59 @@ public class OOCCacheImplStressTest {
 	}
 
 	@Test
+	public void testMaterializedStoreConcurrentOutOfOrderPublication() throws Exception {
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(_io, 64 * BYTES, 16 * BYTES),
+			2 * BYTES, 8 * BYTES, 0);
+		MaterializedStoreImpl<IndexedMatrixValue> store = new MaterializedStoreImpl<>(cache, 4);
+		ExecutorService publishers = Executors.newFixedThreadPool(8);
+		try {
+			CompletableFuture<?>[] tasks = new CompletableFuture<?>[BLOCKS];
+			for(int i = 0; i < BLOCKS; i++) {
+				int index = BLOCKS - i - 1;
+				tasks[i] = CompletableFuture.runAsync(() -> {
+					_producer.reserveBlocking(BYTES);
+					store.publishPinned(index, payload(index), BYTES, _producer);
+				}, publishers);
+			}
+			CompletableFuture.allOf(tasks).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			store.complete();
+			Assert.assertEquals(BLOCKS, store.size());
+			waitFor(() -> _producer.getUsedMemory() == 0);
+
+			MaterializedStore.Reader<IndexedMatrixValue> reader =
+				store.openReader(new SequentialAccessPattern(BLOCKS), _consumerB, 32);
+			store.sealReaders();
+			consumeStoreReader(reader);
+			waitFor(() -> _consumerB.getUsedMemory() == 0);
+		}
+		finally {
+			publishers.shutdownNow();
+			store.close();
+			cache.shutdown();
+		}
+	}
+
+	@Test
 	public void testMaterializedStoreOpportunisticPackedReplayWithFakeIO() throws Exception {
 		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(_io, 64 * BYTES, 16 * BYTES),
 			2 * BYTES, 8 * BYTES, 0);
 		MaterializedStoreImpl<IndexedMatrixValue> store = new MaterializedStoreImpl<>(cache, 5);
 		try {
-			for(int i = 0; i < BLOCKS; i++) {
-				_producer.reserveBlocking(BYTES);
-				store.publishPinned(i, payload(i), BYTES, _producer);
+			int[] indices = new int[8];
+			IndexedMatrixValue[] values = new IndexedMatrixValue[8];
+			long[] sizes = new long[8];
+			for(int first = 0; first < BLOCKS; first += indices.length) {
+				for(int i = 0; i < indices.length; i++) {
+					indices[i] = first + i;
+					values[i] = payload(first + i);
+					sizes[i] = BYTES;
+				}
+				_producer.reserveBlocking(8 * BYTES);
+				store.publishPackPinned(indices, values, sizes, _producer);
 			}
 			store.complete();
 			int expectedPacks = cache.getPackGroupCount();
+			Assert.assertEquals(BLOCKS / 8, expectedPacks);
 			waitFor(() -> _producer.getUsedMemory() == 0);
 
 			MaterializedStore.PackReader<IndexedMatrixValue> first =
