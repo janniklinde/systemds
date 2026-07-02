@@ -142,8 +142,10 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 		OOCStream<IndexedMatrixValue> intermediateStream = createWritableStream();
 		OOCStream<IndexedMatrixValue> outStream = createWritableStream();
 		ec.getMatrixObject(output).setStreamHandle(outStream);
+		OOCStream<IndexedMatrixValue> leftStream = min.getStreamHandle();
+		OOCStream<IndexedMatrixValue> rightStream = vin.getStreamHandle();
 
-		joinManyOOC(min.getStreamHandle(), vin.getStreamHandle(), intermediateStream,
+		joinManyOOC(leftStream, rightStream, intermediateStream,
 			(left, right) -> {
 				MatrixBlock leftBlock = (MatrixBlock) left.getValue();
 				MatrixBlock rightBlock = (MatrixBlock) right.getValue();
@@ -163,5 +165,8 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 			left.setValue(mb);
 			return left;
 		}, emitAggThreshold);
+
+		leftStream.start();
+		rightStream.start();
 	}
 }
