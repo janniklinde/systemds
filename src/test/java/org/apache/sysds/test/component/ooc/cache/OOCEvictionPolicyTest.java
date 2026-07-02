@@ -160,6 +160,37 @@ public class OOCEvictionPolicyTest {
 		}
 	}
 
+	@Test
+	public void testStoreBindingCombinesConsumerPoliciesWithMinScore() throws Exception {
+		RecordingIOHandler io = new RecordingIOHandler();
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(64 * BYTES);
+		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker, 32 * BYTES);
+		OOCCacheImpl cache = new OOCCacheImpl(io, 8 * BYTES, 8 * BYTES);
+		OOCStoreBinding binding = new OOCStoreBinding(null, cache, STREAM_ID,
+			OOCStoreLayout.of(ix -> Math.toIntExact(ix.getRowIndex() - 1),
+				index -> new MatrixIndexes(index + 1L, 1)),
+			producer, 0, 1, List.of(),
+			List.of(
+				ix -> ix.getRowIndex() == 1 ? 0 : 100,
+				ix -> ix.getRowIndex() == 2 ? 0 : 100));
+		try {
+			for(int i = 0; i < 3; i++) {
+				producer.reserveBlocking(BYTES);
+				BlockEntry entry = cache.putPinned(STREAM_ID, i, value(i), BYTES, producer);
+				await(cache.unpin(entry, producer));
+			}
+			cache.updateLimits(8 * BYTES, 2 * BYTES);
+			waitFor(() -> io.evictionCount() >= 1);
+			Assert.assertEquals("The third tile is the only one both policies allow evicting aggressively.",
+				new BlockKey(STREAM_ID, 2), io.evictedKeys().get(0));
+		}
+		finally {
+			binding.close();
+			cache.shutdown();
+			producer.destroy();
+		}
+	}
+
 	private static long physicalScore(long ix) {
 		if(ix == 3)
 			return 100;

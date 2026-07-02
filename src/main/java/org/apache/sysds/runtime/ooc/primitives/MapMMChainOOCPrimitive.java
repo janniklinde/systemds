@@ -148,7 +148,8 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	public OOCMaterializedInputRequest requiresMaterializedInput() {
 		return new OOCMaterializedInputRequest(1,
 			OOCStoreLayout.of(ix -> Math.toIntExact(ix.getRowIndex() - 1),
-				index -> new MatrixIndexes(index + 1L, 1)), 1, 1);
+				index -> new MatrixIndexes(index + 1L, 1)), 1, 1,
+			ix -> ix.getRowIndex() - 1);
 	}
 
 	@Override
