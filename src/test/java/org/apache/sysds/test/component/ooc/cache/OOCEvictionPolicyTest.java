@@ -31,6 +31,8 @@ import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.packed.OOCPackedCache;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -43,6 +45,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.ToLongFunction;
 
 public class OOCEvictionPolicyTest {
 	private static final long STREAM_ID = 17;
@@ -125,6 +128,35 @@ public class OOCEvictionPolicyTest {
 			cache.shutdown();
 			producer.destroy();
 			reader.destroy();
+		}
+	}
+
+	@Test
+	public void testStoreBindingAdaptsMatrixIndexPolicyToLayout() throws Exception {
+		RecordingIOHandler io = new RecordingIOHandler();
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(64 * BYTES);
+		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker, 32 * BYTES);
+		OOCCacheImpl cache = new OOCCacheImpl(io, 8 * BYTES, 8 * BYTES);
+		OOCStoreBinding binding = new OOCStoreBinding(null, cache, STREAM_ID,
+			OOCStoreLayout.of(ix -> Math.toIntExact((ix.getRowIndex() - 1) * 10 + ix.getColumnIndex() - 1),
+				index -> new MatrixIndexes(index / 10 + 1L, index % 10 + 1L)),
+			producer, 0, 1, List.of(),
+			List.<ToLongFunction<MatrixIndexes>>of(ix -> ix.getRowIndex() * 100 + ix.getColumnIndex()));
+		try {
+			long[] ids = new long[] {0, 3, 10, 13};
+			for(long id : ids) {
+				producer.reserveBlocking(BYTES);
+				BlockEntry entry = cache.putPinned(STREAM_ID, id, value((int) id), BYTES, producer);
+				await(cache.unpin(entry, producer));
+			}
+			cache.updateLimits(8 * BYTES, 3 * BYTES);
+			waitFor(() -> io.evictionCount() >= 1);
+			Assert.assertEquals(new BlockKey(STREAM_ID, 13), io.evictedKeys().get(0));
+		}
+		finally {
+			binding.close();
+			cache.shutdown();
+			producer.destroy();
 		}
 	}
 
