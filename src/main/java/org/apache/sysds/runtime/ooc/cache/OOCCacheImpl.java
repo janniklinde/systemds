@@ -93,8 +93,12 @@ public class OOCCacheImpl implements OOCCache {
 
 	@Override
 	public OOCFuture<BlockEntry> pin(long sId, long tId, MemoryAllowance allowance) {
-		BlockEntry entry = findEntry(new BlockKey(sId, tId));
+		BlockKey key = new BlockKey(sId, tId);
+		BlockEntry entry = findEntry(key);
 		EntryMeta meta;
+		BlockEntry adopted = null;
+		DeferredUnpinHandle adoptedHandle = null;
+		long reserveBytes = -1;
 		synchronized(this) {
 			checkRunning();
 			if(entry == null)
@@ -102,19 +106,29 @@ public class OOCCacheImpl implements OOCCache {
 			meta = getMeta(entry);
 			if(meta == null)
 				return OOCFuture.completed(null);
-			BlockEntry adopted = tryAdoptDeferredPin(meta, allowance);
-			if(adopted != null) {
-				Statistics.incrementOOCEvictionGet();
-				return OOCFuture.completed(adopted);
+			if(meta.deferredUnpin != null) {
+				if(meta.deferredUnpin.allowance == allowance) {
+					adoptedHandle = meta.deferredUnpin;
+					meta.deferredUnpin = null;
+					adopted = entry;
+					Statistics.incrementOOCEvictionGet();
+				}
+				else
+					reserveBytes = entry.getSize();
 			}
-			if(entry.getDataUnsafe() != null && entry.getState() != BlockState.COLD &&
+			else if(entry.getDataUnsafe() != null && entry.getState() != BlockState.COLD &&
 				entry.getState() != BlockState.READING) {
-				if(!allowance.tryReserve(entry.getSize()))
-					return OOCFuture.completed(null);
-				pinResident(meta, allowance);
-				Statistics.incrementOOCEvictionGet();
-				return OOCFuture.completed(entry);
+				reserveBytes = entry.getSize();
 			}
+		}
+		if(adopted != null) {
+			adoptedHandle.complete(false);
+			return OOCFuture.completed(adopted);
+		}
+		if(reserveBytes >= 0) {
+			if(!allowance.tryReserve(reserveBytes))
+				return OOCFuture.completed(null);
+			return pinReserved(key, allowance, reserveBytes);
 		}
 		return pinFromBacking(meta, allowance);
 	}
@@ -167,7 +181,11 @@ public class OOCCacheImpl implements OOCCache {
 
 	@Override
 	public BlockEntry pinIfLive(long sId, long tId, MemoryAllowance allowance) {
-		BlockEntry entry = findEntry(new BlockKey(sId, tId));
+		BlockKey key = new BlockKey(sId, tId);
+		BlockEntry entry = findEntry(key);
+		BlockEntry adopted = null;
+		DeferredUnpinHandle adoptedHandle = null;
+		long reserveBytes = -1;
 		synchronized(this) {
 			checkRunning();
 			if(entry == null)
@@ -175,19 +193,28 @@ public class OOCCacheImpl implements OOCCache {
 			EntryMeta meta = getMeta(entry);
 			if(meta == null || entry.getDataUnsafe() == null)
 				return null;
-			BlockEntry adopted = tryAdoptDeferredPin(meta, allowance);
-			if(adopted != null) {
-				Statistics.incrementOOCEvictionGet();
-				return adopted;
+			if(meta.deferredUnpin != null) {
+				if(meta.deferredUnpin.allowance == allowance) {
+					adoptedHandle = meta.deferredUnpin;
+					meta.deferredUnpin = null;
+					adopted = entry;
+					Statistics.incrementOOCEvictionGet();
+				}
+				else
+					reserveBytes = entry.getSize();
 			}
-			if(entry.getState() == BlockState.COLD || entry.getState() == BlockState.READING)
+			else if(entry.getState() == BlockState.COLD || entry.getState() == BlockState.READING)
 				return null;
-			if(!allowance.tryReserve(entry.getSize()))
-				return null;
-			pinResident(meta, allowance);
-			Statistics.incrementOOCEvictionGet();
-			return entry;
+			else
+				reserveBytes = entry.getSize();
 		}
+		if(adopted != null) {
+			adoptedHandle.complete(false);
+			return adopted;
+		}
+		if(reserveBytes < 0 || !allowance.tryReserve(reserveBytes))
+			return null;
+		return pinIfLiveReserved(key, allowance, reserveBytes);
 	}
 
 	@Override
@@ -260,11 +287,15 @@ public class OOCCacheImpl implements OOCCache {
 	}
 
 	@Override
-	public synchronized void updateLimits(long hardLimit, long evictionLimit) {
-		_hardLimit = hardLimit;
-		_evictionLimit = evictionLimit;
-		processDeferredUnpins();
-		scheduleEvictionIfNeeded();
+	public void updateLimits(long hardLimit, long evictionLimit) {
+		List<DeferredCompletion> completions;
+		synchronized(this) {
+			_hardLimit = hardLimit;
+			_evictionLimit = evictionLimit;
+			completions = processDeferredUnpins();
+			scheduleEvictionIfNeeded();
+		}
+		completeDeferred(completions);
 	}
 
 	@Override
@@ -296,43 +327,140 @@ public class OOCCacheImpl implements OOCCache {
 
 	private OOCFuture<BlockEntry> pinReserved(BlockKey key, MemoryAllowance allowance, long reservedBytes) {
 		EntryMeta meta;
+		BlockEntry adopted = null;
+		DeferredUnpinHandle adoptedHandle = null;
+		MemoryAllowance releaseAllowance = null;
+		DeferredCompletion deferredCompletion = null;
+		BlockEntry resident = null;
+		long releaseBytes = 0;
+		boolean releaseReserved = false;
+		boolean returnNull = false;
 		synchronized(this) {
-			checkRunning();
-			BlockEntry entry = findEntry(key);
-			meta = getMeta(entry);
-			if(meta == null) {
-				allowance.release(reservedBytes);
-				return OOCFuture.completed(null);
+			if(!_running) {
+				releaseReserved = true;
+				returnNull = true;
 			}
-			BlockEntry adopted = tryAdoptDeferredPinReserved(meta, allowance, reservedBytes);
-			if(adopted != null) {
-				Statistics.incrementOOCEvictionGet();
-				return OOCFuture.completed(adopted);
-			}
-			if(entry.getDataUnsafe() != null && entry.getState() != BlockState.COLD &&
-				entry.getState() != BlockState.READING) {
-				pinResident(meta, allowance);
-				Statistics.incrementOOCEvictionGet();
-				return OOCFuture.completed(entry);
+			if(returnNull)
+				meta = null;
+			else {
+				BlockEntry entry = findEntry(key);
+				meta = getMeta(entry);
+				if(meta == null) {
+					releaseReserved = true;
+					returnNull = true;
+				}
+				else if(meta.deferredUnpin != null) {
+					adoptedHandle = meta.deferredUnpin;
+					meta.deferredUnpin = null;
+					adopted = meta.entry;
+					if(adoptedHandle.allowance == allowance)
+						releaseReserved = true;
+					else {
+						releaseAllowance = adoptedHandle.allowance;
+						releaseBytes = meta.entry.getSize();
+					}
+					Statistics.incrementOOCEvictionGet();
+				}
+				else if(entry.getDataUnsafe() != null && entry.getState() != BlockState.COLD &&
+						entry.getState() != BlockState.READING) {
+					deferredCompletion = pinResident(meta);
+					Statistics.incrementOOCEvictionGet();
+					resident = entry;
+				}
 			}
 		}
+		if(releaseReserved)
+			allowance.release(reservedBytes);
+		if(releaseAllowance != null) {
+			releaseAllowance.release(releaseBytes);
+			adoptedHandle.complete(false);
+		}
+		else if(adoptedHandle != null)
+			adoptedHandle.complete(false);
+		completeDeferred(deferredCompletion);
+		if(resident != null)
+			return OOCFuture.completed(resident);
+		if(returnNull || adopted != null)
+			return OOCFuture.completed(adopted);
 		return pinFromBackingReserved(meta, allowance, reservedBytes);
+	}
+
+	private BlockEntry pinIfLiveReserved(BlockKey key, MemoryAllowance allowance, long reservedBytes) {
+		BlockEntry adopted = null;
+		DeferredUnpinHandle adoptedHandle = null;
+		MemoryAllowance releaseAllowance = null;
+		DeferredCompletion deferredCompletion = null;
+		BlockEntry resident = null;
+		long releaseBytes = 0;
+		boolean releaseReserved = false;
+		boolean returnNull = false;
+		synchronized(this) {
+			if(!_running) {
+				releaseReserved = true;
+				returnNull = true;
+			}
+			else {
+				BlockEntry entry = findEntry(key);
+				EntryMeta meta = getMeta(entry);
+				if(meta == null || entry.getDataUnsafe() == null) {
+					releaseReserved = true;
+					returnNull = true;
+				}
+				else if(meta.deferredUnpin != null) {
+					adoptedHandle = meta.deferredUnpin;
+					meta.deferredUnpin = null;
+					adopted = meta.entry;
+					if(adoptedHandle.allowance == allowance)
+						releaseReserved = true;
+					else {
+						releaseAllowance = adoptedHandle.allowance;
+						releaseBytes = meta.entry.getSize();
+					}
+					Statistics.incrementOOCEvictionGet();
+				}
+				else if(entry.getState() == BlockState.COLD || entry.getState() == BlockState.READING) {
+					releaseReserved = true;
+					returnNull = true;
+				}
+				else {
+					deferredCompletion = pinResident(meta);
+					Statistics.incrementOOCEvictionGet();
+					resident = entry;
+				}
+			}
+		}
+		if(releaseReserved)
+			allowance.release(reservedBytes);
+		if(releaseAllowance != null) {
+			releaseAllowance.release(releaseBytes);
+			adoptedHandle.complete(false);
+		}
+		else if(adoptedHandle != null)
+			adoptedHandle.complete(false);
+		completeDeferred(deferredCompletion);
+		if(resident != null)
+			return resident;
+		return returnNull ? null : adopted;
 	}
 
 	private OOCFuture<BlockEntry> pinFromBackingReserved(EntryMeta meta, MemoryAllowance allowance,
 		long reservedBytes) {
 		OOCFuture<BlockEntry> readFuture;
+		boolean releaseReserved = false;
+		DeferredCompletion deferredCompletion = null;
+		BlockEntry resident = null;
 		synchronized(this) {
 			if(!_running || getMeta(meta.entry) != meta) {
-				allowance.release(reservedBytes);
-				return OOCFuture.completed(null);
+				releaseReserved = true;
+				readFuture = null;
 			}
-			if(meta.entry.getDataUnsafe() != null) {
-				pinResident(meta, allowance);
+			else if(meta.entry.getDataUnsafe() != null) {
+				deferredCompletion = pinResident(meta);
 				Statistics.incrementOOCEvictionGet();
-				return OOCFuture.completed(meta.entry);
+				resident = meta.entry;
+				readFuture = null;
 			}
-			if(meta.readFuture == null) {
+			else if(meta.readFuture == null) {
 				meta.entry.setState(BlockState.READING);
 				OOCFuture<BlockEntry> scheduled = _ioHandler.scheduleRead(meta.entry);
 				meta.readFuture = scheduled;
@@ -349,11 +477,21 @@ public class OOCCacheImpl implements OOCCache {
 			else
 				readFuture = meta.readFuture;
 		}
+		if(releaseReserved) {
+			allowance.release(reservedBytes);
+			return OOCFuture.completed(null);
+		}
+		completeDeferred(deferredCompletion);
+		if(resident != null)
+			return OOCFuture.completed(resident);
 
 		OOCFuture<BlockEntry> result = new OOCFuture<>();
 		readFuture.whenComplete((entry, ex) -> {
+			boolean release = false;
+			DeferredCompletion completion = null;
 			try {
 				if(ex != null) {
+					release = true;
 					allowance.release(reservedBytes);
 					result.completeExceptionally(ex);
 					return;
@@ -361,28 +499,32 @@ public class OOCCacheImpl implements OOCCache {
 				BlockEntry pinned;
 				synchronized(OOCCacheImpl.this) {
 					if(entry == null || getMeta(meta.entry) != meta || meta.entry.getDataUnsafe() == null) {
-						allowance.release(reservedBytes);
+						release = true;
 						if(meta.entry.getState() == BlockState.READING)
 							meta.entry.setState(BlockState.COLD);
 						pinned = null;
 					}
 					else {
-						pinResident(meta, allowance);
+						completion = pinResident(meta);
 						Statistics.incrementOOCEvictionGet();
 						pinned = meta.entry;
 					}
 				}
+				if(release)
+					allowance.release(reservedBytes);
+				completeDeferred(completion);
 				result.complete(pinned);
 			}
 			catch(Throwable t) {
-				allowance.release(reservedBytes);
+				if(!release)
+					allowance.release(reservedBytes);
 				result.completeExceptionally(t);
 			}
 		});
 		return result;
 	}
 
-	private void pinResident(EntryMeta meta, MemoryAllowance allowance) {
+	private DeferredCompletion pinResident(EntryMeta meta) {
 		BlockEntry entry = meta.entry;
 		if(isCacheOwned(entry)) {
 			_ownedBytes -= entry.getSize();
@@ -392,38 +534,7 @@ public class OOCCacheImpl implements OOCCache {
 		}
 		entry.setState(BlockState.REMOVED);
 		entry.pin();
-		resolveDeferredUnpin(meta, false);
-	}
-
-	private BlockEntry tryAdoptDeferredPin(EntryMeta meta, MemoryAllowance allowance) {
-		if(meta == null || meta.deferredUnpin == null)
-			return null;
-		DeferredUnpinHandle handle = meta.deferredUnpin;
-		if(handle.allowance != allowance) {
-			if(!allowance.tryReserve(meta.entry.getSize()))
-				return null;
-			handle.allowance.release(meta.entry.getSize());
-			handle.complete(false);
-		}
-		else {
-			handle.complete(false);
-		}
-		meta.deferredUnpin = null;
-		return meta.entry;
-	}
-
-	private BlockEntry tryAdoptDeferredPinReserved(EntryMeta meta, MemoryAllowance allowance, long reservedBytes) {
-		if(meta == null || meta.deferredUnpin == null)
-			return null;
-		DeferredUnpinHandle handle = meta.deferredUnpin;
-		if(handle.allowance == allowance)
-			allowance.release(reservedBytes);
-		else {
-			handle.allowance.release(meta.entry.getSize());
-			handle.complete(false);
-		}
-		meta.deferredUnpin = null;
-		return meta.entry;
+		return resolveDeferredUnpin(meta, false);
 	}
 
 	private UnpinHandle commitLastUnpin(EntryMeta meta, MemoryAllowance allowance) {
@@ -444,22 +555,23 @@ public class OOCCacheImpl implements OOCCache {
 		return ImmediateUnpinHandle.committed(entry, allowance, entry.getSize());
 	}
 
-	private void resolveDeferredUnpin(EntryMeta meta, boolean keepPhysicalPin) {
+	private DeferredCompletion resolveDeferredUnpin(EntryMeta meta, boolean keepPhysicalPin) {
 		DeferredUnpinHandle handle = meta.deferredUnpin;
 		if(handle == null)
-			return;
+			return null;
+		long bytes = meta.entry.getSize();
 		meta.deferredUnpin = null;
 		if(!keepPhysicalPin)
 			meta.entry.unpin();
-		handle.allowance.release(meta.entry.getSize());
-		handle.complete(false);
+		return new DeferredCompletion(handle, bytes, false);
 	}
 
-	private void processDeferredUnpins() {
+	private List<DeferredCompletion> processDeferredUnpins() {
+		List<DeferredCompletion> completions = null;
 		while(true) {
 			BlockKey key = _deferredUnpins.peek();
 			if(key == null)
-				return;
+				return completions;
 			BlockEntry entry = findEntry(key);
 			EntryMeta meta = getMeta(entry);
 			if(meta == null || meta.deferredUnpin == null) {
@@ -467,20 +579,25 @@ public class OOCCacheImpl implements OOCCache {
 				continue;
 			}
 			if(!canAcceptOwnedBytes(meta.entry.getSize()))
-				return;
+				return completions;
 			_deferredUnpins.poll();
-			commitDeferredUnpin(meta);
+			DeferredCompletion completion = commitDeferredUnpin(meta);
+			if(completion != null) {
+				if(completions == null)
+					completions = new ArrayList<>();
+				completions.add(completion);
+			}
 		}
 	}
 
-	private void commitDeferredUnpin(EntryMeta meta) {
+	private DeferredCompletion commitDeferredUnpin(EntryMeta meta) {
 		DeferredUnpinHandle handle = meta.deferredUnpin;
 		if(handle == null)
-			return;
+			return null;
 		meta.deferredUnpin = null;
 		BlockEntry entry = meta.entry;
+		long bytes = entry.getSize();
 		entry.unpin();
-		handle.allowance.release(entry.getSize());
 		if(entry.getReferenceCount() <= 0) {
 			removeEntry(entry.getKey());
 			entry.clear();
@@ -493,7 +610,21 @@ public class OOCCacheImpl implements OOCCache {
 			setLive(entry);
 			_ownedBytes += entry.getSize();
 		}
-		handle.complete(true);
+		return new DeferredCompletion(handle, bytes, true);
+	}
+
+	private void completeDeferred(List<DeferredCompletion> completions) {
+		if(completions == null)
+			return;
+		for(DeferredCompletion completion : completions)
+			completeDeferred(completion);
+	}
+
+	private void completeDeferred(DeferredCompletion completion) {
+		if(completion == null)
+			return;
+		completion.handle.allowance.release(completion.bytes);
+		completion.handle.complete(completion.committed);
 	}
 
 	private boolean canAcceptOwnedBytes(long bytes) {
@@ -521,6 +652,7 @@ public class OOCCacheImpl implements OOCCache {
 					return;
 
 				List<BlockEntry> toWrite = new ArrayList<>();
+				List<DeferredCompletion> completions;
 				boolean progress = false;
 				synchronized(this) {
 					for(IndexedObjectPair<BlockEntry> candidate : candidates) {
@@ -545,8 +677,9 @@ public class OOCCacheImpl implements OOCCache {
 							progress = true;
 						}
 					}
-					processDeferredUnpins();
+					completions = processDeferredUnpins();
 				}
+				completeDeferred(completions);
 				for(BlockEntry entry : toWrite)
 					_ioHandler.scheduleEviction(entry).whenComplete((ignored, ex) -> onEvicted(entry, ex));
 				if(!progress)
@@ -563,6 +696,7 @@ public class OOCCacheImpl implements OOCCache {
 	}
 
 	private void onEvicted(BlockEntry entry, Throwable ex) {
+		List<DeferredCompletion> completions = null;
 		synchronized(this) {
 			EntryMeta meta = getMeta(entry);
 			if(meta == null)
@@ -588,9 +722,10 @@ public class OOCCacheImpl implements OOCCache {
 			_ownedBytes -= entry.getSize();
 			_evictingBytes -= entry.getSize();
 			removeIfUnused(meta);
-			processDeferredUnpins();
+			completions = processDeferredUnpins();
 			scheduleEvictionIfNeeded();
 		}
+		completeDeferred(completions);
 	}
 
 	private List<IndexedObjectPair<BlockEntry>> collectEvictionCandidates(long bytes) {
@@ -716,6 +851,18 @@ public class OOCCacheImpl implements OOCCache {
 		}
 	}
 
+	private class DeferredCompletion {
+		private final DeferredUnpinHandle handle;
+		private final long bytes;
+		private final boolean committed;
+
+		private DeferredCompletion(DeferredUnpinHandle handle, long bytes, boolean committed) {
+			this.handle = handle;
+			this.bytes = bytes;
+			this.committed = committed;
+		}
+	}
+
 	private static class ImmediateUnpinHandle implements UnpinHandle {
 		private final BlockEntry entry;
 		private final MemoryAllowance allowance;
@@ -804,13 +951,15 @@ public class OOCCacheImpl implements OOCCache {
 
 		@Override
 		public BlockEntry reclaim() {
+			BlockEntry entry;
 			synchronized(OOCCacheImpl.this) {
 				if(completed || meta.deferredUnpin != this)
 					return null;
 				meta.deferredUnpin = null;
-				complete(false);
-				return meta.entry;
+				entry = meta.entry;
 			}
+			complete(false);
+			return entry;
 		}
 
 		private synchronized void complete(boolean committed) {
