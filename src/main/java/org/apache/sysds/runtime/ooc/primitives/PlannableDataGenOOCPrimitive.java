@@ -87,26 +87,49 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 
 	@Override
 	public void startExecution() {
-		final OOCStream<MatrixIndexes> stream = new SubscribableTaskQueue<>();
+		final OOCStream<GenerationWork> stream = new SubscribableTaskQueue<>();
 		final OOCStream<IndexedMatrixValue> out = _outputStream.getWriteStream();
 		runCoordinator("ooc-datagen-index-driver", () -> {
 			for(MatrixIndexes ix : OOCUtils.getAccessPattern(_outputStream.getDataCharacteristics(), _pattern)) {
+				long reservedBytes = 0;
 				if(_startsRegion)
-					_allowance.reserveBlocking(_allocFn.applyAsLong(ix));
-				stream.enqueue(ix);
+					_allowance.reserveBlocking(reservedBytes = _allocFn.applyAsLong(ix));
+				stream.enqueue(new GenerationWork(ix, reservedBytes));
 			}
 			stream.closeInput();
 		});
 
 		OOCInstructionUtils.submitOOCTasks(stream, cb -> {
-			var imv = new IndexedMatrixValue(cb.get(), _fn.apply(cb.get()));
-			if(_crossBoundaries)
-				out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, _allocFn.applyAsLong(cb.get())));
-			else
-				out.enqueue(new OOCStream.SimpleQueueCallback<>(imv, null));
+			GenerationWork work = cb.get();
+			long reservedBytes = work.reservedBytes;
+			try {
+				var imv = new IndexedMatrixValue(work.index, _fn.apply(work.index));
+				if(_crossBoundaries && reservedBytes > 0) {
+					out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, reservedBytes));
+					reservedBytes = 0;
+				}
+				else {
+					out.enqueue(new OOCStream.SimpleQueueCallback<>(imv, null));
+					reservedBytes = 0;
+				}
+			}
+			finally {
+				if(reservedBytes > 0)
+					_allowance.release(reservedBytes);
+			}
 		}, _sc).thenRun(out::closeInput).exceptionally(t -> {
 			out.propagateFailure(DMLRuntimeException.of(t));
 			return null;
 		}).thenRun(() -> out.getPrimitive().onComplete());
+	}
+
+	private static final class GenerationWork {
+		private final MatrixIndexes index;
+		private final long reservedBytes;
+
+		private GenerationWork(MatrixIndexes index, long reservedBytes) {
+			this.index = index;
+			this.reservedBytes = reservedBytes;
+		}
 	}
 }

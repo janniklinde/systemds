@@ -28,6 +28,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
@@ -82,6 +83,11 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 		if(index < 0 || index == Integer.MAX_VALUE)
 			throw new IndexOutOfBoundsException("Invalid index: " + index);
 		BlockEntry entry = cache.putPinned(streamId, index, value, bytes, allowance);
+		if(OOCDebug.TRACE_HOT_PATH)
+			System.out.println("[OOC STORE TRACE] store publish live store=" + System.identityHashCode(this)
+				+ " stream=" + streamId + " index=" + index + " bytes=" + bytes
+				+ " allowance=" + System.identityHashCode(allowance)
+				+ " entry=" + System.identityHashCode(entry));
 		publishedCount.incrementAndGet();
 		updatePublished(index + 1);
 		return new LiveLeaseAlias(new LiveLeaseState(index, entry, allowance));
@@ -358,15 +364,33 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 			this.entry = entry;
 			this.allowance = allowance;
 			references = new AtomicInteger(1);
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[OOC STORE TRACE] live state create store=" + System.identityHashCode(MaterializedStoreImpl.this)
+					+ " index=" + index + " refs=1 entry=" + System.identityHashCode(entry)
+					+ " allowance=" + System.identityHashCode(allowance));
 		}
 
 		private void retain() {
-			if(references.getAndIncrement() <= 0)
+			int before = references.getAndIncrement();
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[OOC STORE TRACE] live retain store=" + System.identityHashCode(MaterializedStoreImpl.this)
+					+ " index=" + index + " refs=" + before + "->" + (before + 1)
+					+ " entry=" + System.identityHashCode(entry));
+			if(before <= 0)
 				throw new IllegalStateException("Live lease is already fully closed");
 		}
 
 		private void release() {
-			if(references.decrementAndGet() == 0) {
+			int after = references.decrementAndGet();
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[OOC STORE TRACE] live release store=" + System.identityHashCode(MaterializedStoreImpl.this)
+					+ " index=" + index + " refs->" + after + " entry=" + System.identityHashCode(entry)
+					+ " allowance=" + System.identityHashCode(allowance));
+			if(after == 0) {
+				if(OOCDebug.TRACE_HOT_PATH)
+					System.out.println("[OOC STORE TRACE] live unpin store=" + System.identityHashCode(MaterializedStoreImpl.this)
+						+ " index=" + index + " entry=" + System.identityHashCode(entry)
+						+ " allowance=" + System.identityHashCode(allowance));
 				cache.unpin(entry, allowance);
 				tryForget(index);
 			}

@@ -25,6 +25,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
 import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
@@ -93,6 +94,8 @@ public abstract class OOCPrimitive {
 		_allocFn = binding.allocFn();
 		_crossBoundaries = crossBoundaries;
 		_startsRegion = startsRegion;
+		if(_allowance instanceof SyncMemoryAllowance sync)
+			sync.registerDebugOwner(debugName() + "[start=" + startsRegion + ",cross=" + crossBoundaries + "]");
 	}
 
 	public List<OOCPrimitive> getChildren() {
@@ -253,6 +256,10 @@ public abstract class OOCPrimitive {
 		if(streamable != null)
 			streamable.reserveLazyHandle();
 		return streamable;
+	}
+
+	protected String debugName() {
+		return getClass().getSimpleName() + "@" + System.identityHashCode(this);
 	}
 
 	private static boolean containsIdentity(List<OOCPrimitive> primitives, OOCPrimitive primitive) {

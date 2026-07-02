@@ -475,7 +475,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 			return;
 		}
 		ManagedPayload<IndexedMatrixValue> payload;
-		if(callback instanceof InMemoryQueueCallback managed) {
+		if(callback instanceof InMemoryQueueCallback managed && managed.getManagedBytes() > 0) {
 			payload = managed.extractManagedPayload();
 			managed.close();
 		}

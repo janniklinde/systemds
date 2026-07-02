@@ -39,6 +39,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	protected volatile boolean _shutdown;
 	protected volatile boolean _destroyed;
 	private final ArrayDeque<ReservationWaiter> _reservationWaiters;
+	private final StringBuilder _debugOwners;
 	private boolean _drainingReservationWaiters;
 	private boolean _reservationDrainRequested;
 
@@ -64,11 +65,27 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		_shutdown = false;
 		_destroyed = false;
 		_reservationWaiters = new ArrayDeque<>();
+		_debugOwners = new StringBuilder();
 		_drainingReservationWaiters = false;
 		_reservationDrainRequested = false;
 		broker.attachAllowance(this);
 		if(OOCDebug.TRACE_HOT_PATH)
-			System.out.println("[ALLOW-INIT] allowance=" + dbgId() + " limit=" + _consumptionLimit);
+			System.out.println("[ALLOW-INIT] allowance=" + dbgId() + " limit=" + _consumptionLimit
+				+ " minimum=" + _minimumOperatingBytes);
+	}
+
+	public synchronized void registerDebugOwner(String owner) {
+		if(owner == null || owner.isEmpty())
+			return;
+		if(_debugOwners.length() > 0)
+			_debugOwners.append(" -> ");
+		_debugOwners.append(owner);
+		if(OOCDebug.TRACE_HOT_PATH)
+			System.out.println("[ALLOW-OWNER] allowance=" + dbgId() + " owners=" + _debugOwners);
+	}
+
+	public synchronized String getDebugOwners() {
+		return _debugOwners.length() == 0 ? "unregistered" : _debugOwners.toString();
 	}
 
 	@Override
@@ -88,6 +105,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				_usedBytes += bytes;
 				if(OOCDebug.TRACE_HOT_PATH)
 					System.out.println("[ALLOW-RESERVE-FAST] allowance=" + dbgId() + " bytes=" + bytes
+						+ " owners=" + getDebugOwners()
 						+ " used=" + usedBefore + "->" + _usedBytes + " granted=" + grantedBefore
 						+ " target=" + targetBefore);
 				return true;
@@ -120,6 +138,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				drainWaiters = success && !_reservationWaiters.isEmpty();
 				if(OOCDebug.TRACE_HOT_PATH)
 					System.out.println("[ALLOW-RESERVE-SLOW] allowance=" + dbgId() + " bytes=" + bytes
+						+ " owners=" + getDebugOwners()
 						+ " brokerGranted=" + granted + " success=" + success
 						+ " used=" + usedBefore + "->" + _usedBytes
 						+ " granted=" + grantedBefore + "->" + _grantedBytes
@@ -232,6 +251,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			}
 			if(OOCDebug.TRACE_HOT_PATH)
 				System.out.println("[ALLOW-RELEASE] allowance=" + dbgId() + " bytes=" + bytes
+					+ " owners=" + getDebugOwners()
 					+ " used=" + usedBefore + "->" + _usedBytes
 					+ " granted=" + grantedBefore + "->" + _grantedBytes
 					+ " target=" + targetBefore + " shutdown=" + _shutdown + " destroyed=" + _destroyed
@@ -290,6 +310,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			}
 			if(OOCDebug.TRACE_HOT_PATH)
 				System.out.println("[ALLOW-TARGET] allowance=" + dbgId() + " target=" + oldTarget + "->" + targetAfter
+					+ " owners=" + getDebugOwners()
 					+ " used=" + usedBefore + " granted=" + grantedBefore + "->" + _grantedBytes
 					+ " freedMemory=" + freedMemory);
 			drainWaiters = !_reservationWaiters.isEmpty();
@@ -319,6 +340,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			freedMemory = grantedBefore - _grantedBytes;
 			if(OOCDebug.TRACE_HOT_PATH)
 				System.out.println("[ALLOW-RECLAIM] allowance=" + dbgId()
+					+ " owners=" + getDebugOwners()
 					+ " used=" + usedBefore + " granted=" + grantedBefore + "->" + _grantedBytes
 					+ " target=" + targetBefore + " freedMemory=" + freedMemory);
 			notifyAll();
@@ -337,6 +359,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				return;
 			if(OOCDebug.TRACE_HOT_PATH)
 				System.out.println("[ALLOW-SHUTDOWN-BEGIN] allowance=" + dbgId() + " used=" + _usedBytes
+					+ " owners=" + getDebugOwners()
 					+ " granted=" + _grantedBytes + " target=" + _targetBytes);
 			_shutdown = true;
 			long oldGrantedBytes = _grantedBytes;
@@ -356,6 +379,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		}
 		if(OOCDebug.TRACE_HOT_PATH)
 			System.out.println("[ALLOW-SHUTDOWN-END] allowance=" + dbgId() + " used=" + _usedBytes
+				+ " owners=" + getDebugOwners()
 				+ " granted=" + _grantedBytes + " target=" + _targetBytes + " destroy=" + destroy
 				+ " freedMemory=" + freedMemory + " destroyFreed=" + destroyFreedMemory);
 		_broker.shutdownAllowance(this);

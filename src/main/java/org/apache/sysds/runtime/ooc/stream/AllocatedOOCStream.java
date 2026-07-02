@@ -26,6 +26,7 @@ import java.util.function.ToLongFunction;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
+import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
@@ -75,6 +76,12 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 				return;
 			}
 			long bytes = _reserve ? _allocFn.applyAsLong(callback.get()) : 0;
+			if(bytes > 0 && OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[OOC ADMIT TRACE] admit source=" + System.identityHashCode(_source)
+					+ " stream=" + System.identityHashCode(this)
+					+ " bytes=" + bytes
+					+ " allowance=" + System.identityHashCode(_allowance)
+					+ " cb=" + System.identityHashCode(callback));
 			if(bytes < 0)
 				throw new IllegalArgumentException("Cannot allocate negative bytes: " + bytes);
 			if(!_reserve || bytes == 0 || _allowance.tryReserve(bytes)) {
@@ -130,6 +137,12 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 	private void forward(OOCStream.QueueCallback<T> callback, long reservedBytes) {
 		OOCStream.QueueCallback<T> retained = callback.keepOpen();
 		try {
+			if(reservedBytes > 0 && OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[OOC ADMIT TRACE] forward stream=" + System.identityHashCode(this)
+					+ " bytes=" + reservedBytes
+					+ " allowance=" + System.identityHashCode(_allowance)
+					+ " cb=" + System.identityHashCode(callback)
+					+ " retained=" + System.identityHashCode(retained));
 			enqueue(retained);
 			retained = null;
 		}

@@ -54,7 +54,7 @@ public final class TableRendezvous {
 		if(tile instanceof MaterializationSink.PinnedLeaseCallback pinned)
 			return installReferenceOrTake(table, slot, pinned);
 		ManagedPayload<IndexedMatrixValue> payload;
-		if(tile instanceof InMemoryQueueCallback managed) {
+		if(tile instanceof InMemoryQueueCallback managed && managed.getManagedBytes() > 0) {
 			payload = managed.extractManagedPayload();
 			managed.close();
 		}

@@ -26,6 +26,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
@@ -172,12 +173,20 @@ public class OOCInstructionUtils {
 		return submitOOCTasks(List.of(admitted), (i, cb) -> {
 			IndexedMatrixValue input = cb.get();
 			MatrixIndexes outputIndex = outputIndexFn.apply(input);
-			long bytes = startsRegion ? allocFn.applyAsLong(outputIndex) : 0;
+			long bytes = (startsRegion || crossBoundaries) ? allocFn.applyAsLong(outputIndex) : 0;
 			boolean reservationOwned = bytes > 0;
+			if(bytes > 0 && OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[OOC ADMIT TRACE] task start startsRegion=" + startsRegion
+					+ " crossBoundaries=" + crossBoundaries
+					+ " bytes=" + bytes
+					+ " allowance=" + System.identityHashCode(allowance)
+					+ " cb=" + System.identityHashCode(cb)
+					+ " managed=" + cb.getManagedBytes()
+					+ " index=" + outputIndex);
 			OOCStream.QueueCallback<IndexedMatrixValue> output = null;
 			try {
 				IndexedMatrixValue result = op.apply(input);
-				if(crossBoundaries) {
+				if(crossBoundaries && bytes > 0) {
 					output = new InMemoryQueueCallback(result, null, allowance, bytes);
 					reservationOwned = false;
 				}
@@ -185,16 +194,24 @@ public class OOCInstructionUtils {
 					output = new OOCStream.SimpleQueueCallback<>(result, null);
 				out.enqueue(output);
 				output = null;
+				if(startsRegion && !crossBoundaries)
+					reservationOwned = false;
 			}
 			finally {
 				if(output != null)
 					output.close();
-				if(reservationOwned)
+				if(reservationOwned) {
+					if(OOCDebug.TRACE_HOT_PATH)
+						System.out.println("[OOC ADMIT TRACE] task release bytes=" + bytes
+							+ " allowance=" + System.identityHashCode(allowance)
+							+ " cb=" + System.identityHashCode(cb)
+							+ " index=" + outputIndex);
 					allowance.release(bytes);
+				}
 			}
 		}, (i, cb) -> true, (i, cb) ->
-			releaseAdmittedReservation(cb, outputIndexFn, allowance, allocFn, startsRegion),
-			allowance, allocFn, sc).thenRun(out::closeInput).exceptionally(t -> {
+			releaseAdmittedReservation(cb, outputIndexFn, allowance, allocFn, startsRegion || crossBoundaries),
+			startsRegion ? allowance : null, startsRegion ? allocFn : null, sc).thenRun(out::closeInput).exceptionally(t -> {
 			out.propagateFailure(DMLRuntimeException.of(t));
 			return null;
 		}).thenRun(() -> out.getPrimitive().onComplete());
@@ -206,8 +223,13 @@ public class OOCInstructionUtils {
 		if(!startsRegion || cb.isEos() || cb.isFailure())
 			return;
 		long bytes = allocFn.applyAsLong(outputIndexFn.apply(cb.get()));
-		if(bytes > 0)
+		if(bytes > 0) {
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[OOC ADMIT TRACE] not-processed release bytes=" + bytes
+					+ " allowance=" + System.identityHashCode(allowance)
+					+ " cb=" + System.identityHashCode(cb));
 			allowance.release(bytes);
+		}
 	}
 
 	public static <T> CompletableFuture<Void> submitOOCTasks(OOCStream<T> queue,

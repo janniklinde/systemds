@@ -300,6 +300,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			granted += allowanceGranted;
 			details.append("[WARN]   ")
 				.append(dbgId(allowance))
+				.append(" owners=").append(debugOwners(allowance))
 				.append(" used=").append(allowanceUsed)
 				.append(" granted=").append(allowanceGranted)
 				.append(" target=").append(allowance.getTargetMemory())
@@ -399,6 +400,10 @@ public class GlobalMemoryBroker implements MemoryBroker {
 
 	private static String dbgId(MemoryAllowance allowance) {
 		return allowance.getClass().getSimpleName() + "@" + System.identityHashCode(allowance);
+	}
+
+	private static String debugOwners(MemoryAllowance allowance) {
+		return allowance instanceof SyncMemoryAllowance sync ? sync.getDebugOwners() : "unregistered";
 	}
 
 	public synchronized boolean hasOutstandingUsage() {

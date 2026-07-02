@@ -35,6 +35,7 @@ import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
@@ -76,6 +77,8 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		_store = new MaterializedStoreImpl<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
 		_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), 200_000_000,
 			estimateDenseTileBytes(_dataCharacteristics));
+		((SyncMemoryAllowance) _allowance).registerDebugOwner("MaterializedStoreStreamable@"
+			+ System.identityHashCode(this) + "[store=" + System.identityHashCode(_store) + "]");
 		_primitive = new MaterializedStoreBoundaryPrimitive(this, safePrimitive(source));
 		_liveReaders = new CopyOnWriteArrayList<>();
 		_complete = new AtomicBoolean(false);
@@ -166,10 +169,20 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		}
 		IndexedMatrixValue value = callback.get();
 		MaterializedStore.LiveLease<IndexedMatrixValue> lease;
-		if(callback instanceof InMemoryQueueCallback managed)
+		long managedBytes = callback.getManagedBytes();
+		if(callback instanceof InMemoryQueueCallback managed && managedBytes > 0) {
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[OOC STORE TRACE] publish managed store=" + System.identityHashCode(_store)
+					+ " index=" + index + " bytes=" + managedBytes + " readers=" + readers.size()
+					+ " cb=" + System.identityHashCode(callback));
 			lease = _store.publishPinnedLive(index, managed.extractManagedPayload());
+		}
 		else {
 			long bytes = ((MatrixBlock)value.getValue()).getExactSerializedSize();
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[OOC STORE TRACE] publish measured store=" + System.identityHashCode(_store)
+					+ " index=" + index + " bytes=" + bytes + " readers=" + readers.size()
+					+ " cb=" + System.identityHashCode(callback));
 			_allowance.reserveBlocking(bytes);
 			try {
 				lease = _store.publishPinnedLive(index, value, bytes, _allowance);
@@ -180,10 +193,17 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			}
 		}
 		try {
-			for(LiveReader reader : readers)
+			for(LiveReader reader : readers) {
+				if(OOCDebug.TRACE_HOT_PATH)
+					System.out.println("[OOC STORE TRACE] retain live store=" + System.identityHashCode(_store)
+						+ " index=" + index + " reader=" + System.identityHashCode(reader));
 				reader.enqueueLive(LeaseQueueCallbacks.pinned(lease.retain()));
+			}
 		}
 		finally {
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[OOC STORE TRACE] close canonical store=" + System.identityHashCode(_store)
+					+ " index=" + index);
 			lease.close();
 		}
 	}

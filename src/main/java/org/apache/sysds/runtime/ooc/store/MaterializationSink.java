@@ -123,7 +123,7 @@ public final class MaterializationSink implements Consumer<OOCStream.QueueCallba
 		IndexedMatrixValue value = callback.get();
 		int index = _linearize.applyAsInt(value.getIndexes());
 		if(_liveConsumers.isEmpty()) {
-			if(callback instanceof InMemoryQueueCallback managed) {
+			if(callback instanceof InMemoryQueueCallback managed && managed.getManagedBytes() > 0) {
 				_store.publishPinned(index, managed.extractManagedPayload());
 				managed.close();
 			}
@@ -143,7 +143,7 @@ public final class MaterializationSink implements Consumer<OOCStream.QueueCallba
 		}
 
 		MaterializedStore.LiveLease<IndexedMatrixValue> lease;
-		if(callback instanceof InMemoryQueueCallback managed) {
+		if(callback instanceof InMemoryQueueCallback managed && managed.getManagedBytes() > 0) {
 			lease = _store.publishPinnedLive(index, managed.extractManagedPayload());
 			managed.close();
 		}

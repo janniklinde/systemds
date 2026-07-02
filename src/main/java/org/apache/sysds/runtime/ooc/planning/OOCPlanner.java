@@ -142,7 +142,10 @@ public class OOCPlanner {
 					CachingStream._streamSeq.getNextID(), allowance));
 			}
 			else if(primitive.requiresCache()) {
-				primitive.bindCache(new CachedAllowance(GlobalMemoryBroker.get()));
+				CachedAllowance cache = new CachedAllowance(GlobalMemoryBroker.get());
+				cache.registerDebugOwner(primitive.getClass().getSimpleName() + "@"
+					+ System.identityHashCode(primitive) + "[legacy-cache]");
+				primitive.bindCache(cache);
 			}
 		}
 	}

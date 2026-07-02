@@ -375,9 +375,29 @@ public final class OOCPackedCache implements OOCCache {
 		for(PackBuilder builder : _builders)
 			if(builder != null)
 				sealBuilder(builder);
+		_physical.updateLimits(Long.MAX_VALUE, Long.MAX_VALUE);
 		_sealExecutor.shutdownNow();
-		_releaseExecutor.shutdownNow();
+		_releaseExecutor.shutdown();
+		awaitReleaseExecutor();
+		drainReleaseQueue();
 		_physical.shutdown();
+	}
+
+	private void awaitReleaseExecutor() {
+		try {
+			_releaseExecutor.awaitTermination(Math.max(100, _packReleaseDelayMs * 2), TimeUnit.MILLISECONDS);
+		}
+		catch(InterruptedException ex) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	private void drainReleaseQueue() {
+		PackedPinState state;
+		while((state = _releaseQueue.poll()) != null) {
+			state.clearReleaseQueued();
+			state.releaseDuePins(_physical, Long.MAX_VALUE);
+		}
 	}
 
 	public synchronized void flushPacks() {
@@ -429,7 +449,7 @@ public final class OOCPackedCache implements OOCCache {
 	}
 
 	private void enqueueReleaseNoSchedule(PackedPinState state) {
-		if(_running && state.markReleaseQueued())
+		if(state.markReleaseQueued())
 			_releaseQueue.offer(state);
 	}
 
@@ -456,14 +476,14 @@ public final class OOCPackedCache implements OOCCache {
 						nextDueNanos = Math.min(nextDueNanos, stateNextDue);
 					}
 				}
+				if(delayed != null)
+					for(PackedPinState delayedState : delayed)
+						enqueueReleaseNoSchedule(delayedState);
 				if(nextDueNanos == Long.MAX_VALUE)
 					return;
 				long waitNanos = nextDueNanos - System.nanoTime();
 				if(waitNanos > 0)
 					LockSupport.parkNanos(waitNanos);
-				if(delayed != null)
-					for(PackedPinState delayedState : delayed)
-						enqueueReleaseNoSchedule(delayedState);
 			}
 		}
 		finally {
