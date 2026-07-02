@@ -31,6 +31,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.store.LeaseQueueCallbacks;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
@@ -115,7 +116,8 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	public OOCMaterializedInputRequest requiresMaterializedInput() {
-		return new OOCMaterializedInputRequest(0, this::broadcastTileIndex, 1, 1);
+		return new OOCMaterializedInputRequest(0,
+			OOCStoreLayout.of(this::broadcastTileIndex, this::broadcastTileIndexes), 1, 1);
 	}
 
 	@Override
@@ -143,6 +145,10 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	private int broadcastTileIndex(MatrixIndexes ix) {
 		return _broadcastKeyFn != null ? _broadcastKeyFn.applyAsInt(new IndexedMatrixValue(ix, null)) :
 			(int) (_rowBroadcast ? ix.getColumnIndex() - 1 : ix.getRowIndex() - 1);
+	}
+
+	private MatrixIndexes broadcastTileIndexes(int index) {
+		return _rowBroadcast ? new MatrixIndexes(1, index + 1L) : new MatrixIndexes(index + 1L, 1);
 	}
 
 	@Override

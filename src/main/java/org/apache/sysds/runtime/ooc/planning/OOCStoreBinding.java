@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.ToIntFunction;
+import java.util.function.ToLongFunction;
 
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
@@ -52,6 +53,9 @@ import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
  */
 public final class OOCStoreBinding implements OOCMaterializedView {
 	private final OOCStreamable<IndexedMatrixValue> _source;
+	private final OOCCache _cache;
+	private final long _streamId;
+	private final OOCStoreLayout<MatrixIndexes> _layout;
 	private final MaterializedStore<IndexedMatrixValue> _store;
 	private final MaterializationSink _sink;
 	private final AtomicBoolean _attached;
@@ -63,22 +67,43 @@ public final class OOCStoreBinding implements OOCMaterializedView {
 	public OOCStoreBinding(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
 		ToIntFunction<MatrixIndexes> linearize, MemoryAllowance sinkAllowance, int expectedReaders,
 		int consumers) {
-		this(source, cache, streamId, linearize, sinkAllowance, expectedReaders, consumers, List.of());
+		this(source, cache, streamId, OOCStoreLayout.of(linearize, index -> new MatrixIndexes(index + 1L, 1)),
+			sinkAllowance, expectedReaders, consumers);
 	}
 
 	public OOCStoreBinding(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
-		ToIntFunction<MatrixIndexes> linearize, MemoryAllowance sinkAllowance, int expectedReaders, int consumers,
+		OOCStoreLayout<MatrixIndexes> layout, MemoryAllowance sinkAllowance, int expectedReaders,
+		int consumers) {
+		this(source, cache, streamId, layout, sinkAllowance, expectedReaders, consumers, List.of(), List.of());
+	}
+
+	public OOCStoreBinding(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
+		OOCStoreLayout<MatrixIndexes> layout, MemoryAllowance sinkAllowance, int expectedReaders, int consumers,
 		List<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> liveConsumers) {
+		this(source, cache, streamId, layout, sinkAllowance, expectedReaders, consumers, liveConsumers, List.of());
+	}
+
+	public OOCStoreBinding(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
+		OOCStoreLayout<MatrixIndexes> layout, MemoryAllowance sinkAllowance, int expectedReaders, int consumers,
+		List<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> liveConsumers,
+		List<ToLongFunction<MatrixIndexes>> evictionPolicies) {
 		if(expectedReaders < 0 || consumers <= 0)
 			throw new IllegalArgumentException("Invalid binding counts: readers=" + expectedReaders
 				+ ", consumers=" + consumers);
+		if(layout == null)
+			throw new IllegalArgumentException("Store binding requires a layout.");
 		_source = source;
+		_cache = cache;
+		_streamId = streamId;
+		_layout = layout;
 		_store = new MaterializedStoreImpl<>(cache, streamId);
-		_sink = new MaterializationSink(_store, linearize, sinkAllowance, liveConsumers);
+		_sink = new MaterializationSink(_store, layout, sinkAllowance, liveConsumers);
 		_attached = new AtomicBoolean(false);
 		_readersSealed = new OOCFuture<>();
 		_pendingReaders = expectedReaders;
 		_refCtr = consumers;
+		for(ToLongFunction<MatrixIndexes> evictionPolicy : evictionPolicies)
+			addEvictionPolicy(evictionPolicy);
 	}
 
 	/**
@@ -105,6 +130,13 @@ public final class OOCStoreBinding implements OOCMaterializedView {
 		_pendingReaders += expectedReaders;
 		_refCtr += consumers;
 		return true;
+	}
+
+	public void addEvictionPolicy(ToLongFunction<MatrixIndexes> policy) {
+		if(policy == null)
+			return;
+		_cache.addEvictionPolicy(_streamId,
+			index -> policy.applyAsLong(_layout.delinearize(Math.toIntExact(index))));
 	}
 
 	/**

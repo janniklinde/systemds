@@ -43,6 +43,7 @@ import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.store.LeaseQueueCallbacks;
 import org.apache.sysds.runtime.ooc.store.MaterializationSink;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
@@ -145,7 +146,9 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 
 	@Override
 	public OOCMaterializedInputRequest requiresMaterializedInput() {
-		return new OOCMaterializedInputRequest(1, ix -> Math.toIntExact(ix.getRowIndex() - 1), 1, 1);
+		return new OOCMaterializedInputRequest(1,
+			OOCStoreLayout.of(ix -> Math.toIntExact(ix.getRowIndex() - 1),
+				index -> new MatrixIndexes(index + 1L, 1)), 1, 1);
 	}
 
 	@Override

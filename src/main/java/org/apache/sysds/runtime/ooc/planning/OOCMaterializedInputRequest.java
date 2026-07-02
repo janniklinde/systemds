@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.ooc.planning;
 
 import java.util.function.ToIntFunction;
+import java.util.function.ToLongFunction;
 
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 
@@ -31,18 +32,31 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
  */
 public final class OOCMaterializedInputRequest {
 	private final int _inputIndex;
-	private final ToIntFunction<MatrixIndexes> _preferredLayout;
+	private final OOCStoreLayout<MatrixIndexes> _preferredLayout;
+	private final ToLongFunction<MatrixIndexes> _evictionPolicy;
 	private final int _expectedReaders;
 	private final int _consumers;
 
 	public OOCMaterializedInputRequest(int inputIndex, ToIntFunction<MatrixIndexes> preferredLayout,
 		int expectedReaders, int consumers) {
+		this(inputIndex, OOCStoreLayout.of(preferredLayout, index -> new MatrixIndexes(index + 1L, 1)),
+			expectedReaders, consumers, null);
+	}
+
+	public OOCMaterializedInputRequest(int inputIndex, OOCStoreLayout<MatrixIndexes> preferredLayout,
+		int expectedReaders, int consumers) {
+		this(inputIndex, preferredLayout, expectedReaders, consumers, null);
+	}
+
+	public OOCMaterializedInputRequest(int inputIndex, OOCStoreLayout<MatrixIndexes> preferredLayout,
+		int expectedReaders, int consumers, ToLongFunction<MatrixIndexes> evictionPolicy) {
 		if(inputIndex < 0)
 			throw new IllegalArgumentException("Materialized input request requires a valid input slot.");
 		if(preferredLayout == null)
 			throw new IllegalArgumentException("Materialized input request requires a preferred layout.");
 		_inputIndex = inputIndex;
 		_preferredLayout = preferredLayout;
+		_evictionPolicy = evictionPolicy;
 		_expectedReaders = expectedReaders;
 		_consumers = consumers;
 	}
@@ -51,8 +65,12 @@ public final class OOCMaterializedInputRequest {
 		return _inputIndex;
 	}
 
-	public ToIntFunction<MatrixIndexes> preferredLayout() {
+	public OOCStoreLayout<MatrixIndexes> preferredLayout() {
 		return _preferredLayout;
+	}
+
+	public ToLongFunction<MatrixIndexes> evictionPolicy() {
+		return _evictionPolicy;
 	}
 
 	public int expectedReaders() {

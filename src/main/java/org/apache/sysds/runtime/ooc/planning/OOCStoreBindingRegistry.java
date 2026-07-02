@@ -19,15 +19,19 @@
 
 package org.apache.sysds.runtime.ooc.planning;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.ToLongFunction;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
@@ -54,7 +58,8 @@ public final class OOCStoreBindingRegistry {
 		if(source == null) {
 			//anonymous boundary: never shared
 			return new OOCStoreBinding(null, OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID(),
-				request.preferredLayout(), sinkAllowance, request.expectedReaders(), request.consumers());
+				request.preferredLayout(), sinkAllowance, request.expectedReaders(), request.consumers(),
+				List.of(), evictionPolicies(request));
 		}
 		synchronized(BINDINGS) {
 			Entry entry = BINDINGS.get(source);
@@ -71,6 +76,7 @@ public final class OOCStoreBindingRegistry {
 					throw new DMLRuntimeException("A consumer joined a materialized input after its reader set "
 						+ "sealed; all consumers of an input must be constructed before the declared "
 						+ "readers register (source=" + source + ").");
+				entry.binding.addEvictionPolicy(request.evictionPolicy());
 				entry.counted.add(requester);
 				return entry.binding;
 			}
@@ -92,6 +98,7 @@ public final class OOCStoreBindingRegistry {
 		//aggregate the requests of every already-constructed consumer of this input, so the
 		//declared reader/consumer counts cover the full set before the first reader registers
 		Set<OOCPrimitive> counted = Collections.newSetFromMap(new IdentityHashMap<>());
+		List<ToLongFunction<MatrixIndexes>> evictionPolicies = new ArrayList<>();
 		int readers = 0;
 		int consumers = 0;
 		OOCPrimitive producer = producerOf(source);
@@ -108,16 +115,31 @@ public final class OOCStoreBindingRegistry {
 					continue;
 				readers += parentRequest.expectedReaders();
 				consumers += parentRequest.consumers();
+				addEvictionPolicy(evictionPolicies, parentRequest);
 			}
 		}
 		if(!counted.contains(requester)) {
 			counted.add(requester);
 			readers += request.expectedReaders();
 			consumers += request.consumers();
+			addEvictionPolicy(evictionPolicies, request);
 		}
 		OOCStoreBinding binding = new OOCStoreBinding(source, OOCCacheManager.getGlobalCache(),
-			CachingStream._streamSeq.getNextID(), request.preferredLayout(), sinkAllowance, readers, consumers);
+			CachingStream._streamSeq.getNextID(), request.preferredLayout(), sinkAllowance, readers, consumers,
+			List.of(), evictionPolicies);
 		return new Entry(binding, counted);
+	}
+
+	private static List<ToLongFunction<MatrixIndexes>> evictionPolicies(OOCMaterializedInputRequest request) {
+		ToLongFunction<MatrixIndexes> policy = request.evictionPolicy();
+		return policy == null ? List.of() : List.of(policy);
+	}
+
+	private static void addEvictionPolicy(List<ToLongFunction<MatrixIndexes>> policies,
+		OOCMaterializedInputRequest request) {
+		ToLongFunction<MatrixIndexes> policy = request.evictionPolicy();
+		if(policy != null)
+			policies.add(policy);
 	}
 
 	private static OOCPrimitive producerOf(OOCStreamable<IndexedMatrixValue> source) {
