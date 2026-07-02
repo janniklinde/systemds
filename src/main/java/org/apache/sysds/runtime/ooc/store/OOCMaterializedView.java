@@ -20,13 +20,19 @@
 package org.apache.sysds.runtime.ooc.store;
 
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+
+import java.util.function.ToLongFunction;
 
 public interface OOCMaterializedView extends AutoCloseable {
 	OOCFuture<Void> completion();
 
 	OOCFuture<Void> readersSealed();
+
+	default void addEvictionPolicy(ToLongFunction<MatrixIndexes> policy) {
+	}
 
 	MaterializedStore.Reader<IndexedMatrixValue> openReader(MaterializedStore.AccessPattern pattern,
 		MemoryAllowance allowance, int maxPrefetch);

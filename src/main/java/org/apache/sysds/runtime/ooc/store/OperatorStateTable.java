@@ -29,8 +29,12 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiFunction;
+import java.util.function.IntToLongFunction;
 
 /**
  * Mutable online indexed coordination over the global cache: join rendezvous, reduction accumulators,
@@ -55,6 +59,9 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 	private final long _streamId;
 	private final MemoryAllowance _allowance;
 	private final AtomicLong _nextGeneration;
+	private final CopyOnWriteArrayList<IntToLongFunction> _evictionPolicies;
+	private final AtomicBoolean _evictionPolicyInstalled;
+	private volatile AtomicIntegerArray _generationSlots;
 	private Slot[] _slots;
 	private volatile boolean _closed;
 
@@ -67,11 +74,22 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		_streamId = streamId;
 		_allowance = allowance;
 		_nextGeneration = new AtomicLong();
+		_evictionPolicies = new CopyOnWriteArrayList<>();
+		_evictionPolicyInstalled = new AtomicBoolean(false);
+		_generationSlots = new AtomicIntegerArray(Math.max(1, numSlots));
 		_slots = new Slot[Math.max(1, numSlots)];
 	}
 
 	public long getStreamId() {
 		return _streamId;
+	}
+
+	public void addEvictionPolicy(IntToLongFunction slotPolicy) {
+		if(slotPolicy == null)
+			return;
+		_evictionPolicies.add(slotPolicy);
+		if(_evictionPolicyInstalled.compareAndSet(false, true))
+			_cache.addEvictionPolicy(_streamId, this::scoreTableEntry);
 	}
 
 	/**
@@ -347,19 +365,20 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			failInstall(index, slot, ex);
 			throw ex;
 		}
-		_cache.unpin(entry, payload.owner());
-
 		boolean cleared;
 		OOCFuture<Void> installFuture;
 		synchronized(this) {
 			slot._key = key;
+			slot._tableOwnedKey = true;
+			registerSlotKey(key, index);
 			cleared = slot._cleared;
 			slot._state = cleared ? Slot.REMOVED : Slot.INSTALLED;
 			installFuture = slot._installFuture;
 			slot._installFuture = null;
 		}
+		_cache.unpin(entry, payload.owner());
 		if(cleared)
-			_cache.dereference(key);
+			releaseSlot(slot);
 		installFuture.complete(null);
 	}
 
@@ -389,6 +408,8 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		synchronized(this) {
 			slot._key = key;
 			slot._entry = entry;
+			slot._tableOwnedKey = true;
+			registerSlotKey(key, index);
 			cleared = slot._cleared;
 			slot._state = cleared ? Slot.REMOVED : Slot.INSTALLED;
 			installFuture = slot._installFuture;
@@ -512,6 +533,8 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 	}
 
 	private void releaseSlot(Slot slot) {
+		if(slot._tableOwnedKey)
+			clearSlotKey(slot._key);
 		_cache.dereference(slot._key);
 	}
 
@@ -519,6 +542,56 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		releaseSlot(slot);
 		if(slot._entry != null)
 			_cache.unpin(slot._entry, _allowance);
+	}
+
+	private void registerSlotKey(BlockKey key, int index) {
+		int generation = blockIndex(key.getSequenceNumber());
+		ensureGenerationCapacity(generation);
+		_generationSlots.set(generation, index + 1);
+	}
+
+	private void clearSlotKey(BlockKey key) {
+		int generation = blockIndex(key.getSequenceNumber());
+		AtomicIntegerArray slots = _generationSlots;
+		if(generation < slots.length())
+			slots.set(generation, 0);
+	}
+
+	private long scoreTableEntry(long generation) {
+		int index = blockIndex(generation);
+		AtomicIntegerArray slots = _generationSlots;
+		if(index >= slots.length())
+			return Long.MAX_VALUE;
+		int encodedSlot = slots.get(index);
+		if(encodedSlot == 0)
+			return Long.MAX_VALUE;
+		int slot = encodedSlot - 1;
+		long score = Long.MAX_VALUE;
+		for(IntToLongFunction policy : _evictionPolicies)
+			score = Math.min(score, policy.applyAsLong(slot));
+		return score;
+	}
+
+	private void ensureGenerationCapacity(int index) {
+		AtomicIntegerArray slots = _generationSlots;
+		if(index < slots.length())
+			return;
+		int newLength = slots.length();
+		while(index >= newLength) {
+			if(newLength > Integer.MAX_VALUE / 2)
+				throw new IllegalStateException("State table generation map capacity overflow");
+			newLength <<= 1;
+		}
+		AtomicIntegerArray grown = new AtomicIntegerArray(newLength);
+		for(int i = 0; i < slots.length(); i++)
+			grown.set(i, slots.get(i));
+		_generationSlots = grown;
+	}
+
+	private static int blockIndex(long sequenceNumber) {
+		if(sequenceNumber < 0 || sequenceNumber > Integer.MAX_VALUE)
+			throw new IndexOutOfBoundsException("Invalid block index: " + sequenceNumber);
+		return (int) sequenceNumber;
 	}
 
 	private void checkOpen() {
@@ -614,6 +687,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 
 		private byte _state;
 		private boolean _cleared;
+		private boolean _tableOwnedKey;
 		private BlockKey _key;
 		private BlockEntry _entry;
 		private OOCFuture<Void> _installFuture;

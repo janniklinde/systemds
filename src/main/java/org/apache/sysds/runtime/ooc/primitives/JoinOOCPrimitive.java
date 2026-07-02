@@ -46,6 +46,8 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	private final Function<List<MatrixBlock>, MatrixBlock> _fn;
 	private final StreamContext _sc;
 	private OperatorStateTable<IndexedMatrixValue> _table;
+	private volatile long _policyRows;
+	private volatile long _policyCols;
 
 	private JoinOOCPrimitive(List<OOCPrimitive> inputPrimitives, List<OOCStreamable<IndexedMatrixValue>> inputs, OOCStreamable<IndexedMatrixValue> output, Function<List<MatrixBlock>, MatrixBlock> fn, StreamContext sc) {
 		super(inputPrimitives);
@@ -102,6 +104,7 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	@Override
 	public void bindStateTable(OperatorStateTable<IndexedMatrixValue> table) {
 		_table = table;
+		_table.addEvictionPolicy(this::scoreTableSlot);
 	}
 
 	@Override
@@ -147,8 +150,14 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	public void startExecution() {
 		if(_inputStreamables.size() != 2)
 			throw new IllegalArgumentException();
-		OOCStream<IndexedMatrixValue> l = _inputStreamables.get(0).getReadStream();
-		OOCStream<IndexedMatrixValue> r = _inputStreamables.get(1).getReadStream();
+		OOCStreamable<IndexedMatrixValue> leftInput = _inputStreamables.get(0);
+		OOCStreamable<IndexedMatrixValue> rightInput = _inputStreamables.get(1);
+		_policyRows = OOCUtils.getNumRowBlocks(rightInput.getDataCharacteristics());
+		_policyCols = OOCUtils.getNumColBlocks(rightInput.getDataCharacteristics());
+		addMaterializedInputPolicy(leftInput);
+		addMaterializedInputPolicy(rightInput);
+		OOCStream<IndexedMatrixValue> l = leftInput.getReadStream();
+		OOCStream<IndexedMatrixValue> r = rightInput.getReadStream();
 		OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
 		OOCStream<JoinWork> intermediate = new SubscribableTaskQueue<>();
 
@@ -199,7 +208,9 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 			OOCStream.QueueCallback<IndexedMatrixValue> next = null;
 			long outputBytes = 0;
 			try {
+				_policyRows = OOCUtils.getNumRowBlocks(r.getDataCharacteristics());
 				long cols = OOCUtils.getNumColBlocks(r.getDataCharacteristics());
+				_policyCols = cols;
 				boolean nextLeft = true;
 
 				while((next = (nextLeft ? l : r).dequeueCB()) != null && !next.isEos()) {
@@ -260,6 +271,32 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 				failJoin(t, intermediate, out);
 			}
 		});
+	}
+
+	private void addMaterializedInputPolicy(OOCStreamable<IndexedMatrixValue> input) {
+		if(input.hasMaterializedView())
+			input.materializedView().addEvictionPolicy(this::scoreTile);
+	}
+
+	private long scoreTableSlot(int slot) {
+		long cols = _policyCols;
+		if(cols <= 0)
+			return slot;
+		return scoreTile(new MatrixIndexes(slot / cols + 1, slot % cols + 1));
+	}
+
+	private long scoreTile(MatrixIndexes ix) {
+		long cols = _policyCols;
+		if(cols <= 0)
+			return Math.max(0, ix.getRowIndex() - 1);
+		long row = ix.getRowIndex() - 1;
+		long col = ix.getColumnIndex() - 1;
+		if(_pattern == OOCAccessPattern.COL_MAJOR) {
+			long rows = _policyRows;
+			if(rows > 0)
+				return col * rows + row;
+		}
+		return row * cols + col;
 	}
 
 	private static void closeMatch(TableRendezvous.Match match) {

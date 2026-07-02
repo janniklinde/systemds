@@ -132,6 +132,7 @@ public final class OOCStoreBinding implements OOCMaterializedView {
 		return true;
 	}
 
+	@Override
 	public void addEvictionPolicy(ToLongFunction<MatrixIndexes> policy) {
 		if(policy == null)
 			return;
