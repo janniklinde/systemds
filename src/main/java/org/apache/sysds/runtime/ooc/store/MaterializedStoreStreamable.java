@@ -508,6 +508,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 
 		@Override
 		public void startExecution() {
+			_owner._source.start();
 			onComplete();
 		}
 

@@ -206,6 +206,12 @@ public class MergedOOCStream<T> implements OOCStream<T> {
 	}
 
 	@Override
+	public void start() {
+		for(OOCStream<T> source : _sources)
+			source.start();
+	}
+
+	@Override
 	public OOCStream<T> getWriteStream() {
 		throw new UnsupportedOperationException();
 	}

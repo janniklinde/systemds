@@ -29,6 +29,7 @@ import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 /**
  * Stream wrapper that forwards source callbacks only after reserving the requested operator memory.
@@ -52,6 +53,11 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 		_pending = new AtomicInteger(1);
 		_closed = new AtomicBoolean(false);
 		source.setSubscriber(this::admit);
+	}
+
+	@Override
+	public OOCPrimitive getPrimitive() {
+		return _source.getPrimitive();
 	}
 
 	private void admit(OOCStream.QueueCallback<T> callback) {

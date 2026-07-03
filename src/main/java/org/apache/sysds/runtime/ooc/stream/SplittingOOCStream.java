@@ -24,6 +24,7 @@ import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
@@ -160,6 +161,11 @@ public class SplittingOOCStream<T> implements OOCStream<T> {
 	@Override
 	public OOCStream<T> getWriteStream() {
 		return _sourceStream.getWriteStream();
+	}
+
+	@Override
+	public OOCPrimitive getPrimitive() {
+		return _sourceStream.getPrimitive();
 	}
 
 	@Override
