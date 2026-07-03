@@ -175,6 +175,18 @@ public class CtableOOCInstruction extends ComputationOOCInstruction {
 		catch(Exception ex) {
 			throw new DMLRuntimeException(ex);
 		}
+		finally {
+			drainQueue(qIn2);
+			drainQueue(qIn3);
+		}
+	}
+
+	private void drainQueue(OOCStream<IndexedMatrixValue> queue) {
+		if(queue == null)
+			return;
+		while(queue.dequeue() != LocalTaskQueue.NO_MORE_TASKS) {
+			// Dequeueing closes the previously returned callback in SubscribableTaskQueue.
+		}
 	}
 
 	private MatrixBlock getOrDequeueBlock(long key, long cols, HashMap<Long, MatrixBlock> blocks,
