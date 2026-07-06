@@ -495,10 +495,12 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 
 	private static final class MaterializedStoreBoundaryPrimitive extends OOCPrimitive {
 		private final MaterializedStoreStreamable _owner;
+		private final OOCPrimitive _sourcePrimitive;
 
 		private MaterializedStoreBoundaryPrimitive(MaterializedStoreStreamable owner, OOCPrimitive sourcePrimitive) {
 			super(sourcePrimitive == null ? List.of() : List.of(sourcePrimitive), List.of(), List.of(owner));
 			_owner = owner;
+			_sourcePrimitive = sourcePrimitive;
 		}
 
 		@Override
@@ -508,7 +510,8 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 
 		@Override
 		public void startExecution() {
-			_owner._source.start();
+			if(_sourcePrimitive != null && _sourcePrimitive != this)
+				_sourcePrimitive.tryStartExecution();
 			onComplete();
 		}
 

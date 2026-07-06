@@ -61,7 +61,7 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 
 	default void start() {
 		OOCPrimitive primitive = getPrimitive();
-		if(primitive != null)
+		if(primitive != null && !primitive.hasStartedExecution())
 			primitive.start();
 	}
 
