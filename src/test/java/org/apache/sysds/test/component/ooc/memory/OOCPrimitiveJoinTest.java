@@ -130,7 +130,7 @@ public class OOCPrimitiveJoinTest {
 						ix -> new MatrixBlock(OOCUtils.getNumRowsOfTile(ix, ROWS, BLEN),
 							OOCUtils.getNumColsOfTile(ix, COLS, BLEN), 5.0), scMaps.get(k));
 				else
-					OOCInstructionUtils.equiMap(streams.get(k - 1), streams.get(k),
+					OOCInstructionUtils.equiMapBlock(streams.get(k - 1), streams.get(k),
 						mb -> mb.scalarOperations(new RightScalarOperator(Plus.getPlusFnObject(), 2.0),
 							new MatrixBlock()), scMaps.get(k));
 			}
@@ -153,7 +153,7 @@ public class OOCPrimitiveJoinTest {
 		for(int k = 1; k < K + 1; k++) {
 			streams.add(createMatrixStream());
 			scMaps.add(new StreamContext(0, "op_" + k).addOutStream(streams.get(streams.size() - 1)));
-			OOCInstructionUtils.equiMap(streams.get(k - 1), streams.get(k),
+			OOCInstructionUtils.equiMapBlock(streams.get(k - 1), streams.get(k),
 				mb -> mb.scalarOperations(new RightScalarOperator(Plus.getPlusFnObject(), 2.0),
 					new MatrixBlock()), scMaps.get(k));
 		}

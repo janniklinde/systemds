@@ -57,7 +57,7 @@ public class OOCPrimitiveChainTest {
 			if(k == 0)
 				OOCInstructionUtils.dataGen(streams.get(k), ix -> new MatrixBlock(BLEN, COLS, 5.0), scMaps.get(k));
 			else
-				OOCInstructionUtils.equiMap(streams.get(k-1), streams.get(k),
+				OOCInstructionUtils.equiMapBlock(streams.get(k-1), streams.get(k),
 					mb -> mb.scalarOperations(new RightScalarOperator(Plus.getPlusFnObject(), 2.0), new MatrixBlock()), scMaps.get(k));
 		}
 
