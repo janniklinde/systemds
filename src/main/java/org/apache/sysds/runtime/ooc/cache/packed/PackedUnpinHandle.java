@@ -19,23 +19,22 @@
 
 package org.apache.sysds.runtime.ooc.cache.packed;
 
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
-
-import java.util.concurrent.CompletableFuture;
 
 abstract class PackedUnpinHandle implements OOCCache.UnpinHandle {
 	final BlockEntry entry;
 	final MemoryAllowance allowance;
 	final long bytes;
-	final CompletableFuture<Boolean> future;
+	final OOCFuture<Boolean> future;
 
 	PackedUnpinHandle(BlockEntry entry, MemoryAllowance allowance, long bytes, boolean committed) {
 		this.entry = entry;
 		this.allowance = allowance;
 		this.bytes = bytes;
-		future = committed ? CompletableFuture.completedFuture(true) : new CompletableFuture<>();
+		future = committed ? OOCFuture.completed(true) : new OOCFuture<>();
 	}
 
 	@Override
@@ -59,13 +58,8 @@ abstract class PackedUnpinHandle implements OOCCache.UnpinHandle {
 	}
 
 	@Override
-	public CompletableFuture<Boolean> getCompletionFuture() {
+	public OOCFuture<Boolean> getCompletionFuture() {
 		return future;
-	}
-
-	@Override
-	public BlockEntry reclaim() {
-		return null;
 	}
 
 	void complete(boolean committed) {

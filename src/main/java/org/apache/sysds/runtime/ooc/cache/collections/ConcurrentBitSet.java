@@ -28,6 +28,7 @@ public class ConcurrentBitSet {
 	private final long[] words;
 
 	public ConcurrentBitSet(int bits) {
+		// (bits + 63) >>> 6 = ceil(bits / 64.0)
 		this.words = new long[(bits + 63) >>> 6];
 	}
 
@@ -52,11 +53,6 @@ public class ConcurrentBitSet {
 
 		long prev = (long) LONG_ARR.getAndBitwiseAndRelease(words, w, ~mask);
 		return (prev & mask) != 0; // true if changed present -> absent
-	}
-
-	public boolean anyInWord(int wordIndex) {
-		long word = (long) LONG_ARR.getAcquire(words, wordIndex);
-		return word != 0L;
 	}
 
 	public long getWord(int wordIndex) {

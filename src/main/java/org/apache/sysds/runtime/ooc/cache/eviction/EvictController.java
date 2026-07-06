@@ -29,7 +29,6 @@ import java.util.function.LongUnaryOperator;
 
 public class EvictController {
 	private final CopyOnWriteArrayList<LongUnaryOperator> _op = new CopyOnWriteArrayList<>();
-	private final CopyOnWriteArrayList<LongUnaryOperator> _futureOp = new CopyOnWriteArrayList<>();
 
 	public void addEvictionPolicy(LongUnaryOperator op) {
 		if(op == null)
@@ -39,7 +38,7 @@ public class EvictController {
 
 	public void findEvictionCandidates(MaskedOnceArrayList<BlockEntry> list,
 		PriorityQueue<IndexedObjectPair<BlockEntry>> candidates, int k, long estimatedReuseTimestamp) {
-		if(_op.isEmpty() && _futureOp.isEmpty()) {
+		if(_op.isEmpty()) {
 			list.forEachLive((idx, b) -> {
 				if(!isEvictionCandidate(b))
 					return true;
@@ -60,7 +59,7 @@ public class EvictController {
 				return true;
 			long score = computeScore(idx);
 			if(score == Long.MAX_VALUE)
-				score = computeFutureScore(idx) + estimatedReuseTimestamp;
+				score = idx + estimatedReuseTimestamp;
 			var iop = new IndexedObjectPair<>(score, b);
 			if(candidates.size() < k) {
 				candidates.offer(iop);
@@ -81,15 +80,6 @@ public class EvictController {
 	private long computeScore(int idx) {
 		long out = Long.MAX_VALUE;
 		for(LongUnaryOperator uop : _op)
-			out = Math.min(out, uop.applyAsLong(idx));
-		return out;
-	}
-
-	private long computeFutureScore(int idx) {
-		if(_futureOp.isEmpty())
-			return idx;
-		long out = Long.MAX_VALUE;
-		for(LongUnaryOperator uop : _futureOp)
 			out = Math.min(out, uop.applyAsLong(idx));
 		return out;
 	}

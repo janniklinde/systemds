@@ -30,8 +30,8 @@ public class MaskedOnceArrayList<T> {
 
 	static {
 		try {
-			PARTITIONS = MethodHandles.lookup().findVarHandle(MaskedOnceArrayList.class,
-				"_partitions", MaskedOnceArray[].class);
+			PARTITIONS = MethodHandles.lookup()
+				.findVarHandle(MaskedOnceArrayList.class, "_partitions", MaskedOnceArray[].class);
 		}
 		catch(ReflectiveOperationException e) {
 			throw new ExceptionInInitializerError(e);

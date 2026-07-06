@@ -21,38 +21,39 @@ package org.apache.sysds.runtime.ooc.cache.collections;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.function.Consumer;
 
-public class MaskedOnceArray<T> extends OnceArray<T> {
+public class MaskedOnceArray<T> {
 	private static final int RETIRED = Integer.MIN_VALUE;
 	private static final VarHandle NON_NULL_COUNT;
 
 	static {
 		try {
-			NON_NULL_COUNT = MethodHandles.lookup().findVarHandle(MaskedOnceArray.class,
-				"_nonNullCount", int.class);
+			NON_NULL_COUNT = MethodHandles.lookup().findVarHandle(MaskedOnceArray.class, "_nonNullCount", int.class);
 		}
 		catch(ReflectiveOperationException e) {
 			throw new ExceptionInInitializerError(e);
 		}
 	}
 
+	private final AtomicReferenceArray<T> _values;
 	protected final ConcurrentBitSet _liveState;
 	private volatile int _nonNullCount;
 
 	public MaskedOnceArray(int length) {
-		super(length);
+		_values = new AtomicReferenceArray<>(length);
 		_liveState = new ConcurrentBitSet(length);
 		_nonNullCount = 0;
 	}
 
-	@Override
 	public boolean put(int i, T value) {
 		if(value == null) {
 			return clear(i);
 		}
 		if(!incrementNonNullCount())
 			return false;
-		boolean changed = super.put(i, value);
+		boolean changed = _values.getAndSet(i, value) == null;
 		if(!changed)
 			decrementNonNullCount();
 		_liveState.set(i);
@@ -79,13 +80,24 @@ public class MaskedOnceArray<T> extends OnceArray<T> {
 		}
 	}
 
-	@Override
 	public boolean clear(int i) {
-		boolean changed = super.clear(i);
+		boolean changed = _values.getAndSet(i, null) != null;
 		if(changed)
 			decrementNonNullCount();
 		_liveState.clear(i);
 		return changed;
+	}
+
+	public T get(int i) {
+		return _values.get(i);
+	}
+
+	public void forEachVisible(Consumer<? super T> action) {
+		for(int i = 0; i < _values.length(); i++) {
+			T v = _values.get(i);
+			if(v != null)
+				action.accept(v);
+		}
 	}
 
 	public boolean tryRetireIfEmpty() {
@@ -106,10 +118,6 @@ public class MaskedOnceArray<T> extends OnceArray<T> {
 
 	public void clearLive(int i) {
 		_liveState.clear(i);
-	}
-
-	public boolean forEachLive(IndexedObjectPredicate<? super T> action, boolean reversed) {
-		return forEachLive(action, reversed, 0);
 	}
 
 	public boolean forEachLive(IndexedObjectPredicate<? super T> action, boolean reversed, int offset) {
@@ -139,13 +147,13 @@ public class MaskedOnceArray<T> extends OnceArray<T> {
 
 	private boolean forEachLiveBackward(IndexedObjectPredicate<? super T> action, int offset) {
 		int len = _liveState.length();
-		for(int word = len-1; word >= 0; word--) {
+		for(int word = len - 1; word >= 0; word--) {
 			if(_liveState.getWord(word) == 0)
 				continue;
 			int lower = word * 64;
 			int upper = (word + 1) * 64;
 			T data;
-			for(int i = upper-1; i >= lower; i--) {
+			for(int i = upper - 1; i >= lower; i--) {
 				data = get(i);
 				if(data != null)
 					if(!action.test(offset + i, data))

@@ -31,8 +31,8 @@ public class SegmentedStreamTableList<T> {
 
 	static {
 		try {
-			SEGMENTS = MethodHandles.lookup().findVarHandle(SegmentedStreamTableList.class,
-				"_segments", Object[].class);
+			SEGMENTS = MethodHandles.lookup()
+				.findVarHandle(SegmentedStreamTableList.class, "_segments", Object[].class);
 		}
 		catch(ReflectiveOperationException e) {
 			throw new ExceptionInInitializerError(e);
@@ -75,8 +75,8 @@ public class SegmentedStreamTableList<T> {
 			return null;
 
 		@SuppressWarnings("unchecked")
-		MaskedOnceArrayList<T> streamTable =
-			(MaskedOnceArrayList<T>) ARRAY.getAcquire(segment, offsetInSegment(streamId));
+		MaskedOnceArrayList<T> streamTable = (MaskedOnceArrayList<T>) ARRAY.getAcquire(segment,
+			offsetInSegment(streamId));
 		return streamTable;
 	}
 
@@ -100,8 +100,7 @@ public class SegmentedStreamTableList<T> {
 			}
 
 			@SuppressWarnings("unchecked")
-			MaskedOnceArrayList<T> streamTable =
-				(MaskedOnceArrayList<T>) ARRAY.getAcquire(segment, offset);
+			MaskedOnceArrayList<T> streamTable = (MaskedOnceArrayList<T>) ARRAY.getAcquire(segment, offset);
 			if(streamTable != null)
 				return streamTable;
 

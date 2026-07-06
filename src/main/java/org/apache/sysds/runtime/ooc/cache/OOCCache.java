@@ -21,7 +21,6 @@ package org.apache.sysds.runtime.ooc.cache;
 
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
-import java.util.concurrent.CompletableFuture;
 import java.util.function.LongUnaryOperator;
 
 public interface OOCCache {
@@ -34,32 +33,29 @@ public interface OOCCache {
 	}
 
 	/**
-	 * Adds a new resident entry whose bytes are already owned by the supplied allowance. This creates cache metadata and
-	 * a physical pin, but does not transfer ownership to the cache. Ownership can later move only via pin/unpin.
+	 * Adds a new pinned entry whose bytes are already owned by the given allowance. Ownership can later move only via
+	 * pin/unpin.
 	 */
 	default BlockEntry putPinned(BlockKey key, Object data, long size, MemoryAllowance allowance) {
 		return putPinned(key.getStreamId(), key.getSequenceNumber(), data, size, allowance);
 	}
 
 	/**
-	 * Adds a new resident entry whose bytes are already owned by the supplied allowance. This creates cache metadata and
-	 * a physical pin, but does not transfer ownership to the cache. Ownership can later move only via pin/unpin.
+	 * Adds a new pinned entry whose bytes are already owned by the given allowance. Ownership can later move only via
+	 * pin/unpin.
 	 */
 	BlockEntry putPinned(long sId, long tId, Object data, long size, MemoryAllowance allowance);
 
 	/**
-	 * Pins an item backed by an allowance. A successful pin transfers resident-memory ownership from the cache to the
-	 * owner of the allowance and guarantees data availability through the returned entry. While pinned, the entry remains
-	 * visible to cache metadata but its bytes are not counted as cache-owned memory.
-	 *
-	 * Implementations must reserve the required bytes from the allowance before making data available. The returned
-	 * future itself must not be null; if reservation or loading fails in a non-exceptional way, the future completes with
-	 * null.
+	 * Pins an item backed by an allowance. A successful pin transfers memory ownership from the cache to the owner of
+	 * the allowance and guarantees data availability. While pinned, the bytes of the entry are not counted as
+	 * cache-owned memory.
 	 *
 	 * @param sId
 	 * @param tId
 	 * @param allowance
-	 * @return a non-null future of the pinned block entry; the future result is null if the required memory could not be reserved
+	 * @return a non-null future of the pinned block entry; the future result is null if the required memory could not
+	 * be reserved
 	 */
 	OOCFuture<BlockEntry> pin(long sId, long tId, MemoryAllowance allowance);
 
@@ -68,24 +64,25 @@ public interface OOCCache {
 	}
 
 	/**
-	 * Pins an item backed by an allowance if it is already live in cache. A successful pin transfers resident-memory
-	 * ownership from the cache to the owner of the allowance and guarantees data availability through the returned entry.
-	 * While pinned, the entry remains visible to cache metadata but its bytes are not counted as cache-owned memory.
-	 *
-	 * Implementations must reserve the required bytes from the allowance before returning the entry.
+	 * Pins an item backed by an allowance if it is already live in cache. A successful pin transfers memory ownership
+	 * from the cache to the owner of the allowance and guarantees data availability. While pinned, the bytes of the
+	 * entry are not counted as cache-owned memory. Implementations must reserve the required bytes from the allowance
+	 * before making data available.
 	 *
 	 * @param sId
 	 * @param tId
 	 * @param allowance
-	 * @return the pinned block entry if available; null if the required memory could not be reserved or the block is not live
+	 * @return the pinned block entry if available. Null if the required memory could not be reserved or the block is
+	 * not live
 	 */
 	BlockEntry pinIfLive(long sId, long tId, MemoryAllowance allowance);
 
 	/**
-	 * Unpins an item that is still backed by the given allowance. Unpinning tries to transfer resident-memory ownership
-	 * back to the cache. An ownership transfer may commit immediately only if this does not cause the cache to exceed its
-	 * hard limit. Otherwise, the transfer is deferred and the allowance remains charged until the returned handle commits,
-	 * is reclaimed, or is superseded by a later pin that transfers ownership to another allowance.
+	 * Unpins an item that is still backed by the given allowance. Unpinning tries to transfer memory ownership back to
+	 * the cache. An ownership transfer may commit immediately only if this does not cause the cache to exceed its hard
+	 * limit. Otherwise, the transfer is deferred and the allowance remains charged until the returned handle commits,
+	 * is reclaimed, or is superseded by a later pin that transfers ownership to another allowance. Unpin can be viewed
+	 * as an eventually resolving operation.
 	 *
 	 * @param entry
 	 * @param allowance
@@ -94,23 +91,16 @@ public interface OOCCache {
 	UnpinHandle unpin(BlockEntry entry, MemoryAllowance allowance);
 
 	/**
-	 * References the logical value represented by a pinned entry, guaranteeing that its key remains
-	 * addressable until dereferenced. Referencing does not affect resident-memory ownership; ownership
-	 * remains with the current owner, either the cache or an allowance.
+	 * Referencing a pinned entry guarantees that its key remains in the cache until dereferenced.
 	 *
 	 * @param entry
 	 * @return
 	 */
 	int reference(BlockEntry entry);
 
-	default int referencePinned(BlockEntry entry) {
-		return reference(entry);
-	}
-
 	/**
-	 * Dereferences the logical value represented by an entry. This causes its metadata and backing
-	 * storage to become removable if no further reference exists. Removal may happen later if the
-	 * physical item is still pinned or has a deferred unpin transfer.
+	 * Dereferencing allows an entry to be forgotten if no further reference is held. Dereferencing may not immediately
+	 * cause entry removal if still pinned.
 	 *
 	 * @param entry
 	 * @return
@@ -118,49 +108,35 @@ public interface OOCCache {
 	int dereference(BlockEntry entry);
 
 	/**
-	 * Dereferences the logical entry identified by the key. A referenced logical key must remain
-	 * sufficient to pin the value, including when the value resides in a physical pack.
+	 * Dereferencing allows an entry to be forgotten if no further reference is held. Dereferencing may not immediately
+	 * cause entry removal if still pinned.
 	 */
 	int dereference(BlockKey key);
 
-	/**
-	 * Updates the cache limits.
-	 */
 	void updateLimits(long hardLimit, long evictionLimit);
 
 	/**
-	 * Adds an eviction scoring policy for one logical cache stream. Larger scores are selected for
-	 * eviction first; {@link Long#MAX_VALUE} remains reserved as the "no immediate policy score"
-	 * sentinel used by the eviction controller.
+	 * Adds an eviction scoring policy for one logical cache stream. Larger scores are selected for eviction first.
+	 * {@link Long#MAX_VALUE} remains reserved as "no policy score".
 	 */
 	void addEvictionPolicy(long streamId, LongUnaryOperator scoreFn);
 
 	/**
-	 * Returns the current cache-owned resident size in bytes. This excludes bytes currently owned by operator
-	 * allowances through pinned entries.
+	 * Returns the current cache-owned size in bytes.
 	 */
 	long getOwnedCacheSize();
 
-	default long getCacheSize() {
-		return getOwnedCacheSize();
-	}
-
-	/**
-	 * Shuts down the cache scheduler.
-	 */
 	void shutdown();
 
 	interface UnpinHandle {
 		BlockEntry getEntry();
-		MemoryAllowance getAllowance();
-		long getBytes();
-		boolean isCommitted();
-		CompletableFuture<Boolean> getCompletionFuture();
 
-		/**
-		 * Cancels a not-yet-committed transfer and returns the entry to the allowance owner. Returns null if ownership
-		 * already transferred to the cache.
-		 */
-		BlockEntry reclaim();
+		MemoryAllowance getAllowance();
+
+		long getBytes();
+
+		boolean isCommitted();
+
+		OOCFuture<Boolean> getCompletionFuture();
 	}
 }
