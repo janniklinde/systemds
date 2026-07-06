@@ -501,14 +501,14 @@ public final class OOCPackedCache implements OOCCache {
 		if(!clearLocation(key))
 			return 0;
 		if(location.state().forgetLocation()) {
-			_packedStates.clear(blockIndex(location.state().physicalEntry.getKey().getSequenceNumber()));
+			_packedStates.clear((int)location.state().physicalEntry.getKey().getSequenceNumber());
 			return _physical.dereference(location.state().physicalEntry);
 		}
 		return 0;
 	}
 
 	private PackBuilder getOpenBuilder(long streamId, MemoryAllowance allowance, long nextSize) {
-		int sid = asIntStreamId(streamId);
+		int sid = (int)streamId;
 		PackBuilder builder = sid < _builders.length ? _builders[sid] : null;
 		if(builder != null && (builder.sealed || builder.allowance != allowance)) {
 			sealBuilder(builder);
@@ -597,15 +597,17 @@ public final class OOCPackedCache implements OOCCache {
 	}
 
 	private void registerPackedState(PackedPinState state) {
-		_packedStates.put(blockIndex(state.physicalEntry.getKey().getSequenceNumber()), state);
+		_packedStates.put((int)state.physicalEntry.getKey().getSequenceNumber(), state);
 	}
 
 	private long scorePackedBlock(long packId) {
-		PackedPinState state = _packedStates.get(blockIndex(packId));
+		PackedPinState state = _packedStates.get((int)packId);
 		if(state == null)
 			return packId;
 		PackGroup group = state.group;
-		CopyOnWriteArrayList<LongUnaryOperator> policies = getLogicalEvictionPolicies(group.streamId());
+		CopyOnWriteArrayList<LongUnaryOperator> policies =
+			group.streamId < _logicalEvictionPolicies.size() ? _logicalEvictionPolicies.get(
+				(int) group.streamId) : null;
 		if(policies == null || policies.isEmpty())
 			return packId;
 		long score = Long.MAX_VALUE;
@@ -618,7 +620,7 @@ public final class OOCPackedCache implements OOCCache {
 	}
 
 	private synchronized void addLogicalEvictionPolicy(long streamId, LongUnaryOperator scoreFn) {
-		int sid = asIntStreamId(streamId);
+		int sid = (int)streamId;
 		while(sid >= _logicalEvictionPolicies.size())
 			_logicalEvictionPolicies.add(null);
 		CopyOnWriteArrayList<LongUnaryOperator> policies = _logicalEvictionPolicies.get(sid);
@@ -627,11 +629,6 @@ public final class OOCPackedCache implements OOCCache {
 			_logicalEvictionPolicies.set(sid, policies);
 		}
 		policies.add(scoreFn);
-	}
-
-	private synchronized CopyOnWriteArrayList<LongUnaryOperator> getLogicalEvictionPolicies(long streamId) {
-		int sid = asIntStreamId(streamId);
-		return sid < _logicalEvictionPolicies.size() ? _logicalEvictionPolicies.get(sid) : null;
 	}
 
 	private void scheduleSeal(PackBuilder builder) {
@@ -648,16 +645,16 @@ public final class OOCPackedCache implements OOCCache {
 
 	private PackedCacheLocation getLocation(long sId, long tId) {
 		MaskedOnceArrayList<PackedCacheLocation> stream = _locations.get(sId);
-		return stream == null ? null : stream.get(blockIndex(tId));
+		return stream == null ? null : stream.get((int)tId);
 	}
 
 	private void putLocation(BlockKey key, PackedCacheLocation location) {
-		_locations.getOrCreate(key.getStreamId()).put(blockIndex(key.getSequenceNumber()), location);
+		_locations.getOrCreate(key.getStreamId()).put((int)key.getSequenceNumber(), location);
 	}
 
 	private boolean clearLocation(BlockKey key) {
 		MaskedOnceArrayList<PackedCacheLocation> stream = _locations.get(key.getStreamId());
-		return stream != null && stream.clear(blockIndex(key.getSequenceNumber()));
+		return stream != null && stream.clear((int)key.getSequenceNumber());
 	}
 
 	private void ensureBuilderCapacity(int streamId) {
@@ -669,18 +666,6 @@ public final class OOCPackedCache implements OOCCache {
 		PackBuilder[] bigger = new PackBuilder[len];
 		System.arraycopy(_builders, 0, bigger, 0, _builders.length);
 		_builders = bigger;
-	}
-
-	private static int asIntStreamId(long streamId) {
-		if(streamId < 0 || streamId > Integer.MAX_VALUE)
-			throw new IndexOutOfBoundsException("Invalid streamId: " + streamId);
-		return (int)streamId;
-	}
-
-	private static int blockIndex(long sequenceNumber) {
-		if(sequenceNumber < 0 || sequenceNumber > Integer.MAX_VALUE)
-			throw new IndexOutOfBoundsException("Invalid block index: " + sequenceNumber);
-		return (int)sequenceNumber;
 	}
 
 	private void checkRunning() {
@@ -716,7 +701,7 @@ public final class OOCPackedCache implements OOCCache {
 		}
 
 		public int id() {
-			return blockIndex(state.physicalEntry.getKey().getSequenceNumber());
+			return (int)state.physicalEntry.getKey().getSequenceNumber();
 		}
 
 		public long streamId() {
