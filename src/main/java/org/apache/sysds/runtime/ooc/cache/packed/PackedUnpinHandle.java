@@ -19,18 +19,30 @@
 
 package org.apache.sysds.runtime.ooc.cache.packed;
 
-import org.apache.sysds.runtime.ooc.cache.OOCFuture;
-import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
-abstract class PackedUnpinHandle implements OOCCache.UnpinHandle {
+final class PackedUnpinHandle implements OOCCache.UnpinHandle {
 	final BlockEntry entry;
 	final MemoryAllowance allowance;
 	final long bytes;
 	final OOCFuture<Boolean> future;
 
-	PackedUnpinHandle(BlockEntry entry, MemoryAllowance allowance, long bytes, boolean committed) {
+	static PackedUnpinHandle committed(BlockEntry entry, MemoryAllowance allowance, long bytes) {
+		return new PackedUnpinHandle(entry, allowance, bytes, true);
+	}
+
+	static PackedUnpinHandle pendingProducerTransfer(BlockEntry entry, MemoryAllowance allowance, long bytes) {
+		return new PackedUnpinHandle(entry, allowance, bytes, false);
+	}
+
+	static PackedUnpinHandle delayedPhysicalRelease(BlockEntry entry, MemoryAllowance allowance) {
+		return new PackedUnpinHandle(entry, allowance, entry.getSize(), false);
+	}
+
+	private PackedUnpinHandle(BlockEntry entry, MemoryAllowance allowance, long bytes, boolean committed) {
 		this.entry = entry;
 		this.allowance = allowance;
 		this.bytes = bytes;
@@ -38,17 +50,17 @@ abstract class PackedUnpinHandle implements OOCCache.UnpinHandle {
 	}
 
 	@Override
-	public BlockEntry getEntry() {
+	public BlockEntry entry() {
 		return entry;
 	}
 
 	@Override
-	public MemoryAllowance getAllowance() {
+	public MemoryAllowance allowance() {
 		return allowance;
 	}
 
 	@Override
-	public long getBytes() {
+	public long bytes() {
 		return bytes;
 	}
 
@@ -64,27 +76,5 @@ abstract class PackedUnpinHandle implements OOCCache.UnpinHandle {
 
 	void complete(boolean committed) {
 		future.complete(committed);
-	}
-}
-
-final class DelayedPackedUnpinHandle extends PackedUnpinHandle {
-	DelayedPackedUnpinHandle(BlockEntry entry, MemoryAllowance allowance) {
-		super(entry, allowance, entry.getSize(), false);
-	}
-}
-
-final class PackUnpinHandle extends PackedUnpinHandle {
-	PackUnpinHandle(BlockEntry entry, MemoryAllowance allowance, long bytes) {
-		super(entry, allowance, bytes, false);
-	}
-}
-
-final class ImmediatePackedUnpinHandle extends PackedUnpinHandle {
-	static ImmediatePackedUnpinHandle committed(BlockEntry entry, MemoryAllowance allowance, long bytes) {
-		return new ImmediatePackedUnpinHandle(entry, allowance, bytes);
-	}
-
-	private ImmediatePackedUnpinHandle(BlockEntry entry, MemoryAllowance allowance, long bytes) {
-		super(entry, allowance, bytes, true);
 	}
 }

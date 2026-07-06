@@ -26,9 +26,9 @@ record PendingPackLocation(PackBuilder builder, int slot) implements PackedCache
 }
 
 final class SealedPackLocation implements PackedCacheLocation {
-	private final PackedPinState state;
-	private final int slot;
-	private int references;
+	private final PackedPinState _state;
+	private final int _slot;
+	private int _references;
 
 	SealedPackLocation(PackedPinState state, int slot) {
 		this(state, slot, 1);
@@ -37,32 +37,32 @@ final class SealedPackLocation implements PackedCacheLocation {
 	SealedPackLocation(PackedPinState state, int slot, int references) {
 		if(references <= 0)
 			throw new IllegalArgumentException("Sealed location requires a positive reference count.");
-		this.state = state;
-		this.slot = slot;
-		this.references = references;
+		_state = state;
+		_slot = slot;
+		_references = references;
 	}
 
 	PackedPinState state() {
-		return state;
+		return _state;
 	}
 
 	int slot() {
-		return slot;
+		return _slot;
 	}
 
 	synchronized int retain() {
-		if(references <= 0)
+		if(_references <= 0)
 			throw new IllegalStateException("Cannot retain a forgotten packed location.");
-		return ++references;
+		return ++_references;
 	}
 
 	synchronized int release() {
-		if(references <= 0) {
-			//tolerated for legacy double-forget callers; assertion surfaces it in debug runs
-			assert false : "Packed location slot " + slot + " dereferenced below zero.";
+		if(_references <= 0) {
+			// tolerated for legacy double-forget callers; assertion surfaces it in debug runs
+			assert false : "Packed location slot " + _slot + " dereferenced below zero.";
 			return 0;
 		}
-		return --references;
+		return --_references;
 	}
 }
 

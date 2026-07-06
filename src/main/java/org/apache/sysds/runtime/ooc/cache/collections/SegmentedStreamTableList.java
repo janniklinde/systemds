@@ -31,8 +31,8 @@ public class SegmentedStreamTableList<T> {
 
 	static {
 		try {
-			SEGMENTS = MethodHandles.lookup()
-				.findVarHandle(SegmentedStreamTableList.class, "_segments", Object[].class);
+			SEGMENTS = MethodHandles.lookup().findVarHandle(SegmentedStreamTableList.class, "_segments",
+				Object[].class);
 		}
 		catch(ReflectiveOperationException e) {
 			throw new ExceptionInInitializerError(e);

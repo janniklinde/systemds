@@ -20,7 +20,6 @@
 package org.apache.sysds.runtime.ooc.cache.packed;
 
 import org.apache.sysds.runtime.instructions.ooc.CachingStream;
-import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.BlockState;
@@ -30,8 +29,10 @@ import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.collections.MaskedOnceArrayList;
 import org.apache.sysds.runtime.ooc.cache.collections.SegmentedStreamTableList;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
@@ -43,15 +44,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.LongUnaryOperator;
 
-/**
- * Logical-to-physical packing adapter. Small logical blocks are packed into larger physical cache entries
- * before being handed to OOCCacheImpl.
- */
 public final class OOCPackedCache implements OOCCache {
 	private static final long PACKED_STREAM_ID = CachingStream._streamSeq.getNextID();
-	private static final long DEFAULT_PACK_THRESHOLD_BYTES = 64 * 1024;
+	private static final long DEFAULT_PACK_THRESHOLD_BYTES = 1L << 18;
 	private static final long DEFAULT_PACK_TARGET_BYTES = 1L << 19; // 512 KB tile packing
-	private static final long DEFAULT_MAX_STAGING_BYTES = 64L << 20;
+	private static final long DEFAULT_MAX_STAGING_BYTES = 1L << 26;
 	private static final int DEFAULT_MAX_OPEN_BUILDERS = 64;
 	private static final long DEFAULT_SEAL_DELAY_MS = 5;
 	private static final long DEFAULT_PACK_RELEASE_DELAY_MS = 5;
@@ -93,15 +90,15 @@ public final class OOCPackedCache implements OOCCache {
 
 	public OOCPackedCache(OOCCacheImpl physical, long packThresholdBytes, long packTargetBytes, long sealDelayMs,
 		long packReleaseDelayMs) {
-		this(physical, packThresholdBytes, packTargetBytes, DEFAULT_MAX_STAGING_BYTES,
-			DEFAULT_MAX_OPEN_BUILDERS, sealDelayMs, packReleaseDelayMs);
+		this(physical, packThresholdBytes, packTargetBytes, DEFAULT_MAX_STAGING_BYTES, DEFAULT_MAX_OPEN_BUILDERS,
+			sealDelayMs, packReleaseDelayMs);
 	}
 
-	public OOCPackedCache(OOCCacheImpl physical, long packThresholdBytes, long packTargetBytes,
-		long maxStagingBytes, int maxOpenBuilders, long sealDelayMs, long packReleaseDelayMs) {
+	public OOCPackedCache(OOCCacheImpl physical, long packThresholdBytes, long packTargetBytes, long maxStagingBytes,
+		int maxOpenBuilders, long sealDelayMs, long packReleaseDelayMs) {
 		if(packThresholdBytes <= 0 || packTargetBytes < packThresholdBytes)
-			throw new IllegalArgumentException("Invalid pack sizes: threshold=" + packThresholdBytes +
-				", target=" + packTargetBytes);
+			throw new IllegalArgumentException(
+				"Invalid pack sizes: threshold=" + packThresholdBytes + ", target=" + packTargetBytes);
 		_physical = physical;
 		_packThresholdBytes = packThresholdBytes;
 		_packTargetBytes = packTargetBytes;
@@ -151,11 +148,6 @@ public final class OOCPackedCache implements OOCCache {
 		return logical;
 	}
 
-	public BlockEntry[] putPackPinned(long sId, long[] tIds, Object[] data, long[] sizes,
-		MemoryAllowance allowance) {
-		return putPackPinned(sId, tIds, data, sizes, 0, tIds.length, allowance);
-	}
-
 	public BlockEntry[] putPackPinned(long sId, long[] tIds, Object[] data, long[] sizes, int off, int len,
 		MemoryAllowance allowance) {
 		BlockEntry[] entries = new BlockEntry[len];
@@ -180,11 +172,6 @@ public final class OOCPackedCache implements OOCCache {
 		return entries;
 	}
 
-	public BlockEntry putSealedPackPinned(long sId, long[] tIds, Object[] data, long[] sizes,
-		MemoryAllowance allowance) {
-		return putSealedPackPinned(sId, tIds, data, sizes, 0, tIds.length, allowance);
-	}
-
 	public BlockEntry putSealedPackPinned(long sId, long[] tIds, Object[] data, long[] sizes, int off, int len,
 		MemoryAllowance allowance) {
 		long totalSize = 0;
@@ -201,31 +188,8 @@ public final class OOCPackedCache implements OOCCache {
 			checkRunning();
 			BlockEntry physicalEntry = putSealedBlockPinned(new PackedBlock(packedData, packedSizes, totalSize),
 				allowance);
-			PackedPinState state = new PackedPinState(physicalEntry, sId, tIds, off, len, len);
-			registerPackedState(state);
-			for(int i = 0; i < len; i++)
-				putLocation(new BlockKey(sId, tIds[off + i]), new SealedPackLocation(state, i));
-			return physicalEntry;
-		}
-	}
-
-	public BlockEntry putSealedPackPinned(long sId, int[] tIds, Object[] data, long[] sizes, int off, int len,
-		MemoryAllowance allowance) {
-		long totalSize = 0;
-		Object[] packedData = new Object[len];
-		long[] packedSizes = new long[len];
-		for(int i = 0; i < len; i++) {
-			int p = off + i;
-			packedData[i] = data[p];
-			packedSizes[i] = sizes[p];
-			totalSize += sizes[p];
-		}
-
-		synchronized(this) {
-			checkRunning();
-			BlockEntry physicalEntry = putSealedBlockPinned(new PackedBlock(packedData, packedSizes, totalSize),
-				allowance);
-			PackedPinState state = new PackedPinState(physicalEntry, sId, tIds, off, len, len);
+			PackedPinState state = new PackedPinState(physicalEntry, sId,
+				Arrays.stream(tIds).mapToInt(Math::toIntExact).toArray(), off, len, len);
 			registerPackedState(state);
 			for(int i = 0; i < len; i++)
 				putLocation(new BlockKey(sId, tIds[off + i]), new SealedPackLocation(state, i));
@@ -245,8 +209,8 @@ public final class OOCPackedCache implements OOCCache {
 	}
 
 	public OOCFuture<PackLease> pinPack(PackGroup group, MemoryAllowance allowance) {
-		return group.state.pin(_physical, allowance, false).map(entry ->
-			entry == null ? null : new PackLease(this, group, allowance));
+		return group.state.pin(_physical, allowance, false)
+			.map(entry -> entry == null ? null : new PackLease(this, group, allowance));
 	}
 
 	@Override
@@ -341,10 +305,10 @@ public final class OOCPackedCache implements OOCCache {
 	}
 
 	/**
-	 * References/dereferences on tiles in open builders are counted on the builder slot instead of
-	 * forcing a seal, so pipelined consumers that park references (state tables, store readers) do not
-	 * fragment packs into per-tile physical entries. Slot counts carry over into the
-	 * SealedPackLocation at seal time; only physical access (pin, pack group) forces a seal.
+	 * References/dereferences on tiles in open builders are counted on the builder slot instead of forcing a seal, so
+	 * pipelined consumers that park references (state tables, store readers) do not fragment packs into per-tile
+	 * physical entries. Slot counts carry over into the SealedPackLocation at seal time. Only physical access (pin,
+	 * pack group) forces a seal.
 	 */
 	private synchronized int referencePending(PackBuilder builder, int slot) {
 		if(!builder.sealed)
@@ -427,17 +391,17 @@ public final class OOCPackedCache implements OOCCache {
 	private UnpinHandle unpinPending(BlockEntry entry, PendingLogicalPin pin, MemoryAllowance allowance) {
 		if(entry.fastUnpin()) {
 			allowance.release(entry.getSize());
-			return ImmediatePackedUnpinHandle.committed(entry, allowance, entry.getSize());
+			return PackedUnpinHandle.committed(entry, allowance, entry.getSize());
 		}
 		synchronized(this) {
 			if(entry.getPinCount() > 1) {
 				entry.unpin();
 				allowance.release(entry.getSize());
-				return ImmediatePackedUnpinHandle.committed(entry, allowance, entry.getSize());
+				return PackedUnpinHandle.committed(entry, allowance, entry.getSize());
 			}
 			entry.unpin();
 			entry.setCacheMeta(null);
-			PackUnpinHandle handle = pin.builder().unpinProducer(entry, pin.slot(), allowance);
+			PackedUnpinHandle handle = pin.builder().unpinProducer(entry, pin.slot(), allowance);
 			if(pin.builder().sealed && pin.builder().activePins == 0)
 				pin.builder().transferProducerOwnership(_physical);
 			scheduleSeal(pin.builder());
@@ -447,10 +411,10 @@ public final class OOCPackedCache implements OOCCache {
 
 	private UnpinHandle unpinPacked(BlockEntry entry, PackedLogicalPin pin, MemoryAllowance allowance) {
 		if(entry.fastUnpin())
-			return ImmediatePackedUnpinHandle.committed(entry, allowance, entry.getSize());
+			return PackedUnpinHandle.committed(entry, allowance, entry.getSize());
 		if(entry.getPinCount() > 1) {
 			entry.unpin();
-			return ImmediatePackedUnpinHandle.committed(entry, allowance, entry.getSize());
+			return PackedUnpinHandle.committed(entry, allowance, entry.getSize());
 		}
 		entry.unpin();
 		entry.setCacheMeta(null);
@@ -516,7 +480,7 @@ public final class OOCPackedCache implements OOCCache {
 			sealBuilder(pending.builder());
 			PackedCacheLocation location = getLocation(pending.builder().streamIds[pending.slot()],
 				pending.builder().tileIds[pending.slot()]);
-			return (SealedPackLocation)location;
+			return (SealedPackLocation) location;
 		}
 	}
 
@@ -537,14 +501,14 @@ public final class OOCPackedCache implements OOCCache {
 		if(!clearLocation(key))
 			return 0;
 		if(location.state().forgetLocation()) {
-			_packedStates.clear(blockIndex(location.state().physicalEntry.getKey().getSequenceNumber()));
+			_packedStates.clear((int) location.state().physicalEntry.getKey().getSequenceNumber());
 			return _physical.dereference(location.state().physicalEntry);
 		}
 		return 0;
 	}
 
 	private PackBuilder getOpenBuilder(long streamId, MemoryAllowance allowance, long nextSize) {
-		int sid = asIntStreamId(streamId);
+		int sid = (int) streamId;
 		PackBuilder builder = sid < _builders.length ? _builders[sid] : null;
 		if(builder != null && (builder.sealed || builder.allowance != allowance)) {
 			sealBuilder(builder);
@@ -610,13 +574,12 @@ public final class OOCPackedCache implements OOCCache {
 		BlockEntry physicalEntry = putSealedBlockPinned(block, builder.allowance);
 		int liveSlots = builder.countLiveSlots();
 		PackedPinState state = new PackedPinState(physicalEntry, builder.streamIds[0],
-			builder.tileIds, 0, builder.count, liveSlots);
+			Arrays.stream(builder.tileIds).mapToInt(Math::toIntExact).toArray(), 0, builder.count, liveSlots);
 		builder.state = state;
 		if(liveSlots > 0)
 			registerPackedState(state);
 
-		//slots forgotten while pending stay in the physical pack (uncompacted, like sealed packs)
-		//but get no location; their builder-side reference counts seed the sealed locations
+		// slots forgotten while pending stay in the physical pack but get no location
 		for(int i = 0; i < builder.count; i++)
 			if(builder.refCounts[i] > 0)
 				putLocation(new BlockKey(builder.streamIds[i], builder.tileIds[i]),
@@ -634,15 +597,16 @@ public final class OOCPackedCache implements OOCCache {
 	}
 
 	private void registerPackedState(PackedPinState state) {
-		_packedStates.put(blockIndex(state.physicalEntry.getKey().getSequenceNumber()), state);
+		_packedStates.put((int) state.physicalEntry.getKey().getSequenceNumber(), state);
 	}
 
 	private long scorePackedBlock(long packId) {
-		PackedPinState state = _packedStates.get(blockIndex(packId));
+		PackedPinState state = _packedStates.get((int) packId);
 		if(state == null)
 			return packId;
 		PackGroup group = state.group;
-		CopyOnWriteArrayList<LongUnaryOperator> policies = getLogicalEvictionPolicies(group.streamId());
+		CopyOnWriteArrayList<LongUnaryOperator> policies = group.streamId < _logicalEvictionPolicies
+			.size() ? _logicalEvictionPolicies.get((int) group.streamId) : null;
 		if(policies == null || policies.isEmpty())
 			return packId;
 		long score = Long.MAX_VALUE;
@@ -655,7 +619,7 @@ public final class OOCPackedCache implements OOCCache {
 	}
 
 	private synchronized void addLogicalEvictionPolicy(long streamId, LongUnaryOperator scoreFn) {
-		int sid = asIntStreamId(streamId);
+		int sid = (int) streamId;
 		while(sid >= _logicalEvictionPolicies.size())
 			_logicalEvictionPolicies.add(null);
 		CopyOnWriteArrayList<LongUnaryOperator> policies = _logicalEvictionPolicies.get(sid);
@@ -664,11 +628,6 @@ public final class OOCPackedCache implements OOCCache {
 			_logicalEvictionPolicies.set(sid, policies);
 		}
 		policies.add(scoreFn);
-	}
-
-	private synchronized CopyOnWriteArrayList<LongUnaryOperator> getLogicalEvictionPolicies(long streamId) {
-		int sid = asIntStreamId(streamId);
-		return sid < _logicalEvictionPolicies.size() ? _logicalEvictionPolicies.get(sid) : null;
 	}
 
 	private void scheduleSeal(PackBuilder builder) {
@@ -685,16 +644,16 @@ public final class OOCPackedCache implements OOCCache {
 
 	private PackedCacheLocation getLocation(long sId, long tId) {
 		MaskedOnceArrayList<PackedCacheLocation> stream = _locations.get(sId);
-		return stream == null ? null : stream.get(blockIndex(tId));
+		return stream == null ? null : stream.get((int) tId);
 	}
 
 	private void putLocation(BlockKey key, PackedCacheLocation location) {
-		_locations.getOrCreate(key.getStreamId()).put(blockIndex(key.getSequenceNumber()), location);
+		_locations.getOrCreate(key.getStreamId()).put((int) key.getSequenceNumber(), location);
 	}
 
 	private boolean clearLocation(BlockKey key) {
 		MaskedOnceArrayList<PackedCacheLocation> stream = _locations.get(key.getStreamId());
-		return stream != null && stream.clear(blockIndex(key.getSequenceNumber()));
+		return stream != null && stream.clear((int) key.getSequenceNumber());
 	}
 
 	private void ensureBuilderCapacity(int streamId) {
@@ -708,18 +667,6 @@ public final class OOCPackedCache implements OOCCache {
 		_builders = bigger;
 	}
 
-	private static int asIntStreamId(long streamId) {
-		if(streamId < 0 || streamId > Integer.MAX_VALUE)
-			throw new IndexOutOfBoundsException("Invalid streamId: " + streamId);
-		return (int)streamId;
-	}
-
-	private static int blockIndex(long sequenceNumber) {
-		if(sequenceNumber < 0 || sequenceNumber > Integer.MAX_VALUE)
-			throw new IndexOutOfBoundsException("Invalid block index: " + sequenceNumber);
-		return (int)sequenceNumber;
-	}
-
 	private void checkRunning() {
 		if(!_running)
 			throw new IllegalStateException("Cache has been shut down.");
@@ -731,27 +678,6 @@ public final class OOCPackedCache implements OOCCache {
 		private final int firstIndex;
 		private final int[] indices;
 		private final int size;
-
-		PackGroup(PackedPinState state, long streamId, long[] tileIds, int off, int size) {
-			this.state = state;
-			this.streamId = streamId;
-			this.size = size;
-			firstIndex = blockIndex(tileIds[off]);
-			boolean contiguous = true;
-			for(int i = 1; i < size; i++) {
-				if(tileIds[off + i] != (long)firstIndex + i) {
-					contiguous = false;
-					break;
-				}
-			}
-			if(contiguous)
-				indices = null;
-			else {
-				indices = new int[size];
-				for(int i = 0; i < size; i++)
-					indices[i] = blockIndex(tileIds[off + i]);
-			}
-		}
 
 		PackGroup(PackedPinState state, long streamId, int[] tileIds, int off, int size) {
 			this.state = state;
@@ -774,7 +700,7 @@ public final class OOCPackedCache implements OOCCache {
 		}
 
 		public int id() {
-			return blockIndex(state.physicalEntry.getKey().getSequenceNumber());
+			return (int) state.physicalEntry.getKey().getSequenceNumber();
 		}
 
 		public long streamId() {
@@ -820,7 +746,7 @@ public final class OOCPackedCache implements OOCCache {
 		public Object value(int slot) {
 			if(!open)
 				throw new IllegalStateException("Pack lease is closed");
-			PackedBlock block = (PackedBlock)group.state.physicalEntry.getData();
+			PackedBlock block = (PackedBlock) group.state.physicalEntry.getData();
 			return block.values[slot];
 		}
 

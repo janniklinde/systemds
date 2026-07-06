@@ -234,14 +234,15 @@ public class OOCCacheImplStressTest {
 
 	@Test
 	public void testPackedCacheBatchAndSealedPackApisWithFakeIO() throws Exception {
-		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(_io, 64 * BYTES, 16 * BYTES),
-			2 * BYTES, 8 * BYTES, 64 * BYTES, 1, 0, 0);
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(_io, 64 * BYTES, 16 * BYTES), 2 * BYTES, 8 * BYTES,
+			64 * BYTES, 1, 0, 0);
 		try {
 			long[] batchIds = new long[] {0, 1};
 			Object[] batchData = new Object[] {payload(0), payload(1)};
 			long[] batchSizes = new long[] {BYTES, BYTES};
 			_producer.reserveBlocking(2 * BYTES);
-			BlockEntry[] batchEntries = cache.putPackPinned(1, batchIds, batchData, batchSizes, _producer);
+			BlockEntry[] batchEntries = cache.putPackPinned(1, batchIds, batchData, batchSizes, 0, batchIds.length,
+				_producer);
 
 			_producer.reserveBlocking(BYTES);
 			BlockEntry streamEntry = cache.putPinned(2, 0, payload(2), BYTES, _producer);
@@ -253,7 +254,8 @@ public class OOCCacheImplStressTest {
 			Object[] sealedData = new Object[] {payload(10), payload(11)};
 			long[] sealedSizes = new long[] {BYTES, BYTES};
 			_producer.reserveBlocking(2 * BYTES);
-			BlockEntry sealedPhysical = cache.putSealedPackPinned(3, sealedIds, sealedData, sealedSizes, _producer);
+			BlockEntry sealedPhysical = cache.putSealedPackPinned(3, sealedIds, sealedData, sealedSizes, 0,
+				batchIds.length, _producer);
 
 			for(BlockEntry entry : batchEntries)
 				cache.unpin(entry, _producer);
@@ -265,15 +267,17 @@ public class OOCCacheImplStressTest {
 
 			BlockEntry batchReplay = cache.pin(1, 1, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 			Assert.assertNotNull(batchReplay);
-			Assert.assertEquals(2.0, ((MatrixBlock) ((IndexedMatrixValue) batchReplay.getData()).getValue()).sum(), 0.0);
+			Assert.assertEquals(2.0, ((MatrixBlock) ((IndexedMatrixValue) batchReplay.getData()).getValue()).sum(),
+				0.0);
 			cache.unpin(batchReplay, _consumerB);
 			waitFor(() -> _consumerB.getUsedMemory() == 0);
 
 			BlockEntry streamReplay = cache.pin(2, 0, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 			Assert.assertNotNull(streamReplay);
-			Assert.assertEquals(3.0, ((MatrixBlock) ((IndexedMatrixValue) streamReplay.getData()).getValue()).sum(), 0.0);
-			Assert.assertEquals("A per-stream pack must not include tiles from another stream.",
-				BYTES, _consumerB.getUsedMemory());
+			Assert.assertEquals(3.0, ((MatrixBlock) ((IndexedMatrixValue) streamReplay.getData()).getValue()).sum(),
+				0.0);
+			Assert.assertEquals("A per-stream pack must not include tiles from another stream.", BYTES,
+				_consumerB.getUsedMemory());
 
 			BlockEntry otherStreamReplay = cache.pin(4, 0, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 			Assert.assertNotNull(otherStreamReplay);
@@ -285,7 +289,8 @@ public class OOCCacheImplStressTest {
 
 			BlockEntry sealedReplay = cache.pin(3, 11, _consumerB).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 			Assert.assertNotNull(sealedReplay);
-			Assert.assertEquals(12.0, ((MatrixBlock) ((IndexedMatrixValue) sealedReplay.getData()).getValue()).sum(), 0.0);
+			Assert.assertEquals(12.0, ((MatrixBlock) ((IndexedMatrixValue) sealedReplay.getData()).getValue()).sum(),
+				0.0);
 			cache.unpin(sealedReplay, _consumerB);
 			waitFor(() -> _consumerB.getUsedMemory() == 0);
 		}

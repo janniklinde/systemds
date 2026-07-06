@@ -24,10 +24,29 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import java.util.function.LongUnaryOperator;
 
 public interface OOCCache {
+	/**
+	 * Pins an item backed by an allowance. A successful pin transfers memory ownership from the cache to the owner of
+	 * the allowance and guarantees data availability. While pinned, the bytes of the entry are not counted as
+	 * cache-owned memory.
+	 *
+	 * @param key
+	 * @param allowance
+	 * @return a non-null future of the pinned block entry; the future result is null if the required memory could not
+	 *         be reserved
+	 */
 	default OOCFuture<BlockEntry> pin(BlockKey key, MemoryAllowance allowance) {
 		return pin(key.getStreamId(), key.getSequenceNumber(), allowance);
 	}
 
+	/**
+	 * Pins an item backed by an allowance. If the allowance cannot reserve enough memory, this method will wait until
+	 * memory is available. A successful pin transfers memory ownership from the cache to the owner of the allowance and
+	 * guarantees data availability. While pinned, the bytes of the entry are not counted as cache-owned memory.
+	 *
+	 * @param key
+	 * @param allowance
+	 * @return a non-null future of the pinned block entry
+	 */
 	default OOCFuture<BlockEntry> pinAdmitted(BlockKey key, MemoryAllowance allowance) {
 		return pinAdmitted(key.getStreamId(), key.getSequenceNumber(), allowance);
 	}
@@ -55,13 +74,21 @@ public interface OOCCache {
 	 * @param tId
 	 * @param allowance
 	 * @return a non-null future of the pinned block entry; the future result is null if the required memory could not
-	 * be reserved
+	 *         be reserved
 	 */
 	OOCFuture<BlockEntry> pin(long sId, long tId, MemoryAllowance allowance);
 
-	default OOCFuture<BlockEntry> pinAdmitted(long sId, long tId, MemoryAllowance allowance) {
-		return pin(sId, tId, allowance);
-	}
+	/**
+	 * Pins an item backed by an allowance. If the allowance cannot reserve enough memory, this method will wait until
+	 * memory is available. A successful pin transfers memory ownership from the cache to the owner of the allowance and
+	 * guarantees data availability. While pinned, the bytes of the entry are not counted as cache-owned memory.
+	 *
+	 * @param sId
+	 * @param tId
+	 * @param allowance
+	 * @return a non-null future of the pinned block entry
+	 */
+	OOCFuture<BlockEntry> pinAdmitted(long sId, long tId, MemoryAllowance allowance);
 
 	/**
 	 * Pins an item backed by an allowance if it is already live in cache. A successful pin transfers memory ownership
@@ -73,7 +100,7 @@ public interface OOCCache {
 	 * @param tId
 	 * @param allowance
 	 * @return the pinned block entry if available. Null if the required memory could not be reserved or the block is
-	 * not live
+	 *         not live
 	 */
 	BlockEntry pinIfLive(long sId, long tId, MemoryAllowance allowance);
 
@@ -129,11 +156,11 @@ public interface OOCCache {
 	void shutdown();
 
 	interface UnpinHandle {
-		BlockEntry getEntry();
+		BlockEntry entry();
 
-		MemoryAllowance getAllowance();
+		MemoryAllowance allowance();
 
-		long getBytes();
+		long bytes();
 
 		boolean isCommitted();
 

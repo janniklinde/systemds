@@ -19,10 +19,10 @@
 
 package org.apache.sysds.runtime.ooc.cache.packed;
 
-import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -32,7 +32,7 @@ final class PackBuilder {
 	final int streamSlot;
 	final MemoryAllowance allowance;
 	final long packTargetBytes;
-	final List<PackUnpinHandle> deferredUnpins = new ArrayList<>();
+	final List<PackedUnpinHandle> deferredUnpins = new ArrayList<>();
 	long[] streamIds = new long[16];
 	long[] tileIds = new long[16];
 	private Object[] values = new Object[16];
@@ -43,8 +43,8 @@ final class PackBuilder {
 	int activePins;
 	boolean sealed;
 	boolean sealScheduled;
-	private boolean producerTransferred;
 	PackedPinState state;
+	private boolean _producerTransferred;
 
 	PackBuilder(int streamSlot, MemoryAllowance allowance, long packTargetBytes) {
 		this.streamSlot = streamSlot;
@@ -65,11 +65,6 @@ final class PackBuilder {
 		return slot;
 	}
 
-	/**
-	 * Logical lifetime references of a staged slot (initial 1 for the canonical publisher), kept on the
-	 * builder so referencing a pending tile does not force a premature seal. Transferred into the
-	 * slot's SealedPackLocation at seal time. Guarded by the OOCPackedCache monitor.
-	 */
 	int retainSlot(int slot) {
 		int references = refCounts[slot];
 		if(references <= 0)
@@ -100,24 +95,24 @@ final class PackBuilder {
 		return new PackedBlock(Arrays.copyOf(values, count), Arrays.copyOf(sizes, count), bytes);
 	}
 
-	PackUnpinHandle unpinProducer(BlockEntry entry, int slot, MemoryAllowance owner) {
+	PackedUnpinHandle unpinProducer(BlockEntry entry, int slot, MemoryAllowance owner) {
 		activePins--;
-		PackUnpinHandle handle = new PackUnpinHandle(entry, owner, sizes[slot]);
+		PackedUnpinHandle handle = PackedUnpinHandle.pendingProducerTransfer(entry, owner, sizes[slot]);
 		deferredUnpins.add(handle);
 		return handle;
 	}
 
 	void transferProducerOwnership(OOCCacheImpl physical) {
-		if(state == null || physical == null || producerTransferred)
+		if(state == null || physical == null || _producerTransferred)
 			return;
-		producerTransferred = true;
+		_producerTransferred = true;
 		OOCCache.UnpinHandle physicalUnpin = physical.unpin(state.physicalEntry, allowance);
 		if(physicalUnpin.isCommitted()) {
 			completeDeferredUnpins(true);
 			return;
 		}
-		physicalUnpin.getCompletionFuture().whenComplete((committed, ex) ->
-			completeDeferredUnpins(ex == null && committed));
+		physicalUnpin.getCompletionFuture()
+			.whenComplete((committed, ex) -> completeDeferredUnpins(ex == null && committed));
 	}
 
 	private void ensureCapacity(int minSize) {
@@ -134,7 +129,7 @@ final class PackBuilder {
 	}
 
 	private void completeDeferredUnpins(boolean committed) {
-		for(PackUnpinHandle handle : deferredUnpins)
+		for(PackedUnpinHandle handle : deferredUnpins)
 			handle.complete(committed);
 		deferredUnpins.clear();
 	}

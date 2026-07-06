@@ -109,25 +109,25 @@ public class OOCCacheImpl implements OOCCache {
 	public UnpinHandle unpin(BlockEntry entry, MemoryAllowance allowance) {
 		if(entry.fastUnpin()) {
 			allowance.release(entry.getSize());
-			return ImmediateUnpinHandle.committed(entry, allowance, entry.getSize());
+			return CacheUnpinHandle.committed(entry, allowance, entry.getSize());
 		}
 		UnpinHandle result;
 		long releaseBytes;
 		synchronized(this) {
 			EntryMeta meta = getMeta(entry);
 			if(meta == null)
-				return ImmediateUnpinHandle.committed(entry, allowance, Math.max(0, entry.getSize()));
+				return CacheUnpinHandle.committed(entry, allowance, Math.max(0, entry.getSize()));
 			if(entry.getPinCount() > 1) {
 				entry.unpin();
 				releaseBytes = entry.getSize();
-				result = ImmediateUnpinHandle.committed(entry, allowance, releaseBytes);
+				result = CacheUnpinHandle.committed(entry, allowance, releaseBytes);
 			}
 			else if(canAcceptOwnedBytes(entry.getSize())) {
 				releaseBytes = entry.getSize();
 				result = commitLastUnpin(meta, allowance);
 			}
 			else {
-				DeferredUnpinHandle handle = new DeferredUnpinHandle(meta, allowance);
+				CacheUnpinHandle handle = CacheUnpinHandle.deferred(entry, allowance);
 				meta.deferredUnpin = handle;
 				_deferredUnpins.offer(entry.getKey());
 				return handle;
@@ -201,7 +201,7 @@ public class OOCCacheImpl implements OOCCache {
 	private OOCFuture<BlockEntry> pinInternal(BlockKey key, MemoryAllowance allowance, boolean liveOnly,
 		boolean waitForAdmission) {
 		BlockEntry deferredUnpinEntry = null;
-		DeferredUnpinHandle deferredUnpinHandle = null;
+		CacheUnpinHandle deferredUnpinHandle = null;
 		long reserveBytes;
 		synchronized(this) {
 			checkRunning();
@@ -263,7 +263,7 @@ public class OOCCacheImpl implements OOCCache {
 		boolean liveOnly) {
 		EntryMeta meta = null;
 		BlockEntry deferredUnpinEntry = null;
-		DeferredUnpinHandle deferredUnpinHandle = null;
+		CacheUnpinHandle deferredUnpinHandle = null;
 		MemoryAllowance releaseAllowance = null;
 		DeferredCompletion deferredCompletion = null;
 		BlockEntry resident = null;
@@ -414,7 +414,7 @@ public class OOCCacheImpl implements OOCCache {
 		}
 		entry.setState(BlockState.REMOVED);
 		entry.pin();
-		DeferredUnpinHandle handle = meta.deferredUnpin;
+		CacheUnpinHandle handle = meta.deferredUnpin;
 		if(handle == null)
 			return null;
 		long bytes = meta.entry.getSize();
@@ -432,13 +432,13 @@ public class OOCCacheImpl implements OOCCache {
 			entry.setCacheMeta(null);
 			if(meta.backed)
 				_ioHandler.scheduleDeletion(entry);
-			return ImmediateUnpinHandle.committed(entry, allowance, entry.getSize());
+			return CacheUnpinHandle.committed(entry, allowance, entry.getSize());
 		}
 		entry.setState(meta.backed ? BlockState.WARM : BlockState.HOT);
 		setLive(entry);
 		_ownedBytes += entry.getSize();
 		scheduleEvictionIfNeeded();
-		return ImmediateUnpinHandle.committed(entry, allowance, entry.getSize());
+		return CacheUnpinHandle.committed(entry, allowance, entry.getSize());
 	}
 
 	private List<DeferredCompletion> processDeferredUnpins() {
@@ -456,7 +456,7 @@ public class OOCCacheImpl implements OOCCache {
 			if(!canAcceptOwnedBytes(meta.entry.getSize()))
 				return completions == null ? Collections.emptyList() : completions;
 			_deferredUnpins.poll();
-			DeferredUnpinHandle handle = meta.deferredUnpin;
+			CacheUnpinHandle handle = meta.deferredUnpin;
 			meta.deferredUnpin = null;
 			long bytes = entry.getSize();
 			entry.unpin();
@@ -705,7 +705,7 @@ public class OOCCacheImpl implements OOCCache {
 		private final BlockEntry entry;
 		private boolean backed;
 		private OOCFuture<BlockEntry> readFuture;
-		private DeferredUnpinHandle deferredUnpin;
+		private CacheUnpinHandle deferredUnpin;
 
 		private EntryMeta(BlockEntry entry) {
 			this.entry = entry;
@@ -713,76 +713,17 @@ public class OOCCacheImpl implements OOCCache {
 		}
 	}
 
-	private record DeferredCompletion(DeferredUnpinHandle handle, long bytes, boolean committed) {
+	private record DeferredCompletion(CacheUnpinHandle handle, long bytes, boolean committed) {
 	}
 
-	private static class ImmediateUnpinHandle implements UnpinHandle {
-		private final BlockEntry entry;
-		private final MemoryAllowance allowance;
-		private final long bytes;
-		private final OOCFuture<Boolean> future;
-
-		private static ImmediateUnpinHandle committed(BlockEntry entry, MemoryAllowance allowance, long bytes) {
-			return new ImmediateUnpinHandle(entry, allowance, bytes);
+	private record CacheUnpinHandle(BlockEntry entry, MemoryAllowance allowance, long bytes, OOCFuture<Boolean> future)
+		implements UnpinHandle {
+		private static CacheUnpinHandle committed(BlockEntry entry, MemoryAllowance allowance, long bytes) {
+			return new CacheUnpinHandle(entry, allowance, bytes, OOCFuture.completed(true));
 		}
 
-		private ImmediateUnpinHandle(BlockEntry entry, MemoryAllowance allowance, long bytes) {
-			this.entry = entry;
-			this.allowance = allowance;
-			this.bytes = bytes;
-			future = OOCFuture.completed(true);
-		}
-
-		@Override
-		public BlockEntry getEntry() {
-			return entry;
-		}
-
-		@Override
-		public MemoryAllowance getAllowance() {
-			return allowance;
-		}
-
-		@Override
-		public long getBytes() {
-			return bytes;
-		}
-
-		@Override
-		public boolean isCommitted() {
-			return true;
-		}
-
-		@Override
-		public OOCFuture<Boolean> getCompletionFuture() {
-			return future;
-		}
-	}
-
-	private static class DeferredUnpinHandle implements UnpinHandle {
-		private final EntryMeta meta;
-		private final MemoryAllowance allowance;
-		private final OOCFuture<Boolean> future;
-
-		private DeferredUnpinHandle(EntryMeta meta, MemoryAllowance allowance) {
-			this.meta = meta;
-			this.allowance = allowance;
-			future = new OOCFuture<>();
-		}
-
-		@Override
-		public BlockEntry getEntry() {
-			return meta.entry;
-		}
-
-		@Override
-		public MemoryAllowance getAllowance() {
-			return allowance;
-		}
-
-		@Override
-		public long getBytes() {
-			return meta.entry.getSize();
+		private static CacheUnpinHandle deferred(BlockEntry entry, MemoryAllowance allowance) {
+			return new CacheUnpinHandle(entry, allowance, entry.getSize(), new OOCFuture<>());
 		}
 
 		@Override

@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.ooc.store;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
@@ -108,7 +109,8 @@ public final class MaterializedStoreImpl<T extends SpillableObject> implements M
 				throw new IndexOutOfBoundsException("Invalid index: " + indices[i]);
 			maxIndex = Math.max(maxIndex, indices[i]);
 		}
-		BlockEntry physical = packed.putSealedPackPinned(streamId, indices, values, bytes, off, len, allowance);
+		BlockEntry physical = packed.putSealedPackPinned(streamId, Arrays.stream(indices).asLongStream().toArray(),
+			values, bytes, off, len, allowance);
 		cache.unpin(physical, allowance);
 		publishedCount.addAndGet(len);
 		updatePublished(maxIndex + 1);
