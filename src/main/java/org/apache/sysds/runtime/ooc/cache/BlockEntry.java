@@ -87,6 +87,12 @@ public final class BlockEntry {
 		_data = data;
 	}
 
+	public void replaceDataUnsafe(Object expected, Object data) {
+		if(_data != expected)
+			throw new IllegalStateException("Cannot replace unexpected data");
+		_data = data;
+	}
+
 	public BlockState getState() {
 		return _state;
 	}

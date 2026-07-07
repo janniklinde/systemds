@@ -191,4 +191,32 @@ public class InMemoryQueueCallback implements OOCStream.QueueCallback<IndexedMat
 	public IndexedMatrixValue takeManagedResultForHandover() {
 		return _handle.takeManagedResultForHandover();
 	}
+
+	/**
+	 * Extracts the value and its detached allowance reservation as a {@link ManagedPayload} and closes this callback.
+	 * The operation fails if multiple callbacks reference the same object.
+	 *
+	 * @return the extracted value with its byte count and owning allowance
+	 */
+	public synchronized ManagedPayload<IndexedMatrixValue> extractManagedPayload() {
+		if(_closed)
+			throw new IllegalStateException("Cannot extract a managed payload from a closed callback.");
+		CallbackHandle handle = _handle;
+		synchronized(handle) {
+			if(handle._failure != null)
+				throw handle._failure;
+			if(!handle.isExclusiveToRoot())
+				throw new IllegalStateException("Cannot extract a managed payload while callback aliases exist.");
+			if(handle._cacheIdx >= 0)
+				throw new IllegalStateException("Cannot extract a managed payload from a cached-slot callback.");
+			IndexedMatrixValue result = handle._result;
+			if(result == null)
+				throw new IllegalStateException("Cannot extract a managed payload from an empty callback.");
+			long bytes = handle._reservedBytes;
+			MemoryAllowance owner = handle._allow;
+			handle._result = null;
+			handle._reservedBytes = 0;
+			return new ManagedPayload<>(result, bytes, owner);
+		}
+	}
 }
