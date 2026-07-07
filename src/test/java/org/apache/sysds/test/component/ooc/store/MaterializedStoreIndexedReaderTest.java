@@ -32,7 +32,6 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
-import org.apache.sysds.runtime.ooc.store.MaterializedStoreImpl;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
 import org.apache.sysds.runtime.ooc.store.SequentialAccessPattern;
 import org.junit.Assert;
@@ -220,7 +219,7 @@ public class MaterializedStoreIndexedReaderTest {
 		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker);
 		producer.setTargetMemory(1L << 30);
 		OOCCacheImpl cache = new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30);
-		MaterializedStoreImpl<IndexedMatrixValue> store = new MaterializedStoreImpl<>(cache, STREAM_ID + 1);
+		MaterializedStore<IndexedMatrixValue> store = new MaterializedStore<>(cache, STREAM_ID + 1);
 		try {
 			for(int i : new int[] {0, 2}) {
 				producer.reserveBlocking(TILE_BYTES);
@@ -249,7 +248,7 @@ public class MaterializedStoreIndexedReaderTest {
 		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker);
 		producer.setTargetMemory(1L << 30);
 		OOCCacheImpl cache = new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30);
-		MaterializedStoreImpl<IndexedMatrixValue> store = new MaterializedStoreImpl<>(cache, STREAM_ID + 2);
+		MaterializedStore<IndexedMatrixValue> store = new MaterializedStore<>(cache, STREAM_ID + 2);
 		CappedAllowance reader = new CappedAllowance(1L << 30);
 		try {
 			producer.reserveBlocking(TILE_BYTES);
@@ -380,7 +379,7 @@ public class MaterializedStoreIndexedReaderTest {
 		private final SyncMemoryAllowance producer;
 		private final MemoryAllowance reader;
 		private final OOCCacheImpl cache;
-		private final MaterializedStoreImpl<IndexedMatrixValue> store;
+		private final MaterializedStore<IndexedMatrixValue> store;
 
 		private Fixture(long readerCapacityBytes) {
 			broker = new GlobalMemoryBroker(1L << 32);
@@ -388,7 +387,7 @@ public class MaterializedStoreIndexedReaderTest {
 			producer.setTargetMemory(1L << 30);
 			reader = new CappedAllowance(readerCapacityBytes);
 			cache = new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30);
-			store = new MaterializedStoreImpl<>(cache, STREAM_ID);
+			store = new MaterializedStore<>(cache, STREAM_ID);
 			for(int i = 0; i < BLOCKS; i++) {
 				producer.reserveBlocking(TILE_BYTES);
 				IndexedMatrixValue imv =

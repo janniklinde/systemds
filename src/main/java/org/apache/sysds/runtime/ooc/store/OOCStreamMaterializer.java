@@ -19,39 +19,21 @@
 
 package org.apache.sysds.runtime.ooc.store;
 
-import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Consumer;
-import java.util.function.ToIntFunction;
-
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
-import org.apache.sysds.runtime.ooc.cache.BlockEntry;
-import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
-/**
- * Consumes a live {@code OOCStream} into a {@link MaterializedStore}. This is the publication half of
- * the {@code CachingStream} replacement: a planner-supplied linearization maps each tile's
- * {@code MatrixIndexes} to the store's dense int index (removing the runtime hash index), managed
- * callbacks transfer their detached reservation exclusively through
- * {@code InMemoryQueueCallback.extractManagedPayload()}, non-managed callbacks are measured and
- * reserved on the sink allowance, and EOS completes the store (validating holes/duplicates).
- *
- * With registered live consumers the sink is the tee replacement: each tile is published pinned ONCE
- * and consumers receive aliases of one lease-backed callback ({@link PinnedLeaseCallback}); the last
- * alias close unpins the canonical entry (ownership to cache, possibly deferred). While an alias is
- * open, {@link PinnedLeaseCallback#pinnedEntry()} exposes the pinned canonical entry so a consumer can
- * park a logical reference to it (e.g. {@code OperatorStateTable.installReference}). Retained live
- * aliases are the live-side backpressure token: the producer allowance stays charged until the last
- * alias closes.
- */
-public final class MaterializationSink implements Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> {
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
+import java.util.function.ToIntFunction;
+
+public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> {
 	private final MaterializedStore<IndexedMatrixValue> _store;
 	private final ToIntFunction<MatrixIndexes> _linearize;
 	private final MemoryAllowance _allowance;
@@ -59,12 +41,12 @@ public final class MaterializationSink implements Consumer<OOCStream.QueueCallba
 	private final OOCFuture<Void> _completion;
 	private final AtomicBoolean _done;
 
-	public MaterializationSink(MaterializedStore<IndexedMatrixValue> store,
+	public OOCStreamMaterializer(MaterializedStore<IndexedMatrixValue> store,
 		ToIntFunction<MatrixIndexes> linearize, MemoryAllowance allowance) {
 		this(store, linearize, allowance, List.of());
 	}
 
-	public MaterializationSink(MaterializedStore<IndexedMatrixValue> store,
+	public OOCStreamMaterializer(MaterializedStore<IndexedMatrixValue> store,
 		ToIntFunction<MatrixIndexes> linearize, MemoryAllowance allowance,
 		List<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> liveConsumers) {
 		_store = store;
@@ -79,10 +61,6 @@ public final class MaterializationSink implements Consumer<OOCStream.QueueCallba
 		source.setSubscriber(this);
 	}
 
-	/**
-	 * Completes with null after EOS completed the store, or exceptionally on a source failure or
-	 * publication error (the store is then left incomplete).
-	 */
 	public OOCFuture<Void> completion() {
 		return _completion;
 	}
@@ -128,7 +106,8 @@ public final class MaterializationSink implements Consumer<OOCStream.QueueCallba
 				managed.close();
 			}
 			else {
-				long bytes = measure(value);
+				// To handle not-yet managed callbacks
+				long bytes = serializedSize(value);
 				_allowance.reserveBlocking(bytes);
 				try {
 					_store.publishPinned(index, value, bytes, _allowance);
@@ -142,13 +121,14 @@ public final class MaterializationSink implements Consumer<OOCStream.QueueCallba
 			return;
 		}
 
-		MaterializedStore.LiveLease<IndexedMatrixValue> lease;
+		StoreLiveLease<IndexedMatrixValue> lease;
 		if(callback instanceof InMemoryQueueCallback managed && managed.getManagedBytes() > 0) {
 			lease = _store.publishPinnedLive(index, managed.extractManagedPayload());
 			managed.close();
 		}
 		else {
-			long bytes = measure(value);
+			// To handle not-yet managed callbacks
+			long bytes = serializedSize(value);
 			_allowance.reserveBlocking(bytes);
 			try {
 				lease = _store.publishPinnedLive(index, value, bytes, _allowance);
@@ -160,9 +140,9 @@ public final class MaterializationSink implements Consumer<OOCStream.QueueCallba
 			callback.close();
 		}
 		try {
-			for(int i = 0; i < _liveConsumers.size(); i++) {
-				try(OOCStream.QueueCallback<IndexedMatrixValue> alias = new PinnedLeaseCallback(lease.retain())) {
-					_liveConsumers.get(i).accept(alias);
+			for(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> liveConsumer : _liveConsumers) {
+				try(OOCStream.QueueCallback<IndexedMatrixValue> alias = new MaterializedCallback(lease.retain())) {
+					liveConsumer.accept(alias);
 				}
 			}
 		}
@@ -194,82 +174,16 @@ public final class MaterializationSink implements Consumer<OOCStream.QueueCallba
 	}
 
 	private void deliverEos(DMLRuntimeException failure) {
-		for(int i = 0; i < _liveConsumers.size(); i++) {
+		for(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> liveConsumer : _liveConsumers) {
 			try {
-				_liveConsumers.get(i).accept(OOCStream.eos(failure));
+				liveConsumer.accept(OOCStream.eos(failure));
 			}
 			catch(RuntimeException ignored) {
-				//EOS delivery must reach every consumer
 			}
 		}
 	}
 
-	private static long measure(IndexedMatrixValue value) {
+	private static long serializedSize(IndexedMatrixValue value) {
 		return ((MatrixBlock)value.getValue()).getExactSerializedSize();
-	}
-
-	/**
-	 * Lease-backed callback for production-time fan-out. {@code get()} reads the published value,
-	 * {@code keepOpen()} retains the shared live lease, and the last close across all aliases unpins
-	 * the canonical entry. The deliverer closes the delivered alias after the consumer returns, so
-	 * consumers retain tiles by calling {@code keepOpen()} — the standard subscriber contract.
-	 */
-	public static final class PinnedLeaseCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
-		private final MaterializedStore.LiveLease<IndexedMatrixValue> _lease;
-		private DMLRuntimeException _failure;
-		private boolean _closed;
-
-		public PinnedLeaseCallback(MaterializedStore.LiveLease<IndexedMatrixValue> lease) {
-			_lease = lease;
-		}
-
-		/**
-		 * The still-pinned canonical cache entry, for parking logical references while live.
-		 */
-		public BlockEntry pinnedEntry() {
-			return _lease.entry();
-		}
-
-		@Override
-		public IndexedMatrixValue get() {
-			if(_failure != null)
-				throw _failure;
-			return _lease.value();
-		}
-
-		@Override
-		public synchronized OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
-			if(_closed)
-				throw new IllegalStateException("Cannot keep open a closed callback");
-			return new PinnedLeaseCallback(_lease.retain());
-		}
-
-		@Override
-		public synchronized void close() {
-			if(_closed)
-				return;
-			_closed = true;
-			_lease.close();
-		}
-
-		@Override
-		public void fail(DMLRuntimeException failure) {
-			_failure = failure;
-		}
-
-		@Override
-		public boolean isEos() {
-			return false;
-		}
-
-		@Override
-		public boolean isFailure() {
-			return _failure != null;
-		}
-
-		@Override
-		public synchronized BlockKey getBlockKey() {
-			return _closed ? null : _lease.entry().getKey();
-		}
 	}
 }

@@ -36,8 +36,8 @@ import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
-import org.apache.sysds.runtime.ooc.store.MaterializationSink;
-import org.apache.sysds.runtime.ooc.store.MaterializedStoreImpl;
+import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
+import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 import org.apache.sysds.runtime.ooc.store.TableRendezvous;
 import org.junit.Assert;
@@ -106,7 +106,7 @@ public class TableRendezvousTest {
 		SyncMemoryAllowance sinkAllowance = allowance(broker);
 		SyncMemoryAllowance region = allowance(broker);
 		OOCCache cache = new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30);
-		MaterializedStoreImpl<IndexedMatrixValue> store = new MaterializedStoreImpl<>(cache, 11);
+		MaterializedStore<IndexedMatrixValue> store = new MaterializedStore<>(cache, 11);
 		OperatorStateTable<IndexedMatrixValue> table = new OperatorStateTable<>(cache, 12, region);
 		long bytes = tileBytes();
 		int tiles = 2;
@@ -114,7 +114,7 @@ public class TableRendezvousTest {
 			//live fan-out consumer routes every pinned alias into the rendezvous (boundary side)
 			List<OOCFuture<TableRendezvous.Match>> installs = new ArrayList<>();
 			SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
-			MaterializationSink sink = new MaterializationSink(store,
+			OOCStreamMaterializer sink = new OOCStreamMaterializer(store,
 				ix -> (int) ix.getRowIndex() - 1, sinkAllowance, List.of(cb -> {
 					if(cb.isEos() || cb.isFailure())
 						return;

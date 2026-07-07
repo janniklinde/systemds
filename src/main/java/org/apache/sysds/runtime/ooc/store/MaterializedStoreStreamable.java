@@ -74,7 +74,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		_source = source;
 		_data = data;
 		_dataCharacteristics = data == null ? source.getDataCharacteristics() : data.getDataCharacteristics();
-		_store = new MaterializedStoreImpl<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
+		_store = new MaterializedStore<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
 		_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), 200_000_000,
 			estimateDenseTileBytes(_dataCharacteristics));
 		((SyncMemoryAllowance) _allowance).registerDebugOwner("MaterializedStoreStreamable@"
@@ -168,7 +168,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			readers = List.copyOf(_liveReaders);
 		}
 		IndexedMatrixValue value = callback.get();
-		MaterializedStore.LiveLease<IndexedMatrixValue> lease;
+		StoreLiveLease<IndexedMatrixValue> lease;
 		long managedBytes = callback.getManagedBytes();
 		if(callback instanceof InMemoryQueueCallback managed && managedBytes > 0) {
 			if(OOCDebug.TRACE_HOT_PATH)

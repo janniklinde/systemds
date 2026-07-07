@@ -45,7 +45,7 @@ import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.store.LeaseQueueCallbacks;
-import org.apache.sysds.runtime.ooc.store.MaterializationSink;
+import org.apache.sysds.runtime.ooc.store.MaterializedCallback;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
 import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
@@ -469,7 +469,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	}
 
 	private void installRetainedCallback(int slot, OOCStream.QueueCallback<IndexedMatrixValue> callback) {
-		if(callback instanceof MaterializationSink.PinnedLeaseCallback pinned) {
+		if(callback instanceof MaterializedCallback pinned) {
 			try {
 				_table.installReference(slot, pinned.pinnedEntry());
 			}

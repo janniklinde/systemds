@@ -51,7 +51,7 @@ public final class TableRendezvous {
 
 	public static OOCFuture<Match> installOrTake(OperatorStateTable<IndexedMatrixValue> table, int slot,
 		OOCStream.QueueCallback<IndexedMatrixValue> tile, MemoryAllowance allowance, long fallbackBytes) {
-		if(tile instanceof MaterializationSink.PinnedLeaseCallback pinned)
+		if(tile instanceof MaterializedCallback pinned)
 			return installReferenceOrTake(table, slot, pinned);
 		ManagedPayload<IndexedMatrixValue> payload;
 		if(tile instanceof InMemoryQueueCallback managed && managed.getManagedBytes() > 0) {
@@ -88,7 +88,7 @@ public final class TableRendezvous {
 	 * as the own-side value).
 	 */
 	private static OOCFuture<Match> installReferenceOrTake(OperatorStateTable<IndexedMatrixValue> table,
-		int slot, MaterializationSink.PinnedLeaseCallback pinned) {
+		int slot, MaterializedCallback pinned) {
 		OOCFuture<Match> result = new OOCFuture<>();
 		table.installReferenceOrTake(slot, pinned.pinnedEntry()).whenComplete((lease, error) -> {
 			if(error != null) {

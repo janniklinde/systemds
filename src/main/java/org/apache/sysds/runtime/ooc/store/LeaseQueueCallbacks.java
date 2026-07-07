@@ -41,9 +41,8 @@ public final class LeaseQueueCallbacks {
 		return new StateLeaseBackedCallback(lease);
 	}
 
-	public static MaterializationSink.PinnedLeaseCallback pinned(
-		MaterializedStore.LiveLease<IndexedMatrixValue> lease) {
-		return new MaterializationSink.PinnedLeaseCallback(lease);
+	public static MaterializedCallback pinned(StoreLiveLease<IndexedMatrixValue> lease) {
+		return new MaterializedCallback(lease);
 	}
 
 	private static final class StoreLeaseBackedCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {

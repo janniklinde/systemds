@@ -120,6 +120,21 @@ public class OOCPlannerSeamTest {
 	}
 
 	@Test
+	public void testStreamStartSkipsAlreadyExecutingPrimitive() {
+		StartGuardPrimitive child = new StartGuardPrimitive();
+		StartGuardPrimitive parent = new StartGuardPrimitive(child);
+		SubscribableTaskQueue<IndexedMatrixValue> stream = new SubscribableTaskQueue<>();
+		stream.assignPrimitive(child);
+
+		child.tryStartExecution();
+		stream.start();
+
+		Assert.assertTrue(child.executed);
+		Assert.assertEquals("Starting a stream whose primitive is already executing must not re-enter planning.",
+			0, parent.inferCount);
+	}
+
+	@Test
 	public void testDistinctTablesGetDistinctStreamIds() throws Exception {
 		StubPrimitive first = new StubPrimitive(true, false);
 		StubPrimitive second = new StubPrimitive(true, false);
@@ -311,6 +326,41 @@ public class OOCPlannerSeamTest {
 		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_TIMEOUT_SEC);
 		while(!condition.getAsBoolean() && System.nanoTime() < deadline)
 			Thread.sleep(1);
+	}
+
+	private static final class StartGuardPrimitive extends OOCPrimitive {
+		private boolean executed;
+		private int inferCount;
+
+		private StartGuardPrimitive(OOCPrimitive... children) {
+			super(List.of(children));
+		}
+
+		@Override
+		public void startExecution() {
+			executed = true;
+		}
+
+		@Override
+		public List<OOCStreamable<?>> getInputStreams() {
+			return List.of();
+		}
+
+		@Override
+		public List<OOCStreamable<?>> getOutputStreams() {
+			return List.of();
+		}
+
+		@Override
+		public void inferPatterns() {
+			inferCount++;
+			_pattern = OOCAccessPattern.ANY;
+		}
+
+		@Override
+		public void requestPattern(OOCAccessPattern accessPattern) {
+			_pattern = accessPattern;
+		}
 	}
 
 	/**

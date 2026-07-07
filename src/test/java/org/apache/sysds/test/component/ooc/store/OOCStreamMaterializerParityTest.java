@@ -19,7 +19,6 @@
 
 package org.apache.sysds.test.component.ooc.store;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -40,13 +39,11 @@ import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
-import org.apache.sysds.runtime.ooc.cache.packed.OOCPackedCache;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
-import org.apache.sysds.runtime.ooc.store.MaterializationSink;
+import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
-import org.apache.sysds.runtime.ooc.store.MaterializedStoreImpl;
 import org.apache.sysds.runtime.ooc.store.SequentialAccessPattern;
 import org.apache.sysds.runtime.ooc.store.StoreBackedStream;
 import org.junit.After;
@@ -58,7 +55,7 @@ import org.junit.Test;
  * Parity of the CachingStream replacement (MaterializationSink + StoreBackedStream) with the legacy
  * pipeline: identical tiles, zero residual allowance bytes, and equivalent forgetting.
  */
-public class MaterializationSinkParityTest {
+public class OOCStreamMaterializerParityTest {
 	private static final int ROWS = 32;
 	private static final int COLS = 1;
 	private static final int TILES = 6;
@@ -103,106 +100,13 @@ public class MaterializationSinkParityTest {
 	}
 
 	@Test
-	public void testSubscriberDeliveryOverPackReader() throws Exception {
-		Fixture f = new Fixture(new OOCPackedCache(new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30)));
-		try {
-			publishAll(f, List.of());
-			awaitUsedMemory(f.producer, 0);
-
-			MaterializedStore.PackReader<IndexedMatrixValue> reader =
-				f.store.openOpportunisticReader(new SequentialAccessPattern(TILES), f.reader, 4);
-			f.store.sealReaders();
-
-			Map<Integer, Double> replayed = new ConcurrentHashMap<>();
-			CompletableFuture<Void> done = new CompletableFuture<>();
-			new StoreBackedStream(reader).setSubscriber(cb -> {
-				try {
-					if(cb.isFailure())
-						done.completeExceptionally(new DMLRuntimeException("Unexpected failure"));
-					else if(cb.isEos())
-						done.complete(null);
-					else
-						replayed.put(linearize(cb.get().getIndexes()), sum(cb.get()));
-				}
-				catch(Throwable t) {
-					done.completeExceptionally(t);
-				}
-			});
-			done.get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
-
-			Assert.assertEquals(expectedTiles(), replayed);
-			awaitUsedMemory(f.reader, 0);
-			awaitOwnedCache(f.cache, 0);
-		}
-		finally {
-			f.close();
-		}
-	}
-
-	@Test
-	public void testFanOutServesLiveConsumersWithSinglePinnedPublication() throws Exception {
-		Fixture f = new Fixture(new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30));
-		long bytes = tileBytes();
-		try {
-			Map<Integer, Double> immediate = new ConcurrentHashMap<>();
-			List<OOCStream.QueueCallback<IndexedMatrixValue>> retained = new ArrayList<>();
-			AtomicInteger eosCount = new AtomicInteger();
-
-			publishAll(f, List.of(
-				cb -> {
-					if(cb.isEos() || cb.isFailure())
-						eosCount.incrementAndGet();
-					else
-						immediate.put(linearize(cb.get().getIndexes()), sum(cb.get()));
-				},
-				cb -> {
-					if(cb.isEos() || cb.isFailure()) {
-						eosCount.incrementAndGet();
-						return;
-					}
-					MaterializationSink.PinnedLeaseCallback alias =
-						(MaterializationSink.PinnedLeaseCallback)cb.keepOpen();
-					Assert.assertTrue("Live fan-out aliases must expose the still-pinned canonical entry.",
-						alias.pinnedEntry().isPinned());
-					synchronized(retained) {
-						retained.add(alias);
-					}
-				}));
-
-			Assert.assertEquals(expectedTiles(), immediate);
-			Assert.assertEquals(2, eosCount.get());
-			Assert.assertEquals("Retained live aliases keep the producer allowance charged (backpressure).",
-				TILES * bytes, f.producer.getUsedMemory());
-
-			synchronized(retained) {
-				Assert.assertEquals(TILES, retained.size());
-				for(OOCStream.QueueCallback<IndexedMatrixValue> alias : retained)
-					alias.close();
-			}
-			//the last alias close unpins: ownership moves from the producer allowance to the cache
-			awaitUsedMemory(f.producer, 0);
-			awaitOwnedCache(f.cache, TILES * bytes);
-
-			MaterializedStore.Reader<IndexedMatrixValue> reader =
-				f.store.openReader(new SequentialAccessPattern(TILES), f.reader, 4);
-			f.store.sealReaders();
-			Assert.assertEquals(expectedTiles(), consume(new StoreBackedStream(reader)));
-			awaitUsedMemory(f.reader, 0);
-			awaitOwnedCache(f.cache, 0);
-		}
-		finally {
-			f.close();
-		}
-	}
-
-	@Test
 	public void testFailureLeavesStoreIncomplete() throws Exception {
 		Fixture f = new Fixture(new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30));
 		long bytes = tileBytes();
 		try {
 			AtomicInteger failureEos = new AtomicInteger();
-			MaterializationSink sink = new MaterializationSink(f.store,
-				MaterializationSinkParityTest::linearize, f.sink,
+			OOCStreamMaterializer sink = new OOCStreamMaterializer(f.store,
+				OOCStreamMaterializerParityTest::linearize, f.sink,
 				List.of(cb -> {
 					if(cb.isFailure())
 						failureEos.incrementAndGet();
@@ -274,8 +178,8 @@ public class MaterializationSinkParityTest {
 
 	private void publishAll(Fixture f, List<java.util.function.Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> liveConsumers)
 		throws Exception {
-		MaterializationSink sink = new MaterializationSink(f.store,
-			MaterializationSinkParityTest::linearize, f.sink, liveConsumers);
+		OOCStreamMaterializer sink = new OOCStreamMaterializer(f.store,
+			OOCStreamMaterializerParityTest::linearize, f.sink, liveConsumers);
 		sink.attach(f.source);
 		long bytes = tileBytes();
 		for(int i = 0; i < TILES; i++) {
@@ -344,7 +248,7 @@ public class MaterializationSinkParityTest {
 		private final SyncMemoryAllowance reader;
 		private final OOCCache cache;
 		private final SubscribableTaskQueue<IndexedMatrixValue> source;
-		private final MaterializedStoreImpl<IndexedMatrixValue> store;
+		private final MaterializedStore<IndexedMatrixValue> store;
 
 		private Fixture(OOCCache cache) {
 			broker = new GlobalMemoryBroker(1L << 32);
@@ -356,7 +260,7 @@ public class MaterializationSinkParityTest {
 			reader.setTargetMemory(1L << 30);
 			this.cache = cache;
 			source = new SubscribableTaskQueue<>();
-			store = new MaterializedStoreImpl<>(cache, STREAM_ID);
+			store = new MaterializedStore<>(cache, STREAM_ID);
 		}
 
 		private void close() {

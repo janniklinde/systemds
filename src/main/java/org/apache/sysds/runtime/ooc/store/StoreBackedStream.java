@@ -21,7 +21,6 @@ package org.apache.sysds.runtime.ooc.store;
 
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
@@ -38,7 +37,7 @@ import org.apache.sysds.runtime.util.IndexRange;
 /**
  * Read-only {@code OOCStream} compatibility view over a completed {@link MaterializedStore}: the
  * offline replay half of the {@code CachingStream} replacement. Wraps an ordered
- * {@link MaterializedStore.Reader} (or an opportunistic {@link MaterializedStore.PackReader}, whose
+ * {@link MaterializedStore.Reader}, whose
  * packs are flattened into per-tile callbacks) and adapts leases to queue callbacks: {@code get()}
  * reads the leased value, {@code keepOpen()} retains the lease, {@code close()} closes it. EOS is
  * delivered after exhaustion; a failure closes the reader before it propagates.
@@ -58,11 +57,6 @@ public final class StoreBackedStream implements OOCStream<IndexedMatrixValue> {
 
 	public StoreBackedStream(MaterializedStore.Reader<IndexedMatrixValue> reader) {
 		_source = new OrderedTileSource(reader);
-		_subscriberSet = new AtomicBoolean(false);
-	}
-
-	public StoreBackedStream(MaterializedStore.PackReader<IndexedMatrixValue> reader) {
-		_source = new PackTileSource(reader);
 		_subscriberSet = new AtomicBoolean(false);
 	}
 
@@ -294,66 +288,6 @@ public final class StoreBackedStream implements OOCStream<IndexedMatrixValue> {
 		}
 	}
 
-	private static final class PackTileSource implements TileSource {
-		private final MaterializedStore.PackReader<IndexedMatrixValue> reader;
-		private SharedPack shared;
-		private int slot;
-
-		private PackTileSource(MaterializedStore.PackReader<IndexedMatrixValue> reader) {
-			this.reader = reader;
-		}
-
-		@Override
-		public QueueCallback<IndexedMatrixValue> nextCallback() throws InterruptedException {
-			while(shared == null || slot >= shared.pack.size()) {
-				if(shared != null) {
-					shared.release();
-					shared = null;
-				}
-				if(!reader.hasNext())
-					return null;
-				shared = new SharedPack(reader.nextPack());
-				slot = 0;
-			}
-			shared.retain();
-			return new PackSlotCallback(shared, slot++);
-		}
-
-		@Override
-		public void close() {
-			if(shared != null) {
-				shared.release();
-				shared = null;
-			}
-			reader.close();
-		}
-	}
-
-	/**
-	 * Keeps a physical pack lease open until the source stopped iterating it AND every flattened
-	 * per-slot callback (including keepOpen aliases) closed. Consumption is recorded at pack
-	 * granularity when the pack lease finally closes.
-	 */
-	private static final class SharedPack {
-		private final MaterializedStore.PackLease<IndexedMatrixValue> pack;
-		private final AtomicInteger references;
-
-		private SharedPack(MaterializedStore.PackLease<IndexedMatrixValue> pack) {
-			this.pack = pack;
-			references = new AtomicInteger(1);
-		}
-
-		private void retain() {
-			if(references.getAndIncrement() <= 0)
-				throw new IllegalStateException("Pack lease is already fully closed");
-		}
-
-		private void release() {
-			if(references.decrementAndGet() == 0)
-				pack.close();
-		}
-	}
-
 	/**
 	 * Queue-callback view of a store lease: {@code get()} reads the leased value, {@code keepOpen()}
 	 * retains the lease, {@code close()} closes it (consumption + forgetting are driven by the lease).
@@ -405,53 +339,4 @@ public final class StoreBackedStream implements OOCStream<IndexedMatrixValue> {
 		}
 	}
 
-	private static final class PackSlotCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
-		private final SharedPack _shared;
-		private final int _slot;
-		private DMLRuntimeException _failure;
-		private boolean _closed;
-
-		private PackSlotCallback(SharedPack shared, int slot) {
-			_shared = shared;
-			_slot = slot;
-		}
-
-		@Override
-		public IndexedMatrixValue get() {
-			if(_failure != null)
-				throw _failure;
-			return _shared.pack.value(_slot);
-		}
-
-		@Override
-		public synchronized QueueCallback<IndexedMatrixValue> keepOpen() {
-			if(_closed)
-				throw new IllegalStateException("Cannot keep open a closed callback");
-			_shared.retain();
-			return new PackSlotCallback(_shared, _slot);
-		}
-
-		@Override
-		public synchronized void close() {
-			if(_closed)
-				return;
-			_closed = true;
-			_shared.release();
-		}
-
-		@Override
-		public void fail(DMLRuntimeException failure) {
-			_failure = failure;
-		}
-
-		@Override
-		public boolean isEos() {
-			return false;
-		}
-
-		@Override
-		public boolean isFailure() {
-			return _failure != null;
-		}
-	}
 }

@@ -32,9 +32,8 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
-import org.apache.sysds.runtime.ooc.store.MaterializationSink;
+import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
-import org.apache.sysds.runtime.ooc.store.MaterializedStoreImpl;
 import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
 
 /**
@@ -57,7 +56,7 @@ public final class OOCStoreBinding implements OOCMaterializedView {
 	private final long _streamId;
 	private final OOCStoreLayout<MatrixIndexes> _layout;
 	private final MaterializedStore<IndexedMatrixValue> _store;
-	private final MaterializationSink _sink;
+	private final OOCStreamMaterializer _sink;
 	private final AtomicBoolean _attached;
 	private final OOCFuture<Void> _readersSealed;
 	private int _pendingReaders;
@@ -96,8 +95,8 @@ public final class OOCStoreBinding implements OOCMaterializedView {
 		_cache = cache;
 		_streamId = streamId;
 		_layout = layout;
-		_store = new MaterializedStoreImpl<>(cache, streamId);
-		_sink = new MaterializationSink(_store, layout, sinkAllowance, liveConsumers);
+		_store = new MaterializedStore<>(cache, streamId);
+		_sink = new OOCStreamMaterializer(_store, layout, sinkAllowance, liveConsumers);
 		_attached = new AtomicBoolean(false);
 		_readersSealed = new OOCFuture<>();
 		_pendingReaders = expectedReaders;
@@ -164,14 +163,6 @@ public final class OOCStoreBinding implements OOCMaterializedView {
 	public MaterializedStore.Reader<IndexedMatrixValue> openReader(MaterializedStore.AccessPattern pattern,
 		MemoryAllowance allowance, int maxPrefetch) {
 		MaterializedStore.Reader<IndexedMatrixValue> reader = _store.openReader(pattern, allowance, maxPrefetch);
-		sealIfLastRegistration();
-		return reader;
-	}
-
-	public MaterializedStore.PackReader<IndexedMatrixValue> openOpportunisticReader(
-		MaterializedStore.AccessPattern pattern, MemoryAllowance allowance, int maxPrefetch) {
-		MaterializedStore.PackReader<IndexedMatrixValue> reader =
-			_store.openOpportunisticReader(pattern, allowance, maxPrefetch);
 		sealIfLastRegistration();
 		return reader;
 	}
