@@ -25,11 +25,11 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 
 public final class MaterializedCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
-	private final StoreLiveLease<IndexedMatrixValue> _lease;
+	private final StoreLease<IndexedMatrixValue> _lease;
 	private DMLRuntimeException _failure;
 	private boolean _closed;
 
-	public MaterializedCallback(StoreLiveLease<IndexedMatrixValue> lease) {
+	public MaterializedCallback(StoreLease<IndexedMatrixValue> lease) {
 		_lease = lease;
 	}
 

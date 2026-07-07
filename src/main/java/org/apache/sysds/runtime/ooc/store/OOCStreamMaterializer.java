@@ -121,7 +121,7 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 			return;
 		}
 
-		StoreLiveLease<IndexedMatrixValue> lease;
+		StoreLease<IndexedMatrixValue> lease;
 		if(callback instanceof InMemoryQueueCallback managed && managed.getManagedBytes() > 0) {
 			lease = _store.publishPinnedLive(index, managed.extractManagedPayload());
 			managed.close();

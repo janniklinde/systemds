@@ -168,7 +168,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			readers = List.copyOf(_liveReaders);
 		}
 		IndexedMatrixValue value = callback.get();
-		StoreLiveLease<IndexedMatrixValue> lease;
+		StoreLease<IndexedMatrixValue> lease;
 		long managedBytes = callback.getManagedBytes();
 		if(callback instanceof InMemoryQueueCallback managed && managedBytes > 0) {
 			if(OOCDebug.TRACE_HOT_PATH)

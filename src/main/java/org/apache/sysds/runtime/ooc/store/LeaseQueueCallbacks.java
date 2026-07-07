@@ -41,7 +41,7 @@ public final class LeaseQueueCallbacks {
 		return new StateLeaseBackedCallback(lease);
 	}
 
-	public static MaterializedCallback pinned(StoreLiveLease<IndexedMatrixValue> lease) {
+	public static MaterializedCallback pinned(StoreLease<IndexedMatrixValue> lease) {
 		return new MaterializedCallback(lease);
 	}
 
