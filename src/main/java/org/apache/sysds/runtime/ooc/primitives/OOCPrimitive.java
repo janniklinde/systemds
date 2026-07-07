@@ -30,7 +30,6 @@ import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
 import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
 import org.apache.sysds.runtime.ooc.planning.OOCRegionBinding;
-import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -148,22 +147,6 @@ public abstract class OOCPrimitive {
 	}
 
 	public void bindCache(CachedAllowance cache) {
-		throw new UnsupportedOperationException();
-	}
-
-	/**
-	 * Capability seam of the new architecture: a migrated primitive requests an
-	 * {@link OperatorStateTable} (rendezvous, accumulators, retention slots over the global cache)
-	 * instead of a {@link CachedAllowance}. Takes precedence over {@link #requiresCache()} so a
-	 * primitive can keep both paths selectable during migration. The planner supplies a table over
-	 * the global cache with the region allowance and a fresh stream id, so eviction sees the table
-	 * as one population. The primitive owns the table lifecycle and closes it in {@code onComplete}.
-	 */
-	public boolean requiresStateTable() {
-		return false;
-	}
-
-	public void bindStateTable(OperatorStateTable<IndexedMatrixValue> table) {
 		throw new UnsupportedOperationException();
 	}
 

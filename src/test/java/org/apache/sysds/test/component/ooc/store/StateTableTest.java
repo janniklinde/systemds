@@ -36,11 +36,12 @@ import org.apache.sysds.runtime.ooc.cache.packed.OOCPackedCache;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
-import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
+import org.apache.sysds.runtime.ooc.store.StateTable;
+import org.apache.sysds.runtime.ooc.store.StateLease;
 import org.junit.Assert;
 import org.junit.Test;
 
-public class OperatorStateTableTest {
+public class StateTableTest {
 	private static final long BYTES = 1000;
 	private static final long STREAM_ID = 9;
 
@@ -53,14 +54,14 @@ public class OperatorStateTableTest {
 			Assert.assertEquals(0, f.producer.getUsedMemory());
 			Assert.assertEquals(BYTES, f.cache.getOwnedCacheSize());
 
-			OperatorStateTable.StateLease<IndexedMatrixValue> lease = f.table.take(5).get(10, TimeUnit.SECONDS);
+			StateLease<IndexedMatrixValue> lease = f.table.take(5, f.region).get(10, TimeUnit.SECONDS);
 			Assert.assertNotNull(lease);
 			Assert.assertEquals(7.0, ((MatrixBlock)lease.value().getValue()).get(0, 0), 0.0);
 			Assert.assertEquals(BYTES, f.region.getUsedMemory());
 			lease.close();
 			Assert.assertEquals(0, f.region.getUsedMemory());
 			//exactly-once consumption: the slot and the cache entry are gone
-			Assert.assertNull(f.table.take(5).get(10, TimeUnit.SECONDS));
+			Assert.assertNull(f.table.take(5, f.region).get(10, TimeUnit.SECONDS));
 			Assert.assertEquals(0, f.cache.getOwnedCacheSize());
 		}
 		finally {
@@ -82,7 +83,7 @@ public class OperatorStateTableTest {
 				//the rejected payload stays with the caller
 				second.release();
 			}
-			try(OperatorStateTable.StateLease<IndexedMatrixValue> lease = f.table.take(1).get(10, TimeUnit.SECONDS)) {
+			try(StateLease<IndexedMatrixValue> lease = f.table.take(1, f.region).get(10, TimeUnit.SECONDS)) {
 				Assert.assertEquals(1.0, ((MatrixBlock)lease.value().getValue()).get(0, 0), 0.0);
 			}
 		}
@@ -99,7 +100,7 @@ public class OperatorStateTableTest {
 			Assert.assertEquals(BYTES, f.cache.getOwnedCacheSize());
 			f.table.clear(2);
 			Assert.assertEquals(0, f.cache.getOwnedCacheSize());
-			Assert.assertNull(f.table.take(2).get(10, TimeUnit.SECONDS));
+			Assert.assertNull(f.table.take(2, f.region).get(10, TimeUnit.SECONDS));
 		}
 		finally {
 			f.close();
@@ -111,16 +112,16 @@ public class OperatorStateTableTest {
 		Fixture f = new Fixture();
 		try {
 			f.table.install(3, f.payload(4.0));
-			try(OperatorStateTable.StateLease<IndexedMatrixValue> peeked = f.table.peek(3)) {
+			try(StateLease<IndexedMatrixValue> peeked = f.table.peek(3, f.region)) {
 				Assert.assertNotNull(peeked);
 				Assert.assertEquals(4.0, ((MatrixBlock)peeked.value().getValue()).get(0, 0), 0.0);
 				Assert.assertEquals(BYTES, f.region.getUsedMemory());
 			}
 			Assert.assertEquals(0, f.region.getUsedMemory());
-			try(OperatorStateTable.StateLease<IndexedMatrixValue> lease = f.table.take(3).get(10, TimeUnit.SECONDS)) {
+			try(StateLease<IndexedMatrixValue> lease = f.table.take(3, f.region).get(10, TimeUnit.SECONDS)) {
 				Assert.assertNotNull(lease);
 			}
-			Assert.assertNull(f.table.peek(3));
+			Assert.assertNull(f.table.peek(3, f.region));
 		}
 		finally {
 			f.close();
@@ -160,7 +161,7 @@ public class OperatorStateTableTest {
 			for(Future<?> task : tasks)
 				task.get(60, TimeUnit.SECONDS);
 
-			try(OperatorStateTable.StateLease<IndexedMatrixValue> lease = f.table.take(0).get(10, TimeUnit.SECONDS)) {
+			try(StateLease<IndexedMatrixValue> lease = f.table.take(0, f.region).get(10, TimeUnit.SECONDS)) {
 				Assert.assertNotNull(lease);
 				Assert.assertEquals(threads * valuesPerThread,
 					((MatrixBlock)lease.value().getValue()).get(0, 0), 0.0);
@@ -189,8 +190,8 @@ public class OperatorStateTableTest {
 			f.cache.dereference(key);
 			f.cache.updateLimits(1L << 30, 0);
 			awaitOwnedCache(f.cache, 0);
-			try(OperatorStateTable.StateLease<IndexedMatrixValue> lease =
-				f.table.take(4).get(10, TimeUnit.SECONDS)) {
+			try(StateLease<IndexedMatrixValue> lease =
+				f.table.take(4, f.region).get(10, TimeUnit.SECONDS)) {
 				Assert.assertNotNull(lease);
 				Assert.assertEquals(7.0, scalar(lease.value()), 0.0);
 			}
@@ -209,13 +210,13 @@ public class OperatorStateTableTest {
 		try {
 			f.producer.reserveBlocking(2 * BYTES);
 			BlockEntry first = f.cache.putPinned(firstKey, value(3.0), BYTES, f.producer);
-			Assert.assertNull(f.table.installReferenceOrTake(6, first).get(10, TimeUnit.SECONDS));
+			Assert.assertNull(f.table.installReferenceOrTake(6, first, f.region).get(10, TimeUnit.SECONDS));
 			await(f.cache.unpin(first, f.producer));
 			f.cache.dereference(firstKey);
 
 			BlockEntry second = f.cache.putPinned(secondKey, value(5.0), BYTES, f.producer);
-			try(OperatorStateTable.StateLease<IndexedMatrixValue> existing =
-				f.table.installReferenceOrTake(6, second).get(10, TimeUnit.SECONDS)) {
+			try(StateLease<IndexedMatrixValue> existing =
+				f.table.installReferenceOrTake(6, second, f.region).get(10, TimeUnit.SECONDS)) {
 				Assert.assertNotNull(existing);
 				Assert.assertEquals(3.0, scalar(existing.value()), 0.0);
 				Assert.assertTrue("The unmatched incoming entry must remain with the caller.", second.isPinned());
@@ -241,8 +242,8 @@ public class OperatorStateTableTest {
 		OOCPackedCache cache = new OOCPackedCache(
 			new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30),
 			2 * BYTES, 2 * BYTES, 0, 0);
-		OperatorStateTable<IndexedMatrixValue> table =
-			new OperatorStateTable<>(cache, STREAM_ID, region);
+		StateTable<IndexedMatrixValue> table =
+			new StateTable<>(cache, STREAM_ID);
 		BlockKey firstKey = new BlockKey(21, 0);
 		BlockKey secondKey = new BlockKey(21, 1);
 		try {
@@ -266,12 +267,12 @@ public class OperatorStateTableTest {
 			cache.updateLimits(1L << 30, 0);
 			awaitOwnedCache(cache, 0);
 
-			OperatorStateTable.StateLease<IndexedMatrixValue> firstLease =
-				table.take(5).get(10, TimeUnit.SECONDS);
-			OperatorStateTable.StateLease<IndexedMatrixValue> secondLease =
-				table.take(9).get(10, TimeUnit.SECONDS);
-			OperatorStateTable.StateLease<IndexedMatrixValue> duplicateFirstLease =
-				table.take(12).get(10, TimeUnit.SECONDS);
+			StateLease<IndexedMatrixValue> firstLease =
+				table.take(5, region).get(10, TimeUnit.SECONDS);
+			StateLease<IndexedMatrixValue> secondLease =
+				table.take(9, region).get(10, TimeUnit.SECONDS);
+			StateLease<IndexedMatrixValue> duplicateFirstLease =
+				table.take(12, region).get(10, TimeUnit.SECONDS);
 			Assert.assertNotNull(firstLease);
 			Assert.assertNotNull(secondLease);
 			Assert.assertNotNull(duplicateFirstLease);
@@ -309,13 +310,13 @@ public class OperatorStateTableTest {
 				//expected
 			}
 			try {
-				f.table.installReferenceOrTake(7, source);
+				f.table.installReferenceOrTake(7, source, f.region);
 				Assert.fail("installReferenceOrTake must reject an unpinned entry");
 			}
 			catch(IllegalArgumentException expected) {
 				//expected
 			}
-			Assert.assertNull(f.table.take(7).get(10, TimeUnit.SECONDS));
+			Assert.assertNull(f.table.take(7, f.region).get(10, TimeUnit.SECONDS));
 			f.cache.dereference(key);
 		}
 		finally {
@@ -334,8 +335,8 @@ public class OperatorStateTableTest {
 		OOCPackedCache cache = new OOCPackedCache(
 			new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30),
 			2 * BYTES, 100 * BYTES, -1, 0);
-		OperatorStateTable<IndexedMatrixValue> table =
-			new OperatorStateTable<>(cache, STREAM_ID, region);
+		StateTable<IndexedMatrixValue> table =
+			new StateTable<>(cache, STREAM_ID);
 		try {
 			//producer unpins of pending tiles stay deferred until the pack seals and transfers
 			OOCCache.UnpinHandle[] unpins = new OOCCache.UnpinHandle[3];
@@ -355,8 +356,8 @@ public class OperatorStateTableTest {
 			Assert.assertEquals("Pipelined parked tiles must share one pack.", 1, cache.getPackGroupCount());
 
 			for(int i = 0; i < 3; i++) {
-				try(OperatorStateTable.StateLease<IndexedMatrixValue> lease =
-					table.take(i).get(10, TimeUnit.SECONDS)) {
+				try(StateLease<IndexedMatrixValue> lease =
+					table.take(i, region).get(10, TimeUnit.SECONDS)) {
 					Assert.assertNotNull(lease);
 					Assert.assertEquals(i + 1.0, scalar(lease.value()), 0.0);
 				}
@@ -380,8 +381,8 @@ public class OperatorStateTableTest {
 		ManagedPayload<IndexedMatrixValue> candidate = f.payload(value);
 		try {
 			while(true) {
-				OperatorStateTable.StateLease<IndexedMatrixValue> existing =
-					f.table.installOrTake(0, candidate).get(10, TimeUnit.SECONDS);
+				StateLease<IndexedMatrixValue> existing =
+					f.table.installOrTake(0, candidate, f.region).get(10, TimeUnit.SECONDS);
 				if(existing == null)
 					return; //installed
 				double merged;
@@ -431,7 +432,7 @@ public class OperatorStateTableTest {
 		private final SyncMemoryAllowance producer;
 		private final SyncMemoryAllowance region;
 		private final OOCCacheImpl cache;
-		private final OperatorStateTable<IndexedMatrixValue> table;
+		private final StateTable<IndexedMatrixValue> table;
 
 		private Fixture() {
 			broker = new GlobalMemoryBroker(1L << 32);
@@ -440,7 +441,7 @@ public class OperatorStateTableTest {
 			region = new SyncMemoryAllowance(broker);
 			region.setTargetMemory(1L << 30);
 			cache = new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30);
-			table = new OperatorStateTable<>(cache, STREAM_ID, region);
+			table = new StateTable<>(cache, STREAM_ID);
 		}
 
 		private ManagedPayload<IndexedMatrixValue> payload(double scalar) {

@@ -24,6 +24,7 @@ import org.apache.sysds.lops.MapMultChain.ChainType;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.data.DenseBlock;
 import org.apache.sysds.runtime.data.SparseBlock;
+import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.ooc.PlaybackStream;
@@ -38,6 +39,7 @@ import org.apache.sysds.runtime.functionobjects.Multiply;
 import org.apache.sysds.runtime.functionobjects.Plus;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.io.CloseableQueue;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
@@ -45,11 +47,12 @@ import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.store.LeaseQueueCallbacks;
+import org.apache.sysds.runtime.ooc.store.StateTable;
 import org.apache.sysds.runtime.ooc.store.MaterializedCallback;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
 import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
-import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
+import org.apache.sysds.runtime.ooc.store.StateLease;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -68,7 +71,8 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	private final StreamContext _sc;
 	private final AtomicBoolean _terminated = new AtomicBoolean(false);
 	private final AtomicBoolean _storeReleased = new AtomicBoolean(false);
-	private OperatorStateTable<IndexedMatrixValue> _table;
+	private StateTable<IndexedMatrixValue> _accumulators;
+	private StateTable<IndexedMatrixValue> _retainedTiles;
 	private OOCMaterializedView _vView;
 	private volatile MaterializedStore.IndexedReader<IndexedMatrixValue> _vReader;
 
@@ -135,16 +139,6 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	}
 
 	@Override
-	public boolean requiresStateTable() {
-		return true;
-	}
-
-	@Override
-	public void bindStateTable(OperatorStateTable<IndexedMatrixValue> table) {
-		_table = table;
-	}
-
-	@Override
 	public OOCMaterializedInputRequest requiresMaterializedInput() {
 		return new OOCMaterializedInputRequest(1,
 			OOCStoreLayout.of(ix -> Math.toIntExact(ix.getRowIndex() - 1),
@@ -155,9 +149,11 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	@Override
 	public void onComplete() {
 		try {
-			releaseStore();
-			if(_table != null)
-				_table.close();
+				releaseStore();
+				if(_accumulators != null)
+					_accumulators.close();
+				if(_retainedTiles != null)
+					_retainedTiles.close();
 		}
 		finally {
 			super.onComplete();
@@ -202,8 +198,10 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	public void startExecution() {
 		if(_type != ChainType.XtXv || getWStreamable() != null)
 			throw new UnsupportedOperationException("MapMMChainOOCPrimitive currently only supports XtXv.");
-		if(_table == null)
-			throw new IllegalStateException("MapMMChain requires a bound OperatorStateTable.");
+		_accumulators = new StateTable<>(OOCCacheManager.getGlobalCache(),
+			CachingStream._streamSeq.getNextID());
+		_retainedTiles = new StateTable<>(OOCCacheManager.getGlobalCache(),
+			CachingStream._streamSeq.getNextID());
 
 		_vView = getVStreamable().materializedView();
 		final OOCStream<IndexedMatrixValue> x = getXStreamable().getReadStream();
@@ -440,9 +438,9 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	private void accumulateTable(int slot, MatrixIndexes index, MatrixBlock block, BinaryOperator plus) {
 		ManagedPayload<IndexedMatrixValue> payload = payload(index, block);
 		while(true) {
-			OperatorStateTable.StateLease<IndexedMatrixValue> existing;
+			StateLease<IndexedMatrixValue> existing;
 			try {
-				existing = await(_table.installOrTake(slot, payload));
+				existing = await(_accumulators.installOrTake(slot, payload, _allowance));
 			}
 			catch(RuntimeException ex) {
 				payload.release();
@@ -471,7 +469,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 	private void installRetainedCallback(int slot, OOCStream.QueueCallback<IndexedMatrixValue> callback) {
 		if(callback instanceof MaterializedCallback pinned) {
 			try {
-				_table.installReference(slot, pinned.pinnedEntry());
+				_retainedTiles.installReference(slot, pinned.pinnedEntry());
 			}
 			finally {
 				pinned.close();
@@ -491,7 +489,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 			callback.close();
 		}
 		try {
-			_table.install(slot, payload);
+			_retainedTiles.install(slot, payload);
 		}
 		catch(RuntimeException ex) {
 			payload.release();
@@ -501,13 +499,13 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 
 	private void schedulePhase2Row(int row, int numColBlocks, int uBase, int xBase,
 		OOCStream<MMChainWorkload> phase2Stream) {
-		OperatorStateTable.StateLease<IndexedMatrixValue> uLease = await(_table.take(uBase + row));
+		StateLease<IndexedMatrixValue> uLease = await(_accumulators.take(uBase + row, _allowance));
 		if(uLease == null)
 			throw new IllegalStateException("Missing finalized XtXv row accumulator " + row);
-		try(OOCStream.QueueCallback<IndexedMatrixValue> uCb = LeaseQueueCallbacks.state(uLease)) {
-			for(int col = 0; col < numColBlocks; col++) {
-				OperatorStateTable.StateLease<IndexedMatrixValue> xLease =
-					await(_table.take(xBase + row * numColBlocks + col));
+			try(OOCStream.QueueCallback<IndexedMatrixValue> uCb = LeaseQueueCallbacks.state(uLease)) {
+				for(int col = 0; col < numColBlocks; col++) {
+					StateLease<IndexedMatrixValue> xLease =
+						await(_retainedTiles.take(xBase + row * numColBlocks + col, _allowance));
 				if(xLease == null)
 					throw new IllegalStateException("Missing retained XtXv input tile for row=" + row
 						+ ", col=" + col);
@@ -530,7 +528,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 
 	private void emitOutputs(OOCStream<IndexedMatrixValue> out, int numColBlocks, int qBase) {
 		for(int col = 0; col < numColBlocks; col++) {
-			OperatorStateTable.StateLease<IndexedMatrixValue> qLease = await(_table.take(qBase + col));
+			StateLease<IndexedMatrixValue> qLease = await(_accumulators.take(qBase + col, _allowance));
 			if(qLease == null)
 				continue;
 			try(qLease) {

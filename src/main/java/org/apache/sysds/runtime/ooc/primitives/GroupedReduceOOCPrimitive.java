@@ -20,20 +20,24 @@
 package org.apache.sysds.runtime.ooc.primitives;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
-import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
+import org.apache.sysds.runtime.ooc.store.StateTable;
+import org.apache.sysds.runtime.ooc.store.StateLease;
 import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
@@ -52,7 +56,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 	private final Function<MatrixBlock, MatrixBlock> _finalizeFn;
 	@SuppressWarnings("unused")
 	private final StreamContext _sc;
-	private OperatorStateTable<IndexedMatrixValue> _table;
+	private StateTable<IndexedMatrixValue> _table;
 
 	private GroupedReduceOOCPrimitive(OOCPrimitive inputPrimitive, OOCStreamable<IndexedMatrixValue> inputStreamable,
 		OOCStreamable<IndexedMatrixValue> outputStreamable, Grouping grouping, int accumulatorsPerGroup,
@@ -110,16 +114,6 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
-	public boolean requiresStateTable() {
-		return true;
-	}
-
-	@Override
-	public void bindStateTable(OperatorStateTable<IndexedMatrixValue> table) {
-		_table = table;
-	}
-
-	@Override
 	public void onComplete() {
 		try {
 			if(_table != null)
@@ -153,6 +147,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	public void startExecution() {
+		_table = new StateTable<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
 		final OOCStream<IndexedMatrixValue> in = new AllocatedOOCStream<>(_inputStreamable.getReadStream(), _allowance,
 			t -> _allocFn.applyAsLong(t.getIndexes()), true);
 		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
@@ -187,26 +182,15 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 				_partialFn.apply(input)), reservedBytes, _allowance);
 			pending.incrementAndGet();
 			try {
-				_table.merge(group, p, (l, r) -> new IndexedMatrixValue(l.getIndexes(),
-					_mergeFn.apply((MatrixBlock) l.getValue(), (MatrixBlock) r.getValue())))
-					.whenComplete((ignored, error) -> {
-						try {
-							if(error != null) {
-								fail.accept(error);
-								return;
-							}
-							if(consumedPerGroup.incrementAndGet(group) == groupSize)
-								finalizeGroup(group, out, pending, releasePending, fail);
-						}
-						finally {
-							releasePending.run();
-						}
-					});
+				accumulateGroup(group, p);
+				if(consumedPerGroup.incrementAndGet(group) == groupSize)
+					finalizeGroup(group, out, pending, releasePending, fail);
 			}
 			catch(Throwable t) {
-				p.release();
+				fail.accept(t);
+			}
+			finally {
 				releasePending.run();
-				throw t;
 			}
 		}, _sc).whenComplete((ignored, error) -> {
 			if(error != null)
@@ -219,7 +203,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		Runnable releasePending, Consumer<Throwable> fail) {
 		pending.incrementAndGet();
 		try {
-			_table.take(group).whenComplete((lease, error) -> {
+			_table.take(group, _allowance).whenComplete((lease, error) -> {
 				try {
 					if(error != null) {
 						fail.accept(error);
@@ -247,14 +231,56 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		}
 	}
 
+	private void accumulateGroup(int group, ManagedPayload<IndexedMatrixValue> payload)
+		throws InterruptedException {
+		while(true) {
+			StateLease<IndexedMatrixValue> existing;
+			try {
+				existing = await(_table.installOrTake(group, payload, _allowance));
+			}
+			catch(InterruptedException ex) {
+				payload.release();
+				throw ex;
+			}
+			catch(RuntimeException ex) {
+				payload.release();
+				throw ex;
+			}
+			if(existing == null)
+				return;
+			IndexedMatrixValue merged;
+			try(existing) {
+				merged = new IndexedMatrixValue(existing.value().getIndexes(),
+					_mergeFn.apply((MatrixBlock) existing.value().getValue(),
+						(MatrixBlock) payload.value().getValue()));
+			}
+			finally {
+				payload.release();
+			}
+			MatrixBlock block = (MatrixBlock) merged.getValue();
+			long bytes = block.getExactSerializedSize();
+			_allowance.reserveBlocking(bytes);
+			payload = new ManagedPayload<>(merged, bytes, _allowance);
+		}
+	}
+
+	private static <T> T await(org.apache.sysds.runtime.ooc.cache.OOCFuture<T> future)
+		throws InterruptedException {
+		try {
+			return future.get();
+		}
+		catch(ExecutionException ex) {
+			throw DMLRuntimeException.of(ex.getCause());
+		}
+	}
+
 	private static final class LeaseBackedOutputCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
 		private final SharedLease _shared;
 		private final IndexedMatrixValue _value;
 		private DMLRuntimeException _failure;
 		private boolean _closed;
 
-		private LeaseBackedOutputCallback(IndexedMatrixValue value,
-			OperatorStateTable.StateLease<IndexedMatrixValue> lease) {
+		private LeaseBackedOutputCallback(IndexedMatrixValue value, StateLease<IndexedMatrixValue> lease) {
 			_shared = new SharedLease(lease);
 			_value = value;
 		}
@@ -304,10 +330,10 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 	}
 
 	private static final class SharedLease {
-		private final OperatorStateTable.StateLease<IndexedMatrixValue> _lease;
+		private final StateLease<IndexedMatrixValue> _lease;
 		private final AtomicInteger _refs = new AtomicInteger(1);
 
-		private SharedLease(OperatorStateTable.StateLease<IndexedMatrixValue> lease) {
+		private SharedLease(StateLease<IndexedMatrixValue> lease) {
 			_lease = lease;
 		}
 

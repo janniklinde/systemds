@@ -160,7 +160,7 @@ public class OOCCacheManager {
 	/**
 	 * The global cache of the new OOC architecture ({@code OOCCache} pin/unpin/reference protocol over
 	 * logical-to-physical packing). Migrated structures ({@code MaterializedStore},
-	 * {@code OperatorStateTable}) share this one instance so eviction sees one population; the legacy
+	 * state tables) share this one instance so eviction sees one population; the legacy
 	 * {@link #getCache()} scheduler remains independent until the migration completes.
 	 */
 	public static OOCPackedCache getGlobalCache() {

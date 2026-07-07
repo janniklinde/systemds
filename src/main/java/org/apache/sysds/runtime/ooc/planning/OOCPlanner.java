@@ -19,19 +19,16 @@
 
 package org.apache.sysds.runtime.ooc.planning;
 
-import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
-import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
-import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -123,11 +120,9 @@ public class OOCPlanner {
 			boolean crossBoundaries = i == 0;
 			boolean startsRegion = i == activeRegion.size() - 1;
 			primitive.bindRegion(binding, crossBoundaries, startsRegion);
-			//migrated primitives get an OperatorStateTable over the global cache (one fresh stream id
-			//per table so eviction sees one population); unmigrated primitives keep CachedAllowance.
-			//A primitive may additionally declare an input that must be materialized. The registry
-			//hands out ONE binding per input; the planner attaches the source once after all regions
-			//are bound, and consumers only open readers on the binding they receive.
+				//A primitive may additionally declare an input that must be materialized. The registry
+				//hands out ONE binding per input; the planner attaches the source once after all regions
+				//are bound, and consumers only open readers on the binding they receive.
 			OOCMaterializedInputRequest inputRequest = primitive.requiresMaterializedInput();
 			if(inputRequest != null) {
 				OOCStreamable<IndexedMatrixValue> source =
@@ -137,11 +132,7 @@ public class OOCPlanner {
 					new MaterializedInputStreamable(source, store));
 				materializedInputs.add(store);
 			}
-			if(primitive.requiresStateTable()) {
-				primitive.bindStateTable(new OperatorStateTable<>(OOCCacheManager.getGlobalCache(),
-					CachingStream._streamSeq.getNextID(), allowance));
-			}
-			else if(primitive.requiresCache()) {
+				if(primitive.requiresCache()) {
 				CachedAllowance cache = new CachedAllowance(GlobalMemoryBroker.get());
 				cache.registerDebugOwner(primitive.getClass().getSimpleName() + "@"
 					+ System.identityHashCode(primitive) + "[legacy-cache]");

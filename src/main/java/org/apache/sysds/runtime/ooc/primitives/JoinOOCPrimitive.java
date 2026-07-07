@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.ooc.primitives;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
@@ -27,9 +28,10 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
-import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
+import org.apache.sysds.runtime.ooc.store.StateTable;
 import org.apache.sysds.runtime.ooc.store.TableRendezvous;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
@@ -45,7 +47,7 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _outputStreamable;
 	private final Function<List<MatrixBlock>, MatrixBlock> _fn;
 	private final StreamContext _sc;
-	private OperatorStateTable<IndexedMatrixValue> _table;
+	private StateTable<IndexedMatrixValue> _table;
 	private volatile long _policyRows;
 	private volatile long _policyCols;
 
@@ -87,11 +89,6 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
-	public boolean requiresStateTable() {
-		return true;
-	}
-
-	@Override
 	public long getDenseTileMemoryFactor() {
 		return 2;
 	}
@@ -99,12 +96,6 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	@Override
 	public long getMinimumOperatingMemoryFactor() {
 		return 3;
-	}
-
-	@Override
-	public void bindStateTable(OperatorStateTable<IndexedMatrixValue> table) {
-		_table = table;
-		_table.addEvictionPolicy(this::scoreTableSlot);
 	}
 
 	@Override
@@ -150,6 +141,8 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	public void startExecution() {
 		if(_inputStreamables.size() != 2)
 			throw new IllegalArgumentException();
+		_table = new StateTable<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
+		_table.addEvictionPolicy(this::scoreTableSlot);
 		OOCStreamable<IndexedMatrixValue> leftInput = _inputStreamables.get(0);
 		OOCStreamable<IndexedMatrixValue> rightInput = _inputStreamables.get(1);
 		_policyRows = OOCUtils.getNumRowBlocks(rightInput.getDataCharacteristics());

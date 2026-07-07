@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * A value together with the resident bytes still charged to its owning allowance. This is the only
  * ownership-transfer token between memory-managed callbacks and the cache-backed structures
- * ({@code MaterializedStore}, {@code OperatorStateTable}): the reservation has been detached from the
+ * ({@code MaterializedStore}, state tables): the reservation has been detached from the
  * callback lifecycle but not released, so it can be handed to {@code OOCCache.putPinned()} where the
  * pin/unpin protocol takes over.
  *

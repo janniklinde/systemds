@@ -52,7 +52,7 @@ import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
-import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
+import org.apache.sysds.runtime.ooc.store.StateTable;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
@@ -217,13 +217,13 @@ public class OOCEvictionPolicyTest {
 	}
 
 	@Test
-	public void testOperatorStateTableEvictsOwnedEntriesBySlotPolicy() throws Exception {
+	public void testStateTableEvictsOwnedEntriesBySlotPolicy() throws Exception {
 		RecordingIOHandler io = new RecordingIOHandler();
 		GlobalMemoryBroker broker = new GlobalMemoryBroker(64 * BYTES);
 		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker, 32 * BYTES);
 		SyncMemoryAllowance region = new SyncMemoryAllowance(broker, 32 * BYTES);
 		OOCCacheImpl cache = new OOCCacheImpl(io, 8 * BYTES, 8 * BYTES);
-		OperatorStateTable<IndexedMatrixValue> table = new OperatorStateTable<>(cache, STREAM_ID, region);
+		StateTable<IndexedMatrixValue> table = new StateTable<>(cache, STREAM_ID);
 		try {
 			table.addEvictionPolicy(slot -> slot == 2 ? 100 : 0);
 			for(int slot = 0; slot < 3; slot++) {
@@ -245,13 +245,13 @@ public class OOCEvictionPolicyTest {
 	}
 
 	@Test
-	public void testOperatorStateTableReferenceEntriesKeepSourcePolicy() throws Exception {
+	public void testStateTableReferenceEntriesKeepSourcePolicy() throws Exception {
 		RecordingIOHandler io = new RecordingIOHandler();
 		GlobalMemoryBroker broker = new GlobalMemoryBroker(64 * BYTES);
 		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker, 32 * BYTES);
 		SyncMemoryAllowance region = new SyncMemoryAllowance(broker, 32 * BYTES);
 		OOCCacheImpl cache = new OOCCacheImpl(io, 8 * BYTES, 8 * BYTES);
-		OperatorStateTable<IndexedMatrixValue> table = new OperatorStateTable<>(cache, STREAM_ID, region);
+		StateTable<IndexedMatrixValue> table = new StateTable<>(cache, STREAM_ID);
 		long sourceStreamId = STREAM_ID;
 		try {
 			table.addEvictionPolicy(slot -> slot == 0 ? 100 : 0);
@@ -292,8 +292,6 @@ public class OOCEvictionPolicyTest {
 			OOCStoreLayout.of(ix -> Math.toIntExact((ix.getRowIndex() - 1) * 3 + ix.getColumnIndex() - 1),
 				index -> new MatrixIndexes(index / 3 + 1L, index % 3 + 1L)),
 			producer, 0, 1);
-		OperatorStateTable<IndexedMatrixValue> table =
-			new OperatorStateTable<>(cache, STREAM_ID + 21, region);
 		OOCStream<IndexedMatrixValue> left = matrixStream(2, 3, 1);
 		OOCStream<IndexedMatrixValue> right = matrixStream(2, 3, 1);
 		OOCStream<IndexedMatrixValue> out = matrixStream(2, 3, 1);
@@ -333,7 +331,6 @@ public class OOCEvictionPolicyTest {
 				blocks -> blocks.get(0), new StreamContext(0, "op_join_eviction_policy").addOutStream(out));
 			primitive.requestPattern(OOCAccessPattern.COL_MAJOR);
 			primitive.bindRegion(new OOCRegionBinding(region, ix -> BYTES, new AtomicInteger(1)), true, true);
-			primitive.bindStateTable(table);
 			primitive.startExecution();
 			done.get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 			Assert.assertEquals(6, outputs.get());
@@ -346,7 +343,6 @@ public class OOCEvictionPolicyTest {
 				new BlockKey(materializedStreamId, 2), evicted.get(1));
 		}
 		finally {
-			table.close();
 			binding.close();
 			cache.shutdown();
 			producer.destroy();

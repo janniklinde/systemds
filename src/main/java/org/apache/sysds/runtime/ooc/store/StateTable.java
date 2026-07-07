@@ -33,51 +33,36 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.IntToLongFunction;
 
 /**
- * Mutable online indexed coordination over the global cache: join rendezvous, reduction accumulators,
- * and second-pass retention. The table owns only atomic slot semantics; spilling, loading, eviction
- * order, and resident ownership remain exclusively within {@link OOCCache}. Each table maps its slots
- * onto one cache stream id (so eviction policy sees the table as one population), and slot contents are
- * swapped by key replacement with a per-table generation counter, never by mutating a cache entry.
- *
- * Private values enter through {@link ManagedPayload} (bytes stay charged to the producer allowance
- * until the cache unpin commits). Shared canonical values increment the logical reference of an
- * already pinned cache entry. Every installed slot stores only a {@link BlockKey}; values leave as
- * {@link StateLease}s pinned under the table's region allowance.
- *
- * Slot transitions are serialized on the table monitor; they are O(1) metadata updates, and all cache
- * I/O (putPinned, pin loading, unpin) happens outside the lock. If the single monitor becomes a
- * bottleneck under many independent slots, per-slot striping is the intended follow-up optimization.
+ * Indexed cache-backed state table. Slots may hold table-owned entries or references to entries owned by
+ * another stream; cached values must be treated as read-only and updates must take, compute a replacement,
+ * and reinstall a new owned payload.
  */
-public final class OperatorStateTable<T extends SpillableObject> implements AutoCloseable {
+public final class StateTable<T extends SpillableObject> implements AutoCloseable {
 	private static final int INITIAL_SLOTS = 64;
 
 	private final OOCCache _cache;
 	private final long _streamId;
-	private final MemoryAllowance _allowance;
-	private final AtomicLong _nextGeneration;
-	private final CopyOnWriteArrayList<IntToLongFunction> _evictionPolicies;
-	private final AtomicBoolean _evictionPolicyInstalled;
+	private final AtomicLong _nextGeneration = new AtomicLong();
+	private final CopyOnWriteArrayList<IntToLongFunction> _evictionPolicies = new CopyOnWriteArrayList<>();
+	private final AtomicBoolean _evictionPolicyInstalled = new AtomicBoolean(false);
 	private volatile AtomicIntegerArray _generationSlots;
 	private Slot[] _slots;
 	private volatile boolean _closed;
 
-	public OperatorStateTable(OOCCache cache, long streamId, MemoryAllowance allowance) {
-		this(cache, streamId, allowance, INITIAL_SLOTS);
+	public StateTable(OOCCache cache, long streamId) {
+		this(cache, streamId, INITIAL_SLOTS);
 	}
 
-	public OperatorStateTable(OOCCache cache, long streamId, MemoryAllowance allowance, int numSlots) {
+	public StateTable(OOCCache cache, long streamId, int numSlots) {
+		int capacity = Math.max(1, numSlots);
 		_cache = cache;
 		_streamId = streamId;
-		_allowance = allowance;
-		_nextGeneration = new AtomicLong();
-		_evictionPolicies = new CopyOnWriteArrayList<>();
-		_evictionPolicyInstalled = new AtomicBoolean(false);
-		_generationSlots = new AtomicIntegerArray(Math.max(1, numSlots));
-		_slots = new Slot[Math.max(1, numSlots)];
+		_generationSlots = new AtomicIntegerArray(capacity);
+		_slots = new Slot[capacity];
 	}
 
 	public long getStreamId() {
@@ -92,29 +77,16 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			_cache.addEvictionPolicy(_streamId, this::scoreTableEntry);
 	}
 
-	/**
-	 * Installs the payload into an empty slot, transferring its reservation into the cache ownership
-	 * protocol. Throws if the slot is occupied (including by a concurrent in-flight install).
-	 */
 	public void install(int index, ManagedPayload<T> payload) {
-		Slot slot;
-		synchronized(this) {
-			checkOpen();
-			ensureCapacity(index);
-			if(_slots[index] != null)
-				throw new IllegalStateException("State table slot " + index + " is already occupied.");
-			slot = new Slot();
-			_slots[index] = slot;
-		}
-		finishInstall(index, slot, payload);
+		installSlot(index, slot -> finishOwnedInstall(index, slot, payload));
 	}
 
-	/**
-	 * Retains an already pinned canonical cache entry in an empty slot. The caller remains responsible
-	 * for unpinning the supplied entry; this method adds only a logical lifetime reference.
-	 */
 	public void installReference(int index, BlockEntry pinned) {
 		checkPinned(pinned);
+		installSlot(index, slot -> finishReferenceInstall(index, slot, pinned));
+	}
+
+	private void installSlot(int index, Consumer<Slot> installer) {
 		Slot slot;
 		synchronized(this) {
 			checkOpen();
@@ -124,93 +96,22 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			slot = new Slot();
 			_slots[index] = slot;
 		}
-		finishReferenceInstall(index, slot, pinned);
+		installer.accept(slot);
 	}
 
-	/**
-	 * Merges the state at the given index. This operation does not reserve bytes and may be viewed as non-blocking.
-	 * The first payload installs a merge-owned pinned slot. Subsequent merges must produce a value that fits in the
-	 * existing slot budget; the incoming payload reservation is released after the merge.
-	 */
-	public OOCFuture<Void> merge(int index, ManagedPayload<T> payload, BiFunction<T, T, T> mergeFn) {
-		Slot installing = null;
-		Slot merging = null;
-		OOCFuture<Void> waitFor = null;
-		synchronized(this) {
-			checkOpen();
-			ensureCapacity(index);
-			Slot existing = _slots[index];
-			if(existing == null) {
-				installing = new Slot();
-				_slots[index] = installing;
-			}
-			else if(existing._state == Slot.INSTALLED) {
-				merging = existing;
-				merging._state = Slot.INSTALLING;
-				merging._installFuture = new OOCFuture<>();
-			}
-			else {
-				waitFor = existing._installFuture;
-			}
-		}
-		if(installing != null) {
-			finishMergeInstall(index, installing, payload);
-			return OOCFuture.completed(null);
-		}
-		if(merging != null)
-			return finishMerge(merging, payload, mergeFn);
-		OOCFuture<Void> result = new OOCFuture<>();
-		waitFor.whenComplete((ignored, error) -> retry(() -> merge(index, payload, mergeFn), result));
-		return result;
+	public OOCFuture<StateLease<T>> installOrTake(int index, ManagedPayload<T> payload,
+		MemoryAllowance leaseAllowance) {
+		return installSlotOrTake(index, leaseAllowance, slot -> finishOwnedInstall(index, slot, payload));
 	}
 
-	/**
-	 * Atomic install-or-take: if the slot is empty the payload is installed and the future completes
-	 * with null; otherwise the previously installed value is removed from the slot and returned as a
-	 * lease while the payload remains owned by the caller. Slot transitions are atomic (on the table
-	 * monitor), which makes this the rendezvous primitive for joins and the merge primitive for
-	 * reduction accumulators (merge outside, retry with the merged payload). A call racing an in-flight
-	 * install chains behind it instead of failing.
-	 */
-	public OOCFuture<StateLease<T>> installOrTake(int index, ManagedPayload<T> payload) {
-		Slot installing = null;
-		Slot taken = null;
-		OOCFuture<Void> waitFor = null;
-		synchronized(this) {
-			checkOpen();
-			ensureCapacity(index);
-			Slot existing = _slots[index];
-			if(existing == null) {
-				installing = new Slot();
-				_slots[index] = installing;
-			}
-			else if(existing._state == Slot.INSTALLED) {
-				_slots[index] = null;
-				taken = existing;
-			}
-			else {
-				waitFor = existing._installFuture;
-			}
-		}
-		if(installing != null) {
-			finishInstall(index, installing, payload);
-			return OOCFuture.completed(null);
-		}
-		if(taken != null)
-			return pinTaken(taken);
-		OOCFuture<StateLease<T>> result = new OOCFuture<>();
-		waitFor.whenComplete((ignored, error) -> retry(() -> installOrTake(index, payload), result));
-		return result;
-	}
-
-	/**
-	 * Atomic reference install-or-take. If the slot is empty, the pinned logical entry is retained and
-	 * the future completes with null. Otherwise the existing slot value is removed and returned while
-	 * the supplied pinned entry remains untouched. The caller must keep the supplied entry pinned until
-	 * the returned future completes.
-	 */
-	public OOCFuture<StateLease<T>> installReferenceOrTake(int index, BlockEntry pinned) {
+	public OOCFuture<StateLease<T>> installReferenceOrTake(int index, BlockEntry pinned,
+		MemoryAllowance leaseAllowance) {
 		checkPinned(pinned);
+		return installSlotOrTake(index, leaseAllowance, slot -> finishReferenceInstall(index, slot, pinned));
+	}
+
+	private OOCFuture<StateLease<T>> installSlotOrTake(int index, MemoryAllowance leaseAllowance,
+		Consumer<Slot> installer) {
 		Slot installing = null;
 		Slot taken = null;
 		OOCFuture<Void> waitFor = null;
@@ -231,23 +132,18 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			}
 		}
 		if(installing != null) {
-			finishReferenceInstall(index, installing, pinned);
+			installer.accept(installing);
 			return OOCFuture.completed(null);
 		}
 		if(taken != null)
-			return pinTaken(taken);
+			return pinTaken(taken, leaseAllowance);
 		OOCFuture<StateLease<T>> result = new OOCFuture<>();
 		waitFor.whenComplete((ignored, error) ->
-			retry(() -> installReferenceOrTake(index, pinned), result));
+			retry(() -> installSlotOrTake(index, leaseAllowance, installer), result));
 		return result;
 	}
 
-	/**
-	 * Removes the slot and returns its value as a pinned lease, or null if the slot is empty. A call
-	 * racing an in-flight install chains behind it. The lease charges the table's region allowance;
-	 * closing it releases the value entirely (exactly-once consumption).
-	 */
-	public OOCFuture<StateLease<T>> take(int index) {
+	public OOCFuture<StateLease<T>> take(int index, MemoryAllowance leaseAllowance) {
 		Slot taken = null;
 		OOCFuture<Void> waitFor = null;
 		synchronized(this) {
@@ -266,17 +162,13 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			}
 		}
 		if(taken != null)
-			return pinTaken(taken);
+			return pinTaken(taken, leaseAllowance);
 		OOCFuture<StateLease<T>> result = new OOCFuture<>();
-		waitFor.whenComplete((ignored, error) -> retry(() -> take(index), result));
+		waitFor.whenComplete((ignored, error) -> retry(() -> take(index, leaseAllowance), result));
 		return result;
 	}
 
-	/**
-	 * Returns a pinned lease on the slot's value without removing it, if the value is resident and
-	 * admissible right now; null otherwise. Never blocks and never schedules I/O.
-	 */
-	public StateLease<T> peek(int index) {
+	public StateLease<T> peek(int index, MemoryAllowance leaseAllowance) {
 		BlockKey key;
 		synchronized(this) {
 			checkOpen();
@@ -287,13 +179,10 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 				return null;
 			key = slot._key;
 		}
-		BlockEntry entry = _cache.pinIfLive(key.getStreamId(), key.getSequenceNumber(), _allowance);
-		return entry == null ? null : new TableLease(entry);
+		BlockEntry entry = _cache.pinIfLive(key.getStreamId(), key.getSequenceNumber(), leaseAllowance);
+		return entry == null ? null : new TableLease(entry, leaseAllowance);
 	}
 
-	/**
-	 * Removes the slot and drops its value.
-	 */
 	public void clear(int index) {
 		Slot removed = null;
 		synchronized(this) {
@@ -312,7 +201,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			}
 		}
 		if(removed != null)
-			dropSlot(removed);
+			releaseSlot(removed);
 	}
 
 	@Override
@@ -337,14 +226,14 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			}
 		}
 		for(Slot slot : toRelease)
-			dropSlot(slot);
+			releaseSlot(slot);
 	}
 
 	public boolean isClosed() {
 		return _closed;
 	}
 
-	private void finishInstall(int index, Slot slot, ManagedPayload<T> payload) {
+	private void finishOwnedInstall(int index, Slot slot, ManagedPayload<T> payload) {
 		BlockKey key = new BlockKey(_streamId, _nextGeneration.getAndIncrement());
 		BlockEntry entry;
 		try {
@@ -359,7 +248,6 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 				payload.owner());
 		}
 		catch(RuntimeException ex) {
-			//the payload was already marked transferred; return the bytes to the producer directly
 			if(payload.bytes() > 0)
 				payload.owner().release(payload.bytes());
 			failInstall(index, slot, ex);
@@ -382,84 +270,6 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		installFuture.complete(null);
 	}
 
-	private void finishMergeInstall(int index, Slot slot, ManagedPayload<T> payload) {
-		BlockKey key = new BlockKey(_streamId, _nextGeneration.getAndIncrement());
-		BlockEntry entry;
-		try {
-			payload.transfer();
-		}
-		catch(RuntimeException ex) {
-			failInstall(index, slot, ex);
-			throw ex;
-		}
-		try {
-			entry = _cache.putPinned(key.getStreamId(), key.getSequenceNumber(), payload.value(), payload.bytes(),
-				payload.owner());
-		}
-		catch(RuntimeException ex) {
-			if(payload.bytes() > 0)
-				payload.owner().release(payload.bytes());
-			failInstall(index, slot, ex);
-			throw ex;
-		}
-
-		boolean cleared;
-		OOCFuture<Void> installFuture;
-		synchronized(this) {
-			slot._key = key;
-			slot._entry = entry;
-			slot._tableOwnedKey = true;
-			registerSlotKey(key, index);
-			cleared = slot._cleared;
-			slot._state = cleared ? Slot.REMOVED : Slot.INSTALLED;
-			installFuture = slot._installFuture;
-			slot._installFuture = null;
-		}
-		if(cleared)
-			dropSlot(slot);
-		installFuture.complete(null);
-	}
-
-	private OOCFuture<Void> finishMerge(Slot slot, ManagedPayload<T> payload, BiFunction<T, T, T> mergeFn) {
-		OOCFuture<Void> result = new OOCFuture<>();
-		OOCFuture<Void> installFuture;
-		boolean cleared;
-		try {
-			if(slot._entry == null)
-				throw new IllegalStateException("State table merge requires a merge-owned slot.");
-			@SuppressWarnings("unchecked")
-			T old = (T)slot._entry.getData();
-			T merged = mergeFn.apply(old, payload.value());
-			slot._entry.replaceDataUnsafe(old, merged);
-			payload.release();
-			synchronized(this) {
-				cleared = slot._cleared;
-				slot._state = cleared ? Slot.REMOVED : Slot.INSTALLED;
-				installFuture = slot._installFuture;
-				slot._installFuture = null;
-			}
-			if(cleared)
-				dropSlot(slot);
-			installFuture.complete(null);
-			result.complete(null);
-		}
-		catch(Throwable t) {
-			boolean clearedOnError;
-			payload.release();
-			synchronized(this) {
-				clearedOnError = slot._cleared;
-				slot._state = clearedOnError ? Slot.REMOVED : Slot.INSTALLED;
-				installFuture = slot._installFuture;
-				slot._installFuture = null;
-			}
-			if(clearedOnError)
-				dropSlot(slot);
-			installFuture.completeExceptionally(t);
-			result.completeExceptionally(t);
-		}
-		return result;
-	}
-
 	private void finishReferenceInstall(int index, Slot slot, BlockEntry pinned) {
 		try {
 			_cache.reference(pinned);
@@ -473,6 +283,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		OOCFuture<Void> installFuture;
 		synchronized(this) {
 			slot._key = pinned.getKey();
+			slot._tableOwnedKey = false;
 			cleared = slot._cleared;
 			slot._state = cleared ? Slot.REMOVED : Slot.INSTALLED;
 			installFuture = slot._installFuture;
@@ -496,15 +307,10 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			installFuture.completeExceptionally(ex);
 	}
 
-	private OOCFuture<StateLease<T>> pinTaken(Slot slot) {
-		if(slot._entry != null) {
-			releaseSlot(slot);
-			return OOCFuture.completed(new TableLease(slot._entry));
-		}
+	private OOCFuture<StateLease<T>> pinTaken(Slot slot, MemoryAllowance leaseAllowance) {
 		OOCFuture<BlockEntry> pinned = new OOCFuture<>();
-		StorePinRetry.pinWithRetry(_cache, slot._key.getStreamId(), slot._key.getSequenceNumber(), _allowance,
+		StorePinRetry.pinWithRetry(_cache, slot._key.getStreamId(), slot._key.getSequenceNumber(), leaseAllowance,
 			() -> _closed, pinned);
-		//complete a fresh future exactly once; a mapped view would re-run the side effects per read
 		OOCFuture<StateLease<T>> result = new OOCFuture<>();
 		pinned.whenComplete((entry, error) -> {
 			Throwable completionError = error;
@@ -518,7 +324,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 			if(completionError != null) {
 				if(entry != null) {
 					try {
-						_cache.unpin(entry, _allowance);
+						_cache.unpin(entry, leaseAllowance);
 					}
 					catch(Throwable ignored) {
 						// Preserve the original pin/release failure.
@@ -527,7 +333,7 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 				result.completeExceptionally(completionError);
 				return;
 			}
-			result.complete(entry == null ? null : new TableLease(entry));
+			result.complete(entry == null ? null : new TableLease(entry, leaseAllowance));
 		});
 		return result;
 	}
@@ -536,12 +342,6 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		if(slot._tableOwnedKey)
 			clearSlotKey(slot._key);
 		_cache.dereference(slot._key);
-	}
-
-	private void dropSlot(Slot slot) {
-		releaseSlot(slot);
-		if(slot._entry != null)
-			_cache.unpin(slot._entry, _allowance);
 	}
 
 	private void registerSlotKey(BlockKey key, int index) {
@@ -618,11 +418,6 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		_slots = grown;
 	}
 
-	/**
-	 * Re-runs a chained slot operation after an in-flight install resolved, forwarding its outcome.
-	 * Synchronous failures (e.g. a concurrently closed table) must complete the caller's future instead
-	 * of vanishing inside the install future's callback.
-	 */
 	private static <T> void retry(java.util.function.Supplier<OOCFuture<T>> operation, OOCFuture<T> to) {
 		OOCFuture<T> from;
 		try {
@@ -640,21 +435,14 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		});
 	}
 
-	public interface StateLease<T> extends AutoCloseable {
-		T value();
-
-		long bytes();
-
-		@Override
-		void close();
-	}
-
 	private final class TableLease implements StateLease<T> {
 		private final BlockEntry _entry;
+		private final MemoryAllowance _allowance;
 		private boolean _open;
 
-		private TableLease(BlockEntry entry) {
+		private TableLease(BlockEntry entry, MemoryAllowance allowance) {
 			_entry = entry;
+			_allowance = allowance;
 			_open = true;
 		}
 
@@ -689,7 +477,6 @@ public final class OperatorStateTable<T extends SpillableObject> implements Auto
 		private boolean _cleared;
 		private boolean _tableOwnedKey;
 		private BlockKey _key;
-		private BlockEntry _entry;
 		private OOCFuture<Void> _installFuture;
 
 		private Slot() {

@@ -48,7 +48,7 @@ import org.junit.Assert;
 import org.junit.Test;
 
 /**
- * Correctness of the migrated GroupedReduce (OperatorStateTable accumulators over the global cache)
+ * Correctness of the migrated GroupedReduce (StateTable accumulators over the global cache)
  * through the real planner pipeline.
  */
 public class GroupedReducePrimitiveParityTest {

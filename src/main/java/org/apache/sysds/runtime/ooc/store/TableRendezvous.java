@@ -29,7 +29,7 @@ import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 /**
- * Rendezvous driver over an {@link OperatorStateTable}: atomic install-or-take per linearized slot,
+ * Rendezvous driver over a {@link StateTable}: atomic install-or-take per linearized slot,
  * routed by callback kind. Exclusive in-memory callbacks transfer their detached reservation
  * ({@code installOrTake}); shared pinned-lease callbacks from materialized boundaries park a logical
  * reference to the canonical entry ({@code installReferenceOrTake}) — with the pin held INSIDE this
@@ -49,10 +49,10 @@ public final class TableRendezvous {
 	private TableRendezvous() {
 	}
 
-	public static OOCFuture<Match> installOrTake(OperatorStateTable<IndexedMatrixValue> table, int slot,
+	public static OOCFuture<Match> installOrTake(StateTable<IndexedMatrixValue> table, int slot,
 		OOCStream.QueueCallback<IndexedMatrixValue> tile, MemoryAllowance allowance, long fallbackBytes) {
 		if(tile instanceof MaterializedCallback pinned)
-			return installReferenceOrTake(table, slot, pinned);
+			return installReferenceOrTake(table, slot, pinned, allowance);
 		ManagedPayload<IndexedMatrixValue> payload;
 		if(tile instanceof InMemoryQueueCallback managed && managed.getManagedBytes() > 0) {
 			payload = managed.extractManagedPayload();
@@ -67,7 +67,7 @@ public final class TableRendezvous {
 			tile.close();
 		}
 		OOCFuture<Match> result = new OOCFuture<>();
-		table.installOrTake(slot, payload).whenComplete((lease, error) -> {
+		table.installOrTake(slot, payload, allowance).whenComplete((lease, error) -> {
 			if(error != null) {
 				payload.release();
 				result.completeExceptionally(error);
@@ -87,10 +87,10 @@ public final class TableRendezvous {
 	 * resolved (install: the table holds its own reference now; take: the alias moves into the match
 	 * as the own-side value).
 	 */
-	private static OOCFuture<Match> installReferenceOrTake(OperatorStateTable<IndexedMatrixValue> table,
-		int slot, MaterializedCallback pinned) {
+	private static OOCFuture<Match> installReferenceOrTake(StateTable<IndexedMatrixValue> table,
+		int slot, MaterializedCallback pinned, MemoryAllowance allowance) {
 		OOCFuture<Match> result = new OOCFuture<>();
-		table.installReferenceOrTake(slot, pinned.pinnedEntry()).whenComplete((lease, error) -> {
+		table.installReferenceOrTake(slot, pinned.pinnedEntry(), allowance).whenComplete((lease, error) -> {
 			if(error != null) {
 				pinned.close();
 				result.completeExceptionally(error);

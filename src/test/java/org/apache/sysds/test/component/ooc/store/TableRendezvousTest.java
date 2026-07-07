@@ -38,7 +38,8 @@ import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
-import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
+import org.apache.sysds.runtime.ooc.store.StateTable;
+import org.apache.sysds.runtime.ooc.store.StateLease;
 import org.apache.sysds.runtime.ooc.store.TableRendezvous;
 import org.junit.Assert;
 import org.junit.Test;
@@ -60,7 +61,7 @@ public class TableRendezvousTest {
 		SyncMemoryAllowance producer = allowance(broker);
 		SyncMemoryAllowance region = allowance(broker);
 		OOCCache cache = new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30);
-		OperatorStateTable<IndexedMatrixValue> table = new OperatorStateTable<>(cache, 7, region);
+		StateTable<IndexedMatrixValue> table = new StateTable<>(cache, 7);
 		long bytes = tileBytes();
 		try {
 			//slot 0: left first; slot 1: right first — the second arrival always takes the partner
@@ -107,7 +108,7 @@ public class TableRendezvousTest {
 		SyncMemoryAllowance region = allowance(broker);
 		OOCCache cache = new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30);
 		MaterializedStore<IndexedMatrixValue> store = new MaterializedStore<>(cache, 11);
-		OperatorStateTable<IndexedMatrixValue> table = new OperatorStateTable<>(cache, 12, region);
+		StateTable<IndexedMatrixValue> table = new StateTable<>(cache, 12);
 		long bytes = tileBytes();
 		int tiles = 2;
 		try {

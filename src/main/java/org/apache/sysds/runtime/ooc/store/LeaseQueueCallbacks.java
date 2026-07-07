@@ -37,7 +37,7 @@ public final class LeaseQueueCallbacks {
 	}
 
 	public static OOCStream.QueueCallback<IndexedMatrixValue> state(
-		OperatorStateTable.StateLease<IndexedMatrixValue> lease) {
+		StateLease<IndexedMatrixValue> lease) {
 		return new StateLeaseBackedCallback(lease);
 	}
 
@@ -93,12 +93,12 @@ public final class LeaseQueueCallbacks {
 	}
 
 	private static final class StateLeaseBackedCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
-		private final OperatorStateTable.StateLease<IndexedMatrixValue> _lease;
+		private final StateLease<IndexedMatrixValue> _lease;
 		private DMLRuntimeException _failure;
 		private int _references = 1;
 		private boolean _closed;
 
-		private StateLeaseBackedCallback(OperatorStateTable.StateLease<IndexedMatrixValue> lease) {
+		private StateLeaseBackedCallback(StateLease<IndexedMatrixValue> lease) {
 			_lease = lease;
 		}
 

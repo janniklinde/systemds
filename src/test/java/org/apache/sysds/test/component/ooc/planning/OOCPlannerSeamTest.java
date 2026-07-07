@@ -47,7 +47,9 @@ import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
 import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
-import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
+import org.apache.sysds.runtime.instructions.ooc.CachingStream;
+import org.apache.sysds.runtime.ooc.store.StateTable;
+import org.apache.sysds.runtime.ooc.store.StateLease;
 import org.apache.sysds.runtime.ooc.store.SequentialAccessPattern;
 import org.apache.sysds.runtime.ooc.store.StoreBackedStream;
 import org.junit.After;
@@ -55,8 +57,8 @@ import org.junit.Assert;
 import org.junit.Test;
 
 /**
- * The planner seam of the new architecture: migrated primitives receive an OperatorStateTable over
- * the global cache (region allowance, fresh stream id), unmigrated primitives keep CachedAllowance,
+ * The planner seam of the new architecture: primitives keep private state tables at execution time,
+ * unmigrated primitives keep CachedAllowance,
  * and OOCStoreBinding coordinates counted reader registration with automatic sealing.
  */
 public class OOCPlannerSeamTest {
@@ -85,8 +87,8 @@ public class OOCPlannerSeamTest {
 		try {
 			producer.reserveBlocking(bytes);
 			stub.table.install(3, new ManagedPayload<>(tile(0, 5.0), bytes, producer));
-			try(OperatorStateTable.StateLease<IndexedMatrixValue> lease =
-				stub.table.take(3).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
+			try(StateLease<IndexedMatrixValue> lease =
+				stub.table.take(3, stub.allowance).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
 				Assert.assertNotNull(lease);
 				Assert.assertEquals(5.0 * ROWS * COLS, sum(lease.value()), 0.0);
 			}
@@ -149,12 +151,12 @@ public class OOCPlannerSeamTest {
 			first.table.install(0, new ManagedPayload<>(tile(0, 1.0), bytes, producer));
 			producer.reserveBlocking(bytes);
 			second.table.install(0, new ManagedPayload<>(tile(0, 2.0), bytes, producer));
-			try(OperatorStateTable.StateLease<IndexedMatrixValue> lease =
-				first.table.take(0).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
+			try(StateLease<IndexedMatrixValue> lease =
+				first.table.take(0, first.allowance).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
 				Assert.assertEquals(1.0 * ROWS * COLS, sum(lease.value()), 0.0);
 			}
-			try(OperatorStateTable.StateLease<IndexedMatrixValue> lease =
-				second.table.take(0).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
+			try(StateLease<IndexedMatrixValue> lease =
+				second.table.take(0, second.allowance).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
 				Assert.assertEquals(2.0 * ROWS * COLS, sum(lease.value()), 0.0);
 			}
 		}
@@ -431,7 +433,8 @@ public class OOCPlannerSeamTest {
 	private static final class StubPrimitive extends OOCPrimitive {
 		private final boolean wantsTable;
 		private final boolean wantsCache;
-		private OperatorStateTable<IndexedMatrixValue> table;
+		private StateTable<IndexedMatrixValue> table;
+		private SyncMemoryAllowance allowance;
 		private CachedAllowance cache;
 		private boolean executed;
 
@@ -442,18 +445,8 @@ public class OOCPlannerSeamTest {
 		}
 
 		@Override
-		public boolean requiresStateTable() {
-			return wantsTable;
-		}
-
-		@Override
-		public void bindStateTable(OperatorStateTable<IndexedMatrixValue> table) {
-			this.table = table;
-		}
-
-		@Override
 		public boolean requiresCache() {
-			return wantsCache;
+			return wantsCache && !wantsTable;
 		}
 
 		@Override
@@ -463,7 +456,20 @@ public class OOCPlannerSeamTest {
 
 		@Override
 		public void startExecution() {
+			if(wantsTable) {
+				allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get());
+				allowance.setTargetMemory(1L << 26);
+				table = new StateTable<>(OOCCacheManager.getGlobalCache(),
+					CachingStream._streamSeq.getNextID());
+			}
 			executed = true;
+		}
+
+		@Override
+		public void onComplete() {
+			if(allowance != null)
+				allowance.destroy();
+			super.onComplete();
 		}
 
 		@Override
