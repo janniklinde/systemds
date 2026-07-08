@@ -27,7 +27,6 @@ import org.apache.sysds.runtime.ooc.cache.collections.ConcurrentGrowableBitSet;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
-import org.apache.sysds.runtime.ooc.store.StoreRegisteredReader;
 
 import java.util.ArrayList;
 import java.util.Collections;

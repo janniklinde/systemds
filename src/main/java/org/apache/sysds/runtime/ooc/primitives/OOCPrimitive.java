@@ -21,7 +21,6 @@ package org.apache.sysds.runtime.ooc.primitives;
 
 import org.apache.commons.lang3.NotImplementedException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
-import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
