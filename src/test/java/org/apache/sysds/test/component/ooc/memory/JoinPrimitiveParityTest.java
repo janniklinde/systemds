@@ -27,39 +27,49 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import java.util.function.ToLongFunction;
 
 import org.apache.sysds.common.Types.FileFormat;
 import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.functionobjects.Plus;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
+import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
-import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
-import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCRegionBinding;
 import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
-import org.apache.sysds.runtime.ooc.store.OperatorStateTable;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.store.MaterializedStore;
+import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
+import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
+import org.apache.sysds.runtime.util.IndexRange;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Test;
 
 /**
- * Correctness of the migrated equi-join (OperatorStateTable rendezvous over the global cache via
+ * Correctness of the migrated equi-join (StateTable rendezvous over the global cache via
  * TableRendezvous) through the real planner pipeline.
  */
 public class JoinPrimitiveParityTest {
@@ -99,8 +109,6 @@ public class JoinPrimitiveParityTest {
 		final long bytes = new MatrixBlock(BLEN, BLEN, 1.0).getExactSerializedSize();
 		CappedAllowance region = new CappedAllowance(3 * bytes);
 		CappedAllowance producer = new CappedAllowance(16 * bytes);
-		OOCCache cache = new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30);
-		OperatorStateTable<IndexedMatrixValue> table = new OperatorStateTable<>(cache, 77, region);
 		OOCStream<IndexedMatrixValue> left = createMatrixStream(rows, cols);
 		OOCStream<IndexedMatrixValue> right = createMatrixStream(rows, cols);
 		OOCStream<IndexedMatrixValue> out = createMatrixStream(rows, cols);
@@ -141,7 +149,6 @@ public class JoinPrimitiveParityTest {
 				return blocks.get(0).binaryOperations(plus, blocks.get(1));
 			}, new StreamContext(0, "op_join_prepaid_regression").addOutStream(out));
 			primitive.bindRegion(new OOCRegionBinding(region, ix -> bytes, new AtomicInteger(1)), true, true);
-			primitive.bindStateTable(table);
 			primitive.startExecution();
 
 			Assert.assertTrue("Expected the first matched pair to reach compute.",
@@ -155,7 +162,7 @@ public class JoinPrimitiveParityTest {
 			releaseCompute.countDown();
 			done.get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 			Assert.assertEquals(tiles, outputs.get());
-			awaitOwnedCache(cache, 0);
+			awaitOwnedCache(OOCCacheManager.getGlobalCache(), 0);
 			waitFor(() -> region.getUsedMemory() == 0);
 			Assert.assertEquals(0, region.getUsedMemory());
 			waitFor(() -> producer.getUsedMemory() == 0);
@@ -163,8 +170,69 @@ public class JoinPrimitiveParityTest {
 		}
 		finally {
 			releaseCompute.countDown();
-			table.close();
-			cache.shutdown();
+			region.shutdown();
+			producer.shutdown();
+		}
+	}
+
+	@Test
+	public void testJoinAddsPolicyToAlreadyMaterializedInputWithoutReleasingView() throws Exception {
+		final int rows = 2 * BLEN;
+		final int cols = 2 * BLEN;
+		final long bytes = new MatrixBlock(BLEN, BLEN, 1.0).getExactSerializedSize();
+		CappedAllowance region = new CappedAllowance(8 * bytes);
+		SubscribableTaskQueue<IndexedMatrixValue> left = (SubscribableTaskQueue<IndexedMatrixValue>)
+			createMatrixStream(rows, cols);
+		SubscribableTaskQueue<IndexedMatrixValue> right = (SubscribableTaskQueue<IndexedMatrixValue>)
+			createMatrixStream(rows, cols);
+		OOCStream<IndexedMatrixValue> out = createMatrixStream(rows, cols);
+		RecordingMaterializedView view = new RecordingMaterializedView();
+		MaterializedPolicyStreamable materializedLeft = new MaterializedPolicyStreamable(left, view);
+		CompletableFuture<Void> done = new CompletableFuture<>();
+		CappedAllowance producer = new CappedAllowance(16 * bytes);
+		AtomicInteger outputs = new AtomicInteger();
+
+		try {
+			for(int r = 1; r <= 2; r++) {
+				for(int c = 1; c <= 2; c++) {
+					enqueueManaged(left, r, c, 3.0, producer, bytes);
+					enqueueManaged(right, r, c, 5.0, producer, bytes);
+				}
+			}
+			left.closeInput();
+			right.closeInput();
+			out.setSubscriber(cb -> {
+				try {
+					if(cb.isEos())
+						done.complete(null);
+					else
+						outputs.incrementAndGet();
+				}
+				catch(Throwable t) {
+					done.completeExceptionally(t);
+				}
+				finally {
+					cb.close();
+				}
+			});
+
+			JoinOOCPrimitive primitive = new JoinOOCPrimitive(List.of(materializedLeft, right), out,
+			blocks -> blocks.get(0), new StreamContext(0, "op_join_policy_injection").addOutStream(out));
+		primitive.requestPattern(OOCAccessPattern.COL_MAJOR);
+		primitive.bindRegion(new OOCRegionBinding(region, ix -> bytes, new AtomicInteger(1)), true, true);
+		primitive.startExecution();
+
+			done.get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			Assert.assertEquals(4, outputs.get());
+			Assert.assertEquals("Join should attach a consumer policy to an already-materialized input.",
+				1, view.policyCount.get());
+			Assert.assertEquals("Join did not declare this materialized input, so it must not release the view.",
+				0, view.closeCount.get());
+			Assert.assertNotNull(view.policy);
+			Assert.assertEquals("The injected policy should follow the planner-requested column-major rank.",
+				2, view.policy.applyAsLong(new MatrixIndexes(1, 2)));
+		}
+		finally {
 			region.shutdown();
 			producer.shutdown();
 		}
@@ -222,6 +290,13 @@ public class JoinPrimitiveParityTest {
 		MemoryAllowance allowance, long bytes) {
 		allowance.reserveBlocking(bytes);
 		stream.enqueue(new InMemoryQueueCallback(new IndexedMatrixValue(new MatrixIndexes(row, 1),
+			new MatrixBlock(BLEN, BLEN, value)), null, allowance, bytes));
+	}
+
+	private static void enqueueManaged(OOCStream<IndexedMatrixValue> stream, int row, int col, double value,
+		MemoryAllowance allowance, long bytes) {
+		allowance.reserveBlocking(bytes);
+		stream.enqueue(new InMemoryQueueCallback(new IndexedMatrixValue(new MatrixIndexes(row, col),
 			new MatrixBlock(BLEN, BLEN, value)), null, allowance, bytes));
 	}
 
@@ -324,6 +399,160 @@ public class JoinPrimitiveParityTest {
 		@Override
 		public synchronized boolean isShutdown() {
 			return _shutdown;
+		}
+	}
+
+	private static final class RecordingMaterializedView implements OOCMaterializedView {
+		private final AtomicInteger policyCount = new AtomicInteger();
+		private final AtomicInteger closeCount = new AtomicInteger();
+		private volatile ToLongFunction<MatrixIndexes> policy;
+
+		@Override
+		public OOCFuture<Void> completion() {
+			return OOCFuture.completed(null);
+		}
+
+		@Override
+		public OOCFuture<Void> readersSealed() {
+			return OOCFuture.completed(null);
+		}
+
+		@Override
+		public void addEvictionPolicy(ToLongFunction<MatrixIndexes> policy) {
+			this.policy = policy;
+			policyCount.incrementAndGet();
+		}
+
+		@Override
+		public MaterializedStore.Reader<IndexedMatrixValue> openReader(MaterializedStore.AccessPattern pattern,
+			MemoryAllowance allowance, int maxPrefetch) {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public MaterializedStore.IndexedReader<IndexedMatrixValue> openIndexedReader(
+			MaterializedStore.Liveness liveness, MemoryAllowance allowance) {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public void close() {
+			closeCount.incrementAndGet();
+		}
+	}
+
+	private static final class MaterializedPolicyStreamable implements OOCStreamable<IndexedMatrixValue> {
+		private final OOCStream<IndexedMatrixValue> stream;
+		private final OOCMaterializedView view;
+
+		private MaterializedPolicyStreamable(OOCStream<IndexedMatrixValue> stream, OOCMaterializedView view) {
+			this.stream = stream;
+			this.view = view;
+		}
+
+		@Override
+		public OOCStream<IndexedMatrixValue> getReadStream() {
+			return stream;
+		}
+
+		@Override
+		public OOCStream<IndexedMatrixValue> getWriteStream() {
+			return stream;
+		}
+
+		@Override
+		public boolean hasStreamCache() {
+			return stream.hasStreamCache();
+		}
+
+		@Override
+		public org.apache.sysds.runtime.instructions.ooc.CachingStream getStreamCache() {
+			return stream.getStreamCache();
+		}
+
+		@Override
+		public boolean hasMaterializedView() {
+			return true;
+		}
+
+		@Override
+		public OOCMaterializedView materializedView() {
+			return view;
+		}
+
+		@Override
+		public boolean isProcessed() {
+			return stream.isProcessed();
+		}
+
+		@Override
+		public DataCharacteristics getDataCharacteristics() {
+			return stream.getDataCharacteristics();
+		}
+
+		@Override
+		public CacheableData<?> getData() {
+			return stream.getData();
+		}
+
+		@Override
+		public void setData(CacheableData<?> data) {
+			stream.setData(data);
+		}
+
+		@Override
+		public void messageUpstream(OOCStreamMessage msg) {
+			stream.messageUpstream(msg);
+		}
+
+		@Override
+		public void messageDownstream(OOCStreamMessage msg) {
+			stream.messageDownstream(msg);
+		}
+
+		@Override
+		public void setUpstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+			stream.setUpstreamMessageRelay(relay);
+		}
+
+		@Override
+		public void setDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+			stream.setDownstreamMessageRelay(relay);
+		}
+
+		@Override
+		public void addUpstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+			stream.addUpstreamMessageRelay(relay);
+		}
+
+		@Override
+		public void addDownstreamMessageRelay(Consumer<OOCStreamMessage> relay) {
+			stream.addDownstreamMessageRelay(relay);
+		}
+
+		@Override
+		public void clearUpstreamMessageRelays() {
+			stream.clearUpstreamMessageRelays();
+		}
+
+		@Override
+		public void clearDownstreamMessageRelays() {
+			stream.clearDownstreamMessageRelays();
+		}
+
+		@Override
+		public void setIXTransform(BiFunction<Boolean, IndexRange, IndexRange> transform) {
+			stream.setIXTransform(transform);
+		}
+
+		@Override
+		public BiFunction<Boolean, IndexRange, IndexRange> getIXTransform() {
+			return stream.getIXTransform();
+		}
+
+		@Override
+		public OOCPrimitive getPrimitive() {
+			return stream.getPrimitive();
 		}
 	}
 }
