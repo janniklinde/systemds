@@ -162,7 +162,13 @@ public final class OOCStoreBinding implements OOCMaterializedView {
 
 	public MaterializedStore.Reader<IndexedMatrixValue> openReader(MaterializedStore.AccessPattern pattern,
 		MemoryAllowance allowance, int maxPrefetch) {
-		MaterializedStore.Reader<IndexedMatrixValue> reader = _store.openReader(pattern, allowance, maxPrefetch);
+		return openReader(pattern, allowance, maxPrefetch, true);
+	}
+
+	public MaterializedStore.Reader<IndexedMatrixValue> openReader(MaterializedStore.AccessPattern pattern,
+		MemoryAllowance allowance, int maxPrefetch, boolean softOrdering) {
+		MaterializedStore.Reader<IndexedMatrixValue> reader =
+			_store.openReader(pattern, allowance, maxPrefetch, softOrdering);
 		sealIfLastRegistration();
 		return reader;
 	}
