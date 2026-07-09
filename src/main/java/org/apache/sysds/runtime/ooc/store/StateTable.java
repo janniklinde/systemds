@@ -308,9 +308,8 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 	}
 
 	private OOCFuture<StateLease<T>> pinTaken(Slot slot, MemoryAllowance leaseAllowance) {
-		OOCFuture<BlockEntry> pinned = new OOCFuture<>();
-		StorePinRetry.pinWithRetry(_cache, slot._key.getStreamId(), slot._key.getSequenceNumber(), leaseAllowance,
-			() -> _closed, pinned);
+		OOCFuture<BlockEntry> pinned = StorePinAdmission.pinAdmitted(_cache, slot._key.getStreamId(),
+			slot._key.getSequenceNumber(), leaseAllowance, () -> _closed);
 		OOCFuture<StateLease<T>> result = new OOCFuture<>();
 		pinned.whenComplete((entry, error) -> {
 			Throwable completionError = error;
