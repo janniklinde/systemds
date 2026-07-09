@@ -24,8 +24,16 @@ import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 
 import java.util.ArrayDeque;
+import java.util.Arrays;
+import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.LongAdder;
 
 public class SyncMemoryAllowance implements MemoryAllowance {
 	private static final long RELEASE_TRIM_BUFFER_BYTES = 20_000_000L;
@@ -38,10 +46,10 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	protected volatile long _targetBytes;
 	protected volatile boolean _shutdown;
 	protected volatile boolean _destroyed;
-	private final ArrayDeque<ReservationWaiter> _reservationWaiters;
+	private final Queue<ReservationWaiter> _reservationWaiters;
 	private final StringBuilder _debugOwners;
-	private boolean _drainingReservationWaiters;
-	private boolean _reservationDrainRequested;
+	private final AtomicBoolean _drainingReservationWaiters;
+	private final AtomicBoolean _reservationDrainRequested;
 
 	public SyncMemoryAllowance(MemoryBroker broker) {
 		this(broker, Long.MAX_VALUE);
@@ -64,10 +72,10 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		_targetBytes = 0;
 		_shutdown = false;
 		_destroyed = false;
-		_reservationWaiters = new ArrayDeque<>();
+		_reservationWaiters = new ConcurrentLinkedQueue<>();
 		_debugOwners = new StringBuilder();
-		_drainingReservationWaiters = false;
-		_reservationDrainRequested = false;
+		_drainingReservationWaiters = new AtomicBoolean(false);
+		_reservationDrainRequested = new AtomicBoolean(false);
 		broker.attachAllowance(this);
 		if(OOCDebug.TRACE_HOT_PATH)
 			System.out.println("[ALLOW-INIT] allowance=" + dbgId() + " limit=" + _consumptionLimit
@@ -175,15 +183,19 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			return OOCFuture.completed(null);
 		if(bytes > _consumptionLimit)
 			return OOCFuture.failed(new IllegalArgumentException("Cannot reserve more memory than the consumption limit"));
-		if(tryReserve(bytes))
+		if(_reservationWaiters.isEmpty() && tryReserve(bytes))
 			return OOCFuture.completed(null);
+		return enqueueReservationWaiter(bytes);
+	}
+
+	private OOCFuture<Void> enqueueReservationWaiter(long bytes) {
 		OOCFuture<Void> future = new OOCFuture<>();
-		synchronized(this) {
-			if(_shutdown || _destroyed) {
+		ReservationWaiter waiter = new ReservationWaiter(bytes, future);
+		_reservationWaiters.add(waiter);
+		if(_shutdown || _destroyed) {
+			if(_reservationWaiters.remove(waiter))
 				future.completeExceptionally(new IllegalStateException("Cannot reserve memory on closed allowance."));
-				return future;
-			}
-			_reservationWaiters.addLast(new ReservationWaiter(bytes, future));
+			return future;
 		}
 		requestReservationDrain();
 		return future;
@@ -353,7 +365,6 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		long freedMemory = 0;
 		long destroyFreedMemory = 0;
 		boolean destroy = false;
-		ArrayDeque<ReservationWaiter> waiters;
 		synchronized(this) {
 			if(_shutdown || _destroyed)
 				return;
@@ -373,10 +384,9 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			else {
 				freedMemory = oldGrantedBytes - _grantedBytes;
 			}
-			waiters = new ArrayDeque<>(_reservationWaiters);
-			_reservationWaiters.clear();
 			notifyAll();
 		}
+		ArrayDeque<ReservationWaiter> waiters = drainReservationWaiterQueue();
 		if(OOCDebug.TRACE_HOT_PATH)
 			System.out.println("[ALLOW-SHUTDOWN-END] allowance=" + dbgId() + " used=" + _usedBytes
 				+ " owners=" + getDebugOwners()
@@ -412,44 +422,36 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	}
 
 	private void requestReservationDrain() {
-		synchronized(this) {
-			_reservationDrainRequested = true;
-			if(_drainingReservationWaiters)
+		_reservationDrainRequested.set(true);
+		if(_drainingReservationWaiters.compareAndSet(false, true))
+			drainReservationWaiters();
+	}
+
+	private void drainReservationWaiters() {
+		while(true) {
+			try {
+				do {
+					_reservationDrainRequested.set(false);
+					drainReservationWaitersOnce();
+				}
+				while(_reservationDrainRequested.get());
+			}
+			finally {
+				_drainingReservationWaiters.set(false);
+			}
+			if(!_reservationDrainRequested.get() || !_drainingReservationWaiters.compareAndSet(false, true))
 				return;
-			_drainingReservationWaiters = true;
-		}
-		try {
-			while(true) {
-				synchronized(this) {
-					_reservationDrainRequested = false;
-				}
-				drainReservationWaitersOnce();
-				synchronized(this) {
-					if(!_reservationDrainRequested) {
-						_drainingReservationWaiters = false;
-						return;
-					}
-				}
-			}
-		}
-		catch(RuntimeException | Error t) {
-			synchronized(this) {
-				_drainingReservationWaiters = false;
-			}
-			throw t;
 		}
 	}
 
 	private void drainReservationWaitersOnce() {
 		while(true) {
 			ReservationWaiter waiter;
-			synchronized(this) {
-				if(_shutdown || _destroyed)
-					return;
-				waiter = _reservationWaiters.peekFirst();
-				if(waiter == null)
-					return;
-			}
+			if(_shutdown || _destroyed)
+				return;
+			waiter = _reservationWaiters.peek();
+			if(waiter == null)
+				return;
 			boolean admitted;
 			try {
 				admitted = tryReserve(waiter.bytes);
@@ -468,17 +470,25 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		}
 	}
 
-	private synchronized boolean removeReservationWaiter(ReservationWaiter waiter) {
-		if(_reservationWaiters.peekFirst() == waiter) {
-			_reservationWaiters.removeFirst();
-			return true;
-		}
+	private boolean removeReservationWaiter(ReservationWaiter waiter) {
+		if(_reservationWaiters.peek() == waiter)
+			return _reservationWaiters.poll() == waiter;
 		return _reservationWaiters.remove(waiter);
 	}
 
+	private ArrayDeque<ReservationWaiter> drainReservationWaiterQueue() {
+		ArrayDeque<ReservationWaiter> waiters = new ArrayDeque<>();
+		ReservationWaiter waiter;
+		while((waiter = _reservationWaiters.poll()) != null)
+			waiters.addLast(waiter);
+		return waiters;
+	}
+
 	private static void failReservationWaiters(ArrayDeque<ReservationWaiter> waiters, Throwable error) {
-		while(!waiters.isEmpty())
-			waiters.removeFirst().future.completeExceptionally(error);
+		while(!waiters.isEmpty()) {
+			ReservationWaiter waiter = waiters.removeFirst();
+			waiter.future.completeExceptionally(error);
+		}
 	}
 
 	private static long saturatingAdd(long left, long right) {
