@@ -149,6 +149,18 @@ public class MaskedOnceArrayList<T> {
 		}
 	}
 
+	@SuppressWarnings({"rawtypes"})
+	public int getNonNullCount() {
+		int cnt = 0;
+		MaskedOnceArray[] partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
+		for(int i = 0; i < partitions.length; i++) {
+			MaskedOnceArray partition = (MaskedOnceArray) PARTITION.getAcquire(partitions, i);
+			if(partition != null)
+				cnt += partition.getNonNullCount();
+		}
+		return cnt;
+	}
+
 	@SuppressWarnings("rawtypes")
 	private MaskedOnceArray[] ensurePartitionCapacity(int partitionIndex) {
 		MaskedOnceArray[] partitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);

@@ -191,6 +191,11 @@ public class OOCCacheImpl implements OOCCache {
 	@Override
 	public synchronized void shutdown() {
 		_running = false;
+		_blocks.forEachStreamTable((i, arr) -> {
+			int cnt = arr.getNonNullCount();
+			if(cnt > 0)
+				System.out.println("[WARN] Stream ID " + i + " is not empty: " + cnt);
+		});
 		_blocks.clear();
 		_deferredUnpins.clear();
 		_ownedBytes = 0;

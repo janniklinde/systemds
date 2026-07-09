@@ -127,6 +127,10 @@ public class MaskedOnceArray<T> {
 			return forEachLiveForward(action, offset);
 	}
 
+	public int getNonNullCount() {
+		return (int)NON_NULL_COUNT.getAcquire(this);
+	}
+
 	private boolean forEachLiveForward(IndexedObjectPredicate<? super T> action, int offset) {
 		int len = _liveState.length();
 		T data;
