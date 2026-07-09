@@ -253,7 +253,15 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 	public interface IndexedReader<T extends SpillableObject> extends AutoCloseable {
 		OOCFuture<Lease<T>> request(int index);
 
+		default OOCFuture<Lease<T>> request(int index, MemoryAllowance allowance) {
+			return request(index);
+		}
+
 		Lease<T> requestIfLive(int index);
+
+		default Lease<T> requestIfLive(int index, MemoryAllowance allowance) {
+			return requestIfLive(index);
+		}
 
 		@Override
 		void close();

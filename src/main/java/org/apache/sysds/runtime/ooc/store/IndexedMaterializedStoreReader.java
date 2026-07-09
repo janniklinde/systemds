@@ -63,9 +63,14 @@ public final class IndexedMaterializedStoreReader<T extends SpillableObject>
 
 	@Override
 	public OOCFuture<MaterializedStore.Lease<T>> request(int index) {
+		return request(index, allowance);
+	}
+
+	@Override
+	public OOCFuture<MaterializedStore.Lease<T>> request(int index, MemoryAllowance requestAllowance) {
 		checkReady(index);
 		reserve(index);
-		OOCFuture<BlockEntry> pinned = StorePinAdmission.pinAdmitted(cache, streamId, index, allowance,
+		OOCFuture<BlockEntry> pinned = StorePinAdmission.pinAdmitted(cache, streamId, index, requestAllowance,
 			() -> closed);
 		OOCFuture<MaterializedStore.Lease<T>> result = new OOCFuture<>();
 		pinned.whenComplete((entry, error) -> {
@@ -78,21 +83,27 @@ public final class IndexedMaterializedStoreReader<T extends SpillableObject>
 				result.complete(null);
 			}
 			else
-				result.complete(new StoreLease<>(this, index, entry));
+				result.complete(new StoreLease<>((idx, current) -> release(idx, current, requestAllowance),
+					index, entry));
 		});
 		return result;
 	}
 
 	@Override
 	public MaterializedStore.Lease<T> requestIfLive(int index) {
+		return requestIfLive(index, allowance);
+	}
+
+	@Override
+	public MaterializedStore.Lease<T> requestIfLive(int index, MemoryAllowance requestAllowance) {
 		checkReady(index);
 		reserve(index);
-		BlockEntry entry = cache.pinIfLive(streamId, index, allowance);
+		BlockEntry entry = cache.pinIfLive(streamId, index, requestAllowance);
 		if(entry == null) {
 			liveness.unreserve(index);
 			return null;
 		}
-		return new StoreLease<>(this, index, entry);
+		return new StoreLease<>((idx, current) -> release(idx, current, requestAllowance), index, entry);
 	}
 
 	@Override
@@ -105,7 +116,11 @@ public final class IndexedMaterializedStoreReader<T extends SpillableObject>
 
 	@Override
 	public void release(int index, BlockEntry entry) {
-		cache.unpin(entry, allowance);
+		release(index, entry, allowance);
+	}
+
+	private void release(int index, BlockEntry entry, MemoryAllowance requestAllowance) {
+		cache.unpin(entry, requestAllowance);
 		liveness.consumed(index);
 		afterRelease.accept(index);
 	}
