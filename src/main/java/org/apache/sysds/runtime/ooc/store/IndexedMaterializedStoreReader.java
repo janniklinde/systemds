@@ -65,8 +65,8 @@ public final class IndexedMaterializedStoreReader<T extends SpillableObject>
 	public OOCFuture<MaterializedStore.Lease<T>> request(int index) {
 		checkReady(index);
 		reserve(index);
-		OOCFuture<BlockEntry> pinned = new OOCFuture<>();
-		StorePinRetry.pinWithRetry(cache, streamId, index, allowance, () -> closed, pinned);
+		OOCFuture<BlockEntry> pinned = StorePinAdmission.pinAdmitted(cache, streamId, index, allowance,
+			() -> closed);
 		OOCFuture<MaterializedStore.Lease<T>> result = new OOCFuture<>();
 		pinned.whenComplete((entry, error) -> {
 			if(error != null) {

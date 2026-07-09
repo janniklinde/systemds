@@ -119,12 +119,17 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 	}
 
 	public synchronized Reader<T> openReader(AccessPattern pattern, MemoryAllowance allowance, int maxPrefetch) {
+		return openReader(pattern, allowance, maxPrefetch, true);
+	}
+
+	public synchronized Reader<T> openReader(AccessPattern pattern, MemoryAllowance allowance, int maxPrefetch,
+		boolean softOrdering) {
 		if(!_complete || _closed)
 			throw new IllegalStateException("Readers require a completed store");
 		if(_readersSealed)
 			throw new IllegalStateException("Store no longer accepts new readers");
 		OrderedMaterializedStoreReader<T> reader = new OrderedMaterializedStoreReader<>(_cache, _streamId, pattern,
-			allowance, Math.max(1, maxPrefetch), this::forgetAfterReaderClose, this::tryForget);
+			allowance, Math.max(1, maxPrefetch), softOrdering, this::forgetAfterReaderClose, this::tryForget);
 		_registeredReaders.add(reader);
 		return reader;
 	}
@@ -145,8 +150,8 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 			throw new IllegalStateException("Store is closed");
 		if(index < 0 || index >= _published.get())
 			throw new IndexOutOfBoundsException("Invalid requested index: " + index);
-		OOCFuture<BlockEntry> pinned = new OOCFuture<>();
-		StorePinRetry.pinWithRetry(_cache, _streamId, index, allowance, () -> _closed, pinned);
+		OOCFuture<BlockEntry> pinned = StorePinAdmission.pinAdmitted(_cache, _streamId, index, allowance,
+			() -> _closed);
 		OOCFuture<Lease<T>> result = new OOCFuture<>();
 		pinned.whenComplete((entry, error) -> {
 			if(error != null)
