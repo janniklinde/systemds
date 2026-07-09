@@ -75,8 +75,8 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		_data = data;
 		_dataCharacteristics = data == null ? source.getDataCharacteristics() : data.getDataCharacteristics();
 		_store = new MaterializedStore<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
-		_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), 200_000_000,
-			estimateDenseTileBytes(_dataCharacteristics));
+		_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(),
+			GlobalMemoryBroker.defaultAllowanceLimit(), estimateDenseTileBytes(_dataCharacteristics));
 		((SyncMemoryAllowance) _allowance).registerDebugOwner("MaterializedStoreStreamable@"
 			+ System.identityHashCode(this) + "[store=" + System.identityHashCode(_store) + "]");
 		_primitive = new MaterializedStoreBoundaryPrimitive(this, safePrimitive(source));

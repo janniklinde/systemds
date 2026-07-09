@@ -37,6 +37,11 @@ public interface OOCMaterializedView extends AutoCloseable {
 	MaterializedStore.Reader<IndexedMatrixValue> openReader(MaterializedStore.AccessPattern pattern,
 		MemoryAllowance allowance, int maxPrefetch);
 
+	default MaterializedStore.Reader<IndexedMatrixValue> openReader(MaterializedStore.AccessPattern pattern,
+		MemoryAllowance allowance, int maxPrefetch, boolean softOrdering) {
+		return openReader(pattern, allowance, maxPrefetch);
+	}
+
 	MaterializedStore.IndexedReader<IndexedMatrixValue> openIndexedReader(
 		MaterializedStore.Liveness liveness, MemoryAllowance allowance);
 

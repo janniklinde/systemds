@@ -43,6 +43,10 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		return BROKER;
 	}
 
+	public static long defaultAllowanceLimit() {
+		return Math.max(Runtime.getRuntime().maxMemory() / 10, 200_000_000L);
+	}
+
 	private final long _allowedBytes;
 	private final List<MemoryAllowance> _allowances;
 	private final AtomicBoolean _reclaimRunning;
