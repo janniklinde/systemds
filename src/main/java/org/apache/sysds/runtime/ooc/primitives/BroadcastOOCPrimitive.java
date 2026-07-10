@@ -294,14 +294,14 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 				var bcb = work._broadcast;
 				var cb = work._streamed;
 				ReservationBudget budget = work._budget;
-				IndexedMatrixValue result;
-				try(bcb; cb) {
-					int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(cb.get()) :
-						(int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
-						cb.get().getIndexes().getRowIndex() - 1);
-					result = process(idx, bcb, cb);
-				}
 				try {
+					IndexedMatrixValue result;
+					try(bcb; cb) {
+						int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(cb.get()) :
+							(int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
+							cb.get().getIndexes().getRowIndex() - 1);
+						result = process(idx, bcb, cb);
+					}
 					if(budget == null)
 						throw new DMLRuntimeException("Missing admitted broadcast output budget.");
 					OOCInstructionUtils.enqueueExact(out, result, budget);
@@ -311,7 +311,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 					if(budget != null)
 						budget.close();
 				}
-			}, _sc);
+			}, cb -> true, (i, cb) -> cb.get().close(), _sc);
 			future2.whenComplete((finished, probeError) -> {
 				try {
 					if(probeError != null)
@@ -356,9 +356,10 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 
 	private static long broadcastTaskBudgetBytes(OOCStreamable<IndexedMatrixValue> streamed,
 		OOCStreamable<IndexedMatrixValue> broadcast, OOCStreamable<IndexedMatrixValue> output) {
-		return saturatingAdd(OOCInstructionUtils.estimateOutputTileBytes(output.getDataCharacteristics()),
-			Math.max(OOCInstructionUtils.estimateOutputTileBytes(streamed.getDataCharacteristics()),
-				OOCInstructionUtils.estimateOutputTileBytes(broadcast.getDataCharacteristics())));
+		long tileBytes = Math.max(OOCInstructionUtils.estimateFullTileBytes(output.getDataCharacteristics()),
+			Math.max(OOCInstructionUtils.estimateFullTileBytes(streamed.getDataCharacteristics()),
+				OOCInstructionUtils.estimateFullTileBytes(broadcast.getDataCharacteristics())));
+		return saturatingAdd(tileBytes, tileBytes);
 	}
 
 	private static long saturatingAdd(long a, long b) {
@@ -378,7 +379,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		return getOutputStream(0);
 	}
 
-	private static final class ProbeWork {
+	private static final class ProbeWork implements AutoCloseable {
 		private final OOCStream.QueueCallback<IndexedMatrixValue> _broadcast;
 		private final OOCStream.QueueCallback<IndexedMatrixValue> _streamed;
 		private final ReservationBudget _budget;
@@ -388,6 +389,22 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 			_broadcast = broadcast;
 			_streamed = streamed;
 			_budget = budget;
+		}
+
+		@Override
+		public void close() {
+			try {
+				_broadcast.close();
+			}
+			finally {
+				try {
+					_streamed.close();
+				}
+				finally {
+					if(_budget != null)
+						_budget.close();
+				}
+			}
 		}
 	}
 }

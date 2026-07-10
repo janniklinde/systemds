@@ -42,6 +42,8 @@ import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.io.CloseableQueue;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
@@ -52,6 +54,7 @@ import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
 import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.store.StateLease;
+import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -210,6 +213,13 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		final AggregateBinaryOperator mmOp = new AggregateBinaryOperator(Multiply.getMultiplyFnObject(), agg);
 		final BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
 		final AtomicIntegerArray seenPerRow = new AtomicIntegerArray(numRowBlocks);
+		final long xBytes = OOCInstructionUtils.estimateOutputTileBytes(x.getDataCharacteristics());
+		final long vBytes = OOCInstructionUtils.estimateOutputTileBytes(getVStreamable().getDataCharacteristics());
+		final long qBytes = OOCInstructionUtils.estimateOutputTileBytes(getOutputStreamable().getDataCharacteristics());
+		final long vectorBytes = Math.max(vBytes, qBytes);
+		final long phase1BudgetBytes = saturatingAdd(xBytes, vBytes, saturatingMultiply(vectorBytes, 3));
+		final long phase2BudgetBytes = saturatingAdd(xBytes, vectorBytes, saturatingMultiply(qBytes, 3));
+		final long outputBudgetBytes = saturatingAdd(qBytes, qBytes);
 
 		_vView.completion().whenComplete((ignored, error) -> {
 			if(error != null) {
@@ -219,7 +229,8 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 			try {
 				_vReader = _vView.openIndexedReader(
 					new MultiplicityLiveness(numVBlocks, numRowBlocks), _allowance);
-				startXtXv(x, out, numColBlocks, uBase, qBase, xBase, mmOp, plus, seenPerRow);
+				startXtXv(x, out, numColBlocks, uBase, qBase, xBase, mmOp, plus, seenPerRow,
+					phase1BudgetBytes, phase2BudgetBytes, outputBudgetBytes);
 			}
 			catch(Throwable t) {
 				fail(t, out, null);
@@ -229,31 +240,42 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 
 	private void startXtXv(OOCStream<IndexedMatrixValue> x, OOCStream<IndexedMatrixValue> out,
 		int numColBlocks, int uBase, int qBase, int xBase, AggregateBinaryOperator mmOp, BinaryOperator plus,
-		AtomicIntegerArray seenPerRow) {
+		AtomicIntegerArray seenPerRow, long phase1BudgetBytes, long phase2BudgetBytes, long outputBudgetBytes) {
 		final OOCStream<MMChainWorkload> phase1Stream = new SubscribableTaskQueue<>();
-		final OOCStream<MMChainWorkload> phase2Stream = new SubscribableTaskQueue<>();
+		final OOCStream<Phase2Request> phase2Requests = new SubscribableTaskQueue<>();
+		final OOCStream<Phase2Request> admittedPhase2 = new AllocatedOOCStream<>(phase2Requests, _allowance,
+			request -> phase2BudgetBytes, phase2BudgetBytes > 0, ReservationBudget::admitted);
+		final OOCStream<IndexedMatrixValue> admittedX = new AllocatedOOCStream<>(x, _allowance,
+			input -> phase1BudgetBytes, phase1BudgetBytes > 0, ReservationBudget::admitted);
 		final CloseableQueue<Phase1Result> phase1Results = new CloseableQueue<>();
 		final CloseableQueue<Phase2Result> phase2Results = new CloseableQueue<>();
 		final AtomicBoolean phase1Closed = new AtomicBoolean(false);
 		final AtomicBoolean phase2Closed = new AtomicBoolean(false);
 
 		CompletableFuture<Void> phase1Future = OOCInstructionUtils.submitOOCTasks(phase1Stream, wl -> {
-			var vCb = wl.get().cb1;
-			var xCb = wl.get().cb2;
+			MMChainWorkload work = wl.get();
+			var vCb = work.cb1;
+			var xCb = work.cb2;
+			ReservationBudget budget = work.detachBudget();
 			OOCStream.QueueCallback<IndexedMatrixValue> retainedX = null;
 			boolean resultQueued = false;
 			try(vCb; xCb) {
+				if(budget == null)
+					throw new DMLRuntimeException("Missing admitted MapMMChain phase-1 budget.");
 				MatrixIndexes xIx = xCb.get().getIndexes();
 				int row = Math.toIntExact(xIx.getRowIndex() - 1);
 				int col = Math.toIntExact(xIx.getColumnIndex() - 1);
 				MatrixBlock xb = (MatrixBlock)xCb.get().getValue();
 				MatrixBlock vb = (MatrixBlock)vCb.get().getValue();
-				// TODO OOC: ub/qb and merge intermediates are currently reserved only when installed
-				// into the state table. Pre-admit these allocations if MapMMChain needs strict
-				// allowance bounds under tight memory pressure.
 				MatrixBlock ub = xb.aggregateBinaryOperations(xb, vb, new MatrixBlock(), mmOp);
 				retainedX = xCb.keepOpen();
-				phase1Results.enqueueIfOpen(new Phase1Result(row, col, ub, retainedX));
+				Phase1Result result = new Phase1Result(row, col, ub, retainedX, budget);
+				if(!phase1Results.enqueueIfOpen(result)) {
+					result.close();
+					throw new DMLRuntimeException("MapMMChain phase-1 result queue closed before task completion.");
+				}
+				retainedX = null;
+				budget = null;
 				resultQueued = true;
 			}
 			catch(InterruptedException e) {
@@ -263,35 +285,62 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 			finally {
 				if(!resultQueued && retainedX != null)
 					retainedX.close();
+				if(budget != null)
+					budget.close();
 			}
-		}, _sc);
+		}, cb -> true, (i, cb) -> cb.get().close(), _sc);
 		phase1Future.whenComplete((ignored, error) -> {
 			try {
 				phase1Results.close();
 			}
 			catch(InterruptedException e) {
 				Thread.currentThread().interrupt();
-				fail(e, out, phase2Stream);
+				fail(e, out, phase2Requests);
 				return;
 			}
 			if(error != null)
-				fail(error, out, phase2Stream);
+				fail(error, out, phase2Requests);
 		});
 
-		CompletableFuture<Void> phase2Future = OOCInstructionUtils.submitOOCTasks(phase2Stream, wl -> {
-			var uCb = wl.get().cb1;
-			var xCb = wl.get().cb2;
-			try(uCb; xCb) {
-				MatrixIndexes xIx = xCb.get().getIndexes();
-				int col = Math.toIntExact(xIx.getColumnIndex() - 1);
-				MatrixBlock xb = (MatrixBlock)xCb.get().getValue();
-				MatrixBlock ub = (MatrixBlock)uCb.get().getValue();
+		CompletableFuture<Void> phase2Future = OOCInstructionUtils.submitOOCTasks(admittedPhase2, cb -> {
+			ReservationBudget budget = OOCInstructionUtils.detachBudget(cb);
+			StateLease<IndexedMatrixValue> uLease = null;
+			StateLease<IndexedMatrixValue> xLease = null;
+			try {
+				if(budget == null)
+					throw new DMLRuntimeException("Missing admitted MapMMChain phase-2 budget.");
+				Phase2Request request = cb.get();
+				uLease = await(_accumulators.lease(uBase + request.row, budget));
+				if(uLease == null)
+					throw new IllegalStateException("Missing finalized XtXv row accumulator " + request.row);
+				xLease = await(_retainedTiles.take(xBase + request.row * numColBlocks + request.col, budget));
+				if(xLease == null)
+					throw new IllegalStateException("Missing retained XtXv input tile for row=" + request.row
+						+ ", col=" + request.col);
+				MatrixBlock xb = (MatrixBlock)xLease.value().getValue();
+				MatrixBlock ub = (MatrixBlock)uLease.value().getValue();
 				MatrixBlock qb = multTransposeVector(xb, ub);
-				phase2Results.enqueueIfOpen(new Phase2Result(col, qb));
+				uLease.close();
+				uLease = null;
+				xLease.close();
+				xLease = null;
+				Phase2Result result = new Phase2Result(request.col, qb, budget);
+				if(!phase2Results.enqueueIfOpen(result)) {
+					result.close();
+					throw new DMLRuntimeException("MapMMChain phase-2 result queue closed before task completion.");
+				}
+				budget = null;
 			}
 			catch(InterruptedException e) {
-				Thread.currentThread().interrupt();
-				throw new DMLRuntimeException(e);
+				throw DMLRuntimeException.of(e);
+			}
+			finally {
+				if(uLease != null)
+					uLease.close();
+				if(xLease != null)
+					xLease.close();
+				if(budget != null)
+					budget.close();
 			}
 		}, _sc);
 		phase2Future.whenComplete((ignored, error) -> {
@@ -310,13 +359,23 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		runCoordinator("ooc-mapmmchain-q-coordinator", () -> {
 			try {
 				Phase2Result result;
-				while((result = phase2Results.take()) != null)
-					accumulateTable(qBase + result.col(), new MatrixIndexes(result.col() + 1L, 1L),
-						result.block(), plus);
-				emitOutputs(out, numColBlocks, qBase);
+				while((result = phase2Results.take()) != null) {
+					Phase2Result current = result;
+					ReservationBudget budget = current.detachBudget();
+					try(current) {
+						accumulateTable(qBase + current.col, new MatrixIndexes(current.col + 1L, 1L),
+							current.block, plus, budget);
+					}
+					finally {
+						if(budget != null)
+							budget.close();
+					}
+				}
+				emitOutputs(out, numColBlocks, qBase, outputBudgetBytes);
 				complete(out);
 			}
 			catch(Throwable t) {
+				closeAndDrain(phase2Results, t);
 				fail(t, out, null);
 			}
 		});
@@ -325,29 +384,34 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 			try {
 				Phase1Result result;
 				while((result = phase1Results.take()) != null) {
-					boolean retainedInstalled = false;
-					try {
-						accumulateTable(uBase + result.row(), new MatrixIndexes(result.row() + 1L, 1L),
-							result.block(), plus);
-						installRetainedCallback(xBase + result.row() * numColBlocks + result.col(), result.xCb());
-						retainedInstalled = true;
-						if(seenPerRow.incrementAndGet(result.row()) == numColBlocks)
-							schedulePhase2Row(result.row(), numColBlocks, uBase, xBase, phase2Stream);
+					Phase1Result current = result;
+					ReservationBudget budget = current.detachBudget();
+					boolean rowReady;
+					try(current) {
+						accumulateTable(uBase + current.row, new MatrixIndexes(current.row + 1L, 1L),
+							current.block, plus, budget);
+						installRetainedCallback(xBase + current.row * numColBlocks + current.col,
+							current.xCb, budget);
+						rowReady = seenPerRow.incrementAndGet(current.row) == numColBlocks;
 					}
 					finally {
-						if(!retainedInstalled)
-							result.xCb().close();
+						if(budget != null)
+							budget.close();
 					}
+					if(rowReady)
+						schedulePhase2Row(current.row, numColBlocks, phase2Requests);
 				}
-				closeOnce(phase2Stream, phase2Closed, out, phase2Stream);
+				closeOnce(phase2Requests, phase2Closed, out, phase2Requests);
 			}
 			catch(Throwable t) {
-				fail(t, out, phase2Stream);
+				closeAndDrain(phase1Results, t);
+				fail(t, out, phase2Requests);
 			}
 		});
 
 		final AtomicInteger inflightCtr = new AtomicInteger(1);
 		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> xSubscriber = xcb -> {
+			ReservationBudget budget = OOCInstructionUtils.detachBudget(xcb);
 			OOCStream.QueueCallback<IndexedMatrixValue> retainedX = null;
 			boolean inflightRetained = false;
 			try(xcb) {
@@ -356,13 +420,17 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 						closeOnce(phase1Stream, phase1Closed, out, phase1Stream);
 					return;
 				}
+				if(budget == null)
+					throw new DMLRuntimeException("Missing admitted MapMMChain input budget.");
 				retainedX = xcb.keepOpen();
 				inflightCtr.incrementAndGet();
 				inflightRetained = true;
 				int col = Math.toIntExact(xcb.get().getIndexes().getColumnIndex() - 1);
-				OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> vFuture = vectorTile(col);
+				OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> vFuture = vectorTile(col, budget);
 				final var fXcb = retainedX;
+				final var fBudget = budget;
 				retainedX = null;
+				budget = null;
 				vFuture.whenComplete((vcb, error) -> {
 					boolean enqueued = false;
 					try {
@@ -370,7 +438,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 							throw DMLRuntimeException.of(error);
 						if(vcb == null)
 							throw new IllegalStateException("Missing broadcast vector tile for column block " + col);
-						phase1Stream.enqueue(new MMChainWorkload(vcb, fXcb));
+						phase1Stream.enqueue(new MMChainWorkload(vcb, fXcb, fBudget));
 						enqueued = true;
 					}
 					catch(Throwable t) {
@@ -381,6 +449,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 							if(vcb != null)
 								vcb.close();
 							fXcb.close();
+							fBudget.close();
 						}
 						if(inflightCtr.decrementAndGet() == 0)
 							closeOnce(phase1Stream, phase1Closed, out, phase1Stream);
@@ -394,8 +463,12 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 					closeOnce(phase1Stream, phase1Closed, out, phase1Stream);
 				fail(t, out, phase1Stream);
 			}
+			finally {
+				if(budget != null)
+					budget.close();
+			}
 		};
-		x.setSubscriber(xSubscriber);
+		admittedX.setSubscriber(xSubscriber);
 	}
 
 	private void closeOnce(OOCStream<?> stream, AtomicBoolean closed, OOCStream<?> out, OOCStream<?> workStream) {
@@ -409,12 +482,28 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		}
 	}
 
-	private OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> vectorTile(int idx) {
-		MaterializedStore.Lease<IndexedMatrixValue> live = _vReader.requestIfLive(idx);
+	private static <T extends AutoCloseable> void closeAndDrain(CloseableQueue<T> queue, Throwable failure) {
+		try {
+			queue.close();
+			T value;
+			while((value = queue.take()) != null)
+				value.close();
+		}
+		catch(InterruptedException ex) {
+			Thread.currentThread().interrupt();
+			failure.addSuppressed(ex);
+		}
+		catch(Exception ex) {
+			failure.addSuppressed(ex);
+		}
+	}
+
+	private OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> vectorTile(int idx, MemoryAllowance allowance) {
+		MaterializedStore.Lease<IndexedMatrixValue> live = _vReader.requestIfLive(idx, allowance);
 		if(live != null)
 			return OOCFuture.completed(LeaseQueueCallbacks.store(live));
 		OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> pending = new OOCFuture<>();
-		_vReader.request(idx).whenComplete((lease, error) -> {
+		_vReader.request(idx, allowance).whenComplete((lease, error) -> {
 			if(error != null)
 				pending.completeExceptionally(error);
 			else if(lease == null)
@@ -426,12 +515,13 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		return pending;
 	}
 
-	private void accumulateTable(int slot, MatrixIndexes index, MatrixBlock block, BinaryOperator plus) {
-		ManagedPayload<IndexedMatrixValue> payload = payload(index, block);
+	private void accumulateTable(int slot, MatrixIndexes index, MatrixBlock block, BinaryOperator plus,
+		ReservationBudget budget) {
+		ManagedPayload<IndexedMatrixValue> payload = payload(index, block, budget);
 		while(true) {
 			StateLease<IndexedMatrixValue> existing;
 			try {
-				existing = await(_accumulators.installOrTake(slot, payload, _allowance));
+				existing = await(_accumulators.installOrTake(slot, payload, budget));
 			}
 			catch(RuntimeException ex) {
 				payload.release();
@@ -447,17 +537,19 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 			finally {
 				payload.release();
 			}
-			payload = payload(index, merged);
+			payload = payload(index, merged, budget);
 		}
 	}
 
-	private ManagedPayload<IndexedMatrixValue> payload(MatrixIndexes index, MatrixBlock block) {
+	private ManagedPayload<IndexedMatrixValue> payload(MatrixIndexes index, MatrixBlock block,
+		MemoryAllowance owner) {
 		long bytes = block.getExactSerializedSize();
-		_allowance.reserveBlocking(bytes);
-		return new ManagedPayload<>(new IndexedMatrixValue(index, block), bytes, _allowance);
+		owner.reserveBlocking(bytes);
+		return new ManagedPayload<>(new IndexedMatrixValue(index, block), bytes, owner);
 	}
 
-	private void installRetainedCallback(int slot, OOCStream.QueueCallback<IndexedMatrixValue> callback) {
+	private void installRetainedCallback(int slot, OOCStream.QueueCallback<IndexedMatrixValue> callback,
+		ReservationBudget budget) {
 		if(callback instanceof MaterializedCallback pinned) {
 			try {
 				_retainedTiles.installReference(slot, pinned.pinnedEntry());
@@ -475,8 +567,8 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		else {
 			IndexedMatrixValue value = callback.get();
 			long bytes = ((MatrixBlock)value.getValue()).getExactSerializedSize();
-			_allowance.reserveBlocking(bytes);
-			payload = new ManagedPayload<>(value, bytes, _allowance);
+			budget.reserveBlocking(bytes);
+			payload = new ManagedPayload<>(value, bytes, budget);
 			callback.close();
 		}
 		try {
@@ -488,59 +580,32 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		}
 	}
 
-	private void schedulePhase2Row(int row, int numColBlocks, int uBase, int xBase,
-		OOCStream<MMChainWorkload> phase2Stream) {
-		StateLease<IndexedMatrixValue> uLease = await(_accumulators.take(uBase + row, _allowance));
-		if(uLease == null)
-			throw new IllegalStateException("Missing finalized XtXv row accumulator " + row);
-			try(OOCStream.QueueCallback<IndexedMatrixValue> uCb = LeaseQueueCallbacks.state(uLease)) {
-				for(int col = 0; col < numColBlocks; col++) {
-					StateLease<IndexedMatrixValue> xLease =
-						await(_retainedTiles.take(xBase + row * numColBlocks + col, _allowance));
-				if(xLease == null)
-					throw new IllegalStateException("Missing retained XtXv input tile for row=" + row
-						+ ", col=" + col);
-				OOCStream.QueueCallback<IndexedMatrixValue> uAlias = uCb.keepOpen();
-				OOCStream.QueueCallback<IndexedMatrixValue> xCb = LeaseQueueCallbacks.state(xLease);
-				boolean enqueued = false;
-				try {
-					phase2Stream.enqueue(new MMChainWorkload(uAlias, xCb));
-					enqueued = true;
-				}
-				finally {
-					if(!enqueued) {
-						uAlias.close();
-						xCb.close();
-					}
-				}
-			}
-		}
+	private void schedulePhase2Row(int row, int numColBlocks, OOCStream<Phase2Request> phase2Requests) {
+		for(int col = 0; col < numColBlocks; col++)
+			phase2Requests.enqueue(new Phase2Request(row, col));
 	}
 
-	private void emitOutputs(OOCStream<IndexedMatrixValue> out, int numColBlocks, int qBase) {
+	private void emitOutputs(OOCStream<IndexedMatrixValue> out, int numColBlocks, int qBase,
+		long outputBudgetBytes) {
 		for(int col = 0; col < numColBlocks; col++) {
-			StateLease<IndexedMatrixValue> qLease = await(_accumulators.take(qBase + col, _allowance));
-			if(qLease == null)
-				continue;
-			try(qLease) {
-				OOCStream.QueueCallback<IndexedMatrixValue> output = outputCallback(
-					new MatrixIndexes(col + 1L, 1L), (MatrixBlock) qLease.value().getValue());
-				boolean enqueued = false;
-				try {
-					out.enqueue(output);
-					enqueued = true;
+			ReservationBudget budget = OOCInstructionUtils.reserveBudget(_allowance, outputBudgetBytes);
+			try {
+				StateLease<IndexedMatrixValue> qLease = await(_accumulators.take(qBase + col, budget));
+				if(qLease == null)
+					continue;
+				IndexedMatrixValue output;
+				try(qLease) {
+					output = new IndexedMatrixValue(new MatrixIndexes(col + 1L, 1L),
+						(MatrixBlock) qLease.value().getValue());
 				}
-				finally {
-					if(!enqueued)
-						output.close();
-				}
+				OOCInstructionUtils.enqueueExact(out, output, budget);
+				budget = null;
+			}
+			finally {
+				if(budget != null)
+					budget.close();
 			}
 		}
-	}
-
-	private OOCStream.QueueCallback<IndexedMatrixValue> outputCallback(MatrixIndexes index, MatrixBlock block) {
-		IndexedMatrixValue imv = new IndexedMatrixValue(index, block);
-		return OOCInstructionUtils.exactCallback(imv, _allowance);
 	}
 
 	private void fail(Throwable t, OOCStream<?> out, OOCStream<?> workStream) {
@@ -667,6 +732,22 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		return out;
 	}
 
+	private static long saturatingMultiply(long value, long factor) {
+		if(value > Long.MAX_VALUE / factor)
+			return Long.MAX_VALUE;
+		return value * factor;
+	}
+
+	private static long saturatingAdd(long... values) {
+		long result = 0;
+		for(long value : values) {
+			if(Long.MAX_VALUE - result < value)
+				return Long.MAX_VALUE;
+			result += value;
+		}
+		return result;
+	}
+
 	public OOCStreamable<IndexedMatrixValue> getXStreamable() {
 		return getInputStream(0);
 	}
@@ -691,7 +772,105 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		return _sc;
 	}
 
-	private record MMChainWorkload(OOCStream.QueueCallback<IndexedMatrixValue> cb1, OOCStream.QueueCallback<IndexedMatrixValue> cb2){}
-	private record Phase1Result(int row, int col, MatrixBlock block, OOCStream.QueueCallback<IndexedMatrixValue> xCb){}
-	private record Phase2Result(int col, MatrixBlock block){}
+	private static final class MMChainWorkload implements AutoCloseable {
+		private final OOCStream.QueueCallback<IndexedMatrixValue> cb1;
+		private final OOCStream.QueueCallback<IndexedMatrixValue> cb2;
+		private ReservationBudget budget;
+
+		private MMChainWorkload(OOCStream.QueueCallback<IndexedMatrixValue> cb1,
+			OOCStream.QueueCallback<IndexedMatrixValue> cb2, ReservationBudget budget) {
+			this.cb1 = cb1;
+			this.cb2 = cb2;
+			this.budget = budget;
+		}
+
+		private synchronized ReservationBudget detachBudget() {
+			ReservationBudget detached = budget;
+			budget = null;
+			return detached;
+		}
+
+		@Override
+		public synchronized void close() {
+			try {
+				cb1.close();
+			}
+			finally {
+				try {
+					cb2.close();
+				}
+				finally {
+					if(budget != null) {
+						budget.close();
+						budget = null;
+					}
+				}
+			}
+		}
+	}
+
+	private static final class Phase1Result implements AutoCloseable {
+		private final int row;
+		private final int col;
+		private final MatrixBlock block;
+		private final OOCStream.QueueCallback<IndexedMatrixValue> xCb;
+		private ReservationBudget budget;
+
+		private Phase1Result(int row, int col, MatrixBlock block,
+			OOCStream.QueueCallback<IndexedMatrixValue> xCb, ReservationBudget budget) {
+			this.row = row;
+			this.col = col;
+			this.block = block;
+			this.xCb = xCb;
+			this.budget = budget;
+		}
+
+		private synchronized ReservationBudget detachBudget() {
+			ReservationBudget detached = budget;
+			budget = null;
+			return detached;
+		}
+
+		@Override
+		public synchronized void close() {
+			try {
+				xCb.close();
+			}
+			finally {
+				if(budget != null) {
+					budget.close();
+					budget = null;
+				}
+			}
+		}
+	}
+
+	private static final class Phase2Result implements AutoCloseable {
+		private final int col;
+		private final MatrixBlock block;
+		private ReservationBudget budget;
+
+		private Phase2Result(int col, MatrixBlock block, ReservationBudget budget) {
+			this.col = col;
+			this.block = block;
+			this.budget = budget;
+		}
+
+		private synchronized ReservationBudget detachBudget() {
+			ReservationBudget detached = budget;
+			budget = null;
+			return detached;
+		}
+
+		@Override
+		public synchronized void close() {
+			if(budget != null) {
+				budget.close();
+				budget = null;
+			}
+		}
+	}
+
+	private record Phase2Request(int row, int col) {
+	}
 }

@@ -23,16 +23,20 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
+import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongConsumer;
 
 public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
@@ -41,6 +45,7 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	private final long _bulkAlloc;
 	private final AtomicBoolean _finished = new AtomicBoolean(false);
 	private final AtomicInteger _pendingEmits = new AtomicInteger(1);
+	private final AtomicReference<ReservationBudget> _activeBudget = new AtomicReference<>();
 	private LongConsumer _bulkProducer;
 	private OOCStream<IndexedMatrixValue> _out;
 	private boolean _shutdown;
@@ -94,10 +99,30 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	public void startExecution() {
 		_out = _outputStream.getWriteStream();
 		final long targetAlloc = Math.max(0, _bulkAlloc);
+		final DataCharacteristics dc = _outputStream.getDataCharacteristics();
+		final long tileBytes = OOCInstructionUtils.estimateOutputTileBytes(dc);
+		final long batchBudgetBytes = saturatingAdd(targetAlloc, tileBytes);
+		final long totalBudgetBytes = dc != null && dc.dimsKnown() ?
+			saturatingMultiply(tileBytes, OOCUtils.getNumBlocks(dc)) : 0;
+		final long taskBudgetBytes = totalBudgetBytes > 0 ? Math.min(batchBudgetBytes, totalBudgetBytes) :
+			batchBudgetBytes;
 
 		runCoordinator("ooc-uncoordinated-datagen", OOCInstructionUtils.oocTask(() -> {
 			while(!_shutdown) {
-				_bulkProducer.accept(targetAlloc);
+				ReservationBudget budget = OOCInstructionUtils.reserveBudget(_allowance, taskBudgetBytes);
+				if(budget == null)
+					throw new DMLRuntimeException("Uncoordinated data generation requires a positive task budget.");
+				if(!_activeBudget.compareAndSet(null, budget)) {
+					budget.close();
+					throw new IllegalStateException("Overlapping uncoordinated data generation phases.");
+				}
+				try {
+					_bulkProducer.accept(targetAlloc);
+				}
+				finally {
+					_activeBudget.compareAndSet(budget, null);
+					budget.close();
+				}
 			}
 			producerFinished();
 		}, new CompletableFuture<>(), _sc));
@@ -130,7 +155,10 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 
 	private void forward(IndexedMatrixValue imv) {
 		try {
-			OOCInstructionUtils.enqueueExact(_out, imv, _allowance);
+			ReservationBudget budget = _activeBudget.get();
+			if(budget == null)
+				throw new DMLRuntimeException("Data block emitted outside an admitted producer phase.");
+			OOCInstructionUtils.enqueueExact(_out, imv, budget, false);
 		}
 		catch(Throwable t) {
 			fail(t);
@@ -140,5 +168,16 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	private void fail(Throwable t) {
 		_shutdown = true;
 		_out.propagateFailure(DMLRuntimeException.of(t));
+	}
+
+	private static long saturatingAdd(long a, long b) {
+		long result = a + b;
+		return result < 0 ? Long.MAX_VALUE : result;
+	}
+
+	private static long saturatingMultiply(long a, long b) {
+		if(a <= 0 || b <= 0)
+			return 0;
+		return a > Long.MAX_VALUE / b ? Long.MAX_VALUE : a * b;
 	}
 }

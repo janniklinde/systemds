@@ -98,6 +98,10 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 
 	@Override
 	public boolean tryReserve(long bytes) {
+		if(bytes < 0)
+			throw new IllegalArgumentException("Cannot reserve negative bytes: " + bytes);
+		if(bytes > _consumptionLimit)
+			throw new IllegalArgumentException("Cannot reserve more memory than the consumption limit");
 		long minRequest;
 		long maxRequest;
 		long usedBefore;
@@ -106,7 +110,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		synchronized(this) {
 			if(_shutdown || _destroyed)
 				return false;
-			if(_usedBytes + bytes <= _grantedBytes) {
+			if(_usedBytes + bytes <= _grantedBytes && _usedBytes + bytes <= _targetBytes) {
 				usedBefore = _usedBytes;
 				grantedBefore = _grantedBytes;
 				targetBefore = _targetBytes;
@@ -123,9 +127,6 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			minRequest = _usedBytes + bytes - _grantedBytes;
 			maxRequest = Math.max(minRequest, Math.max(_grantedBytes, bytes) * 2);
 		}
-
-		if(bytes > _consumptionLimit)
-			throw new IllegalArgumentException("Cannot reserve more memory than the consumption limit");
 
 		long granted = _broker.requestMemory(this, minRequest, maxRequest);
 		long refund = 0;

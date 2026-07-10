@@ -168,6 +168,33 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 		return result;
 	}
 
+	/**
+	 * Pins an installed slot without removing the table's ownership. The caller must ensure the slot is
+	 * not cleared until the returned future has resolved.
+	 */
+	public OOCFuture<StateLease<T>> lease(int index, MemoryAllowance leaseAllowance) {
+		BlockKey key;
+		synchronized(this) {
+			checkOpen();
+			if(index < 0 || index >= _slots.length)
+				return OOCFuture.completed(null);
+			Slot slot = _slots[index];
+			if(slot == null || slot._state != Slot.INSTALLED)
+				return OOCFuture.completed(null);
+			key = slot._key;
+		}
+		OOCFuture<BlockEntry> pinned = StorePinAdmission.pinAdmitted(_cache, key.getStreamId(),
+			key.getSequenceNumber(), leaseAllowance, () -> _closed);
+		OOCFuture<StateLease<T>> result = new OOCFuture<>();
+		pinned.whenComplete((entry, error) -> {
+			if(error != null)
+				result.completeExceptionally(error);
+			else
+				result.complete(entry == null ? null : new TableLease(entry, leaseAllowance));
+		});
+		return result;
+	}
+
 	public StateLease<T> peek(int index, MemoryAllowance leaseAllowance) {
 		BlockKey key;
 		synchronized(this) {

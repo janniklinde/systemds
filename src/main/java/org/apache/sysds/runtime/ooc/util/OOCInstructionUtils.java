@@ -207,7 +207,12 @@ public class OOCInstructionUtils {
 
 	public static void enqueueExact(OOCStream<IndexedMatrixValue> out, IndexedMatrixValue value,
 		ReservationBudget budget) {
-		OOCStream.QueueCallback<IndexedMatrixValue> output = exactCallback(value, budget);
+		enqueueExact(out, value, budget, true);
+	}
+
+	public static void enqueueExact(OOCStream<IndexedMatrixValue> out, IndexedMatrixValue value,
+		ReservationBudget budget, boolean releaseUnused) {
+		OOCStream.QueueCallback<IndexedMatrixValue> output = exactCallback(value, budget, releaseUnused);
 		try {
 			out.enqueue(output);
 			output = null;
@@ -253,6 +258,11 @@ public class OOCInstructionUtils {
 
 	public static OOCStream.QueueCallback<IndexedMatrixValue> exactCallback(IndexedMatrixValue value,
 		ReservationBudget budget) {
+		return exactCallback(value, budget, true);
+	}
+
+	public static OOCStream.QueueCallback<IndexedMatrixValue> exactCallback(IndexedMatrixValue value,
+		ReservationBudget budget, boolean releaseUnused) {
 		long bytes = inMemoryBytes(value);
 		boolean reservationOwned = false;
 		try {
@@ -267,7 +277,7 @@ public class OOCInstructionUtils {
 				throw new DMLRuntimeException("Pre-reserved output budget too small for " + value.getIndexes()
 					+ ": reserved=" + available + ", actual=" + bytes);
 			long unused = available - bytes;
-			if(unused > 0)
+			if(releaseUnused && unused > 0)
 				budget.releaseUnused(unused);
 			budget.reserveBlocking(bytes);
 			reservationOwned = true;
@@ -313,6 +323,11 @@ public class OOCInstructionUtils {
 		long rows = Math.min(dc.getBlocksize(), dc.getRows());
 		long cols = Math.min(dc.getBlocksize(), dc.getCols());
 		return estimateMatrixBlockBytes(rows, cols);
+	}
+
+	public static long estimateFullTileBytes(DataCharacteristics dc) {
+		int blen = dc != null && dc.getBlocksize() > 0 ? dc.getBlocksize() : 1000;
+		return estimateMatrixBlockBytes(blen, blen);
 	}
 
 	private static long estimateMatrixBlockBytes(long rows, long cols) {
