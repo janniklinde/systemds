@@ -30,8 +30,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
 
@@ -164,8 +162,9 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 
 	@Override
 	public void reserveBlocking(long bytes) {
+		OOCFuture<Void> reservation = reserveAsync(bytes);
 		try {
-			reserveAsync(bytes).get();
+			reservation.get();
 		}
 		catch(InterruptedException e) {
 			Thread.currentThread().interrupt();
@@ -198,6 +197,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				future.completeExceptionally(new IllegalStateException("Cannot reserve memory on closed allowance."));
 			return future;
 		}
+		_broker.reservationBlocked(this, bytes);
 		requestReservationDrain();
 		return future;
 	}

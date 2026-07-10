@@ -25,4 +25,7 @@ public interface MemoryBroker {
 	void shutdownAllowance(MemoryAllowance allowance);
 	void destroyAllowance(MemoryAllowance allowance, long freedMemory);
 	void attachAllowance(MemoryAllowance allowance);
+
+	default void reservationBlocked(MemoryAllowance allowance, long bytes) {
+	}
 }

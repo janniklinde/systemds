@@ -198,16 +198,19 @@ public class OOCPlanner {
 
 	private static long buildMinimumOperatingBytes(List<OOCPrimitive> region) {
 		long primitiveFactor = 1;
+		long explicitMinimum = 0;
 		DataCharacteristics dc = null;
 
 		for(OOCPrimitive primitive : region) {
 			primitiveFactor = Math.max(primitiveFactor, primitive.getMinimumOperatingMemoryFactor());
+			explicitMinimum = Math.max(explicitMinimum, primitive.getMinimumOperatingMemoryBytes());
 
 			if(dc == null && !primitive.getOutputStreams().isEmpty())
 				dc = primitive.getOutputStreams().get(0).getDataCharacteristics();
 		}
 
-		return primitiveFactor * estimateDenseTileBytes(dc, new MatrixIndexes(1, 1));
+		return Math.max(explicitMinimum,
+			primitiveFactor * estimateDenseTileBytes(dc, new MatrixIndexes(1, 1)));
 	}
 
 	private static long estimateDenseTileBytes(DataCharacteristics dc, MatrixIndexes ix) {

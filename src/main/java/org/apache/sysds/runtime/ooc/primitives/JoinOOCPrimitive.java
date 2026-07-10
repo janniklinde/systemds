@@ -99,6 +99,16 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	public long getMinimumOperatingMemoryBytes() {
+		OOCStreamable<IndexedMatrixValue> leftInput = _inputStreamables.get(0);
+		OOCStreamable<IndexedMatrixValue> rightInput = _inputStreamables.get(1);
+		long tableTileBytes = joinTableTileBytes(leftInput, rightInput);
+		long outputBudgetBytes = Math.max(tableTileBytes, OOCInstructionUtils.estimateOutputTileBytes(
+			_outputStreamable.getDataCharacteristics()));
+		return saturatingAdd(outputBudgetBytes, saturatingAdd(tableTileBytes, tableTileBytes));
+	}
+
+	@Override
 	public void onComplete() {
 		try {
 			if(_table != null)

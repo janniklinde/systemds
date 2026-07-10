@@ -186,7 +186,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		synchronized(this) {
 			usedBefore = _usedBytes;
 			_usedBytes = Math.max(0, _usedBytes - reclaimed);
-			updates = rebalance(false);
+			updates = rebalanceAfterFree();
 		}
 		if(OOCDebug.TRACE_HOT_PATH)
 			System.out.println("[BROKER-RECLAIM] reclaimed=" + reclaimed + " used=" + usedBefore + "->" + _usedBytes);
@@ -222,7 +222,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 				throw new IllegalArgumentException();
 			usedBefore = _usedBytes;
 			_usedBytes -= freedMemory;
-			updates = rebalance(false);
+			updates = rebalanceAfterFree();
 			notifyWaiters = freedMemory > 0;
 			allowanceCount = _allowances.size();
 		}
@@ -276,6 +276,11 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			System.out.println("[BROKER-ATTACH] allowance=" + dbgId(allowance) + " allowances=" + _allowances.size()
 				+ " used=" + _usedBytes + " allowed=" + _allowedBytes);
 		allowance.setTargetMemory(_allowedBytes);
+	}
+
+	@Override
+	public void reservationBlocked(MemoryAllowance allowance, long bytes) {
+		scheduleReclaimIfNeeded(true);
 	}
 
 	public void shutdownAllAllowances() {
@@ -335,6 +340,13 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			return switchBrokerMode(BrokerMode.RELAXED);
 		else
 			return switchBrokerMode(BrokerMode.STRICT);
+	}
+
+	private List<TargetUpdate> rebalanceAfterFree() {
+		long free = _allowedBytes - _usedBytes;
+		if(_brokerMode == BrokerMode.RELAXED && free > _allowedBytes / 5)
+			return rebalanceToRelaxed();
+		return rebalance(false);
 	}
 
 	private List<TargetUpdate> switchBrokerMode(BrokerMode newMode) {
