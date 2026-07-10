@@ -21,7 +21,6 @@ package org.apache.sysds.runtime.ooc.primitives;
 
 import org.apache.commons.lang3.NotImplementedException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
-import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
@@ -37,7 +36,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.ToLongFunction;
 
 public abstract class OOCPrimitive {
 	private static final AtomicInteger COORDINATOR_THREAD_ID = new AtomicInteger();
@@ -53,9 +51,6 @@ public abstract class OOCPrimitive {
 	protected OOCAccessPattern _pattern;
 	protected OOCRegionBinding _regionBinding;
 	protected MemoryAllowance _allowance;
-	protected ToLongFunction<MatrixIndexes> _allocFn;
-	protected boolean _crossBoundaries;
-	protected boolean _startsRegion;
 
 	public OOCPrimitive(List<OOCPrimitive> children) {
 		this(children, List.of(), List.of());
@@ -86,14 +81,11 @@ public abstract class OOCPrimitive {
 		_pattern = OOCAccessPattern.UNSET;
 	}
 
-	public void bindRegion(OOCRegionBinding binding, boolean crossBoundaries, boolean startsRegion) {
+	public void bindRegion(OOCRegionBinding binding) {
 		_regionBinding = binding;
 		_allowance = binding.allowance();
-		_allocFn = binding.allocFn();
-		_crossBoundaries = crossBoundaries;
-		_startsRegion = startsRegion;
 		if(_allowance instanceof SyncMemoryAllowance sync)
-			sync.registerDebugOwner(debugName() + "[start=" + startsRegion + ",cross=" + crossBoundaries + "]");
+			sync.registerDebugOwner(debugName());
 	}
 
 	public List<OOCPrimitive> getChildren() {
@@ -156,10 +148,6 @@ public abstract class OOCPrimitive {
 	 */
 	public OOCMaterializedInputRequest requiresMaterializedInput() {
 		return null;
-	}
-
-	public long getDenseTileMemoryFactor() {
-		return 1;
 	}
 
 	public long getMinimumOperatingMemoryFactor() {

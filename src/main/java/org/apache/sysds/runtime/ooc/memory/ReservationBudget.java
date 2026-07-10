@@ -37,17 +37,26 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 	private final AtomicReference<State> _state;
 
 	private ReservationBudget(MemoryAllowance parent, long bytes) {
+		this(parent, bytes, bytes);
+	}
+
+	private ReservationBudget(MemoryAllowance parent, long outstanding, long available) {
 		if(parent == null)
 			throw new NullPointerException("parent");
-		if(bytes < 0)
-			throw new IllegalArgumentException("Cannot create a negative reservation budget: " + bytes);
+		if(outstanding < 0 || available < 0 || available > outstanding)
+			throw new IllegalArgumentException("Invalid reservation budget: outstanding=" + outstanding
+				+ ", available=" + available);
 		_parent = parent;
-		_initialBytes = bytes;
-		_state = new AtomicReference<>(new State(bytes, bytes, false));
+		_initialBytes = outstanding;
+		_state = new AtomicReference<>(new State(outstanding, available, false));
 	}
 
 	public static ReservationBudget admitted(MemoryAllowance parent, long bytes) {
 		return new ReservationBudget(parent, bytes);
+	}
+
+	public static ReservationBudget consumed(MemoryAllowance parent, long bytes) {
+		return new ReservationBudget(parent, bytes, 0);
 	}
 
 	@Override

@@ -26,9 +26,12 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.matrix.data.MatrixValue;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
@@ -165,71 +168,156 @@ public class OOCInstructionUtils {
 
 	public static CompletableFuture<Void> submitAdmittedOOCTasks(OOCStream<IndexedMatrixValue> in,
 		OOCStream<IndexedMatrixValue> out, Function<IndexedMatrixValue, IndexedMatrixValue> op,
-		Function<IndexedMatrixValue, MatrixIndexes> outputIndexFn, MemoryAllowance allowance,
-		ToLongFunction<MatrixIndexes> allocFn, boolean startsRegion, boolean crossBoundaries, StreamContext sc) {
-		final OOCStream<IndexedMatrixValue> admitted = startsRegion ?
-			new AllocatedOOCStream<>(in, allowance, value -> allocFn.applyAsLong(outputIndexFn.apply(value)), true) :
-			in;
+		MemoryAllowance allowance, StreamContext sc) {
+		long outputBytes = estimateOutputTileBytes(out.getDataCharacteristics());
+		AllocatedOOCStream<IndexedMatrixValue> admitted =
+			new AllocatedOOCStream<>(in, allowance, input -> outputBytes, outputBytes > 0,
+				ReservationBudget::admitted);
 		return submitOOCTasks(List.of(admitted), (i, cb) -> {
-			IndexedMatrixValue input = cb.get();
-			MatrixIndexes outputIndex = outputIndexFn.apply(input);
-			long bytes = (startsRegion || crossBoundaries) ? allocFn.applyAsLong(outputIndex) : 0;
-			boolean reservationOwned = bytes > 0;
-			if(bytes > 0 && OOCDebug.TRACE_HOT_PATH)
-				System.out.println("[OOC ADMIT TRACE] task start startsRegion=" + startsRegion
-					+ " crossBoundaries=" + crossBoundaries
-					+ " bytes=" + bytes
-					+ " allowance=" + System.identityHashCode(allowance)
-					+ " cb=" + System.identityHashCode(cb)
-					+ " managed=" + cb.getManagedBytes()
-					+ " index=" + outputIndex);
-			OOCStream.QueueCallback<IndexedMatrixValue> output = null;
+			ReservationBudget budget = detachBudget(cb);
 			try {
-				IndexedMatrixValue result = op.apply(input);
-				if(crossBoundaries && bytes > 0) {
-					output = new InMemoryQueueCallback(result, null, allowance, bytes);
-					reservationOwned = false;
-				}
-				else
-					output = new OOCStream.SimpleQueueCallback<>(result, null);
-				out.enqueue(output);
-				output = null;
-				if(startsRegion && !crossBoundaries)
-					reservationOwned = false;
+				IndexedMatrixValue input = cb.get();
+				if(budget == null)
+					throw new DMLRuntimeException("Missing admitted output budget.");
+				enqueueExact(out, op.apply(input), budget);
+				budget = null;
 			}
 			finally {
-				if(output != null)
-					output.close();
-				if(reservationOwned) {
-					if(OOCDebug.TRACE_HOT_PATH)
-						System.out.println("[OOC ADMIT TRACE] task release bytes=" + bytes
-							+ " allowance=" + System.identityHashCode(allowance)
-							+ " cb=" + System.identityHashCode(cb)
-							+ " index=" + outputIndex);
-					allowance.release(bytes);
-				}
+				if(budget != null)
+					budget.close();
 			}
-		}, (i, cb) -> true, (i, cb) ->
-			releaseAdmittedReservation(cb, outputIndexFn, allowance, allocFn, startsRegion || crossBoundaries),
-			startsRegion ? allowance : null, startsRegion ? allocFn : null, sc).thenRun(out::closeInput).exceptionally(t -> {
+		}, sc).thenRun(out::closeInput).exceptionally(t -> {
 			out.propagateFailure(DMLRuntimeException.of(t));
 			return null;
 		}).thenRun(() -> out.getPrimitive().onComplete());
 	}
 
-	private static void releaseAdmittedReservation(OOCStream.QueueCallback<IndexedMatrixValue> cb,
-		Function<IndexedMatrixValue, MatrixIndexes> outputIndexFn, MemoryAllowance allowance,
-		ToLongFunction<MatrixIndexes> allocFn, boolean startsRegion) {
-		if(!startsRegion || cb.isEos() || cb.isFailure())
-			return;
-		long bytes = allocFn.applyAsLong(outputIndexFn.apply(cb.get()));
-		if(bytes > 0) {
-			if(OOCDebug.TRACE_HOT_PATH)
-				System.out.println("[OOC ADMIT TRACE] not-processed release bytes=" + bytes
-					+ " allowance=" + System.identityHashCode(allowance)
-					+ " cb=" + System.identityHashCode(cb));
-			allowance.release(bytes);
+	public static void enqueueExact(OOCStream<IndexedMatrixValue> out, IndexedMatrixValue value,
+		MemoryAllowance allowance) {
+		OOCStream.QueueCallback<IndexedMatrixValue> output = exactCallback(value, allowance);
+		try {
+			out.enqueue(output);
+			output = null;
 		}
+		finally {
+			if(output != null)
+				output.close();
+		}
+	}
+
+	public static void enqueueExact(OOCStream<IndexedMatrixValue> out, IndexedMatrixValue value,
+		ReservationBudget budget) {
+		OOCStream.QueueCallback<IndexedMatrixValue> output = exactCallback(value, budget);
+		try {
+			out.enqueue(output);
+			output = null;
+		}
+		finally {
+			if(output != null)
+				output.close();
+		}
+	}
+
+	public static OOCStream.QueueCallback<IndexedMatrixValue> exactCallback(IndexedMatrixValue value,
+		MemoryAllowance allowance) {
+		long bytes = inMemoryBytes(value);
+		boolean reservationOwned = false;
+		ReservationBudget budget = null;
+		try {
+			if(bytes <= 0)
+				return new OOCStream.SimpleQueueCallback<>(value, null);
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[OOC ADMIT TRACE] exact output reserve bytes=" + bytes
+					+ " allowance=" + System.identityHashCode(allowance)
+					+ " index=" + value.getIndexes());
+			allowance.reserveBlocking(bytes);
+			budget = ReservationBudget.consumed(allowance, bytes);
+			reservationOwned = true;
+			OOCStream.QueueCallback<IndexedMatrixValue> output =
+				new InMemoryQueueCallback(value, null, budget, bytes);
+			reservationOwned = false;
+			budget = null;
+			return output;
+		}
+		finally {
+			if(reservationOwned) {
+				if(budget != null)
+					budget.release(bytes);
+				else
+					allowance.release(bytes);
+			}
+			if(budget != null)
+				budget.close();
+		}
+	}
+
+	public static OOCStream.QueueCallback<IndexedMatrixValue> exactCallback(IndexedMatrixValue value,
+		ReservationBudget budget) {
+		long bytes = inMemoryBytes(value);
+		boolean reservationOwned = false;
+		try {
+			if(bytes <= 0)
+				return new OOCStream.SimpleQueueCallback<>(value, null);
+			if(OOCDebug.TRACE_HOT_PATH)
+				System.out.println("[OOC ADMIT TRACE] exact output budget bytes=" + bytes
+					+ " budget=" + System.identityHashCode(budget)
+					+ " index=" + value.getIndexes());
+			long available = budget.getAvailableMemory();
+			if(available < bytes)
+				throw new DMLRuntimeException("Pre-reserved output budget too small for " + value.getIndexes()
+					+ ": reserved=" + available + ", actual=" + bytes);
+			long unused = available - bytes;
+			if(unused > 0)
+				budget.releaseUnused(unused);
+			budget.reserveBlocking(bytes);
+			reservationOwned = true;
+			OOCStream.QueueCallback<IndexedMatrixValue> output =
+				new InMemoryQueueCallback(value, null, budget, bytes);
+			reservationOwned = false;
+			budget = null;
+			return output;
+		}
+		finally {
+			if(reservationOwned && budget != null)
+				budget.release(bytes);
+			if(budget != null)
+				budget.close();
+		}
+	}
+
+	public static long inMemoryBytes(IndexedMatrixValue value) {
+		MatrixValue matrixValue = value.getValue();
+		if(matrixValue instanceof MatrixBlock)
+			return ((MatrixBlock) matrixValue).getInMemorySize();
+		return 0;
+	}
+
+	public static ReservationBudget reserveBudget(MemoryAllowance allowance, long bytes) {
+		if(bytes <= 0)
+			return null;
+		allowance.reserveBlocking(bytes);
+		return ReservationBudget.admitted(allowance, bytes);
+	}
+
+	public static ReservationBudget detachBudget(OOCStream.QueueCallback<?> callback) {
+		if(callback instanceof AllocatedOOCStream.BudgetedQueueCallback<?> budgeted)
+			return budgeted.detachBudget();
+		return null;
+	}
+
+	public static long estimateOutputTileBytes(DataCharacteristics dc) {
+		if(dc == null || dc.getBlocksize() <= 0 || !dc.dimsKnown()) {
+			int blen = dc != null && dc.getBlocksize() > 0 ? dc.getBlocksize() : 1000;
+			return estimateMatrixBlockBytes(blen, blen);
+		}
+		long rows = Math.min(dc.getBlocksize(), dc.getRows());
+		long cols = Math.min(dc.getBlocksize(), dc.getCols());
+		return estimateMatrixBlockBytes(rows, cols);
+	}
+
+	private static long estimateMatrixBlockBytes(long rows, long cols) {
+		return Math.max(MatrixBlock.estimateSizeDenseInMemory(rows, cols),
+			MatrixBlock.estimateSizeSparseInMemory(rows, cols, 1.0));
 	}
 
 	public static <T> CompletableFuture<Void> submitOOCTasks(OOCStream<T> queue,

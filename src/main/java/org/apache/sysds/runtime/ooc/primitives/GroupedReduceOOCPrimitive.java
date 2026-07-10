@@ -29,6 +29,8 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.store.StateTable;
 import org.apache.sysds.runtime.ooc.store.StateLease;
@@ -125,11 +127,6 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
-	public long getDenseTileMemoryFactor() {
-		return 2;
-	}
-
-	@Override
 	public void inferPatterns() {
 		if(_pattern == OOCAccessPattern.UNSET)
 			_pattern = OOCAccessPattern.ANY;
@@ -148,10 +145,14 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 	@Override
 	public void startExecution() {
 		_table = new StateTable<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
-		final OOCStream<IndexedMatrixValue> in = new AllocatedOOCStream<>(_inputStreamable.getReadStream(), _allowance,
-			t -> _allocFn.applyAsLong(t.getIndexes()), true);
+		final OOCStream<IndexedMatrixValue> in = _inputStreamable.getReadStream();
 		final OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
 		final DataCharacteristics dc = _inputStreamable.getDataCharacteristics();
+		final long reduceTaskBudgetBytes = reduceTaskBudgetBytes(dc);
+		final long finalizeTaskBudgetBytes = finalizeTaskBudgetBytes(dc, _outputStreamable.getDataCharacteristics());
+		final OOCStream<IndexedMatrixValue> admitted =
+			new AllocatedOOCStream<>(in, _allowance, input -> reduceTaskBudgetBytes, reduceTaskBudgetBytes > 0,
+				ReservationBudget::admitted);
 		final int numGroups = _grouping.numGroups(dc);
 		final int groupSize = _grouping.groupSize(dc);
 		final AtomicIntegerArray consumedPerGroup = new AtomicIntegerArray(numGroups);
@@ -174,22 +175,27 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 			}
 		};
 
-		OOCInstructionUtils.submitOOCTasks(in, cb -> {
-			IndexedMatrixValue input = cb.get();
-			int group = group(input.getIndexes());
-			long reservedBytes = _allocFn.applyAsLong(input.getIndexes());
-			ManagedPayload<IndexedMatrixValue> p = new ManagedPayload<>(new IndexedMatrixValue(outputIndex(group),
-				_partialFn.apply(input)), reservedBytes, _allowance);
-			pending.incrementAndGet();
+		OOCInstructionUtils.submitOOCTasks(admitted, cb -> {
+			ReservationBudget budget = OOCInstructionUtils.detachBudget(cb);
 			try {
-				accumulateGroup(group, p);
+				if(budget == null)
+					throw new DMLRuntimeException("Missing admitted grouped-reduce task budget.");
+				IndexedMatrixValue input = cb.get();
+				int group = group(input.getIndexes());
+				ManagedPayload<IndexedMatrixValue> p = payload(new IndexedMatrixValue(outputIndex(group),
+					_partialFn.apply(input)), budget);
+				pending.incrementAndGet();
+				accumulateGroup(group, p, budget);
 				if(consumedPerGroup.incrementAndGet(group) == groupSize)
-					finalizeGroup(group, out, pending, releasePending, fail);
+					finalizeGroup(group, out, pending, releasePending, fail, finalizeTaskBudgetBytes);
+				budget = null;
 			}
 			catch(Throwable t) {
 				fail.accept(t);
 			}
 			finally {
+				if(budget != null)
+					budget.close();
 				releasePending.run();
 			}
 		}, _sc).whenComplete((ignored, error) -> {
@@ -200,43 +206,57 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 	}
 
 	private void finalizeGroup(int group, OOCStream<IndexedMatrixValue> out, AtomicInteger pending,
-		Runnable releasePending, Consumer<Throwable> fail) {
+		Runnable releasePending, Consumer<Throwable> fail, long finalizeTaskBudgetBytes) {
 		pending.incrementAndGet();
+		ReservationBudget budget = null;
 		try {
-			_table.take(group, _allowance).whenComplete((lease, error) -> {
+			budget = OOCInstructionUtils.reserveBudget(_allowance, finalizeTaskBudgetBytes);
+			ReservationBudget finalBudget = budget;
+			_table.take(group, finalBudget).whenComplete((lease, error) -> {
+				StateLease<IndexedMatrixValue> localLease = lease;
+				ReservationBudget localBudget = finalBudget;
 				try {
 					if(error != null) {
 						fail.accept(error);
 						return;
 					}
-					if(lease == null)
+					if(localLease == null)
 						throw new IllegalStateException("Missing grouped-reduce accumulator for group " + group);
-					MatrixBlock value = (MatrixBlock) lease.value().getValue();
+					MatrixBlock value = (MatrixBlock) localLease.value().getValue();
 					MatrixBlock result = _finalizeFn.apply(value);
-					out.enqueue(new LeaseBackedOutputCallback(new IndexedMatrixValue(outputIndex(group), result), lease));
+					localLease.close();
+					localLease = null;
+					OOCInstructionUtils.enqueueExact(out, new IndexedMatrixValue(outputIndex(group), result),
+						localBudget);
+					localBudget = null;
 				}
 				catch(Throwable t) {
-					if(lease != null)
-						lease.close();
+					if(localLease != null)
+						localLease.close();
 					fail.accept(t);
 				}
 				finally {
+					if(localBudget != null)
+						localBudget.close();
 					releasePending.run();
 				}
 			});
+			budget = null;
 		}
 		catch(Throwable t) {
+			if(budget != null)
+				budget.close();
 			fail.accept(t);
 			releasePending.run();
 		}
 	}
 
-	private void accumulateGroup(int group, ManagedPayload<IndexedMatrixValue> payload)
+	private void accumulateGroup(int group, ManagedPayload<IndexedMatrixValue> payload, ReservationBudget budget)
 		throws InterruptedException {
 		while(true) {
 			StateLease<IndexedMatrixValue> existing;
 			try {
-				existing = await(_table.installOrTake(group, payload, _allowance));
+				existing = await(_table.installOrTake(group, payload, budget));
 			}
 			catch(InterruptedException ex) {
 				payload.release();
@@ -258,10 +278,36 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 				payload.release();
 			}
 			MatrixBlock block = (MatrixBlock) merged.getValue();
-			long bytes = block.getExactSerializedSize();
-			_allowance.reserveBlocking(bytes);
-			payload = new ManagedPayload<>(merged, bytes, _allowance);
+			payload = payload(merged, budget);
 		}
+	}
+
+	private ManagedPayload<IndexedMatrixValue> payload(IndexedMatrixValue value, MemoryAllowance owner) {
+		MatrixBlock block = (MatrixBlock) value.getValue();
+		long bytes = block.getExactSerializedSize();
+		owner.reserveBlocking(bytes);
+		return new ManagedPayload<>(value, bytes, owner);
+	}
+
+	private static long reduceTaskBudgetBytes(DataCharacteristics dc) {
+		long tileBytes = OOCInstructionUtils.estimateOutputTileBytes(dc);
+		return saturatingMultiply(tileBytes, 3);
+	}
+
+	private static long finalizeTaskBudgetBytes(DataCharacteristics input, DataCharacteristics output) {
+		return saturatingAdd(OOCInstructionUtils.estimateOutputTileBytes(input),
+			OOCInstructionUtils.estimateOutputTileBytes(output));
+	}
+
+	private static long saturatingMultiply(long value, long factor) {
+		if(value > Long.MAX_VALUE / factor)
+			return Long.MAX_VALUE;
+		return value * factor;
+	}
+
+	private static long saturatingAdd(long a, long b) {
+		long result = a + b;
+		return result < 0 ? Long.MAX_VALUE : result;
 	}
 
 	private static <T> T await(org.apache.sysds.runtime.ooc.cache.OOCFuture<T> future)
@@ -271,79 +317,6 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		}
 		catch(ExecutionException ex) {
 			throw DMLRuntimeException.of(ex.getCause());
-		}
-	}
-
-	private static final class LeaseBackedOutputCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
-		private final SharedLease _shared;
-		private final IndexedMatrixValue _value;
-		private DMLRuntimeException _failure;
-		private boolean _closed;
-
-		private LeaseBackedOutputCallback(IndexedMatrixValue value, StateLease<IndexedMatrixValue> lease) {
-			_shared = new SharedLease(lease);
-			_value = value;
-		}
-
-		private LeaseBackedOutputCallback(IndexedMatrixValue value, SharedLease shared) {
-			_shared = shared;
-			_value = value;
-		}
-
-		@Override
-		public IndexedMatrixValue get() {
-			if(_failure != null)
-				throw _failure;
-			return _value;
-		}
-
-		@Override
-		public synchronized OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
-			if(_closed)
-				throw new IllegalStateException("Cannot keep open a closed callback.");
-			_shared.retain();
-			return new LeaseBackedOutputCallback(_value, _shared);
-		}
-
-		@Override
-		public synchronized void close() {
-			if(_closed)
-				return;
-			_closed = true;
-			_shared.release();
-		}
-
-		@Override
-		public void fail(DMLRuntimeException failure) {
-			_failure = failure;
-		}
-
-		@Override
-		public boolean isEos() {
-			return false;
-		}
-
-		@Override
-		public boolean isFailure() {
-			return _failure != null;
-		}
-	}
-
-	private static final class SharedLease {
-		private final StateLease<IndexedMatrixValue> _lease;
-		private final AtomicInteger _refs = new AtomicInteger(1);
-
-		private SharedLease(StateLease<IndexedMatrixValue> lease) {
-			_lease = lease;
-		}
-
-		private void retain() {
-			_refs.incrementAndGet();
-		}
-
-		private void release() {
-			if(_refs.decrementAndGet() == 0)
-				_lease.close();
 		}
 	}
 

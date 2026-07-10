@@ -23,10 +23,7 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
-import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
-import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
-import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
@@ -36,14 +33,12 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongConsumer;
 
 public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _outputStream;
 	private final StreamContext _sc;
 	private final long _bulkAlloc;
-	private final AtomicLong _remainingBudget = new AtomicLong();
 	private final AtomicBoolean _finished = new AtomicBoolean(false);
 	private final AtomicInteger _pendingEmits = new AtomicInteger(1);
 	private LongConsumer _bulkProducer;
@@ -84,11 +79,6 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	}
 
 	@Override
-	public long getDenseTileMemoryFactor() {
-		return 1;
-	}
-
-	@Override
 	public void inferPatterns() {
 		if(_pattern == OOCAccessPattern.UNSET)
 			_pattern = OOCAccessPattern.ANY;
@@ -103,37 +93,18 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	@Override
 	public void startExecution() {
 		_out = _outputStream.getWriteStream();
-		final long minAlloc = _allocFn.applyAsLong(new MatrixIndexes(1, 1));
-		final long targetAlloc = Math.max(_bulkAlloc, minAlloc);
+		final long targetAlloc = Math.max(0, _bulkAlloc);
 
 		runCoordinator("ooc-uncoordinated-datagen", OOCInstructionUtils.oocTask(() -> {
 			while(!_shutdown) {
-				long allow = targetAlloc;
-				if(_startsRegion)
-					allow = topUpBudget(targetAlloc, minAlloc);
-				_bulkProducer.accept(allow);
-			}
-			if(_startsRegion) {
-				long remaining = _remainingBudget.getAndSet(0);
-				if(remaining < 0)
-					throw new IllegalArgumentException("Negative remaining budget: " + remaining);
-				_allowance.release(remaining);
+				_bulkProducer.accept(targetAlloc);
 			}
 			producerFinished();
 		}, new CompletableFuture<>(), _sc));
 	}
 
 	public void emit(IndexedMatrixValue imv) {
-		long newMem = _allocFn.applyAsLong(imv.getIndexes());
-		if(!_startsRegion) {
-			forward(imv, 0);
-			return;
-		}
-		long deficit = consumeAvailableBudget(newMem);
-		if(deficit == 0)
-			forward(imv, newMem);
-		else
-			admitAsync(imv, newMem, deficit);
+		forward(imv);
 	}
 
 	public void emit(IndexedMatrixValue imv, OOCIOHandler.SourceBlockDescriptor desc) {
@@ -157,90 +128,13 @@ public class UncoordinatedDataGenOOCPrimitive extends PlannableOOCPrimitive {
 			finish();
 	}
 
-	private long topUpBudget(long targetAlloc, long minAlloc) {
-		while(true) {
-			long current = _remainingBudget.get();
-			if(current >= targetAlloc)
-				return targetAlloc;
-			if(current >= minAlloc) {
-				long extra = targetAlloc - current;
-				if(extra > 0 && _allowance.tryReserve(extra)) {
-					if(_remainingBudget.compareAndSet(current, targetAlloc))
-						return targetAlloc;
-					_allowance.release(extra);
-					continue;
-				}
-				return current;
-			}
-			long delta = minAlloc - current;
-			_allowance.reserveBlocking(delta);
-			if(_remainingBudget.compareAndSet(current, minAlloc))
-				return minAlloc;
-			_allowance.release(delta);
-		}
-	}
-
-	private long consumeAvailableBudget(long bytes) {
-		if(bytes < 0)
-			throw new IllegalArgumentException("Cannot consume negative bytes: " + bytes);
-		while(true) {
-			long current = _remainingBudget.get();
-			if(current <= 0)
-				return bytes;
-			long consumed = Math.min(current, bytes);
-			if(_remainingBudget.compareAndSet(current, current - consumed))
-				return bytes - consumed;
-		}
-	}
-
-	private void admitAsync(IndexedMatrixValue imv, long bytes, long deficit) {
-		long consumedBytes = bytes - deficit;
-		_pendingEmits.incrementAndGet();
-		OOCFuture<Void> reservation;
+	private void forward(IndexedMatrixValue imv) {
 		try {
-			reservation = _allowance.reserveAsync(deficit);
+			OOCInstructionUtils.enqueueExact(_out, imv, _allowance);
 		}
 		catch(Throwable t) {
-			if(consumedBytes > 0)
-				_allowance.release(consumedBytes);
 			fail(t);
-			producerFinished();
-			return;
 		}
-		reservation.whenComplete((ignored, error) -> {
-			try {
-				if(error != null) {
-					if(consumedBytes > 0)
-						_allowance.release(consumedBytes);
-					fail(error);
-					return;
-				}
-				forward(imv, bytes);
-			}
-			catch(Throwable t) {
-				fail(t);
-			}
-			finally {
-				producerFinished();
-			}
-		});
-	}
-
-	private void forward(IndexedMatrixValue imv, long bytes) {
-		if(_crossBoundaries) {
-			InMemoryQueueCallback cb = new InMemoryQueueCallback(imv, null, _allowance, bytes);
-			boolean handedOff = false;
-			try {
-				_out.enqueue(cb);
-				handedOff = true;
-			}
-			finally {
-				if(!handedOff)
-					cb.close();
-			}
-			return;
-		}
-		_out.enqueue(imv);
 	}
 
 	private void fail(Throwable t) {

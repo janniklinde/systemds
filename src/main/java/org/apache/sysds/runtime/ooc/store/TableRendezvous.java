@@ -50,7 +50,7 @@ public final class TableRendezvous {
 	}
 
 	public static OOCFuture<Match> installOrTake(StateTable<IndexedMatrixValue> table, int slot,
-		OOCStream.QueueCallback<IndexedMatrixValue> tile, MemoryAllowance allowance, long fallbackBytes) {
+		OOCStream.QueueCallback<IndexedMatrixValue> tile, MemoryAllowance allowance) {
 		if(tile instanceof MaterializedCallback pinned)
 			return installReferenceOrTake(table, slot, pinned, allowance);
 		ManagedPayload<IndexedMatrixValue> payload;
@@ -60,8 +60,7 @@ public final class TableRendezvous {
 		}
 		else {
 			IndexedMatrixValue value = tile.get();
-			long bytes = fallbackBytes > 0 ? fallbackBytes :
-				((MatrixBlock) value.getValue()).getExactSerializedSize();
+			long bytes = ((MatrixBlock) value.getValue()).getExactSerializedSize();
 			allowance.reserveBlocking(bytes);
 			payload = new ManagedPayload<>(value, bytes, allowance);
 			tile.close();

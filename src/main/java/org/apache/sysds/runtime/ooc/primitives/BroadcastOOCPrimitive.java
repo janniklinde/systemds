@@ -28,8 +28,6 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
-import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
-import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
@@ -38,6 +36,7 @@ import org.apache.sysds.runtime.ooc.store.LeaseQueueCallbacks;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
 import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
+import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -154,11 +153,6 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
-	public long getDenseTileMemoryFactor() {
-		return 2;
-	}
-
-	@Override
 	public void inferPatterns() {
 		if(_pattern.isUnset())
 			_pattern = OOCAccessPattern.ANY;
@@ -231,165 +225,93 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 				return;
 			}
 			final OOCStream<IndexedMatrixValue> streamedStream = streamedStreamable.getReadStream();
-			final SubscribableTaskQueue<IndexedMatrixValue> intermediate = new SubscribableTaskQueue<>();
 			final SubscribableTaskQueue<ProbeWork> int2 = new SubscribableTaskQueue<>();
+			final long taskBudgetBytes = broadcastTaskBudgetBytes(streamedStreamable, getBroadcastStreamable(),
+				getOutputStreamable());
+			final OOCStream<IndexedMatrixValue> admittedStreamed =
+				new AllocatedOOCStream<>(streamedStream, _allowance, input -> taskBudgetBytes,
+					taskBudgetBytes > 0, ReservationBudget::admitted);
 			final AtomicInteger inflightCtr = new AtomicInteger(1);
 			CompletableFuture<Void> future = new CompletableFuture<>();
-			OOCInstructionUtils.submitOOCTasks(streamedStream, cb -> {
-				IndexedMatrixValue result;
-				long bytesToReserve = 0;
-				ReservationBudget budget = null;
-				try(cb) {
-					bytesToReserve = _allocFn.applyAsLong(cb.get().getIndexes());
-					if(_startsRegion) {
-						if(!_allowance.tryReserve(bytesToReserve)) {
-							intermediate.enqueue(cb.keepOpen());
+			OOCInstructionUtils.submitOOCTasks(admittedStreamed, cb -> {
+				ReservationBudget budget = OOCInstructionUtils.detachBudget(cb);
+				try {
+					IndexedMatrixValue result;
+					try(cb) {
+						int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(cb.get()) :
+							(int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
+							cb.get().getIndexes().getRowIndex() - 1);
+						var broadcast = broadcastTile(idx, budget == null ? _allowance : budget);
+						if(!broadcast.isDone()) {
+							final var fCb = cb.keepOpen();
+							final ReservationBudget fBudget = budget;
+							budget = null;
+							inflightCtr.incrementAndGet();
+							broadcast.whenComplete((bcb, error) -> {
+								if(error != null) {
+									fCb.close();
+									if(fBudget != null)
+										fBudget.close();
+									out.propagateFailure(DMLRuntimeException.of(error));
+								}
+								else {
+									try {
+										int2.enqueue(new ProbeWork(bcb, fCb, fBudget));
+									}
+									catch(RuntimeException ex) {
+										bcb.close();
+										fCb.close();
+										if(fBudget != null)
+											fBudget.close();
+										out.propagateFailure(DMLRuntimeException.of(ex));
+									}
+								}
+								if(inflightCtr.decrementAndGet() == 0)
+									future.complete(null);
+							});
 							return;
 						}
-						budget = ReservationBudget.admitted(_allowance, bytesToReserve);
+						try(var bcb = broadcast.getNow(null)) {
+							result = process(idx, bcb, cb);
+						}
 					}
-					int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(cb.get()) :
-						(int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
-						cb.get().getIndexes().getRowIndex() - 1);
-					var broadcast = broadcastTile(idx, pinAllowance(budget));
-					if(!broadcast.isDone()) {
-						final var fCb = cb.keepOpen();
-						final ReservationBudget ownedBudget = budget;
-						budget = null;
-						inflightCtr.incrementAndGet();
-						broadcast.whenComplete((bcb, error) -> {
-							if(error != null) {
-								fCb.close();
-								closeBudget(ownedBudget);
-								out.propagateFailure(DMLRuntimeException.of(error));
-							}
-							else {
-								try {
-									int2.enqueue(new ProbeWork(bcb, fCb, ownedBudget));
-								}
-								catch(RuntimeException ex) {
-									bcb.close();
-									fCb.close();
-									closeBudget(ownedBudget);
-									out.propagateFailure(DMLRuntimeException.of(ex));
-								}
-							}
-							if(inflightCtr.decrementAndGet() == 0)
-								future.complete(null);
-						});
-						return;
-					}
-					try(var bcb = broadcast.getNow(null)) {
-						result = process(idx, bcb, cb);
-					}
+					if(budget == null)
+						throw new DMLRuntimeException("Missing admitted broadcast output budget.");
+					OOCInstructionUtils.enqueueExact(out, result, budget);
+					budget = null;
 				}
-				catch(Throwable t) {
-					closeBudget(budget);
-					throw t;
+				finally {
+					if(budget != null)
+						budget.close();
 				}
-				enqueueOutput(out, result, budget);
-			}, _allowance, _allocFn, _sc).thenRun(() -> {
+			}, _sc).thenRun(() -> {
 				if(inflightCtr.decrementAndGet() == 0)
 					future.complete(null);
 			});
-			future.thenRun(intermediate::closeInput);
+			future.thenRun(int2::closeInput);
 			var future2 = OOCInstructionUtils.submitOOCTasks(int2, c -> {
 				ProbeWork work = c.get();
 				var bcb = work._broadcast;
 				var cb = work._streamed;
-				IndexedMatrixValue result;
 				ReservationBudget budget = work._budget;
-				boolean budgetOwned = budget != null;
+				IndexedMatrixValue result;
 				try(bcb; cb) {
 					int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(cb.get()) :
 						(int) (_rowBroadcast ? cb.get().getIndexes().getColumnIndex() - 1 :
 						cb.get().getIndexes().getRowIndex() - 1);
 					result = process(idx, bcb, cb);
 				}
-				catch(Throwable t) {
-					closeBudget(budget);
-					throw t;
-				}
 				try {
-					budgetOwned = false;
-					enqueueOutput(out, result, budget);
+					if(budget == null)
+						throw new DMLRuntimeException("Missing admitted broadcast output budget.");
+					OOCInstructionUtils.enqueueExact(out, result, budget);
+					budget = null;
 				}
 				finally {
-					if(budgetOwned)
-						closeBudget(budget);
+					if(budget != null)
+						budget.close();
 				}
 			}, _sc);
-			CompletableFuture<Void> future3 = new CompletableFuture<>();
-			AtomicInteger retryCtr = new AtomicInteger(1);
-			OOCInstructionUtils.submitOOCTasks(intermediate, tmp -> {
-				long bytesToReserve = _allocFn.applyAsLong(tmp.get().getIndexes());
-				int idx = _streamedKeyFn != null ? _streamedKeyFn.applyAsInt(tmp.get()) :
-					(int) (_rowBroadcast ? tmp.get().getIndexes().getColumnIndex() - 1 :
-					tmp.get().getIndexes().getRowIndex() - 1);
-				final var fCb = tmp.keepOpen();
-				retryCtr.incrementAndGet();
-				CompletableFuture<Void> reservation;
-				try {
-					reservation = _startsRegion ? _allowance.reserve(bytesToReserve) :
-						CompletableFuture.completedFuture(null);
-				}
-				catch(RuntimeException ex) {
-					fCb.close();
-					out.propagateFailure(DMLRuntimeException.of(ex));
-					if(retryCtr.decrementAndGet() == 0)
-						future3.complete(null);
-					return;
-				}
-				reservation.whenComplete((reserved, reservationError) -> {
-					if(reservationError != null) {
-						fCb.close();
-						out.propagateFailure(DMLRuntimeException.of(reservationError));
-						if(retryCtr.decrementAndGet() == 0)
-							future3.complete(null);
-						return;
-					}
-					OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> bcbFuture;
-					ReservationBudget budget = null;
-					try {
-						if(_startsRegion)
-							budget = ReservationBudget.admitted(_allowance, bytesToReserve);
-						bcbFuture = broadcastTile(idx, pinAllowance(budget));
-					}
-					catch(RuntimeException ex) {
-						fCb.close();
-						closeBudget(budget);
-						out.propagateFailure(DMLRuntimeException.of(ex));
-						if(retryCtr.decrementAndGet() == 0)
-							future3.complete(null);
-						return;
-					}
-					final ReservationBudget ownedBudget = budget;
-					bcbFuture.whenComplete((bcb, error) -> {
-						if(error != null) {
-							fCb.close();
-							closeBudget(ownedBudget);
-							out.propagateFailure(DMLRuntimeException.of(error));
-						}
-						else {
-							try {
-								int2.enqueue(new ProbeWork(bcb, fCb, ownedBudget));
-							}
-							catch(RuntimeException ex) {
-								bcb.close();
-								fCb.close();
-								closeBudget(ownedBudget);
-								out.propagateFailure(DMLRuntimeException.of(ex));
-							}
-						}
-						if(retryCtr.decrementAndGet() == 0)
-							future3.complete(null);
-					});
-				});
-			}, _sc.addOutStream(int2)).thenRun(() -> {
-				if(retryCtr.decrementAndGet() == 0)
-					future3.complete(null);
-			});
-			CompletableFuture.allOf(future, future3).thenRun(int2::closeInput);
 			future2.whenComplete((finished, probeError) -> {
 				try {
 					if(probeError != null)
@@ -409,17 +331,13 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	 * the returned callback wraps an {@code IndexedReader} lease whose close is the exactly-once
 	 * consumption driving multiplicity-based forgetting (no manual counting or clearing).
 	 */
-	private OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> broadcastTile(int idx) {
-		return broadcastTile(idx, _allowance);
-	}
-
 	private OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> broadcastTile(int idx,
-		MemoryAllowance pinAllowance) {
-		MaterializedStore.Lease<IndexedMatrixValue> live = _reader.requestIfLive(idx, pinAllowance);
+		org.apache.sysds.runtime.ooc.memory.MemoryAllowance allowance) {
+		MaterializedStore.Lease<IndexedMatrixValue> live = _reader.requestIfLive(idx, allowance);
 		if(live != null)
 			return OOCFuture.completed(LeaseQueueCallbacks.store(live));
 		OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> pending = new OOCFuture<>();
-		_reader.request(idx, pinAllowance).whenComplete((lease, error) -> {
+		_reader.request(idx, allowance).whenComplete((lease, error) -> {
 			if(error != null)
 				pending.completeExceptionally(error);
 			else if(lease == null)
@@ -436,46 +354,16 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 		return new IndexedMatrixValue(cb.get().getIndexes(), _mergeFn.apply(bcb.get(), cb.get()));
 	}
 
-	private MemoryAllowance pinAllowance(ReservationBudget budget) {
-		return budget != null ? budget : _allowance;
+	private static long broadcastTaskBudgetBytes(OOCStreamable<IndexedMatrixValue> streamed,
+		OOCStreamable<IndexedMatrixValue> broadcast, OOCStreamable<IndexedMatrixValue> output) {
+		return saturatingAdd(OOCInstructionUtils.estimateOutputTileBytes(output.getDataCharacteristics()),
+			Math.max(OOCInstructionUtils.estimateOutputTileBytes(streamed.getDataCharacteristics()),
+				OOCInstructionUtils.estimateOutputTileBytes(broadcast.getDataCharacteristics())));
 	}
 
-	private void enqueueOutput(OOCStream<IndexedMatrixValue> out, IndexedMatrixValue imv,
-		ReservationBudget budget) {
-		if(budget == null) {
-			enqueueOutput(out, imv, 0, false);
-			return;
-		}
-		long attachedBytes = budget.detachUnused();
-		budget.close();
-		enqueueOutput(out, imv, attachedBytes, attachedBytes > 0);
-	}
-
-	private static void closeBudget(ReservationBudget budget) {
-		if(budget != null)
-			budget.close();
-	}
-
-	private void enqueueOutput(OOCStream<IndexedMatrixValue> out, IndexedMatrixValue imv, long attachedBytes,
-		boolean reserved) {
-		OOCStream.QueueCallback<IndexedMatrixValue> output = null;
-		boolean reservationOwned = reserved && attachedBytes > 0;
-		try {
-			if(_crossBoundaries) {
-				output = new InMemoryQueueCallback(imv, null, _allowance, reservationOwned ? attachedBytes : 0);
-				reservationOwned = false;
-			}
-			else
-				output = new OOCStream.SimpleQueueCallback<>(imv, null);
-			out.enqueue(output);
-			output = null;
-		}
-		finally {
-			if(output != null)
-				output.close();
-			if(reservationOwned)
-				_allowance.release(attachedBytes);
-		}
+	private static long saturatingAdd(long a, long b) {
+		long result = a + b;
+		return result < 0 ? Long.MAX_VALUE : result;
 	}
 
 	public OOCStreamable<IndexedMatrixValue> getBroadcastStreamable() {

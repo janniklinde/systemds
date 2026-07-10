@@ -39,7 +39,6 @@ import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.StateTable;
-import org.apache.sysds.runtime.ooc.store.StateLease;
 import org.apache.sysds.runtime.ooc.store.TableRendezvous;
 import org.junit.Assert;
 import org.junit.Test;
@@ -66,12 +65,12 @@ public class TableRendezvousTest {
 		try {
 			//slot 0: left first; slot 1: right first — the second arrival always takes the partner
 			Assert.assertNull(await(TableRendezvous.installOrTake(table, 0, managed(0, 1.0, producer, bytes),
-				region, bytes)));
+				region)));
 			Assert.assertNull(await(TableRendezvous.installOrTake(table, 1, managed(1, 2.0, producer, bytes),
-				region, bytes)));
+				region)));
 
 			TableRendezvous.Match match0 = await(TableRendezvous.installOrTake(table, 0,
-				managed(0, 10.0, producer, bytes), region, bytes));
+				managed(0, 10.0, producer, bytes), region));
 			Assert.assertNotNull(match0);
 			Assert.assertEquals(10.0 * ROWS * COLS, sum(match0.own()), 0.0);
 			Assert.assertEquals(1.0 * ROWS * COLS, sum(match0.partner()), 0.0);
@@ -80,7 +79,7 @@ public class TableRendezvousTest {
 
 			//unmanaged fallback: measured and reserved on the supplied allowance
 			TableRendezvous.Match match1 = await(TableRendezvous.installOrTake(table, 1,
-				new OOCStream.SimpleQueueCallback<>(tile(1, 20.0), null), region, 0));
+				new OOCStream.SimpleQueueCallback<>(tile(1, 20.0), null), region));
 			Assert.assertNotNull(match1);
 			Assert.assertEquals(20.0 * ROWS * COLS, sum(match1.own()), 0.0);
 			Assert.assertEquals(2.0 * ROWS * COLS, sum(match1.partner()), 0.0);
@@ -122,7 +121,7 @@ public class TableRendezvousTest {
 					int slot = (int) cb.get().getIndexes().getRowIndex() - 1;
 					synchronized(installs) {
 						installs.add(TableRendezvous.installOrTake(table, slot,
-							cb.keepOpen(), region, bytes));
+							cb.keepOpen(), region));
 					}
 				}));
 			sink.attach(source);
@@ -145,7 +144,7 @@ public class TableRendezvousTest {
 			//the partner side arrives with owned payloads and takes the referenced values
 			for(int i = 0; i < tiles; i++) {
 				TableRendezvous.Match match = await(TableRendezvous.installOrTake(table, i,
-					managed(i, 100.0 + i, producer, bytes), region, bytes));
+					managed(i, 100.0 + i, producer, bytes), region));
 				Assert.assertNotNull(match);
 				Assert.assertEquals((100.0 + i) * ROWS * COLS, sum(match.own()), 0.0);
 				Assert.assertEquals((i + 1.0) * ROWS * COLS, sum(match.partner()), 0.0);

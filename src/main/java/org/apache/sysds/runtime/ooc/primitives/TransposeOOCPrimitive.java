@@ -72,11 +72,6 @@ public class TransposeOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
-	public long getDenseTileMemoryFactor() {
-		return 2;
-	}
-
-	@Override
 	public void inferPatterns() {
 		_pattern = getPattern(_inputStreamable).transposed();
 		inferPatterns(getParents());
@@ -98,7 +93,7 @@ public class TransposeOOCPrimitive extends OOCPrimitive {
 		OOCInstructionUtils.submitAdmittedOOCTasks(in, out, input -> {
 			MatrixIndexes outIx = outputIndex(input);
 			return new IndexedMatrixValue(outIx, _fn.apply((MatrixBlock) input.getValue()));
-		}, this::outputIndex, _allowance, _allocFn, _startsRegion, _crossBoundaries, _sc);
+		}, _allowance, _sc);
 	}
 
 	private MatrixIndexes outputIndex(IndexedMatrixValue input) {

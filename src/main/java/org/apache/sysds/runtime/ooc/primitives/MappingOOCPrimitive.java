@@ -64,11 +64,6 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
-	public long getDenseTileMemoryFactor() {
-		return 2;
-	}
-
-	@Override
 	public void inferPatterns() {
 		OOCStreamable<IndexedMatrixValue> input = getInputStream(0);
 		_pattern = _pattern.preferred(getPattern(input));
@@ -92,6 +87,6 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 		final OOCStream<IndexedMatrixValue> out = outputStreamable.getWriteStream();
 		OOCInstructionUtils.submitAdmittedOOCTasks(in, out,
 			input -> new IndexedMatrixValue(input.getIndexes(), _fn.apply(input)),
-			IndexedMatrixValue::getIndexes, _allowance, _allocFn, _startsRegion, _crossBoundaries, _sc);
+			_allowance, _sc);
 	}
 }

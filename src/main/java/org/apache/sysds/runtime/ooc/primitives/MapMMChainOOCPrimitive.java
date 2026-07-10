@@ -27,7 +27,6 @@ import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
-import org.apache.sysds.runtime.instructions.ooc.PlaybackStream;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
@@ -166,11 +165,6 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		if(_vReader != null)
 			_vReader.close();
 		_vView.close();
-	}
-
-	@Override
-	public long getDenseTileMemoryFactor() {
-		return 2;
 	}
 
 	@Override
@@ -401,10 +395,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 				fail(t, out, phase1Stream);
 			}
 		};
-		if(x instanceof PlaybackStream playback)
-			playback.setSubscriber(xSubscriber, _allowance, _allocFn);
-		else
-			x.setSubscriber(xSubscriber);
+		x.setSubscriber(xSubscriber);
 	}
 
 	private void closeOnce(OOCStream<?> stream, AtomicBoolean closed, OOCStream<?> out, OOCStream<?> workStream) {
@@ -549,17 +540,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 
 	private OOCStream.QueueCallback<IndexedMatrixValue> outputCallback(MatrixIndexes index, MatrixBlock block) {
 		IndexedMatrixValue imv = new IndexedMatrixValue(index, block);
-		long bytes = _startsRegion ? _allocFn.applyAsLong(index) : 0;
-		boolean reserved = false;
-		if(bytes > 0) {
-			_allowance.reserveBlocking(bytes);
-			reserved = true;
-		}
-		if(_crossBoundaries)
-			return new InMemoryQueueCallback(imv, null, _allowance, reserved ? bytes : 0);
-		if(reserved)
-			_allowance.release(bytes);
-		return new OOCStream.SimpleQueueCallback<>(imv, null);
+		return OOCInstructionUtils.exactCallback(imv, _allowance);
 	}
 
 	private void fail(Throwable t, OOCStream<?> out, OOCStream<?> workStream) {

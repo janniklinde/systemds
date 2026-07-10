@@ -19,15 +19,12 @@
 
 package org.apache.sysds.runtime.ooc.planning;
 
-import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.ToLongFunction;
 
 public record OOCRegionBinding(
 	MemoryAllowance allowance,
-	ToLongFunction<MatrixIndexes> allocFn,
 	AtomicInteger refCtr) {
 
 	public void dereference() {

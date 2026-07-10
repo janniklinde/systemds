@@ -29,10 +29,11 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
-import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
+import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.store.StateTable;
 import org.apache.sysds.runtime.ooc.store.TableRendezvous;
+import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -86,11 +87,6 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	@Override
 	public boolean requiresCache() {
 		return false;
-	}
-
-	@Override
-	public long getDenseTileMemoryFactor() {
-		return 2;
 	}
 
 	@Override
@@ -153,33 +149,30 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 		OOCStream<IndexedMatrixValue> r = rightInput.getReadStream();
 		OOCStream<IndexedMatrixValue> out = _outputStreamable.getWriteStream();
 		OOCStream<JoinWork> intermediate = new SubscribableTaskQueue<>();
+		long tableBudgetBytes = joinTableBudgetBytes(leftInput, rightInput);
+		long outputBudgetBytes = OOCInstructionUtils.estimateOutputTileBytes(_outputStreamable.getDataCharacteristics());
+		OOCStream<JoinWork> admitted =
+			new AllocatedOOCStream<>(intermediate, _allowance, work -> outputBudgetBytes, outputBudgetBytes > 0,
+				ReservationBudget::admitted);
 
-		startTableDriver(l, r, intermediate, out);
+		startTableDriver(l, r, intermediate, out, tableBudgetBytes);
 
-		OOCInstructionUtils.submitOOCTasks(intermediate, cb -> {
+		OOCInstructionUtils.submitOOCTasks(admitted, cb -> {
+			ReservationBudget budget = OOCInstructionUtils.detachBudget(cb);
 			var t = cb.get();
 			var qL = t._left;
 			var qR = t._right;
-			long bytes = t._outputBytes;
-			boolean reservationOwned = bytes > 0;
 			try(qL; qR) {
 				var imv = new IndexedMatrixValue(qL.get().getIndexes(),
 					_fn.apply(List.of((MatrixBlock)qL.get().getValue(), (MatrixBlock)qR.get().getValue())));
-				if(bytes == 0)
-					bytes = _allocFn.applyAsLong(imv.getIndexes());
-				if(_startsRegion && !reservationOwned)
-					throw new IllegalStateException("Join output reservation was not pre-admitted.");
-				if(_crossBoundaries) {
-					out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, bytes));
-					reservationOwned = false;
-				}
-				else
-					out.enqueue(new OOCStream.SimpleQueueCallback<>(imv, null));
+				if(budget == null)
+					throw new DMLRuntimeException("Missing admitted join output budget.");
+				OOCInstructionUtils.enqueueExact(out, imv, budget);
+				budget = null;
 			}
 			finally {
-				if(reservationOwned)
-					_allowance.release(bytes);
-				//the table path has nothing to clear: the take already removed the slot
+				if(budget != null)
+					budget.close();
 			}
 		}, _sc).thenRun(out::closeInput).exceptionally(t -> {
 			out.propagateFailure(DMLRuntimeException.of(t));
@@ -196,10 +189,9 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	 */
 	private void startTableDriver(OOCStream<IndexedMatrixValue> l, OOCStream<IndexedMatrixValue> r,
 		OOCStream<JoinWork> intermediate,
-		OOCStream<IndexedMatrixValue> out) {
+		OOCStream<IndexedMatrixValue> out, long tableBudgetBytes) {
 		runCoordinator("ooc-join-table-driver", () -> {
 			OOCStream.QueueCallback<IndexedMatrixValue> next = null;
-			long outputBytes = 0;
 			try {
 				_policyRows = OOCUtils.getNumRowBlocks(r.getDataCharacteristics());
 				long cols = OOCUtils.getNumColBlocks(r.getDataCharacteristics());
@@ -212,45 +204,40 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 					long rIdx = nextValue.getIndexes().getRowIndex() - 1;
 					long cIdx = nextValue.getIndexes().getColumnIndex() - 1;
 					final int idx = (int) (rIdx * cols + cIdx);
-					long bytes = _allocFn.applyAsLong(nextValue.getIndexes());
 					OOCStream.QueueCallback<IndexedMatrixValue> ownedNext = next.keepOpen();
 					next.close();
 					next = null; // detach from dequeueCB auto-close before handing ownership to rendezvous
 					OOCFuture<TableRendezvous.Match> rendezvous;
+					ReservationBudget tableBudget = null;
 					try {
-						rendezvous = TableRendezvous.installOrTake(_table, idx, ownedNext, _allowance, bytes);
+						tableBudget = OOCInstructionUtils.reserveBudget(_allowance, tableBudgetBytes);
+						rendezvous = TableRendezvous.installOrTake(_table, idx, ownedNext,
+							tableBudget == null ? _allowance : tableBudget);
 						ownedNext = null; //ownership transferred to the helper
+						TableRendezvous.Match match = getRendezvous(rendezvous);
+						if(match != null) {
+							JoinWork work = null;
+							try {
+								work = isLeft ?
+									new JoinWork(match.own(), match.partner()) :
+									new JoinWork(match.partner(), match.own());
+								intermediate.enqueue(work);
+								work = null;
+							}
+							catch(Throwable t) {
+								if(work != null)
+									work.closeInputs();
+								else
+									closeMatch(match);
+								throw t;
+							}
+						}
 					}
 					finally {
+						if(tableBudget != null)
+							tableBudget.close();
 						if(ownedNext != null)
 							ownedNext.close();
-					}
-					TableRendezvous.Match match = getRendezvous(rendezvous);
-					if(match != null) {
-						long reservedBytes = 0;
-						JoinWork work = null;
-						try {
-							if(_startsRegion) {
-								if(outputBytes == 0)
-									outputBytes = _allocFn.applyAsLong(new MatrixIndexes(1, 1));
-								_allowance.reserveBlocking(outputBytes);
-								reservedBytes = outputBytes;
-							}
-							work = isLeft ?
-								new JoinWork(match.own(), match.partner(), reservedBytes) :
-								new JoinWork(match.partner(), match.own(), reservedBytes);
-							intermediate.enqueue(work);
-							work = null;
-						}
-						catch(Throwable t) {
-							if(work != null)
-								work.closeInputs();
-							else
-								closeMatch(match);
-							if(reservedBytes > 0)
-								_allowance.release(reservedBytes);
-							throw t;
-						}
 					}
 					nextLeft = !nextLeft;
 				}
@@ -264,6 +251,19 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 				failJoin(t, intermediate, out);
 			}
 		});
+	}
+
+	private static long joinTableBudgetBytes(OOCStreamable<IndexedMatrixValue> leftInput,
+		OOCStreamable<IndexedMatrixValue> rightInput) {
+		long leftBytes = OOCInstructionUtils.estimateOutputTileBytes(leftInput.getDataCharacteristics());
+		long rightBytes = OOCInstructionUtils.estimateOutputTileBytes(rightInput.getDataCharacteristics());
+		long tileBytes = Math.max(leftBytes, rightBytes);
+		return saturatingAdd(tileBytes, tileBytes);
+	}
+
+	private static long saturatingAdd(long a, long b) {
+		long result = a + b;
+		return result < 0 ? Long.MAX_VALUE : result;
 	}
 
 	private void addMaterializedInputPolicy(OOCStreamable<IndexedMatrixValue> input) {
@@ -312,13 +312,11 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	private static final class JoinWork {
 		private final OOCStream.QueueCallback<IndexedMatrixValue> _left;
 		private final OOCStream.QueueCallback<IndexedMatrixValue> _right;
-		private final long _outputBytes;
 
 		private JoinWork(OOCStream.QueueCallback<IndexedMatrixValue> left,
-			OOCStream.QueueCallback<IndexedMatrixValue> right, long outputBytes) {
+			OOCStream.QueueCallback<IndexedMatrixValue> right) {
 			_left = left;
 			_right = right;
-			_outputBytes = outputBytes;
 		}
 
 		private void closeInputs() {

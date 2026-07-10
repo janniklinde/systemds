@@ -37,7 +37,6 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.ToLongFunction;
 
 public class OOCPlanner {
 	public static void compile(OOCPrimitive root) {
@@ -108,21 +107,17 @@ public class OOCPlanner {
 		if(activeRegion.isEmpty())
 			return;
 
-		ToLongFunction<MatrixIndexes> allocFn = buildAllocFn(region);
-		long minimumOperatingBytes = buildMinimumOperatingFactor(region) *
-			allocFn.applyAsLong(new MatrixIndexes(1, 1));
+		long minimumOperatingBytes = buildMinimumOperatingBytes(region);
 		MemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(),
 			GlobalMemoryBroker.defaultAllowanceLimit(), minimumOperatingBytes);
-		OOCRegionBinding binding = new OOCRegionBinding(allowance, allocFn, new AtomicInteger(activeRegion.size()));
+		OOCRegionBinding binding = new OOCRegionBinding(allowance, new AtomicInteger(activeRegion.size()));
 
 		for(int i = 0; i < activeRegion.size(); i++) {
 			OOCPrimitive primitive = activeRegion.get(i);
-			boolean crossBoundaries = i == 0;
-			boolean startsRegion = i == activeRegion.size() - 1;
-			primitive.bindRegion(binding, crossBoundaries, startsRegion);
-				//A primitive may additionally declare an input that must be materialized. The registry
-				//hands out ONE binding per input; the planner attaches the source once after all regions
-				//are bound, and consumers only open readers on the binding they receive.
+			primitive.bindRegion(binding);
+			//A primitive may additionally declare an input that must be materialized. The registry
+			//hands out ONE binding per input; the planner attaches the source once after all regions
+			//are bound, and consumers only open readers on the binding they receive.
 			OOCMaterializedInputRequest inputRequest = primitive.requiresMaterializedInput();
 			if(inputRequest != null) {
 				OOCStreamable<IndexedMatrixValue> source =
@@ -132,7 +127,7 @@ public class OOCPlanner {
 					new MaterializedInputStreamable(source, store));
 				materializedInputs.add(store);
 			}
-				if(primitive.requiresCache()) {
+			if(primitive.requiresCache()) {
 				CachedAllowance cache = new CachedAllowance(GlobalMemoryBroker.get());
 				cache.registerDebugOwner(primitive.getClass().getSimpleName() + "@"
 					+ System.identityHashCode(primitive) + "[legacy-cache]");
@@ -201,27 +196,18 @@ public class OOCPlanner {
 		return region;
 	}
 
-	private static ToLongFunction<MatrixIndexes> buildAllocFn(List<OOCPrimitive> region) {
+	private static long buildMinimumOperatingBytes(List<OOCPrimitive> region) {
 		long primitiveFactor = 1;
 		DataCharacteristics dc = null;
 
 		for(OOCPrimitive primitive : region) {
-			primitiveFactor = Math.max(primitiveFactor, primitive.getDenseTileMemoryFactor());
+			primitiveFactor = Math.max(primitiveFactor, primitive.getMinimumOperatingMemoryFactor());
 
 			if(dc == null && !primitive.getOutputStreams().isEmpty())
 				dc = primitive.getOutputStreams().get(0).getDataCharacteristics();
 		}
 
-		final DataCharacteristics outDc = dc;
-		final long factor = primitiveFactor;
-		return ix -> factor * estimateDenseTileBytes(outDc, ix);
-	}
-
-	private static long buildMinimumOperatingFactor(List<OOCPrimitive> region) {
-		long factor = 1;
-		for(OOCPrimitive primitive : region)
-			factor = Math.max(factor, primitive.getMinimumOperatingMemoryFactor());
-		return factor;
+		return primitiveFactor * estimateDenseTileBytes(dc, new MatrixIndexes(1, 1));
 	}
 
 	private static long estimateDenseTileBytes(DataCharacteristics dc, MatrixIndexes ix) {

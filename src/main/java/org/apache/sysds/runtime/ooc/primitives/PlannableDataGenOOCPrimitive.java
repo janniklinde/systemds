@@ -26,8 +26,9 @@ import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
-import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
+import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -69,11 +70,6 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	}
 
 	@Override
-	public long getDenseTileMemoryFactor() {
-		return 1;
-	}
-
-	@Override
 	public void inferPatterns() {
 		if(_pattern == OOCAccessPattern.UNSET)
 			_pattern = OOCAccessPattern.ANY;
@@ -89,33 +85,30 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 	public void startExecution() {
 		final OOCStream<GenerationWork> stream = new SubscribableTaskQueue<>();
 		final OOCStream<IndexedMatrixValue> out = _outputStream.getWriteStream();
+		final long outputBudgetBytes = OOCInstructionUtils.estimateOutputTileBytes(_outputStream.getDataCharacteristics());
+		final OOCStream<GenerationWork> admitted =
+			new AllocatedOOCStream<>(stream, _allowance, work -> outputBudgetBytes, outputBudgetBytes > 0,
+				ReservationBudget::admitted);
 		runCoordinator("ooc-datagen-index-driver", () -> {
 			for(MatrixIndexes ix : OOCUtils.getAccessPattern(_outputStream.getDataCharacteristics(), _pattern)) {
-				long reservedBytes = 0;
-				if(_startsRegion)
-					_allowance.reserveBlocking(reservedBytes = _allocFn.applyAsLong(ix));
-				stream.enqueue(new GenerationWork(ix, reservedBytes));
+				stream.enqueue(new GenerationWork(ix));
 			}
 			stream.closeInput();
 		});
 
-		OOCInstructionUtils.submitOOCTasks(stream, cb -> {
+		OOCInstructionUtils.submitOOCTasks(admitted, cb -> {
+			ReservationBudget budget = OOCInstructionUtils.detachBudget(cb);
 			GenerationWork work = cb.get();
-			long reservedBytes = work.reservedBytes;
 			try {
-				var imv = new IndexedMatrixValue(work.index, _fn.apply(work.index));
-				if(_crossBoundaries && reservedBytes > 0) {
-					out.enqueue(new InMemoryQueueCallback(imv, null, _allowance, reservedBytes));
-					reservedBytes = 0;
-				}
-				else {
-					out.enqueue(new OOCStream.SimpleQueueCallback<>(imv, null));
-					reservedBytes = 0;
-				}
+				IndexedMatrixValue output = new IndexedMatrixValue(work.index, _fn.apply(work.index));
+				if(budget == null)
+					throw new DMLRuntimeException("Missing admitted datagen output budget.");
+				OOCInstructionUtils.enqueueExact(out, output, budget);
+				budget = null;
 			}
 			finally {
-				if(reservedBytes > 0)
-					_allowance.release(reservedBytes);
+				if(budget != null)
+					budget.close();
 			}
 		}, _sc).thenRun(out::closeInput).exceptionally(t -> {
 			out.propagateFailure(DMLRuntimeException.of(t));
@@ -125,11 +118,9 @@ public class PlannableDataGenOOCPrimitive extends PlannableOOCPrimitive {
 
 	private static final class GenerationWork {
 		private final MatrixIndexes index;
-		private final long reservedBytes;
 
-		private GenerationWork(MatrixIndexes index, long reservedBytes) {
+		private GenerationWork(MatrixIndexes index) {
 			this.index = index;
-			this.reservedBytes = reservedBytes;
 		}
 	}
 }

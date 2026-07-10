@@ -24,7 +24,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
@@ -102,19 +101,16 @@ public class JoinPrimitiveParityTest {
 	}
 
 	@Test
-	public void testTablePathPreReservesOutputBeforeAdmittingNextMatch() throws Exception {
+	public void testTablePathUsesExactOutputCallbackOwnership() throws Exception {
 		final int tiles = 3;
 		final int rows = tiles * BLEN;
 		final int cols = BLEN;
 		final long bytes = new MatrixBlock(BLEN, BLEN, 1.0).getExactSerializedSize();
-		CappedAllowance region = new CappedAllowance(3 * bytes);
+		CappedAllowance region = new CappedAllowance(32 * bytes);
 		CappedAllowance producer = new CappedAllowance(16 * bytes);
 		OOCStream<IndexedMatrixValue> left = createMatrixStream(rows, cols);
 		OOCStream<IndexedMatrixValue> right = createMatrixStream(rows, cols);
 		OOCStream<IndexedMatrixValue> out = createMatrixStream(rows, cols);
-		CountDownLatch firstComputeEntered = new CountDownLatch(1);
-		CountDownLatch releaseCompute = new CountDownLatch(1);
-		AtomicInteger enteredComputes = new AtomicInteger();
 		AtomicInteger outputs = new AtomicInteger();
 		CompletableFuture<Void> done = new CompletableFuture<>();
 
@@ -142,24 +138,12 @@ public class JoinPrimitiveParityTest {
 			});
 
 			JoinOOCPrimitive primitive = new JoinOOCPrimitive(List.of(left, right), out, blocks -> {
-				enteredComputes.incrementAndGet();
-				firstComputeEntered.countDown();
-				awaitLatch(releaseCompute);
 				BinaryOperator plus = new BinaryOperator(Plus.getPlusFnObject());
 				return blocks.get(0).binaryOperations(plus, blocks.get(1));
 			}, new StreamContext(0, "op_join_prepaid_regression").addOutStream(out));
-			primitive.bindRegion(new OOCRegionBinding(region, ix -> bytes, new AtomicInteger(1)), true, true);
+			primitive.bindRegion(new OOCRegionBinding(region, new AtomicInteger(1)));
 			primitive.startExecution();
 
-			Assert.assertTrue("Expected the first matched pair to reach compute.",
-				firstComputeEntered.await(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS));
-			waitFor(() -> region.getUsedMemory() == 3 * bytes);
-			Assert.assertEquals(3 * bytes, region.getUsedMemory());
-			Thread.sleep(200);
-			Assert.assertEquals("The table driver must stop before pinning another partner when only the "
-				+ "next output reservation is available.", 1, enteredComputes.get());
-
-			releaseCompute.countDown();
 			done.get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 			Assert.assertEquals(tiles, outputs.get());
 			awaitOwnedCache(OOCCacheManager.getGlobalCache(), 0);
@@ -169,7 +153,6 @@ public class JoinPrimitiveParityTest {
 			Assert.assertEquals(0, producer.getUsedMemory());
 		}
 		finally {
-			releaseCompute.countDown();
 			region.shutdown();
 			producer.shutdown();
 		}
@@ -219,7 +202,7 @@ public class JoinPrimitiveParityTest {
 			JoinOOCPrimitive primitive = new JoinOOCPrimitive(List.of(materializedLeft, right), out,
 			blocks -> blocks.get(0), new StreamContext(0, "op_join_policy_injection").addOutStream(out));
 		primitive.requestPattern(OOCAccessPattern.COL_MAJOR);
-		primitive.bindRegion(new OOCRegionBinding(region, ix -> bytes, new AtomicInteger(1)), true, true);
+		primitive.bindRegion(new OOCRegionBinding(region, new AtomicInteger(1)));
 		primitive.startExecution();
 
 			done.get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
@@ -298,17 +281,6 @@ public class JoinPrimitiveParityTest {
 		allowance.reserveBlocking(bytes);
 		stream.enqueue(new InMemoryQueueCallback(new IndexedMatrixValue(new MatrixIndexes(row, col),
 			new MatrixBlock(BLEN, BLEN, value)), null, allowance, bytes));
-	}
-
-	private static void awaitLatch(CountDownLatch latch) {
-		try {
-			if(!latch.await(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS))
-				throw new DMLRuntimeException("Timed out waiting for join regression latch.");
-		}
-		catch(InterruptedException ex) {
-			Thread.currentThread().interrupt();
-			throw new DMLRuntimeException(ex);
-		}
 	}
 
 	private static void awaitOwnedCache(OOCCache cache, long expected) throws Exception {
