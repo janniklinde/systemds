@@ -89,10 +89,31 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 		BlockEntry entry = _cache.putPinned(_streamId, index, value, bytes, allowance);
 		_publishedCount.incrementAndGet();
 		updatePublished(index + 1);
-		return new StoreLease<>((idx, current) -> {
-			_cache.unpin(current, allowance);
-			tryForget(idx);
-		}, index, entry);
+		return new StoreLease<>(new AllowancePinReleaser(allowance), index, entry);
+	}
+
+	private final class AllowancePinReleaser implements StoreLeaseReleaser {
+		private MemoryAllowance _owner;
+
+		private AllowancePinReleaser(MemoryAllowance owner) {
+			_owner = owner;
+		}
+
+		@Override
+		public synchronized void release(int index, BlockEntry entry) {
+			_cache.unpin(entry, _owner);
+			tryForget(index);
+		}
+
+		@Override
+		public synchronized void transferOwnershipBlocking(BlockEntry entry, MemoryAllowance allowance) {
+			if(_owner == allowance || !_cache.supportsPinOwnershipTransfer(entry))
+				return;
+			long bytes = entry.getSize();
+			allowance.reserveBlocking(bytes);
+			_owner.release(bytes);
+			_owner = allowance;
+		}
 	}
 
 	StoreLease<T> publishPinnedLive(int index, ManagedPayload<T> payload) {

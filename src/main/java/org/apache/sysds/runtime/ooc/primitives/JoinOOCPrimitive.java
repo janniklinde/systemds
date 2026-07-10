@@ -204,11 +204,13 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 					OOCFuture<TableRendezvous.Match> rendezvous;
 					ReservationBudget tableBudget = null;
 					try {
-						boolean incomingReservationOwned = ownedNext instanceof MaterializedCallback
-							|| ownedNext instanceof InMemoryQueueCallback && ownedNext.getManagedBytes() > 0;
-						long tableBudgetBytes = saturatingAdd(outputBudgetBytes, incomingReservationOwned ?
-							tableTileBytes : saturatingAdd(tableTileBytes, tableTileBytes));
+						long tableBudgetBytes = saturatingAdd(outputBudgetBytes,
+							saturatingAdd(tableTileBytes, tableTileBytes));
 						tableBudget = OOCInstructionUtils.reserveBudget(_allowance, tableBudgetBytes);
+						if(ownedNext instanceof InMemoryQueueCallback && ownedNext.getManagedBytes() > 0)
+							ownedNext.transferOwnershipBlocking(tableBudget);
+						else if(ownedNext instanceof MaterializedCallback)
+							ownedNext.transferOwnershipBlocking(tableBudget);
 						rendezvous = TableRendezvous.installOrTake(_table, idx, ownedNext,
 							tableBudget == null ? _allowance : tableBudget);
 						ownedNext = null; //ownership transferred to the helper

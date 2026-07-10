@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.ooc.store;
 
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -63,6 +64,12 @@ public final class StoreLease<T extends SpillableObject> implements Materialized
 		if(!_open)
 			throw new IllegalStateException("Lease is closed");
 		return _entry;
+	}
+
+	void transferOwnershipBlocking(MemoryAllowance allowance) {
+		if(!_open)
+			throw new IllegalStateException("Lease is closed");
+		_releaser.transferOwnershipBlocking(_entry, allowance);
 	}
 
 	@Override

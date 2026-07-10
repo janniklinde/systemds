@@ -66,6 +66,14 @@ public interface OOCCache {
 	BlockEntry putPinned(long sId, long tId, Object data, long size, MemoryAllowance allowance);
 
 	/**
+	 * Returns whether ownership of an existing physical pin can move between allowances without changing the pin.
+	 * Packed logical pins may reject this because their producer ownership is shared by the containing pack.
+	 */
+	default boolean supportsPinOwnershipTransfer(BlockEntry entry) {
+		return true;
+	}
+
+	/**
 	 * Pins an item backed by an allowance. A successful pin transfers memory ownership from the cache to the owner of
 	 * the allowance and guarantees data availability. While pinned, the bytes of the entry are not counted as
 	 * cache-owned memory.

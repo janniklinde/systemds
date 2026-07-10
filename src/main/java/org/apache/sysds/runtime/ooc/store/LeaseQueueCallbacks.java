@@ -33,7 +33,14 @@ public final class LeaseQueueCallbacks {
 
 	public static OOCStream.QueueCallback<IndexedMatrixValue> store(
 		MaterializedStore.Lease<IndexedMatrixValue> lease) {
+		if(lease instanceof StoreLease<?> storeLease)
+			return new MaterializedCallback(castStoreLease(storeLease));
 		return new StoreLeaseBackedCallback(lease);
+	}
+
+	@SuppressWarnings("unchecked")
+	private static StoreLease<IndexedMatrixValue> castStoreLease(StoreLease<?> lease) {
+		return (StoreLease<IndexedMatrixValue>) lease;
 	}
 
 	public static OOCStream.QueueCallback<IndexedMatrixValue> state(
