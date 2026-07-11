@@ -162,9 +162,8 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 
 	@Override
 	public void reserveBlocking(long bytes) {
-		OOCFuture<Void> reservation = reserveAsync(bytes);
 		try {
-			reservation.get();
+			reserveAsync(bytes).get();
 		}
 		catch(InterruptedException e) {
 			Thread.currentThread().interrupt();

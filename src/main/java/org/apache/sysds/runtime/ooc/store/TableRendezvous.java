@@ -30,8 +30,9 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 /**
  * Rendezvous driver over a {@link StateTable}: atomic install-or-take per linearized slot,
- * routed by callback kind. Exclusive in-memory callbacks transfer their detached reservation
- * ({@code installOrTake}); shared pinned-lease callbacks from materialized boundaries park a logical
+ * routed by callback kind. Exclusive in-memory callbacks detach their reservation into the table lifecycle
+ * without changing its allowance ({@code installOrTake}); shared pinned-lease callbacks from materialized
+ * boundaries park a logical
  * reference to the canonical entry ({@code installReferenceOrTake}) — with the pin held INSIDE this
  * helper until the rendezvous future resolves, because the chained INSTALLING-wait path makes that
  * contract easy to violate in primitive code; unmanaged callbacks are measured and reserved on the

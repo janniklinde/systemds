@@ -188,8 +188,9 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 	 * The rendezvous driver on the new contract: one thread alternates dequeues between both inputs (the legacy idiom),
 	 * and every tile goes through {@link TableRendezvous#installOrTake} — install when the partner has not arrived,
 	 * take-and-pair when it has. Both inputs share the ONE bound table (one cache stream id), so eviction sees one
-	 * population. Each arriving tile reserves one budget covering its possible table transfer, partner pin, and output.
-	 * An unmatched install immediately releases the unused portions; a match carries the same budget into computation.
+	 * population. Each arriving tile reserves one budget for memory this task may acquire: the partner pin and output,
+	 * plus an owned table copy only when the callback does not already carry a reservation. An unmatched install
+	 * immediately releases the unused portions; a match carries the same budget into computation.
 	 */
 	private void startTableDriver(OOCStream<IndexedMatrixValue> l, OOCStream<IndexedMatrixValue> r,
 		OOCStream<JoinWork> intermediate, OOCStream<IndexedMatrixValue> out, long tableTileBytes,
@@ -214,16 +215,14 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 					OOCFuture<TableRendezvous.Match> rendezvous;
 					ReservationBudget tableBudget = null;
 					try {
-						long tableBudgetBytes = saturatingAdd(outputBudgetBytes,
-							saturatingAdd(tableTileBytes, tableTileBytes));
+						boolean incomingReservationOwned = ownedNext instanceof MaterializedCallback
+							|| ownedNext instanceof InMemoryQueueCallback && ownedNext.getManagedBytes() > 0;
+						long tableBudgetBytes = saturatingAdd(outputBudgetBytes, incomingReservationOwned ?
+							tableTileBytes : saturatingAdd(tableTileBytes, tableTileBytes));
 						tableBudget = OOCInstructionUtils.reserveBudget(_allowance, tableBudgetBytes);
-						if(ownedNext instanceof InMemoryQueueCallback && ownedNext.getManagedBytes() > 0)
-							ownedNext.transferOwnershipBlocking(tableBudget);
-						else if(ownedNext instanceof MaterializedCallback)
-							ownedNext.transferOwnershipBlocking(tableBudget);
 						rendezvous = TableRendezvous.installOrTake(_table, idx, ownedNext,
 							tableBudget == null ? _allowance : tableBudget);
-						ownedNext = null; //ownership transferred to the helper
+						ownedNext = null; //callback lifecycle ownership transferred to the helper
 						TableRendezvous.Match match = getRendezvous(rendezvous);
 						if(match != null) {
 							JoinWork work = null;

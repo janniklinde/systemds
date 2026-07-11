@@ -20,12 +20,7 @@
 package org.apache.sysds.runtime.ooc.store;
 
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
-import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 interface StoreLeaseReleaser {
 	void release(int index, BlockEntry entry);
-
-	default void transferOwnershipBlocking(BlockEntry entry, MemoryAllowance allowance) {
-		throw new UnsupportedOperationException("Store lease does not support ownership transfer.");
-	}
 }

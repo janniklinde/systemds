@@ -23,7 +23,6 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
-import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 public final class MaterializedCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
 	private final StoreLease<IndexedMatrixValue> _lease;
@@ -50,15 +49,6 @@ public final class MaterializedCallback implements OOCStream.QueueCallback<Index
 		if(_closed)
 			throw new IllegalStateException("Cannot keep open a closed callback");
 		return new MaterializedCallback(_lease.retain());
-	}
-
-	@Override
-	public synchronized OOCStream.QueueCallback<IndexedMatrixValue> transferOwnershipBlocking(
-		MemoryAllowance allowance) {
-		if(_closed)
-			throw new IllegalStateException("Cannot transfer ownership of a closed callback");
-		_lease.transferOwnershipBlocking(allowance);
-		return this;
 	}
 
 	@Override

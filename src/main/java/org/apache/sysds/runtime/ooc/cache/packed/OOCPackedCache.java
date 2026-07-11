@@ -148,12 +148,6 @@ public final class OOCPackedCache implements OOCCache {
 		return logical;
 	}
 
-	@Override
-	public boolean supportsPinOwnershipTransfer(BlockEntry entry) {
-		Object meta = entry.getCacheMeta();
-		return !(meta instanceof PendingLogicalPin) && !(meta instanceof PackedLogicalPin);
-	}
-
 	public BlockEntry[] putPackPinned(long sId, long[] tIds, Object[] data, long[] sizes, int off, int len,
 		MemoryAllowance allowance) {
 		BlockEntry[] entries = new BlockEntry[len];
