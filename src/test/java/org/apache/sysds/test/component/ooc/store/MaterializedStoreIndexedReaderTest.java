@@ -47,14 +47,14 @@ public class MaterializedStoreIndexedReaderTest {
 		Fixture f = new Fixture(1L << 30);
 		try {
 			MaterializedStore.IndexedReader<IndexedMatrixValue> reader =
-				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 2), f.reader);
+				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 2));
 			f.store.sealReaders();
 
 			//demand-driven access in arbitrary order, each index twice
 			for(int pass = 0; pass < 2; pass++) {
 				for(int i = BLOCKS - 1; i >= 0; i--) {
 					try(MaterializedStore.Lease<IndexedMatrixValue> lease =
-						reader.request(i).get(10, TimeUnit.SECONDS)) {
+						reader.request(i, f.reader).get(10, TimeUnit.SECONDS)) {
 						Assert.assertEquals(i, lease.index());
 						Assert.assertEquals(i + 1L, lease.value().getIndexes().getRowIndex());
 					}
@@ -65,7 +65,7 @@ public class MaterializedStoreIndexedReaderTest {
 			Assert.assertEquals(0, f.reader.getUsedMemory());
 			Assert.assertEquals(0, f.cache.getOwnedCacheSize());
 			try {
-				reader.request(0);
+				reader.request(0, f.reader);
 				Assert.fail("Request beyond multiplicity must fail");
 			}
 			catch(IllegalStateException expected) {
@@ -83,7 +83,7 @@ public class MaterializedStoreIndexedReaderTest {
 		Fixture f = new Fixture(1L << 30);
 		try {
 			MaterializedStore.IndexedReader<IndexedMatrixValue> indexed =
-				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1), f.reader);
+				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1));
 			MaterializedStore.Reader<IndexedMatrixValue> ordered =
 				f.store.openReader(new SequentialAccessPattern(BLOCKS), f.reader, 4);
 			f.store.sealReaders();
@@ -102,7 +102,7 @@ public class MaterializedStoreIndexedReaderTest {
 			//indexed consumption forgets each entry immediately afterwards
 			for(int i = 0; i < BLOCKS; i++) {
 				try(MaterializedStore.Lease<IndexedMatrixValue> lease =
-					indexed.request(i).get(10, TimeUnit.SECONDS)) {
+					indexed.request(i, f.reader).get(10, TimeUnit.SECONDS)) {
 					Assert.assertEquals(i + 1L, lease.value().getIndexes().getRowIndex());
 				}
 			}
@@ -119,11 +119,11 @@ public class MaterializedStoreIndexedReaderTest {
 		Fixture f = new Fixture(TILE_BYTES); //reader allowance admits exactly one tile
 		try {
 			MaterializedStore.IndexedReader<IndexedMatrixValue> reader =
-				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1), f.reader);
+				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1));
 			f.store.sealReaders();
 
-			MaterializedStore.Lease<IndexedMatrixValue> first = reader.request(0).get(10, TimeUnit.SECONDS);
-			OOCFuture<MaterializedStore.Lease<IndexedMatrixValue>> second = reader.request(1);
+			MaterializedStore.Lease<IndexedMatrixValue> first = reader.request(0, f.reader).get(10, TimeUnit.SECONDS);
+			OOCFuture<MaterializedStore.Lease<IndexedMatrixValue>> second = reader.request(1, f.reader);
 			Thread.sleep(20);
 			Assert.assertFalse("Second request must wait for admission", second.isDone());
 
@@ -143,10 +143,10 @@ public class MaterializedStoreIndexedReaderTest {
 		Fixture f = new Fixture(1L << 30);
 		try {
 			MaterializedStore.IndexedReader<IndexedMatrixValue> reader =
-				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1), f.reader);
+				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1));
 			f.store.sealReaders();
 
-			try(MaterializedStore.Lease<IndexedMatrixValue> lease = reader.requestIfLive(3)) {
+			try(MaterializedStore.Lease<IndexedMatrixValue> lease = reader.requestIfLive(3, f.reader)) {
 				Assert.assertNotNull(lease);
 				Assert.assertEquals(4L, lease.value().getIndexes().getRowIndex());
 			}
@@ -163,13 +163,13 @@ public class MaterializedStoreIndexedReaderTest {
 		Fixture f = new Fixture(1L << 30);
 		try {
 			MaterializedStore.IndexedReader<IndexedMatrixValue> reader =
-				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1), f.reader);
+				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1));
 			f.store.sealReaders();
 
 			//hold the only use of index 0 in flight; a second request must be rejected up front
-			MaterializedStore.Lease<IndexedMatrixValue> lease = reader.request(0).get(10, TimeUnit.SECONDS);
+			MaterializedStore.Lease<IndexedMatrixValue> lease = reader.request(0, f.reader).get(10, TimeUnit.SECONDS);
 			try {
-				reader.request(0);
+				reader.request(0, f.reader);
 				Assert.fail("A second request must not pass while the only use is reserved");
 			}
 			catch(IllegalStateException expected) {
@@ -190,7 +190,7 @@ public class MaterializedStoreIndexedReaderTest {
 		Fixture f = new Fixture(1L << 30);
 		try {
 			MaterializedStore.IndexedReader<IndexedMatrixValue> indexed =
-				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1), f.reader);
+				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1));
 			MaterializedStore.Reader<IndexedMatrixValue> ordered =
 				f.store.openReader(new SequentialAccessPattern(BLOCKS), f.reader, 4);
 			f.store.sealReaders();
@@ -263,9 +263,9 @@ public class MaterializedStoreIndexedReaderTest {
 			store.complete();
 
 			MaterializedStore.IndexedReader<IndexedMatrixValue> indexed =
-				store.openIndexedReader(new MultiplicityLiveness(1, 1), reader);
+				store.openIndexedReader(new MultiplicityLiveness(1, 1));
 			store.sealReaders();
-			try(MaterializedStore.Lease<IndexedMatrixValue> lease = indexed.request(0).get(10, TimeUnit.SECONDS)) {
+			try(MaterializedStore.Lease<IndexedMatrixValue> lease = indexed.request(0, reader).get(10, TimeUnit.SECONDS)) {
 				Assert.assertEquals(5.0, ((MatrixBlock)lease.value().getValue()).get(0, 0), 0.0);
 			}
 			indexed.close();
@@ -282,9 +282,9 @@ public class MaterializedStoreIndexedReaderTest {
 		Fixture f = new Fixture(1L << 30);
 		try {
 			MaterializedStore.IndexedReader<IndexedMatrixValue> reader =
-				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1), f.reader);
+				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1));
 			try(MaterializedStore.Lease<IndexedMatrixValue> lease =
-				reader.request(0).get(10, TimeUnit.SECONDS)) {
+				reader.request(0, f.reader).get(10, TimeUnit.SECONDS)) {
 				Assert.assertNotNull(lease);
 				Assert.assertEquals(new MatrixIndexes(1, 1), lease.value().getIndexes());
 			}

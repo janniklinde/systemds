@@ -199,7 +199,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 			}
 			try {
 				_reader = _broadcastView.openIndexedReader(
-					new MultiplicityLiveness(nBroadcastTiles, maxCount), _allowance);
+					new MultiplicityLiveness(nBroadcastTiles, maxCount));
 			}
 			catch(RuntimeException ex) {
 				out.propagateFailure(DMLRuntimeException.of(ex));

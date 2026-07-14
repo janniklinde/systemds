@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntConsumer;
 
 final class OrderedMaterializedStoreReader<T extends SpillableObject>
-	implements MaterializedStore.Reader<T>, StoreRegisteredReader, StoreLeaseReleaser {
+	implements MaterializedStore.Reader<T>, StoreRegisteredReader {
 	private final OOCCache cache;
 	private final long streamId;
 	private final MaterializedStore.AccessPattern pattern;
@@ -97,7 +97,7 @@ final class OrderedMaterializedStoreReader<T extends SpillableObject>
 		BlockEntry entry = awaitEntry(request);
 		requests.removeFirst();
 		fillStrict();
-		return new StoreLease<>(this, request.index, entry);
+		return new StoreLease<>(lease -> release(lease.index(), lease.entry()), request.index, entry);
 	}
 
 	@Override
@@ -125,7 +125,6 @@ final class OrderedMaterializedStoreReader<T extends SpillableObject>
 		afterClose.run();
 	}
 
-	@Override
 	public void release(int index, BlockEntry entry) {
 		cache.unpin(entry, allowance);
 		pattern.consumed(index);
@@ -148,7 +147,7 @@ final class OrderedMaterializedStoreReader<T extends SpillableObject>
 		if(request.entry == null)
 			throw new IllegalStateException("Reader is closed");
 		fillSoft();
-		return new StoreLease<>(this, request.index, request.entry);
+		return new StoreLease<>(lease -> release(lease.index(), lease.entryUnsafe()), request.index, request.entry);
 	}
 
 	private void fillStrict() {

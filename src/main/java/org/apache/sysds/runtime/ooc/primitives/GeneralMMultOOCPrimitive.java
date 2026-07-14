@@ -191,7 +191,7 @@ public class GeneralMMultOOCPrimitive extends PlannableOOCPrimitive {
 			try {
 				int bTiles = tileCount(bStreamable.getDataCharacteristics());
 				int aRowBlocks = numRowBlocks(aStreamable.getDataCharacteristics());
-				_bReader = _bView.openIndexedReader(new MultiplicityLiveness(bTiles, aRowBlocks), _allowance);
+				_bReader = _bView.openIndexedReader(new MultiplicityLiveness(bTiles, aRowBlocks));
 			}
 			catch(Throwable t) {
 				fail(t, out);

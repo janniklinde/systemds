@@ -251,19 +251,19 @@ public class OOCPlannerSeamTest {
 
 			//pre-counted reader set: the store seals only after BOTH consumers registered
 			MaterializedStore.IndexedReader<IndexedMatrixValue> readerA =
-				firstView.openIndexedReader(new MultiplicityLiveness(2, 1), reader);
+				firstView.openIndexedReader(new MultiplicityLiveness(2, 1));
 			Assert.assertFalse("Sealing must wait for the full declared reader set.",
 				firstView.readersSealed().isDone());
 			MaterializedStore.IndexedReader<IndexedMatrixValue> readerB =
-				secondView.openIndexedReader(new MultiplicityLiveness(2, 1), reader);
+				secondView.openIndexedReader(new MultiplicityLiveness(2, 1));
 			firstView.readersSealed().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 
 			try(MaterializedStore.Lease<IndexedMatrixValue> lease =
-				readerA.request(0).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
+				readerA.request(0, reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
 				Assert.assertEquals(1.0 * ROWS * COLS, sum(lease.value()), 0.0);
 			}
 			try(MaterializedStore.Lease<IndexedMatrixValue> lease =
-				readerB.request(1).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
+				readerB.request(1, reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
 				Assert.assertEquals(2.0 * ROWS * COLS, sum(lease.value()), 0.0);
 			}
 

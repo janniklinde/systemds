@@ -26,6 +26,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -150,6 +151,59 @@ public class JoinPrimitiveParityTest {
 			waitFor(() -> region.getUsedMemory() == 0);
 			Assert.assertEquals(0, region.getUsedMemory());
 			waitFor(() -> producer.getUsedMemory() == 0);
+			Assert.assertEquals(0, producer.getUsedMemory());
+		}
+		finally {
+			region.shutdown();
+			producer.shutdown();
+		}
+	}
+
+	@Test
+	public void testJoinKeepsArrivingInputChargedToProducer() throws Exception {
+		final int rows = BLEN;
+		final int cols = BLEN;
+		final long bytes = new MatrixBlock(BLEN, BLEN, 1.0).getExactSerializedSize();
+		CappedAllowance region = new CappedAllowance(8 * bytes);
+		CappedAllowance producer = new CappedAllowance(4 * bytes);
+		OOCStream<IndexedMatrixValue> left = createMatrixStream(rows, cols);
+		OOCStream<IndexedMatrixValue> right = createMatrixStream(rows, cols);
+		OOCStream<IndexedMatrixValue> out = createMatrixStream(rows, cols);
+		AtomicLong producerBytesDuringJoin = new AtomicLong(-1);
+		CompletableFuture<Void> done = new CompletableFuture<>();
+
+		try {
+			enqueueManaged(left, 1, 3.0, producer, bytes);
+			enqueueManaged(right, 1, 5.0, producer, bytes);
+			left.closeInput();
+			right.closeInput();
+			out.setSubscriber(cb -> {
+				try {
+					if(cb.isEos())
+						done.complete(null);
+				}
+				catch(Throwable t) {
+					done.completeExceptionally(t);
+				}
+				finally {
+					cb.close();
+				}
+			});
+
+			JoinOOCPrimitive primitive = new JoinOOCPrimitive(List.of(left, right), out, blocks -> {
+				producerBytesDuringJoin.set(producer.getUsedMemory());
+				BinaryOperator plus = new BinaryOperator(Plus.getPlusFnObject());
+				return blocks.get(0).binaryOperations(plus, blocks.get(1));
+			}, new StreamContext(0, "op_join_input_owner_regression").addOutStream(out));
+			primitive.bindRegion(new OOCRegionBinding(region, new AtomicInteger(1)));
+			primitive.startExecution();
+
+			done.get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+			Assert.assertTrue("Join moved its arriving input reservation away from the producer allowance.",
+				producerBytesDuringJoin.get() > 0);
+			waitFor(() -> region.getUsedMemory() == 0);
+			waitFor(() -> producer.getUsedMemory() == 0);
+			Assert.assertEquals(0, region.getUsedMemory());
 			Assert.assertEquals(0, producer.getUsedMemory());
 		}
 		finally {
@@ -403,7 +457,7 @@ public class JoinPrimitiveParityTest {
 
 		@Override
 		public MaterializedStore.IndexedReader<IndexedMatrixValue> openIndexedReader(
-			MaterializedStore.Liveness liveness, MemoryAllowance allowance) {
+			MaterializedStore.Liveness liveness) {
 			throw new UnsupportedOperationException();
 		}
 

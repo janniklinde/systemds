@@ -173,9 +173,8 @@ public final class OOCStoreBinding implements OOCMaterializedView {
 		return reader;
 	}
 
-	public MaterializedStore.IndexedReader<IndexedMatrixValue> openIndexedReader(
-		MaterializedStore.Liveness liveness, MemoryAllowance allowance) {
-		MaterializedStore.IndexedReader<IndexedMatrixValue> reader = _store.openIndexedReader(liveness, allowance);
+	public MaterializedStore.IndexedReader<IndexedMatrixValue> openIndexedReader(MaterializedStore.Liveness liveness) {
+		MaterializedStore.IndexedReader<IndexedMatrixValue> reader = _store.openIndexedReader(liveness);
 		sealIfLastRegistration();
 		return reader;
 	}

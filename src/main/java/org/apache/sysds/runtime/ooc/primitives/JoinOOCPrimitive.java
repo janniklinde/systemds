@@ -34,7 +34,7 @@ import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.store.MaterializedCallback;
 import org.apache.sysds.runtime.ooc.store.StateTable;
-import org.apache.sysds.runtime.ooc.store.TableRendezvous;
+import org.apache.sysds.runtime.ooc.store.JoinTable;
 import org.apache.sysds.runtime.ooc.stream.OwnedQueueCallback;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
@@ -186,7 +186,7 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 
 	/**
 	 * The rendezvous driver on the new contract: one thread alternates dequeues between both inputs (the legacy idiom),
-	 * and every tile goes through {@link TableRendezvous#installOrTake} — install when the partner has not arrived,
+	 * and every tile goes through {@link JoinTable#putIfAbsent} — install when the partner has not arrived,
 	 * take-and-pair when it has. Both inputs share the ONE bound table (one cache stream id), so eviction sees one
 	 * population. Each arriving tile reserves one budget for memory this task may acquire: the partner pin and output,
 	 * plus an owned table copy only when the callback does not already carry a reservation. An unmatched install
@@ -212,7 +212,7 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 					OOCStream.QueueCallback<IndexedMatrixValue> ownedNext = next.keepOpen();
 					next.close();
 					next = null; // detach from dequeueCB auto-close before handing ownership to rendezvous
-					OOCFuture<TableRendezvous.Match> rendezvous;
+					OOCFuture<JoinTable.Match> rendezvous;
 					ReservationBudget tableBudget = null;
 					try {
 						boolean incomingReservationOwned = ownedNext instanceof MaterializedCallback
@@ -220,10 +220,10 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 						long tableBudgetBytes = saturatingAdd(outputBudgetBytes, incomingReservationOwned ?
 							tableTileBytes : saturatingAdd(tableTileBytes, tableTileBytes));
 						tableBudget = OOCInstructionUtils.reserveBudget(_allowance, tableBudgetBytes);
-						rendezvous = TableRendezvous.installOrTake(_table, idx, ownedNext,
+						rendezvous = JoinTable.putIfAbsent(_table, idx, ownedNext,
 							tableBudget == null ? _allowance : tableBudget);
 						ownedNext = null; //callback lifecycle ownership transferred to the helper
-						TableRendezvous.Match match = getRendezvous(rendezvous);
+						JoinTable.Match match = getRendezvous(rendezvous);
 						if(match != null) {
 							JoinWork work = null;
 							try {
@@ -300,14 +300,14 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 		return row * cols + col;
 	}
 
-	private static void closeMatch(TableRendezvous.Match match) {
+	private static void closeMatch(JoinTable.Match match) {
 		try(OOCStream.QueueCallback<IndexedMatrixValue> own = match.own();
 			OOCStream.QueueCallback<IndexedMatrixValue> partner = match.partner()) {
 			// Close both callbacks if the matched work cannot be handed to workers.
 		}
 	}
 
-	private static TableRendezvous.Match getRendezvous(OOCFuture<TableRendezvous.Match> rendezvous)
+	private static JoinTable.Match getRendezvous(OOCFuture<JoinTable.Match> rendezvous)
 		throws InterruptedException {
 		try {
 			return rendezvous.get();

@@ -23,12 +23,12 @@ import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
-import org.apache.sysds.runtime.ooc.cache.collections.ConcurrentGrowableBitSet;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -37,7 +37,7 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 	private final OOCCache _cache;
 	private final long _streamId;
 	private final ArrayList<StoreRegisteredReader> _registeredReaders;
-	private final ConcurrentGrowableBitSet _forgotten;
+	private final BitSet _forgotten;
 	private final AtomicInteger _published;
 	private final AtomicInteger _publishedCount;
 
@@ -51,7 +51,7 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 		this._cache = cache;
 		this._streamId = streamId;
 		_registeredReaders = new ArrayList<>();
-		_forgotten = new ConcurrentGrowableBitSet();
+		_forgotten = new BitSet();
 		_published = new AtomicInteger();
 		_publishedCount = new AtomicInteger();
 		_readers = Collections.emptyList();
@@ -89,9 +89,9 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 		BlockEntry entry = _cache.putPinned(_streamId, index, value, bytes, allowance);
 		_publishedCount.incrementAndGet();
 		updatePublished(index + 1);
-		return new StoreLease<>((idx, current) -> {
-			_cache.unpin(current, allowance);
-			tryForget(idx);
+		return new StoreLease<>(lease -> {
+			_cache.unpin(lease.entryUnsafe(), allowance);
+			tryForget(lease.index());
 		}, index, entry);
 	}
 
@@ -134,13 +134,13 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 		return reader;
 	}
 
-	public synchronized IndexedReader<T> openIndexedReader(Liveness liveness, MemoryAllowance allowance) {
+	public synchronized IndexedReader<T> openIndexedReader(Liveness liveness) {
 		if(!_complete || _closed)
 			throw new IllegalStateException("Readers require a completed store");
 		if(_readersSealed)
 			throw new IllegalStateException("Store no longer accepts new readers");
 		IndexedMaterializedStoreReader<T> reader = new IndexedMaterializedStoreReader<>(_cache, _streamId,
-			() -> _completedSize, liveness, allowance, this::forgetAfterReaderClose, this::tryForget);
+			() -> _completedSize, liveness, this::forgetAfterReaderClose, this::tryForget);
 		_registeredReaders.add(reader);
 		return reader;
 	}
@@ -159,7 +159,7 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 			else if(entry == null)
 				result.complete(null);
 			else
-				result.complete(new StoreLease<>((idx, current) -> _cache.unpin(current, allowance), index, entry));
+				result.complete(new StoreLease<>(lease -> _cache.unpin(lease.entryUnsafe(), allowance), index, entry));
 		});
 		return result;
 	}
@@ -192,7 +192,7 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 		for(StoreRegisteredReader localReader : localReaders)
 			localReader.close();
 		for(int i = 0; i < size(); i++)
-			if(_forgotten.set(i))
+			if(markForgotten(i))
 				_cache.dereference(new BlockKey(_streamId, i));
 	}
 
@@ -205,8 +205,15 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 			if(!reader.isClosed() && reader.liveness().needs(index))
 				return;
 		}
-		if(_forgotten.set(index))
+		if(markForgotten(index))
 			_cache.dereference(new BlockKey(_streamId, index));
+	}
+
+	private synchronized boolean markForgotten(int index) {
+		if(_forgotten.get(index))
+			return false;
+		_forgotten.set(index);
+		return true;
 	}
 
 	private void forgetAfterReaderClose() {
@@ -251,17 +258,9 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 	}
 
 	public interface IndexedReader<T extends SpillableObject> extends AutoCloseable {
-		OOCFuture<Lease<T>> request(int index);
+		OOCFuture<Lease<T>> request(int index, MemoryAllowance allowance);
 
-		default OOCFuture<Lease<T>> request(int index, MemoryAllowance allowance) {
-			return request(index);
-		}
-
-		Lease<T> requestIfLive(int index);
-
-		default Lease<T> requestIfLive(int index, MemoryAllowance allowance) {
-			return requestIfLive(index);
-		}
+		Lease<T> requestIfLive(int index, MemoryAllowance allowance);
 
 		@Override
 		void close();

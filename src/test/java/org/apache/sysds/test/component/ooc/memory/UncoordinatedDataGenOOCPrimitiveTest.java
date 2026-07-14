@@ -85,7 +85,8 @@ public class UncoordinatedDataGenOOCPrimitiveTest extends AutomatedTestBase {
 		AtomicInteger sourceBlocks = new AtomicInteger();
 		AtomicInteger producerCalls = new AtomicInteger();
 
-		UncoordinatedDataGenOOCPrimitive primitive = new UncoordinatedDataGenOOCPrimitive(out, 100, new StreamContext(0, TEST_NAME).addOutStream(out));
+		UncoordinatedDataGenOOCPrimitive primitive = new UncoordinatedDataGenOOCPrimitive(out, 10_000,
+			new StreamContext(0, TEST_NAME).addOutStream(out));
 		primitive.setProducer(allow -> {
 			try {
 				producerCalls.incrementAndGet();

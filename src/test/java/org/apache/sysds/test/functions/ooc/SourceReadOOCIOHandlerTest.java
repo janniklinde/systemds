@@ -108,6 +108,10 @@ public class SourceReadOOCIOHandlerTest extends AutomatedTestBase {
 		org.junit.Assert.assertFalse(first.eof);
 		org.junit.Assert.assertNotNull(first.continuation);
 		org.junit.Assert.assertNotNull(first.blocks);
+		long largestBlock = first.blocks.stream().mapToLong(block -> block.serializedSize).max().orElse(0);
+		org.junit.Assert.assertTrue("Parallel source read exceeded its byte budget: read=" + first.bytesRead
+			+ ", budget=" + budget + ", largestBlock=" + largestBlock + ", blocks=" + first.blocks.size(),
+			first.bytesRead <= Math.max(budget, largestBlock));
 
 		OOCIOHandler.SourceReadResult second = handler.continueSourceRead(first.continuation, Long.MAX_VALUE).get();
 		org.junit.Assert.assertTrue(second.eof);

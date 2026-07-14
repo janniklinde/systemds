@@ -28,29 +28,9 @@ import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
-/**
- * Rendezvous driver over a {@link StateTable}: atomic install-or-take per linearized slot,
- * routed by callback kind. Exclusive in-memory callbacks detach their reservation into the table lifecycle
- * without changing its allowance ({@code installOrTake}); shared pinned-lease callbacks from materialized
- * boundaries park a logical
- * reference to the canonical entry ({@code installReferenceOrTake}) — with the pin held INSIDE this
- * helper until the rendezvous future resolves, because the chained INSTALLING-wait path makes that
- * contract easy to violate in primitive code; unmanaged callbacks are measured and reserved on the
- * supplied allowance.
- *
- * Ownership contract: the helper takes ownership of the supplied callback — the caller must hold no
- * aliases and must not touch it afterwards. The future completes with null when the tile was
- * INSTALLED (everything the helper held is settled; the partner side will take it later), or with a
- * {@link Match} when the partner was already installed: {@code own()} carries this tile's value and
- * {@code partner()} the taken partner lease, both as callbacks the caller closes exactly once after
- * the join compute.
- */
-public final class TableRendezvous {
+public final class JoinTable {
 
-	private TableRendezvous() {
-	}
-
-	public static OOCFuture<Match> installOrTake(StateTable<IndexedMatrixValue> table, int slot,
+	public static OOCFuture<Match> putIfAbsent(StateTable<IndexedMatrixValue> table, int slot,
 		OOCStream.QueueCallback<IndexedMatrixValue> tile, MemoryAllowance allowance) {
 		if(tile instanceof MaterializedCallback pinned)
 			return installReferenceOrTake(table, slot, pinned, allowance);

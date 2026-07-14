@@ -29,24 +29,21 @@ import java.util.function.IntConsumer;
 import java.util.function.IntSupplier;
 
 public final class IndexedMaterializedStoreReader<T extends SpillableObject>
-	implements MaterializedStore.IndexedReader<T>, StoreRegisteredReader, StoreLeaseReleaser {
+	implements MaterializedStore.IndexedReader<T>, StoreRegisteredReader {
 	private final OOCCache cache;
 	private final long streamId;
 	private final IntSupplier completedSize;
 	private final MaterializedStore.Liveness liveness;
-	private final MemoryAllowance allowance;
 	private final Runnable afterClose;
 	private final IntConsumer afterRelease;
 	private volatile boolean closed;
 
 	IndexedMaterializedStoreReader(OOCCache cache, long streamId, IntSupplier completedSize,
-		MaterializedStore.Liveness liveness, MemoryAllowance allowance, Runnable afterClose,
-		IntConsumer afterRelease) {
+		MaterializedStore.Liveness liveness, Runnable afterClose, IntConsumer afterRelease) {
 		this.cache = cache;
 		this.streamId = streamId;
 		this.completedSize = completedSize;
 		this.liveness = liveness;
-		this.allowance = allowance;
 		this.afterClose = afterClose;
 		this.afterRelease = afterRelease;
 	}
@@ -59,11 +56,6 @@ public final class IndexedMaterializedStoreReader<T extends SpillableObject>
 	@Override
 	public boolean isClosed() {
 		return closed;
-	}
-
-	@Override
-	public OOCFuture<MaterializedStore.Lease<T>> request(int index) {
-		return request(index, allowance);
 	}
 
 	@Override
@@ -83,15 +75,10 @@ public final class IndexedMaterializedStoreReader<T extends SpillableObject>
 				result.complete(null);
 			}
 			else
-				result.complete(new StoreLease<>((idx, current) -> release(idx, current, requestAllowance),
-					index, entry));
+				result.complete(
+					new StoreLease<>(lease -> release(lease.index(), lease.entryUnsafe(), requestAllowance), index, entry));
 		});
 		return result;
-	}
-
-	@Override
-	public MaterializedStore.Lease<T> requestIfLive(int index) {
-		return requestIfLive(index, allowance);
 	}
 
 	@Override
@@ -103,7 +90,7 @@ public final class IndexedMaterializedStoreReader<T extends SpillableObject>
 			liveness.unreserve(index);
 			return null;
 		}
-		return new StoreLease<>((idx, current) -> release(idx, current, requestAllowance), index, entry);
+		return new StoreLease<>(lease -> release(lease.index(), lease.entryUnsafe(), requestAllowance), index, entry);
 	}
 
 	@Override
@@ -114,13 +101,8 @@ public final class IndexedMaterializedStoreReader<T extends SpillableObject>
 		afterClose.run();
 	}
 
-	@Override
-	public void release(int index, BlockEntry entry) {
-		release(index, entry, allowance);
-	}
-
-	private void release(int index, BlockEntry entry, MemoryAllowance requestAllowance) {
-		cache.unpin(entry, requestAllowance);
+	public void release(int index, BlockEntry entry, MemoryAllowance allowance) {
+		cache.unpin(entry, allowance);
 		liveness.consumed(index);
 		afterRelease.accept(index);
 	}

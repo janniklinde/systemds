@@ -39,7 +39,7 @@ import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.StateTable;
-import org.apache.sysds.runtime.ooc.store.TableRendezvous;
+import org.apache.sysds.runtime.ooc.store.JoinTable;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -49,7 +49,7 @@ import org.junit.Test;
  * callbacks from materialized boundaries (with the pin held inside the helper until the rendezvous
  * resolves, TODO open issue 2).
  */
-public class TableRendezvousTest {
+public class JoinTableTest {
 	private static final int ROWS = 32;
 	private static final int COLS = 1;
 	private static final long WAIT_TIMEOUT_SEC = 10;
@@ -64,12 +64,12 @@ public class TableRendezvousTest {
 		long bytes = tileBytes();
 		try {
 			//slot 0: left first; slot 1: right first — the second arrival always takes the partner
-			Assert.assertNull(await(TableRendezvous.installOrTake(table, 0, managed(0, 1.0, producer, bytes),
+			Assert.assertNull(await(JoinTable.putIfAbsent(table, 0, managed(0, 1.0, producer, bytes),
 				region)));
-			Assert.assertNull(await(TableRendezvous.installOrTake(table, 1, managed(1, 2.0, producer, bytes),
+			Assert.assertNull(await(JoinTable.putIfAbsent(table, 1, managed(1, 2.0, producer, bytes),
 				region)));
 
-			TableRendezvous.Match match0 = await(TableRendezvous.installOrTake(table, 0,
+			JoinTable.Match match0 = await(JoinTable.putIfAbsent(table, 0,
 				managed(0, 10.0, producer, bytes), region));
 			Assert.assertNotNull(match0);
 			Assert.assertEquals(10.0 * ROWS * COLS, sum(match0.own()), 0.0);
@@ -78,7 +78,7 @@ public class TableRendezvousTest {
 			match0.partner().close();
 
 			//unmanaged fallback: measured and reserved on the supplied allowance
-			TableRendezvous.Match match1 = await(TableRendezvous.installOrTake(table, 1,
+			JoinTable.Match match1 = await(JoinTable.putIfAbsent(table, 1,
 				new OOCStream.SimpleQueueCallback<>(tile(1, 20.0), null), region));
 			Assert.assertNotNull(match1);
 			Assert.assertEquals(20.0 * ROWS * COLS, sum(match1.own()), 0.0);
@@ -112,7 +112,7 @@ public class TableRendezvousTest {
 		int tiles = 2;
 		try {
 			//live fan-out consumer routes every pinned alias into the rendezvous (boundary side)
-			List<OOCFuture<TableRendezvous.Match>> installs = new ArrayList<>();
+			List<OOCFuture<JoinTable.Match>> installs = new ArrayList<>();
 			SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
 			OOCStreamMaterializer sink = new OOCStreamMaterializer(store,
 				ix -> (int) ix.getRowIndex() - 1, sinkAllowance, List.of(cb -> {
@@ -120,7 +120,7 @@ public class TableRendezvousTest {
 						return;
 					int slot = (int) cb.get().getIndexes().getRowIndex() - 1;
 					synchronized(installs) {
-						installs.add(TableRendezvous.installOrTake(table, slot,
+						installs.add(JoinTable.putIfAbsent(table, slot,
 							cb.keepOpen(), region));
 					}
 				}));
@@ -136,14 +136,14 @@ public class TableRendezvousTest {
 			//pin once each rendezvous resolved, so ownership moved producer -> cache
 			synchronized(installs) {
 				Assert.assertEquals(tiles, installs.size());
-				for(OOCFuture<TableRendezvous.Match> install : installs)
+				for(OOCFuture<JoinTable.Match> install : installs)
 					Assert.assertNull(await(install));
 			}
 			awaitUsedMemory(producer, 0);
 
 			//the partner side arrives with owned payloads and takes the referenced values
 			for(int i = 0; i < tiles; i++) {
-				TableRendezvous.Match match = await(TableRendezvous.installOrTake(table, i,
+				JoinTable.Match match = await(JoinTable.putIfAbsent(table, i,
 					managed(i, 100.0 + i, producer, bytes), region));
 				Assert.assertNotNull(match);
 				Assert.assertEquals((100.0 + i) * ROWS * COLS, sum(match.own()), 0.0);

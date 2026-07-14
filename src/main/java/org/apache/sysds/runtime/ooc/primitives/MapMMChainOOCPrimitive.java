@@ -228,7 +228,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 			}
 			try {
 				_vReader = _vView.openIndexedReader(
-					new MultiplicityLiveness(numVBlocks, numRowBlocks), _allowance);
+					new MultiplicityLiveness(numVBlocks, numRowBlocks));
 				startXtXv(x, out, numColBlocks, uBase, qBase, xBase, mmOp, plus, seenPerRow,
 					phase1BudgetBytes, phase2BudgetBytes, outputBudgetBytes);
 			}
