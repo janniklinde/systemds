@@ -24,16 +24,12 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 
 public final class LeaseQueueCallbacks {
-	private LeaseQueueCallbacks() {
-	}
 
-	public static OOCStream.QueueCallback<IndexedMatrixValue> store(
-		MaterializedStore.Lease<IndexedMatrixValue> lease) {
+	public static OOCStream.QueueCallback<IndexedMatrixValue> store(MaterializedStore.Lease<IndexedMatrixValue> lease) {
 		return new StoreLeaseBackedCallback(lease);
 	}
 
-	public static OOCStream.QueueCallback<IndexedMatrixValue> state(
-		OperatorStateTable.StateLease<IndexedMatrixValue> lease) {
+	public static OOCStream.QueueCallback<IndexedMatrixValue> state(StateLease<IndexedMatrixValue> lease) {
 		return new StateLeaseBackedCallback(lease);
 	}
 
@@ -85,12 +81,12 @@ public final class LeaseQueueCallbacks {
 	}
 
 	private static final class StateLeaseBackedCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
-		private final OperatorStateTable.StateLease<IndexedMatrixValue> _lease;
+		private final StateLease<IndexedMatrixValue> _lease;
 		private DMLRuntimeException _failure;
 		private int _references = 1;
 		private boolean _closed;
 
-		private StateLeaseBackedCallback(OperatorStateTable.StateLease<IndexedMatrixValue> lease) {
+		private StateLeaseBackedCallback(StateLease<IndexedMatrixValue> lease) {
 			_lease = lease;
 		}
 
