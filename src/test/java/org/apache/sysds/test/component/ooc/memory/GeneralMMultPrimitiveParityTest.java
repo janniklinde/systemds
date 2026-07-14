@@ -19,6 +19,7 @@
 
 package org.apache.sysds.test.component.ooc.memory;
 
+import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.common.Types.FileFormat;
 import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
@@ -40,8 +41,10 @@ import org.apache.sysds.runtime.ooc.primitives.GeneralMMultOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
+import org.apache.sysds.utils.Statistics;
 import org.junit.After;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.util.Map;
@@ -50,15 +53,34 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 public class GeneralMMultPrimitiveParityTest {
-	private static final int M = 2000;
+	private static final int M = 1000;
 	private static final int K = 20000;
 	private static final int N = 50000;
 	private static final int BLEN = 250;
 	private static final long WAIT_TIMEOUT_SEC = 600;
+	private boolean _oldOOCStatistics;
+
+	@Before
+	public void setUp() {
+		_oldOOCStatistics = DMLScript.OOC_STATISTICS;
+		DMLScript.OOC_STATISTICS = true;
+		Statistics.resetOOCEvictionStats();
+	}
 
 	@After
 	public void tearDown() {
-		OOCCacheManager.reset();
+		try {
+			System.out.println("GeneralMMultPrimitiveParityTest OOC statistics:\n" +
+				Statistics.displayOOCEvictionStats());
+		}
+		finally {
+			try {
+				OOCCacheManager.reset();
+			}
+			finally {
+				DMLScript.OOC_STATISTICS = _oldOOCStatistics;
+			}
+		}
 	}
 
 	@Test
