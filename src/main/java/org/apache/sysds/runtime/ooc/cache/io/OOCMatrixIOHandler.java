@@ -666,6 +666,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 						if(DMLScript.OOC_STATISTICS && wrote > 0) {
 							Statistics.incrementOOCEvictionWrite();
 							Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
+							Statistics.accumulateOOCEvictionWriteBytes(wrote);
 						}
 
 						if (DMLScript.OOC_LOG_EVENTS)
