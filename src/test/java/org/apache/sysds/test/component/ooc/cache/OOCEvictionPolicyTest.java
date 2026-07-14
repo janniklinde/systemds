@@ -330,7 +330,7 @@ public class OOCEvictionPolicyTest {
 			JoinOOCPrimitive primitive = new JoinOOCPrimitive(List.of(materializedLeft, right), out,
 				blocks -> blocks.get(0), new StreamContext(0, "op_join_eviction_policy").addOutStream(out));
 			primitive.requestPattern(OOCAccessPattern.COL_MAJOR);
-			primitive.bindRegion(new OOCRegionBinding(region, ix -> BYTES, new AtomicInteger(1)), true, true);
+			primitive.bindRegion(new OOCRegionBinding(region, new AtomicInteger(1)));
 			primitive.startExecution();
 			done.get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 			Assert.assertEquals(6, outputs.get());

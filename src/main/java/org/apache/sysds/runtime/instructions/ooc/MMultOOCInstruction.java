@@ -136,6 +136,29 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 			return;
 		}
 
+		if(OOC_NEW_SYSTEM && min.getDataCharacteristics().dimsKnown()
+			&& vin.getDataCharacteristics().dimsKnown()
+			&& min.getDataCharacteristics().getCols() == vin.getDataCharacteristics().getRows()
+			&& min.getDataCharacteristics().getRows() > 0
+			&& min.getDataCharacteristics().getCols() > 0
+			&& vin.getDataCharacteristics().getCols() > 0
+			&& vin.getDataCharacteristics().getNumColBlocks() > 1) {
+			OOCStreamable<IndexedMatrixValue> a = min.getStreamable();
+			OOCStreamable<IndexedMatrixValue> b = vin.getStreamable();
+			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
+			ec.getMatrixObject(output).setStreamHandle(qOut);
+			a.setDownstreamMessageRelay(qOut::messageDownstream);
+			b.setDownstreamMessageRelay(qOut::messageDownstream);
+			qOut.setUpstreamMessageRelay(msg -> {
+				a.messageUpstream(msg.split());
+				b.messageUpstream(msg.split());
+			});
+			BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
+			OOCInstructionUtils.matrixMultiply(a, b, qOut, (AggregateBinaryOperator)_optr, plus,
+				getContext().addOutStream(qOut));
+			return;
+		}
+
 		int emitLeftThreshold = (int)vin.getDataCharacteristics().getNumColBlocks();
 		int emitRightThreshold = (int)min.getDataCharacteristics().getNumRowBlocks();
 

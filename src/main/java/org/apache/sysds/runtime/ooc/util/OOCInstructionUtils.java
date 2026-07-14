@@ -27,6 +27,8 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.data.MatrixValue;
+import org.apache.sysds.runtime.matrix.operators.AggregateBinaryOperator;
+import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
@@ -34,6 +36,7 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.GeneralMMultOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
@@ -152,6 +155,13 @@ public class OOCInstructionUtils {
 		int numBroadcastTiles, int maxBroadcastCount, StreamContext sc) {
 		OOCPrimitive primitive = new BroadcastOOCPrimitive(broadcast, streamed, out, fn, broadcastKeyFn, streamedKeyFn,
 			numBroadcastTiles, maxBroadcastCount, sc);
+		out.assignPrimitive(primitive);
+	}
+
+	public static void matrixMultiply(OOCStreamable<IndexedMatrixValue> a,
+		OOCStreamable<IndexedMatrixValue> b, OOCStreamable<IndexedMatrixValue> out,
+		AggregateBinaryOperator mmOperator, BinaryOperator plus, StreamContext sc) {
+		OOCPrimitive primitive = new GeneralMMultOOCPrimitive(a, b, out, mmOperator, plus, sc);
 		out.assignPrimitive(primitive);
 	}
 

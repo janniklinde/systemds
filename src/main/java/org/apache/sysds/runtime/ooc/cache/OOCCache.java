@@ -25,6 +25,15 @@ import java.util.function.LongUnaryOperator;
 
 public interface OOCCache {
 	/**
+	 * Conservative upper bound on the physical bytes charged when a logical entry of the supplied size is pinned.
+	 * Most cache implementations store one logical entry per physical entry. Packing caches override this because
+	 * pinning one small logical tile pins its complete physical pack.
+	 */
+	default long maxPhysicalPinBytes(long logicalBytes) {
+		return logicalBytes;
+	}
+
+	/**
 	 * Pins an item backed by an allowance. A successful pin transfers memory ownership from the cache to the owner of
 	 * the allowance and guarantees data availability. While pinned, the bytes of the entry are not counted as
 	 * cache-owned memory.
