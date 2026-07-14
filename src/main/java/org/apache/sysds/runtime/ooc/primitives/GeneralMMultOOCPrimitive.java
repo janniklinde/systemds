@@ -39,11 +39,12 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
+import org.apache.sysds.runtime.ooc.planning.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
+import org.apache.sysds.runtime.ooc.store.IndexedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.MaterializedCallback;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
-import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.store.StateLease;
 import org.apache.sysds.runtime.ooc.store.StateTable;
 import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
@@ -82,7 +83,7 @@ public class GeneralMMultOOCPrimitive extends PlannableOOCPrimitive {
 	private StateTable<IndexedMatrixValue> _retainedA;
 	private StateTable<IndexedMatrixValue> _accumulators;
 	private OOCMaterializedView _bView;
-	private volatile MaterializedStore.IndexedReader<IndexedMatrixValue> _bReader;
+	private volatile IndexedMaterializedStoreReader<IndexedMatrixValue> _bReader;
 	private volatile ABatch _activeABatch;
 
 	public GeneralMMultOOCPrimitive(OOCStreamable<IndexedMatrixValue> a,

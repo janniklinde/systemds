@@ -31,8 +31,10 @@ import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
+import org.apache.sysds.runtime.ooc.store.IndexedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
+import org.apache.sysds.runtime.ooc.store.OrderedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.SequentialAccessPattern;
 import org.junit.Assert;
 import org.junit.Test;
@@ -46,7 +48,7 @@ public class MaterializedStoreIndexedReaderTest {
 	public void testTargetedRequestsWithMultiplicity() throws Exception {
 		Fixture f = new Fixture(1L << 30);
 		try {
-			MaterializedStore.IndexedReader<IndexedMatrixValue> reader =
+			IndexedMaterializedStoreReader<IndexedMatrixValue> reader =
 				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 2));
 			f.store.sealReaders();
 
@@ -82,9 +84,9 @@ public class MaterializedStoreIndexedReaderTest {
 	public void testForgettingWaitsForAllReaders() throws Exception {
 		Fixture f = new Fixture(1L << 30);
 		try {
-			MaterializedStore.IndexedReader<IndexedMatrixValue> indexed =
+			IndexedMaterializedStoreReader<IndexedMatrixValue> indexed =
 				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1));
-			MaterializedStore.Reader<IndexedMatrixValue> ordered =
+			OrderedMaterializedStoreReader<IndexedMatrixValue> ordered =
 				f.store.openReader(new SequentialAccessPattern(BLOCKS), f.reader, 4);
 			f.store.sealReaders();
 
@@ -118,7 +120,7 @@ public class MaterializedStoreIndexedReaderTest {
 	public void testAdmissionRetryCompletesAfterRelease() throws Exception {
 		Fixture f = new Fixture(TILE_BYTES); //reader allowance admits exactly one tile
 		try {
-			MaterializedStore.IndexedReader<IndexedMatrixValue> reader =
+			IndexedMaterializedStoreReader<IndexedMatrixValue> reader =
 				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1));
 			f.store.sealReaders();
 
@@ -142,7 +144,7 @@ public class MaterializedStoreIndexedReaderTest {
 	public void testRequestIfLive() throws Exception {
 		Fixture f = new Fixture(1L << 30);
 		try {
-			MaterializedStore.IndexedReader<IndexedMatrixValue> reader =
+			IndexedMaterializedStoreReader<IndexedMatrixValue> reader =
 				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1));
 			f.store.sealReaders();
 
@@ -162,7 +164,7 @@ public class MaterializedStoreIndexedReaderTest {
 	public void testConcurrentRequestsCannotExceedMultiplicity() throws Exception {
 		Fixture f = new Fixture(1L << 30);
 		try {
-			MaterializedStore.IndexedReader<IndexedMatrixValue> reader =
+			IndexedMaterializedStoreReader<IndexedMatrixValue> reader =
 				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1));
 			f.store.sealReaders();
 
@@ -189,9 +191,9 @@ public class MaterializedStoreIndexedReaderTest {
 	public void testCloseTriggersForgetting() throws Exception {
 		Fixture f = new Fixture(1L << 30);
 		try {
-			MaterializedStore.IndexedReader<IndexedMatrixValue> indexed =
+			IndexedMaterializedStoreReader<IndexedMatrixValue> indexed =
 				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1));
-			MaterializedStore.Reader<IndexedMatrixValue> ordered =
+			OrderedMaterializedStoreReader<IndexedMatrixValue> ordered =
 				f.store.openReader(new SequentialAccessPattern(BLOCKS), f.reader, 4);
 			f.store.sealReaders();
 
@@ -262,7 +264,7 @@ public class MaterializedStoreIndexedReaderTest {
 			Assert.assertEquals(0, producer.getUsedMemory());
 			store.complete();
 
-			MaterializedStore.IndexedReader<IndexedMatrixValue> indexed =
+			IndexedMaterializedStoreReader<IndexedMatrixValue> indexed =
 				store.openIndexedReader(new MultiplicityLiveness(1, 1));
 			store.sealReaders();
 			try(MaterializedStore.Lease<IndexedMatrixValue> lease = indexed.request(0, reader).get(10, TimeUnit.SECONDS)) {
@@ -281,7 +283,7 @@ public class MaterializedStoreIndexedReaderTest {
 	public void testRequestCanProceedBeforeSeal() throws Exception {
 		Fixture f = new Fixture(1L << 30);
 		try {
-			MaterializedStore.IndexedReader<IndexedMatrixValue> reader =
+			IndexedMaterializedStoreReader<IndexedMatrixValue> reader =
 				f.store.openIndexedReader(new MultiplicityLiveness(BLOCKS, 1));
 			try(MaterializedStore.Lease<IndexedMatrixValue> lease =
 				reader.request(0, f.reader).get(10, TimeUnit.SECONDS)) {

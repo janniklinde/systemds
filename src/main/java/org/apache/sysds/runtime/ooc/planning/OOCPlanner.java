@@ -60,11 +60,11 @@ public class OOCPlanner {
 				regions.add(region);
 		}
 
-		List<OOCStoreBinding> materializedInputs = new ArrayList<>();
+		List<OOCMaterializedView> materializedInputs = new ArrayList<>();
 		for(List<OOCPrimitive> region : regions)
 			compileRegion(region, materializedInputs);
 
-		for(OOCStoreBinding materializedInput : materializedInputs)
+		for(OOCMaterializedView materializedInput : materializedInputs)
 			materializedInput.attachMaterializedInput();
 
 		for(int i = regions.size() - 1; i >= 0; i--)
@@ -98,7 +98,7 @@ public class OOCPlanner {
 		}
 	}
 
-	private static void compileRegion(List<OOCPrimitive> region, List<OOCStoreBinding> materializedInputs) {
+	private static void compileRegion(List<OOCPrimitive> region, List<OOCMaterializedView> materializedInputs) {
 		List<OOCPrimitive> activeRegion = new ArrayList<>();
 		for(OOCPrimitive primitive : region) {
 			if(!primitive.hasStartedExecution())
@@ -122,7 +122,7 @@ public class OOCPlanner {
 			if(inputRequest != null) {
 				OOCStreamable<IndexedMatrixValue> source =
 					primitive.getInputStream(inputRequest.inputIndex());
-				OOCStoreBinding store = OOCStoreBindingRegistry.acquire(inputRequest, primitive, source, allowance);
+				OOCMaterializedView store = OOCStoreBindingRegistry.acquire(inputRequest, primitive, source, allowance);
 				primitive.replaceInputStream(inputRequest.inputIndex(),
 					new MaterializedInputStreamable(source, store));
 				materializedInputs.add(store);

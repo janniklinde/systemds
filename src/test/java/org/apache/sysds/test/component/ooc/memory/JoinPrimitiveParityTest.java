@@ -54,11 +54,14 @@ import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.planning.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.planning.OOCRegionBinding;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.store.IndexedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
-import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
+import org.apache.sysds.runtime.ooc.store.OrderedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
@@ -428,10 +431,15 @@ public class JoinPrimitiveParityTest {
 		}
 	}
 
-	private static final class RecordingMaterializedView implements OOCMaterializedView {
+	private static final class RecordingMaterializedView extends OOCMaterializedView {
 		private final AtomicInteger policyCount = new AtomicInteger();
 		private final AtomicInteger closeCount = new AtomicInteger();
 		private volatile ToLongFunction<MatrixIndexes> policy;
+
+		public RecordingMaterializedView() {
+			super(null, null, -1, OOCStoreLayout.of(t -> 0,
+				i -> new MatrixIndexes(0, 0)), null, 0, 1);
+		}
 
 		@Override
 		public OOCFuture<Void> completion() {
@@ -450,13 +458,13 @@ public class JoinPrimitiveParityTest {
 		}
 
 		@Override
-		public MaterializedStore.Reader<IndexedMatrixValue> openReader(MaterializedStore.AccessPattern pattern,
+		public OrderedMaterializedStoreReader<IndexedMatrixValue> openReader(MaterializedStore.AccessPattern pattern,
 			MemoryAllowance allowance, int maxPrefetch) {
 			throw new UnsupportedOperationException();
 		}
 
 		@Override
-		public MaterializedStore.IndexedReader<IndexedMatrixValue> openIndexedReader(
+		public IndexedMaterializedStoreReader<IndexedMatrixValue> openIndexedReader(
 			MaterializedStore.Liveness liveness) {
 			throw new UnsupportedOperationException();
 		}

@@ -32,25 +32,12 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.store.IndexedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
-import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
+import org.apache.sysds.runtime.ooc.store.OrderedMaterializedStoreReader;
 
-/**
- * Planner-owned coordination handle for one materialized input: the source, store, publication
- * sink, counted reader registration, and the consumer refcount. The planner knows the consumer set
- * of a boundary, so it declares up front how many reader registrations to expect; registration goes
- * through this binding and {@code sealReaders()} fires exactly when the declared count has
- * registered — consumers never need a global barrier or knowledge of each other. The last
- * {@link #close()} closes the store (dropping whatever forgetting has not reclaimed yet).
- *
- * One binding is shared by ALL consumers of a materialized input. Attachment is planner-owned and
- * first-wins so the source is materialized exactly once. Late-planned consumers can still join via
- * {@link #tryRegister} as long as the reader set has not sealed (a consumer joining after sealing is
- * a planning error — the store may already have started forgetting). Consumers must await
- * {@link #completion()} before opening readers (readers require a completed store).
- */
-public final class OOCStoreBinding implements OOCMaterializedView {
+public class OOCMaterializedView {
 	private final OOCStreamable<IndexedMatrixValue> _source;
 	private final OOCCache _cache;
 	private final long _streamId;
@@ -63,26 +50,26 @@ public final class OOCStoreBinding implements OOCMaterializedView {
 	private int _refCtr;
 	private boolean _sealed;
 
-	public OOCStoreBinding(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
+	public OOCMaterializedView(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
 		ToIntFunction<MatrixIndexes> linearize, MemoryAllowance sinkAllowance, int expectedReaders,
 		int consumers) {
 		this(source, cache, streamId, OOCStoreLayout.of(linearize, index -> new MatrixIndexes(index + 1L, 1)),
 			sinkAllowance, expectedReaders, consumers);
 	}
 
-	public OOCStoreBinding(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
+	public OOCMaterializedView(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
 		OOCStoreLayout<MatrixIndexes> layout, MemoryAllowance sinkAllowance, int expectedReaders,
 		int consumers) {
 		this(source, cache, streamId, layout, sinkAllowance, expectedReaders, consumers, List.of(), List.of());
 	}
 
-	public OOCStoreBinding(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
+	public OOCMaterializedView(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
 		OOCStoreLayout<MatrixIndexes> layout, MemoryAllowance sinkAllowance, int expectedReaders, int consumers,
 		List<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> liveConsumers) {
 		this(source, cache, streamId, layout, sinkAllowance, expectedReaders, consumers, liveConsumers, List.of());
 	}
 
-	public OOCStoreBinding(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
+	public OOCMaterializedView(OOCStreamable<IndexedMatrixValue> source, OOCCache cache, long streamId,
 		OOCStoreLayout<MatrixIndexes> layout, MemoryAllowance sinkAllowance, int expectedReaders, int consumers,
 		List<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> liveConsumers,
 		List<ToLongFunction<MatrixIndexes>> evictionPolicies) {
@@ -131,7 +118,6 @@ public final class OOCStoreBinding implements OOCMaterializedView {
 		return true;
 	}
 
-	@Override
 	public void addEvictionPolicy(ToLongFunction<MatrixIndexes> policy) {
 		if(policy == null)
 			return;
@@ -160,29 +146,25 @@ public final class OOCStoreBinding implements OOCMaterializedView {
 		return _store;
 	}
 
-	public MaterializedStore.Reader<IndexedMatrixValue> openReader(MaterializedStore.AccessPattern pattern,
+	public OrderedMaterializedStoreReader<IndexedMatrixValue> openReader(MaterializedStore.AccessPattern pattern,
 		MemoryAllowance allowance, int maxPrefetch) {
 		return openReader(pattern, allowance, maxPrefetch, true);
 	}
 
-	public MaterializedStore.Reader<IndexedMatrixValue> openReader(MaterializedStore.AccessPattern pattern,
+	public OrderedMaterializedStoreReader<IndexedMatrixValue> openReader(MaterializedStore.AccessPattern pattern,
 		MemoryAllowance allowance, int maxPrefetch, boolean softOrdering) {
-		MaterializedStore.Reader<IndexedMatrixValue> reader =
+		OrderedMaterializedStoreReader<IndexedMatrixValue> reader =
 			_store.openReader(pattern, allowance, maxPrefetch, softOrdering);
 		sealIfLastRegistration();
 		return reader;
 	}
 
-	public MaterializedStore.IndexedReader<IndexedMatrixValue> openIndexedReader(MaterializedStore.Liveness liveness) {
-		MaterializedStore.IndexedReader<IndexedMatrixValue> reader = _store.openIndexedReader(liveness);
+	public IndexedMaterializedStoreReader<IndexedMatrixValue> openIndexedReader(MaterializedStore.Liveness liveness) {
+		IndexedMaterializedStoreReader<IndexedMatrixValue> reader = _store.openIndexedReader(liveness);
 		sealIfLastRegistration();
 		return reader;
 	}
 
-	/**
-	 * Releases one consumer; the last release closes the store.
-	 */
-	@Override
 	public void close() {
 		boolean close;
 		synchronized(this) {

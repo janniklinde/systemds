@@ -47,11 +47,10 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCRegionBinding;
-import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
+import org.apache.sysds.runtime.ooc.planning.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
-import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.store.StateTable;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
@@ -162,7 +161,7 @@ public class OOCEvictionPolicyTest {
 		GlobalMemoryBroker broker = new GlobalMemoryBroker(64 * BYTES);
 		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker, 32 * BYTES);
 		OOCCacheImpl cache = new OOCCacheImpl(io, 8 * BYTES, 8 * BYTES);
-		OOCStoreBinding binding = new OOCStoreBinding(null, cache, STREAM_ID,
+		OOCMaterializedView binding = new OOCMaterializedView(null, cache, STREAM_ID,
 			OOCStoreLayout.of(ix -> Math.toIntExact((ix.getRowIndex() - 1) * 10 + ix.getColumnIndex() - 1),
 				index -> new MatrixIndexes(index / 10 + 1L, index % 10 + 1L)),
 			producer, 0, 1, List.of(),
@@ -191,7 +190,7 @@ public class OOCEvictionPolicyTest {
 		GlobalMemoryBroker broker = new GlobalMemoryBroker(64 * BYTES);
 		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker, 32 * BYTES);
 		OOCCacheImpl cache = new OOCCacheImpl(io, 8 * BYTES, 8 * BYTES);
-		OOCStoreBinding binding = new OOCStoreBinding(null, cache, STREAM_ID,
+		OOCMaterializedView binding = new OOCMaterializedView(null, cache, STREAM_ID,
 			OOCStoreLayout.of(ix -> Math.toIntExact(ix.getRowIndex() - 1),
 				index -> new MatrixIndexes(index + 1L, 1)),
 			producer, 0, 1, List.of(),
@@ -288,7 +287,7 @@ public class OOCEvictionPolicyTest {
 		SyncMemoryAllowance region = new SyncMemoryAllowance(broker, 64 * BYTES);
 		OOCCacheImpl cache = new OOCCacheImpl(io, 16 * BYTES, 16 * BYTES);
 		long materializedStreamId = STREAM_ID + 20;
-		OOCStoreBinding binding = new OOCStoreBinding(null, cache, materializedStreamId,
+		OOCMaterializedView binding = new OOCMaterializedView(null, cache, materializedStreamId,
 			OOCStoreLayout.of(ix -> Math.toIntExact((ix.getRowIndex() - 1) * 3 + ix.getColumnIndex() - 1),
 				index -> new MatrixIndexes(index / 3 + 1L, index % 3 + 1L)),
 			producer, 0, 1);

@@ -37,7 +37,7 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 /**
- * One {@link OOCStoreBinding} per materialized input, keyed by the input streamable identity. An
+ * One {@link OOCMaterializedView} per materialized input, keyed by the input streamable identity. An
  * input is materialized exactly once: the first consumer's compile creates the binding, every other
  * consumer receives the SAME binding and opens its reader on the existing store.
  *
@@ -53,11 +53,11 @@ public final class OOCStoreBindingRegistry {
 	private OOCStoreBindingRegistry() {
 	}
 
-	public static OOCStoreBinding acquire(OOCMaterializedInputRequest request, OOCPrimitive requester,
+	public static OOCMaterializedView acquire(OOCMaterializedInputRequest request, OOCPrimitive requester,
 		OOCStreamable<IndexedMatrixValue> source, MemoryAllowance sinkAllowance) {
 		if(source == null) {
 			//anonymous boundary: never shared
-			return new OOCStoreBinding(null, OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID(),
+			return new OOCMaterializedView(null, OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID(),
 				request.preferredLayout(), sinkAllowance, request.expectedReaders(), request.consumers(),
 				List.of(), evictionPolicies(request));
 		}
@@ -124,7 +124,7 @@ public final class OOCStoreBindingRegistry {
 			consumers += request.consumers();
 			addEvictionPolicy(evictionPolicies, request);
 		}
-		OOCStoreBinding binding = new OOCStoreBinding(source, OOCCacheManager.getGlobalCache(),
+		OOCMaterializedView binding = new OOCMaterializedView(source, OOCCacheManager.getGlobalCache(),
 			CachingStream._streamSeq.getNextID(), request.preferredLayout(), sinkAllowance, readers, consumers,
 			List.of(), evictionPolicies);
 		return new Entry(binding, counted);
@@ -152,10 +152,10 @@ public final class OOCStoreBindingRegistry {
 	}
 
 	private static final class Entry {
-		private final OOCStoreBinding binding;
+		private final OOCMaterializedView binding;
 		private final Set<OOCPrimitive> counted;
 
-		private Entry(OOCStoreBinding binding, Set<OOCPrimitive> counted) {
+		private Entry(OOCMaterializedView binding, Set<OOCPrimitive> counted) {
 			this.binding = binding;
 			this.counted = counted;
 		}

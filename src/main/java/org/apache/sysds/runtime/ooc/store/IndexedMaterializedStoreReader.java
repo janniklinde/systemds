@@ -28,8 +28,8 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import java.util.function.IntConsumer;
 import java.util.function.IntSupplier;
 
-public final class IndexedMaterializedStoreReader<T extends SpillableObject>
-	implements MaterializedStore.IndexedReader<T>, StoreRegisteredReader {
+public final class IndexedMaterializedStoreReader<T extends SpillableObject> implements
+	MaterializedStore.StoreReader<T> {
 	private final OOCCache cache;
 	private final long streamId;
 	private final IntSupplier completedSize;
@@ -58,7 +58,6 @@ public final class IndexedMaterializedStoreReader<T extends SpillableObject>
 		return closed;
 	}
 
-	@Override
 	public OOCFuture<MaterializedStore.Lease<T>> request(int index, MemoryAllowance requestAllowance) {
 		checkReady(index);
 		reserve(index);
@@ -81,7 +80,6 @@ public final class IndexedMaterializedStoreReader<T extends SpillableObject>
 		return result;
 	}
 
-	@Override
 	public MaterializedStore.Lease<T> requestIfLive(int index, MemoryAllowance requestAllowance) {
 		checkReady(index);
 		reserve(index);

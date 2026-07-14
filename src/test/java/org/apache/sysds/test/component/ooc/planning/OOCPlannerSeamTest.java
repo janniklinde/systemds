@@ -42,12 +42,13 @@ import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
-import org.apache.sysds.runtime.ooc.planning.OOCStoreBinding;
+import org.apache.sysds.runtime.ooc.planning.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.store.IndexedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
-import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
 import org.apache.sysds.runtime.instructions.ooc.CachingStream;
+import org.apache.sysds.runtime.ooc.store.OrderedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.StateTable;
 import org.apache.sysds.runtime.ooc.store.StateLease;
 import org.apache.sysds.runtime.ooc.store.SequentialAccessPattern;
@@ -184,7 +185,7 @@ public class OOCPlannerSeamTest {
 		int tiles = 4;
 		long bytes = tileBytes();
 		try {
-			OOCStoreBinding binding = new OOCStoreBinding(null, cache, 51,
+			OOCMaterializedView binding = new OOCMaterializedView(null, cache, 51,
 				ix -> (int)ix.getRowIndex() - 1, sinkAllowance, 2, 2);
 			for(int i = 0; i < tiles; i++) {
 				producer.reserveBlocking(bytes);
@@ -193,9 +194,9 @@ public class OOCPlannerSeamTest {
 			binding.store().complete();
 			Assert.assertEquals(tiles, binding.store().size());
 
-			MaterializedStore.Reader<IndexedMatrixValue> first =
+			OrderedMaterializedStoreReader<IndexedMatrixValue> first =
 				binding.openReader(new SequentialAccessPattern(tiles), readerA, 2);
-			MaterializedStore.Reader<IndexedMatrixValue> second =
+			OrderedMaterializedStoreReader<IndexedMatrixValue> second =
 				binding.openReader(new SequentialAccessPattern(tiles), readerB, 2);
 			try {
 				binding.openReader(new SequentialAccessPattern(tiles), readerA, 2);
@@ -250,11 +251,11 @@ public class OOCPlannerSeamTest {
 			firstView.completion().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 
 			//pre-counted reader set: the store seals only after BOTH consumers registered
-			MaterializedStore.IndexedReader<IndexedMatrixValue> readerA =
+			IndexedMaterializedStoreReader<IndexedMatrixValue> readerA =
 				firstView.openIndexedReader(new MultiplicityLiveness(2, 1));
 			Assert.assertFalse("Sealing must wait for the full declared reader set.",
 				firstView.readersSealed().isDone());
-			MaterializedStore.IndexedReader<IndexedMatrixValue> readerB =
+			IndexedMaterializedStoreReader<IndexedMatrixValue> readerB =
 				secondView.openIndexedReader(new MultiplicityLiveness(2, 1));
 			firstView.readersSealed().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 

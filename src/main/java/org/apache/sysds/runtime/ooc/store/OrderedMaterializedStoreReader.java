@@ -33,115 +33,112 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntConsumer;
 
-final class OrderedMaterializedStoreReader<T extends SpillableObject>
-	implements MaterializedStore.Reader<T>, StoreRegisteredReader {
-	private final OOCCache cache;
-	private final long streamId;
-	private final MaterializedStore.AccessPattern pattern;
-	private final MemoryAllowance allowance;
-	private final int maxPrefetch;
-	private final boolean softOrdering;
-	private final Runnable afterClose;
-	private final IntConsumer afterRelease;
-	private final ArrayDeque<Request> requests;
-	private final BlockingQueue<Request> readyRequests;
-	private final AtomicInteger inFlightRequests;
-	private volatile boolean closed;
+public final class OrderedMaterializedStoreReader<T extends SpillableObject> implements MaterializedStore.StoreReader<T> {
+	private final OOCCache _cache;
+	private final long _streamId;
+	private final MaterializedStore.AccessPattern _pattern;
+	private final MemoryAllowance _allowance;
+	private final int _maxPrefetch;
+	private final boolean _softOrdering;
+	private final Runnable _afterClose;
+	private final IntConsumer _afterRelease;
+	private final ArrayDeque<Request> _requests;
+	private final BlockingQueue<Request> _readyRequests;
+	private final AtomicInteger _inFlightRequests;
+	private volatile boolean _closed;
 
 	OrderedMaterializedStoreReader(OOCCache cache, long streamId, MaterializedStore.AccessPattern pattern,
 		MemoryAllowance allowance, int maxPrefetch, boolean softOrdering, Runnable afterClose,
 		IntConsumer afterRelease) {
-		this.cache = cache;
-		this.streamId = streamId;
-		this.pattern = pattern;
-		this.allowance = allowance;
-		this.maxPrefetch = maxPrefetch;
-		this.softOrdering = softOrdering;
-		this.afterClose = afterClose;
-		this.afterRelease = afterRelease;
-		requests = new ArrayDeque<>(maxPrefetch);
-		readyRequests = softOrdering ? new LinkedBlockingQueue<>() : null;
-		inFlightRequests = new AtomicInteger();
+		_cache = cache;
+		_streamId = streamId;
+		_pattern = pattern;
+		_allowance = allowance;
+		_maxPrefetch = maxPrefetch;
+		_softOrdering = softOrdering;
+		_afterClose = afterClose;
+		_afterRelease = afterRelease;
+		_requests = new ArrayDeque<>(maxPrefetch);
+		_readyRequests = softOrdering ? new LinkedBlockingQueue<>() : null;
+		_inFlightRequests = new AtomicInteger();
 	}
 
 	@Override
 	public MaterializedStore.Liveness liveness() {
-		return pattern;
+		return _pattern;
 	}
 
 	@Override
 	public boolean isClosed() {
-		return closed;
+		return _closed;
 	}
 
-	@Override
 	public boolean hasNext() {
 		checkReady();
-		if(softOrdering) {
+		if(_softOrdering) {
 			fillSoft();
-			return inFlightRequests.get() > 0;
+			return _inFlightRequests.get() > 0;
 		}
 		fillStrict();
-		return !requests.isEmpty();
+		return !_requests.isEmpty();
 	}
 
-	@Override
 	public MaterializedStore.Lease<T> next() throws InterruptedException {
 		checkReady();
-		if(softOrdering)
+		if(_softOrdering)
 			return nextSoft();
 		fillStrict();
-		if(requests.isEmpty())
+		if(_requests.isEmpty())
 			throw new IllegalStateException("No remaining item");
-		Request request = requests.peekFirst();
+		Request request = _requests.peekFirst();
 		BlockEntry entry = awaitEntry(request);
-		requests.removeFirst();
+		_requests.removeFirst();
 		fillStrict();
 		return new StoreLease<>(lease -> release(lease.index(), lease.entry()), request.index, entry);
 	}
 
 	@Override
 	public void close() {
-		if(closed)
+		if(_closed)
 			return;
-		closed = true;
-		if(softOrdering) {
+		_closed = true;
+		if(_softOrdering) {
 			Request request;
-			while((request = readyRequests.poll()) != null) {
+			while((request = _readyRequests.poll()) != null) {
 				if(request.entry != null)
-					cache.unpin(request.entry, allowance);
-				inFlightRequests.decrementAndGet();
+					_cache.unpin(request.entry, _allowance);
+				_inFlightRequests.decrementAndGet();
 			}
 		}
 		else {
 			Request request;
-			while((request = requests.pollFirst()) != null) {
+			while((request = _requests.pollFirst()) != null) {
 				request.future.whenComplete((entry, error) -> {
 					if(entry != null)
-						cache.unpin(entry, allowance);
+						_cache.unpin(entry, _allowance);
 				});
 			}
 		}
-		afterClose.run();
+		_afterClose.run();
 	}
 
 	public void release(int index, BlockEntry entry) {
-		cache.unpin(entry, allowance);
-		pattern.consumed(index);
-		afterRelease.accept(index);
+		_cache.unpin(entry, _allowance);
+		_pattern.consumed(index);
+		_afterRelease.accept(index);
 	}
 
 	private void checkReady() {
-		if(closed)
+		if(_closed)
 			throw new IllegalStateException("Reader is closed");
 	}
 
 	private MaterializedStore.Lease<T> nextSoft() throws InterruptedException {
 		fillSoft();
-		if(inFlightRequests.get() <= 0)
+		if(_inFlightRequests.get() <= 0)
 			throw new IllegalStateException("No remaining item");
-		Request request = readyRequests.take();
-		inFlightRequests.decrementAndGet();
+		Request request = _readyRequests.take();
+		_inFlightRequests.decrementAndGet();
 		if(request.error != null)
 			throw DMLRuntimeException.of(request.error);
 		if(request.entry == null)
@@ -151,18 +148,18 @@ final class OrderedMaterializedStoreReader<T extends SpillableObject>
 	}
 
 	private void fillStrict() {
-		while(requests.size() < maxPrefetch && pattern.hasNext()) {
-			int index = pattern.next();
-			OOCFuture<BlockEntry> future = cache.pin(streamId, index, allowance);
-			requests.addLast(new Request(index, future));
+		while(_requests.size() < _maxPrefetch && _pattern.hasNext()) {
+			int index = _pattern.next();
+			OOCFuture<BlockEntry> future = _cache.pin(_streamId, index, _allowance);
+			_requests.addLast(new Request(index, future));
 		}
 	}
 
 	private void fillSoft() {
-		while(inFlightRequests.get() < maxPrefetch && pattern.hasNext()) {
-			int index = pattern.next();
-			OOCFuture<BlockEntry> future = cache.pin(streamId, index, allowance);
-			inFlightRequests.incrementAndGet();
+		while(_inFlightRequests.get() < _maxPrefetch && _pattern.hasNext()) {
+			int index = _pattern.next();
+			OOCFuture<BlockEntry> future = _cache.pin(_streamId, index, _allowance);
+			_inFlightRequests.incrementAndGet();
 			registerSoftRequest(new Request(index, future));
 		}
 	}
@@ -173,27 +170,27 @@ final class OrderedMaterializedStoreReader<T extends SpillableObject>
 				completeSoft(request, entry, error);
 				return;
 			}
-			request.future = StorePinAdmission.pinAdmitted(cache, streamId, request.index, allowance,
-				() -> closed);
+			request.future = StorePinAdmission.pinAdmitted(_cache, _streamId, request.index, _allowance,
+				() -> _closed);
 			request.future.whenComplete((admittedEntry, admittedError) ->
 				completeSoft(request, admittedEntry, admittedError));
 		});
 	}
 
 	private void completeSoft(Request request, BlockEntry entry, Throwable error) {
-		if(closed) {
+		if(_closed) {
 			if(entry != null)
-				cache.unpin(entry, allowance);
-			inFlightRequests.decrementAndGet();
+				_cache.unpin(entry, _allowance);
+			_inFlightRequests.decrementAndGet();
 			return;
 		}
 		request.entry = entry;
 		request.error = error;
-		readyRequests.offer(request);
-		if(closed && readyRequests.remove(request)) {
+		_readyRequests.offer(request);
+		if(_closed && _readyRequests.remove(request)) {
 			if(entry != null)
-				cache.unpin(entry, allowance);
-			inFlightRequests.decrementAndGet();
+				_cache.unpin(entry, _allowance);
+			_inFlightRequests.decrementAndGet();
 		}
 	}
 
@@ -201,8 +198,8 @@ final class OrderedMaterializedStoreReader<T extends SpillableObject>
 		try {
 			BlockEntry entry = request.future.get();
 			if(entry == null) {
-				request.future = StorePinAdmission.pinAdmitted(cache, streamId, request.index, allowance,
-					() -> closed);
+				request.future = StorePinAdmission.pinAdmitted(_cache, _streamId, request.index, _allowance,
+					() -> _closed);
 				entry = request.future.get();
 				if(entry == null)
 					throw new IllegalStateException("Reader is closed");

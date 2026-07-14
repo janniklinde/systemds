@@ -34,17 +34,6 @@ import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.message.OOCStreamMessage;
 import org.apache.sysds.runtime.util.IndexRange;
 
-/**
- * Read-only {@code OOCStream} compatibility view over a completed {@link MaterializedStore}: the
- * offline replay half of the {@code CachingStream} replacement. Wraps an ordered
- * {@link MaterializedStore.Reader}, whose
- * packs are flattened into per-tile callbacks) and adapts leases to queue callbacks: {@code get()}
- * reads the leased value, {@code keepOpen()} retains the lease, {@code close()} closes it. EOS is
- * delivered after exhaustion; a failure closes the reader before it propagates.
- *
- * The reader must be opened on a completed store and the store's readers sealed before consumption —
- * live consumption and offline replay are never mixed in one structure.
- */
 public final class StoreBackedStream implements OOCStream<IndexedMatrixValue> {
 	private final TileSource _source;
 	private final AtomicBoolean _subscriberSet;
@@ -55,7 +44,7 @@ public final class StoreBackedStream implements OOCStream<IndexedMatrixValue> {
 	private CacheableData<?> _data;
 	private DataCharacteristics _dataCharacteristics;
 
-	public StoreBackedStream(MaterializedStore.Reader<IndexedMatrixValue> reader) {
+	public StoreBackedStream(OrderedMaterializedStoreReader<IndexedMatrixValue> reader) {
 		_source = new OrderedTileSource(reader);
 		_subscriberSet = new AtomicBoolean(false);
 	}
@@ -268,12 +257,7 @@ public final class StoreBackedStream implements OOCStream<IndexedMatrixValue> {
 		void close();
 	}
 
-	private static final class OrderedTileSource implements TileSource {
-		private final MaterializedStore.Reader<IndexedMatrixValue> reader;
-
-		private OrderedTileSource(MaterializedStore.Reader<IndexedMatrixValue> reader) {
-			this.reader = reader;
-		}
+	private record OrderedTileSource(OrderedMaterializedStoreReader<IndexedMatrixValue> reader) implements TileSource {
 
 		@Override
 		public QueueCallback<IndexedMatrixValue> nextCallback() throws InterruptedException {

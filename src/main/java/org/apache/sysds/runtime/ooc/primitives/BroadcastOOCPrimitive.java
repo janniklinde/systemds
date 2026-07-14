@@ -31,11 +31,12 @@ import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCMaterializedInputRequest;
+import org.apache.sysds.runtime.ooc.planning.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
+import org.apache.sysds.runtime.ooc.store.IndexedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.LeaseQueueCallbacks;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MultiplicityLiveness;
-import org.apache.sysds.runtime.ooc.store.OOCMaterializedView;
 import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
@@ -58,7 +59,7 @@ public class BroadcastOOCPrimitive extends OOCPrimitive {
 	private final boolean _rowBroadcast;
 	private final StreamContext _sc;
 	private OOCMaterializedView _broadcastView;
-	private volatile MaterializedStore.IndexedReader<IndexedMatrixValue> _reader;
+	private volatile IndexedMaterializedStoreReader<IndexedMatrixValue> _reader;
 	private final AtomicBoolean _storeReleased = new AtomicBoolean(false);
 
 	private BroadcastOOCPrimitive(OOCPrimitive broadcastPrimitive, OOCPrimitive streamedPrimitive,

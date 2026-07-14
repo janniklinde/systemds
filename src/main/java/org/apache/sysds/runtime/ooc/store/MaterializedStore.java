@@ -36,12 +36,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class MaterializedStore<T extends SpillableObject> implements AutoCloseable {
 	private final OOCCache _cache;
 	private final long _streamId;
-	private final ArrayList<StoreRegisteredReader> _registeredReaders;
+	private final ArrayList<StoreReader<T>> _registeredReaders;
 	private final BitSet _forgotten;
 	private final AtomicInteger _published;
 	private final AtomicInteger _publishedCount;
 
-	private volatile List<StoreRegisteredReader> _readers;
+	private volatile List<StoreReader<T>> _readers;
 	private volatile int _completedSize;
 	private volatile boolean _complete;
 	private volatile boolean _readersSealed;
@@ -118,11 +118,11 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 		_complete = true;
 	}
 
-	public synchronized Reader<T> openReader(AccessPattern pattern, MemoryAllowance allowance, int maxPrefetch) {
+	public synchronized OrderedMaterializedStoreReader<T> openReader(AccessPattern pattern, MemoryAllowance allowance, int maxPrefetch) {
 		return openReader(pattern, allowance, maxPrefetch, true);
 	}
 
-	public synchronized Reader<T> openReader(AccessPattern pattern, MemoryAllowance allowance, int maxPrefetch,
+	public synchronized OrderedMaterializedStoreReader<T> openReader(AccessPattern pattern, MemoryAllowance allowance, int maxPrefetch,
 		boolean softOrdering) {
 		if(!_complete || _closed)
 			throw new IllegalStateException("Readers require a completed store");
@@ -134,7 +134,7 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 		return reader;
 	}
 
-	public synchronized IndexedReader<T> openIndexedReader(Liveness liveness) {
+	public synchronized IndexedMaterializedStoreReader<T> openIndexedReader(Liveness liveness) {
 		if(!_complete || _closed)
 			throw new IllegalStateException("Readers require a completed store");
 		if(_readersSealed)
@@ -182,14 +182,14 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 
 	@Override
 	public void close() {
-		List<StoreRegisteredReader> localReaders;
+		List<StoreReader<T>> localReaders;
 		synchronized(this) {
 			if(_closed)
 				return;
 			_closed = true;
 			localReaders = _readersSealed ? _readers : new ArrayList<>(_registeredReaders);
 		}
-		for(StoreRegisteredReader localReader : localReaders)
+		for(StoreReader<T> localReader : localReaders)
 			localReader.close();
 		for(int i = 0; i < size(); i++)
 			if(markForgotten(i))
@@ -199,9 +199,8 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 	private void tryForget(int index) {
 		if(!_readersSealed)
 			return;
-		List<StoreRegisteredReader> localReaders = _readers;
-		for(int i = 0; i < localReaders.size(); i++) {
-			StoreRegisteredReader reader = localReaders.get(i);
+		List<StoreReader<T>> localReaders = _readers;
+		for(StoreReader<T> reader : localReaders) {
 			if(!reader.isClosed() && reader.liveness().needs(index))
 				return;
 		}
@@ -242,28 +241,18 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 		}
 	}
 
+	public interface StoreReader<T extends SpillableObject> {
+		Liveness liveness();
+
+		boolean isClosed();
+
+		void close();
+	}
+
 	public interface AccessPattern extends Liveness {
 		boolean hasNext();
 
 		int next();
-	}
-
-	public interface Reader<T extends SpillableObject> extends AutoCloseable {
-		boolean hasNext();
-
-		Lease<T> next() throws InterruptedException;
-
-		@Override
-		void close();
-	}
-
-	public interface IndexedReader<T extends SpillableObject> extends AutoCloseable {
-		OOCFuture<Lease<T>> request(int index, MemoryAllowance allowance);
-
-		Lease<T> requestIfLive(int index, MemoryAllowance allowance);
-
-		@Override
-		void close();
 	}
 
 	public interface Lease<T extends SpillableObject> extends AutoCloseable {

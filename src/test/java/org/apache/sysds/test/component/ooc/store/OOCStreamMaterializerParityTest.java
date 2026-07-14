@@ -44,6 +44,7 @@ import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
+import org.apache.sysds.runtime.ooc.store.OrderedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.SequentialAccessPattern;
 import org.apache.sysds.runtime.ooc.store.StoreBackedStream;
 import org.junit.After;
@@ -83,7 +84,7 @@ public class OOCStreamMaterializerParityTest {
 			Assert.assertEquals(TILES, f.store.size());
 			awaitUsedMemory(f.producer, 0);
 
-			MaterializedStore.Reader<IndexedMatrixValue> reader =
+			OrderedMaterializedStoreReader<IndexedMatrixValue> reader =
 				f.store.openReader(new SequentialAccessPattern(TILES), f.reader, 4);
 			f.store.sealReaders();
 			Map<Integer, Double> replayed = consume(new StoreBackedStream(reader));
