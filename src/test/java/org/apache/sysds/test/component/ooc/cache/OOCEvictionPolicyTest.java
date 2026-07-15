@@ -227,7 +227,7 @@ public class OOCEvictionPolicyTest {
 			table.addEvictionPolicy(slot -> slot == 2 ? 100 : 0);
 			for(int slot = 0; slot < 3; slot++) {
 				producer.reserveBlocking(BYTES);
-				table.install(slot, new ManagedPayload<>(value(slot), BYTES, producer));
+				table.put(slot, new ManagedPayload<>(value(slot), BYTES, producer));
 			}
 			waitFor(() -> cache.getOwnedCacheSize() == 3 * BYTES);
 
@@ -259,7 +259,7 @@ public class OOCEvictionPolicyTest {
 			for(int i = 0; i < entries.length; i++) {
 				producer.reserveBlocking(BYTES);
 				entries[i] = cache.putPinned(sourceStreamId, i, value(i), BYTES, producer);
-				table.installReference(i, entries[i]);
+				table.putReference(i, entries[i]);
 			}
 			for(BlockEntry entry : entries)
 				await(cache.unpin(entry, producer));

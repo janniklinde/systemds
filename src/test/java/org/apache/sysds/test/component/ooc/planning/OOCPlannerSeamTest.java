@@ -87,7 +87,7 @@ public class OOCPlannerSeamTest {
 		long bytes = tileBytes();
 		try {
 			producer.reserveBlocking(bytes);
-			stub.table.install(3, new ManagedPayload<>(tile(0, 5.0), bytes, producer));
+			stub.table.put(3, new ManagedPayload<>(tile(0, 5.0), bytes, producer));
 			try(StateLease<IndexedMatrixValue> lease =
 				stub.table.take(3, stub.allowance).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
 				Assert.assertNotNull(lease);
@@ -149,9 +149,9 @@ public class OOCPlannerSeamTest {
 			second.start();
 			//distinct stream ids: installs at the same slot index must not collide in the global cache
 			producer.reserveBlocking(bytes);
-			first.table.install(0, new ManagedPayload<>(tile(0, 1.0), bytes, producer));
+			first.table.put(0, new ManagedPayload<>(tile(0, 1.0), bytes, producer));
 			producer.reserveBlocking(bytes);
-			second.table.install(0, new ManagedPayload<>(tile(0, 2.0), bytes, producer));
+			second.table.put(0, new ManagedPayload<>(tile(0, 2.0), bytes, producer));
 			try(StateLease<IndexedMatrixValue> lease =
 				first.table.take(0, first.allowance).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
 				Assert.assertEquals(1.0 * ROWS * COLS, sum(lease.value()), 0.0);

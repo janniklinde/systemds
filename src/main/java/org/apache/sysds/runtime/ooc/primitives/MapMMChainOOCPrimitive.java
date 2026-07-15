@@ -522,7 +522,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		while(true) {
 			StateLease<IndexedMatrixValue> existing;
 			try {
-				existing = await(_accumulators.installOrTake(slot, payload, budget));
+				existing = await(_accumulators.putOrTake(slot, payload, budget));
 			}
 			catch(RuntimeException ex) {
 				payload.release();
@@ -553,7 +553,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 		ReservationBudget budget) {
 		if(callback instanceof MaterializedCallback pinned) {
 			try {
-				_retainedTiles.installReference(slot, pinned.pinnedEntry());
+				_retainedTiles.putReference(slot, pinned.pinnedEntry());
 			}
 			finally {
 				pinned.close();
@@ -573,7 +573,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 			callback.close();
 		}
 		try {
-			_retainedTiles.install(slot, payload);
+			_retainedTiles.put(slot, payload);
 		}
 		catch(RuntimeException ex) {
 			payload.release();

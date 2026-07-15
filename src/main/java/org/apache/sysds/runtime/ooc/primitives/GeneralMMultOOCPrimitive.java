@@ -358,7 +358,7 @@ public class GeneralMMultOOCPrimitive extends PlannableOOCPrimitive {
 		while(true) {
 			StateLease<IndexedMatrixValue> existing;
 			try {
-				existing = await(_accumulators.installOrTake(slot, payload, budget));
+				existing = await(_accumulators.putOrTake(slot, payload, budget));
 			}
 			catch(RuntimeException ex) {
 				payload.release();
@@ -388,7 +388,7 @@ public class GeneralMMultOOCPrimitive extends PlannableOOCPrimitive {
 	private void installRetainedA(int slot, OOCStream.QueueCallback<IndexedMatrixValue> callback) {
 		if(callback instanceof MaterializedCallback pinned) {
 			try {
-				_retainedA.installReference(slot, pinned.pinnedEntry());
+				_retainedA.putReference(slot, pinned.pinnedEntry());
 			}
 			finally {
 				pinned.close();
@@ -405,7 +405,7 @@ public class GeneralMMultOOCPrimitive extends PlannableOOCPrimitive {
 				_allowance.reserveBlocking(bytes);
 				payload = new ManagedPayload<>(value, bytes, _allowance);
 			}
-			_retainedA.install(slot, payload);
+			_retainedA.put(slot, payload);
 			payload = null;
 		}
 		finally {

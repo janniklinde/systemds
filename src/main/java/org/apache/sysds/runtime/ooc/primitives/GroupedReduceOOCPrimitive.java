@@ -248,7 +248,7 @@ public class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		while(true) {
 			StateLease<IndexedMatrixValue> existing;
 			try {
-				existing = await(_table.installOrTake(group, payload, budget));
+				existing = await(_table.putOrTake(group, payload, budget));
 			}
 			catch(RuntimeException ex) {
 				payload.release();

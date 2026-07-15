@@ -46,10 +46,10 @@ public class StateTableTest {
 	private static final long STREAM_ID = 9;
 
 	@Test
-	public void testInstallTakeRoundtrip() throws Exception {
+	public void testPutTakeRoundtrip() throws Exception {
 		Fixture f = new Fixture();
 		try {
-			f.table.install(5, f.payload(7.0));
+			f.table.put(5, f.payload(7.0));
 			//the producer reservation transferred to the cache through unpin
 			Assert.assertEquals(0, f.producer.getUsedMemory());
 			Assert.assertEquals(BYTES, f.cache.getOwnedCacheSize());
@@ -70,13 +70,13 @@ public class StateTableTest {
 	}
 
 	@Test
-	public void testDoubleInstallThrows() throws Exception {
+	public void testDoublePutThrows() throws Exception {
 		Fixture f = new Fixture();
 		try {
-			f.table.install(1, f.payload(1.0));
+			f.table.put(1, f.payload(1.0));
 			ManagedPayload<IndexedMatrixValue> second = f.payload(2.0);
 			try {
-				f.table.install(1, second);
+				f.table.put(1, second);
 				Assert.fail("Installing into an occupied slot must fail");
 			}
 			catch(IllegalStateException expected) {
@@ -96,7 +96,7 @@ public class StateTableTest {
 	public void testClearDropsValue() throws Exception {
 		Fixture f = new Fixture();
 		try {
-			f.table.install(2, f.payload(3.0));
+			f.table.put(2, f.payload(3.0));
 			Assert.assertEquals(BYTES, f.cache.getOwnedCacheSize());
 			f.table.clear(2);
 			Assert.assertEquals(0, f.cache.getOwnedCacheSize());
@@ -111,7 +111,7 @@ public class StateTableTest {
 	public void testPeekDoesNotRemove() throws Exception {
 		Fixture f = new Fixture();
 		try {
-			f.table.install(3, f.payload(4.0));
+			f.table.put(3, f.payload(4.0));
 			try(StateLease<IndexedMatrixValue> peeked = f.table.peek(3, f.region)) {
 				Assert.assertNotNull(peeked);
 				Assert.assertEquals(4.0, ((MatrixBlock)peeked.value().getValue()).get(0, 0), 0.0);
@@ -132,8 +132,8 @@ public class StateTableTest {
 	public void testCloseDropsRemainingValues() throws Exception {
 		Fixture f = new Fixture();
 		try {
-			f.table.install(0, f.payload(1.0));
-			f.table.install(1, f.payload(2.0));
+			f.table.put(0, f.payload(1.0));
+			f.table.put(1, f.payload(2.0));
 			Assert.assertEquals(2 * BYTES, f.cache.getOwnedCacheSize());
 			f.table.close();
 			Assert.assertEquals(0, f.cache.getOwnedCacheSize());
@@ -144,7 +144,7 @@ public class StateTableTest {
 	}
 
 	@Test
-	public void testInstallOrTakeConcurrentReduction() throws Exception {
+	public void testPutOrTakeConcurrentReduction() throws Exception {
 		Fixture f = new Fixture();
 		int threads = 4;
 		int valuesPerThread = 50;
@@ -183,7 +183,7 @@ public class StateTableTest {
 		try {
 			f.producer.reserveBlocking(BYTES);
 			BlockEntry source = f.cache.putPinned(key, value(7.0), BYTES, f.producer);
-			f.table.installReference(4, source);
+			f.table.putReference(4, source);
 			await(f.cache.unpin(source, f.producer));
 
 			// Drop the source's canonical lifetime. The table's retained reference must remain valid.
@@ -203,20 +203,20 @@ public class StateTableTest {
 	}
 
 	@Test
-	public void testReferenceInstallOrTakeLeavesIncomingPinned() throws Exception {
+	public void testReferencePutOrTakeLeavesIncomingPinned() throws Exception {
 		Fixture f = new Fixture();
 		BlockKey firstKey = new BlockKey(18, 0);
 		BlockKey secondKey = new BlockKey(18, 1);
 		try {
 			f.producer.reserveBlocking(2 * BYTES);
 			BlockEntry first = f.cache.putPinned(firstKey, value(3.0), BYTES, f.producer);
-			Assert.assertNull(f.table.installReferenceOrTake(6, first, f.region).get(10, TimeUnit.SECONDS));
+			Assert.assertNull(f.table.putReferenceOrTake(6, first, f.region).get(10, TimeUnit.SECONDS));
 			await(f.cache.unpin(first, f.producer));
 			f.cache.dereference(firstKey);
 
 			BlockEntry second = f.cache.putPinned(secondKey, value(5.0), BYTES, f.producer);
 			try(StateLease<IndexedMatrixValue> existing =
-				f.table.installReferenceOrTake(6, second, f.region).get(10, TimeUnit.SECONDS)) {
+				f.table.putReferenceOrTake(6, second, f.region).get(10, TimeUnit.SECONDS)) {
 				Assert.assertNotNull(existing);
 				Assert.assertEquals(3.0, scalar(existing.value()), 0.0);
 				Assert.assertTrue("The unmatched incoming entry must remain with the caller.", second.isPinned());
@@ -251,9 +251,9 @@ public class StateTableTest {
 			BlockEntry first = cache.putPinned(firstKey, value(11.0), BYTES, producer);
 			BlockEntry second = cache.putPinned(secondKey, value(13.0), BYTES, producer);
 
-			table.installReference(5, first);
-			table.installReference(9, second);
-			table.installReference(12, first);
+			table.putReference(5, first);
+			table.putReference(9, second);
+			table.putReference(12, first);
 			OOCCache.UnpinHandle firstUnpin = cache.unpin(first, producer);
 			OOCCache.UnpinHandle secondUnpin = cache.unpin(second, producer);
 			await(firstUnpin);
@@ -295,7 +295,7 @@ public class StateTableTest {
 	}
 
 	@Test
-	public void testInstallReferenceRequiresPinnedEntry() throws Exception {
+	public void testPutReferenceRequiresPinnedEntry() throws Exception {
 		Fixture f = new Fixture();
 		BlockKey key = new BlockKey(19, 0);
 		try {
@@ -303,14 +303,14 @@ public class StateTableTest {
 			BlockEntry source = f.cache.putPinned(key, value(2.0), BYTES, f.producer);
 			await(f.cache.unpin(source, f.producer));
 			try {
-				f.table.installReference(7, source);
+				f.table.putReference(7, source);
 				Assert.fail("installReference must reject an unpinned entry");
 			}
 			catch(IllegalArgumentException expected) {
 				//expected
 			}
 			try {
-				f.table.installReferenceOrTake(7, source, f.region);
+				f.table.putReferenceOrTake(7, source, f.region);
 				Assert.fail("installReferenceOrTake must reject an unpinned entry");
 			}
 			catch(IllegalArgumentException expected) {
@@ -344,7 +344,7 @@ public class StateTableTest {
 				//live consumer after a materialization boundary: park a reference per arriving tile
 				producer.reserveBlocking(BYTES);
 				BlockEntry tile = cache.putPinned(new BlockKey(22, i), value(i + 1.0), BYTES, producer);
-				table.installReference(i, tile);
+				table.putReference(i, tile);
 				unpins[i] = cache.unpin(tile, producer);
 				cache.dereference(new BlockKey(22, i));
 				Assert.assertEquals("Reference installs on pending tiles must not seal packs.",
@@ -382,7 +382,7 @@ public class StateTableTest {
 		try {
 			while(true) {
 				StateLease<IndexedMatrixValue> existing =
-					f.table.installOrTake(0, candidate, f.region).get(10, TimeUnit.SECONDS);
+					f.table.putOrTake(0, candidate, f.region).get(10, TimeUnit.SECONDS);
 				if(existing == null)
 					return; //installed
 				double merged;

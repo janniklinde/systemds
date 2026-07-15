@@ -47,7 +47,7 @@ public final class JoinTable {
 			tile.close();
 		}
 		OOCFuture<Match> result = new OOCFuture<>();
-		table.installOrTake(slot, payload, allowance).whenComplete((lease, error) -> {
+		table.putOrTake(slot, payload, allowance).whenComplete((lease, error) -> {
 			if(error != null) {
 				payload.release();
 				result.completeExceptionally(error);
@@ -70,7 +70,7 @@ public final class JoinTable {
 	private static OOCFuture<Match> installReferenceOrTake(StateTable<IndexedMatrixValue> table,
 		int slot, MaterializedCallback pinned, MemoryAllowance allowance) {
 		OOCFuture<Match> result = new OOCFuture<>();
-		table.installReferenceOrTake(slot, pinned.pinnedEntry(), allowance).whenComplete((lease, error) -> {
+		table.putReferenceOrTake(slot, pinned.pinnedEntry(), allowance).whenComplete((lease, error) -> {
 			if(error != null) {
 				pinned.close();
 				result.completeExceptionally(error);
