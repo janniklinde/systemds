@@ -34,15 +34,15 @@ public final class StoreLease<T extends SpillableObject> implements Materialized
 	private boolean _open;
 	private final AtomicInteger _shared;
 
-	StoreLease(Consumer<StoreLease<T>> releaser, int index, BlockEntry entry) {
+	public StoreLease(Consumer<StoreLease<T>> releaser, int index, BlockEntry entry) {
 		this(releaser, index, null, entry, entry.getSize(), new AtomicInteger(1));
 	}
 
-	StoreLease(BlockEntry entry, Runnable releaser) {
+	public StoreLease(BlockEntry entry, Runnable releaser) {
 		this(ignored -> releaser.run(), -1, null, entry, entry.getSize(), new AtomicInteger(1));
 	}
 
-	StoreLease(T value, long bytes, Runnable releaser) {
+	public StoreLease(T value, long bytes, Runnable releaser) {
 		this(ignored -> releaser.run(), -1, value, null, bytes, new AtomicInteger(1));
 	}
 

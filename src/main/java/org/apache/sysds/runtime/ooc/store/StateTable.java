@@ -61,10 +61,6 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 		_slots = new Slot[capacity];
 	}
 
-	public long getStreamId() {
-		return _streamId;
-	}
-
 	public void addEvictionPolicy(IntToLongFunction slotPolicy) {
 		if(slotPolicy == null)
 			return;
@@ -161,7 +157,7 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 		return result;
 	}
 
-	public OOCFuture<StoreLease<T>> lease(int index, MemoryAllowance leaseAllowance) {
+	public OOCFuture<StoreLease<T>> acquire(int index, MemoryAllowance leaseAllowance) {
 		BlockKey key;
 		synchronized(this) {
 			checkOpen();
@@ -242,10 +238,6 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 		}
 		for(Slot slot : toRelease)
 			releaseSlot(slot);
-	}
-
-	public boolean isClosed() {
-		return _closed;
 	}
 
 	private void finalizeOwnedPut(int index, Slot slot, ManagedPayload<T> payload) {
@@ -340,13 +332,12 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 						_cache.unpin(entry, leaseAllowance);
 					}
 					catch(RuntimeException ignored) {
-						// Preserve the original pin/release failure.
 					}
 				}
 				result.completeExceptionally(completionError);
 				return;
 			}
-			result.complete(entry == null ? null : new StoreLease<>(entry, () -> _cache.unpin(entry, leaseAllowance)));
+			result.complete(new StoreLease<>(entry, () -> _cache.unpin(entry, leaseAllowance)));
 		});
 		return result;
 	}

@@ -108,10 +108,14 @@ public class StateTableTest {
 	}
 
 	@Test
-	public void testPeekDoesNotRemove() throws Exception {
+	public void testAcquireAndPeekDoNotRemove() throws Exception {
 		Fixture f = new Fixture();
 		try {
 			f.table.put(3, f.payload(4.0));
+			try(StateLease<IndexedMatrixValue> acquired = f.table.acquire(3, f.region).get(10, TimeUnit.SECONDS)) {
+				Assert.assertNotNull(acquired);
+				Assert.assertEquals(4.0, ((MatrixBlock)acquired.value().getValue()).get(0, 0), 0.0);
+			}
 			try(StateLease<IndexedMatrixValue> peeked = f.table.peek(3, f.region)) {
 				Assert.assertNotNull(peeked);
 				Assert.assertEquals(4.0, ((MatrixBlock)peeked.value().getValue()).get(0, 0), 0.0);

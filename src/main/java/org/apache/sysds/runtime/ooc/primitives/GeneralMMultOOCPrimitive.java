@@ -309,7 +309,7 @@ public class GeneralMMultOOCPrimitive extends PlannableOOCPrimitive {
 		ManagedPayload<IndexedMatrixValue> partial = null;
 		try {
 			try {
-				aLease = await(_retainedA.lease(work._batch._aSlot, budget));
+				aLease = await(_retainedA.acquire(work._batch._aSlot, budget));
 				if(aLease == null)
 					throw new IllegalStateException("Missing retained A tile " + work._batch._aSlot);
 				bLease = await(_bReader.request(work._bIndex, budget));

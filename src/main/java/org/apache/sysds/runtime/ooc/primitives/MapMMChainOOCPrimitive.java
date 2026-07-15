@@ -311,7 +311,7 @@ public class MapMMChainOOCPrimitive extends PlannableOOCPrimitive {
 				if(budget == null)
 					throw new DMLRuntimeException("Missing admitted MapMMChain phase-2 budget.");
 				Phase2Request request = cb.get();
-				uLease = await(_accumulators.lease(uBase + request.row, budget));
+				uLease = await(_accumulators.acquire(uBase + request.row, budget));
 				if(uLease == null)
 					throw new IllegalStateException("Missing finalized XtXv row accumulator " + request.row);
 				xLease = await(_retainedTiles.take(xBase + request.row * numColBlocks + request.col, budget));

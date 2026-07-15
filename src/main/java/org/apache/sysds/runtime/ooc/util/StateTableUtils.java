@@ -17,7 +17,7 @@
  * under the License.
  */
 
-package org.apache.sysds.runtime.ooc.store;
+package org.apache.sysds.runtime.ooc.util;
 
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
@@ -26,13 +26,18 @@ import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.store.MaterializedCallback;
+import org.apache.sysds.runtime.ooc.store.StateTable;
+import org.apache.sysds.runtime.ooc.store.StoreLease;
 
-public final class JoinTable {
+public final class StateTableUtils {
+	private StateTableUtils() {
+	}
 
-	public static OOCFuture<Match> putIfAbsent(StateTable<IndexedMatrixValue> table, int slot,
+	public static OOCFuture<Match> putOrTake(StateTable<IndexedMatrixValue> table, int slot,
 		OOCStream.QueueCallback<IndexedMatrixValue> tile, MemoryAllowance allowance) {
 		if(tile instanceof MaterializedCallback pinned && pinned.pinnedEntry() != null)
-			return installReferenceOrTake(table, slot, pinned, allowance);
+			return putReferenceOrTake(table, slot, pinned, allowance);
 		ManagedPayload<IndexedMatrixValue> payload;
 		if(tile instanceof InMemoryQueueCallback managed && managed.getManagedBytes() > 0) {
 			payload = managed.extractManagedPayload();
@@ -60,7 +65,7 @@ public final class JoinTable {
 				result.completeExceptionally(error);
 			}
 			else if(lease == null)
-				result.complete(null); //installed: the reservation transferred into the table
+				result.complete(null);
 			else
 				result.complete(new Match(
 					new MaterializedCallback(new StoreLease<>(payload.value(), payload.bytes(), payload::release)),
@@ -69,15 +74,8 @@ public final class JoinTable {
 		return result;
 	}
 
-	/**
-	 * Reference rendezvous for a tile of a shared materialized boundary: the canonical entry stays
-	 * where it is, the table parks (or the partner takes) a counted logical reference. The supplied
-	 * alias is the pin that keeps the entry alive; it is closed here exactly when the rendezvous
-	 * resolved (install: the table holds its own reference now; take: the alias moves into the match
-	 * as the own-side value).
-	 */
-	private static OOCFuture<Match> installReferenceOrTake(StateTable<IndexedMatrixValue> table,
-		int slot, MaterializedCallback pinned, MemoryAllowance allowance) {
+	private static OOCFuture<Match> putReferenceOrTake(StateTable<IndexedMatrixValue> table, int slot,
+		MaterializedCallback pinned, MemoryAllowance allowance) {
 		OOCFuture<Match> result = new OOCFuture<>();
 		OOCFuture<StoreLease<IndexedMatrixValue>> matched;
 		try {
@@ -102,28 +100,7 @@ public final class JoinTable {
 		return result;
 	}
 
-	/**
-	 * A resolved rendezvous: the arriving tile ({@code own}) paired with the previously installed
-	 * partner ({@code partner}). Close both exactly once after the compute (try-with-resources on the
-	 * pair); closing releases the own-side reservation/pin and consumes the partner lease.
-	 */
-	public static final class Match {
-		private final OOCStream.QueueCallback<IndexedMatrixValue> _own;
-		private final OOCStream.QueueCallback<IndexedMatrixValue> _partner;
-
-		private Match(OOCStream.QueueCallback<IndexedMatrixValue> own,
-			OOCStream.QueueCallback<IndexedMatrixValue> partner) {
-			_own = own;
-			_partner = partner;
-		}
-
-		public OOCStream.QueueCallback<IndexedMatrixValue> own() {
-			return _own;
-		}
-
-		public OOCStream.QueueCallback<IndexedMatrixValue> partner() {
-			return _partner;
-		}
+	public record Match(OOCStream.QueueCallback<IndexedMatrixValue> left,
+		OOCStream.QueueCallback<IndexedMatrixValue> right) {
 	}
-
 }
