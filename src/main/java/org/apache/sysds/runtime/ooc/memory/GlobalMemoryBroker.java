@@ -85,23 +85,9 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			usedBefore = _usedBytes;
 			if(minSize < 0 || maxSize < minSize)
 				throw new IllegalArgumentException();
-			long share = getEqualShare();
 			long free = _allowedBytes - _usedBytes;
 			requestReclaim = free < minSize || hasReclaimPressureLocked();
-			if(free < minSize) {
-				if(allowance.getGrantedMemory() > share && allowance.getTargetMemory() > allowance.getGrantedMemory())
-					updates = List.of(new TargetUpdate(allowance, allowance.getUsedMemory()));
-				else {
-					MemoryAllowance largestConsumer = findLargestShrinkCandidate(share);
-					if(largestConsumer != null) {
-						long newTarget = (long) (largestConsumer.getGrantedMemory() * 0.8);
-						if(newTarget <= share)
-							newTarget = share;
-						updates = List.of(new TargetUpdate(largestConsumer, newTarget));
-					}
-				}
-			}
-			else {
+			if(free >= minSize) {
 				allow = Math.min(free, maxSize);
 				_usedBytes += allow;
 				updates = rebalance(false);
@@ -194,21 +180,6 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			applyTargetUpdates(updates);
 		notifyReservationWaiters();
 		return reclaimed;
-	}
-
-	private MemoryAllowance findLargestShrinkCandidate(long share) {
-		long largest = Long.MIN_VALUE;
-		MemoryAllowance allowance = null;
-		for(MemoryAllowance candidate : _allowances) {
-			if(candidate.isShutdown())
-				continue;
-			long granted = candidate.getGrantedMemory();
-			if(granted > share && granted > largest) {
-				largest = granted;
-				allowance = candidate;
-			}
-		}
-		return allowance;
 	}
 
 	@Override
