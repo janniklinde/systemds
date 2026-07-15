@@ -24,6 +24,7 @@ import org.apache.sysds.utils.Statistics;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -48,11 +49,10 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	}
 
 	private final long _allowedBytes;
-	private final List<MemoryAllowance> _allowances;
+	private final CopyOnWriteArrayList<MemoryAllowance> _allowances;
 	private final AtomicBoolean _reclaimRunning;
 	private long _usedBytes;
 	private BrokerMode _brokerMode;
-	private final AtomicBoolean _forceReclaimRequested;
 
 	private record TargetUpdate(MemoryAllowance _allowance, long _target) {}
 
@@ -69,9 +69,8 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	public GlobalMemoryBroker(long allowedBytes) {
 		_allowedBytes = allowedBytes;
 		_usedBytes = 0;
-		_allowances = new ArrayList<>();
+		_allowances = new CopyOnWriteArrayList<>();
 		_reclaimRunning = new AtomicBoolean(false);
-		_forceReclaimRequested = new AtomicBoolean(false);
 	}
 
 	@Override
@@ -80,13 +79,11 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		long allow = 0;
 		long usedBefore;
 		int allowanceCount;
-		boolean requestReclaim;
 		synchronized(this) {
 			usedBefore = _usedBytes;
 			if(minSize < 0 || maxSize < minSize)
 				throw new IllegalArgumentException();
 			long free = _allowedBytes - _usedBytes;
-			requestReclaim = free < minSize || hasReclaimPressureLocked();
 			if(free >= minSize) {
 				allow = Math.min(free, maxSize);
 				_usedBytes += allow;
@@ -100,86 +97,58 @@ public class GlobalMemoryBroker implements MemoryBroker {
 				+ " allowances=" + allowanceCount);
 		if(updates != null)
 			applyTargetUpdates(updates);
-		if(requestReclaim)
-			scheduleReclaimIfNeeded(allow < minSize);
 		return allow;
-	}
-
-	private void scheduleReclaimIfNeeded(boolean force) {
-		if(force)
-			_forceReclaimRequested.set(true);
-		if(!force && !hasReclaimPressure())
-			return;
-		if(!_reclaimRunning.compareAndSet(false, true))
-			return;
-		RECLAIM_EXECUTOR.execute(this::runReclaim);
-	}
-
-	private synchronized boolean hasReclaimPressure() {
-		return hasReclaimPressureLocked();
-	}
-
-	private boolean hasReclaimPressureLocked() {
-		return _usedBytes >= (_allowedBytes * RECLAIM_PRESSURE);
 	}
 
 	private void runReclaim() {
 		Statistics.incrementOOCMemoryReclaimRun();
-
 		long nanos = System.nanoTime();
-		boolean reschedule = false;
 		try {
-			boolean force = _forceReclaimRequested.getAndSet(false);
-			Statistics.accumulateOOCMemoryReclaimBytes(reclaimUnusedGrantedMemory(force));
-			reschedule = hasReclaimPressure();
-		}
-		catch(Throwable t) {
+			long reclaimed = 0;
+			for(MemoryAllowance allowance : _allowances)
+				if(!allowance.isShutdown())
+					reclaimed += allowance.reclaimUnused();
+			Statistics.accumulateOOCMemoryReclaimBytes(reclaimed);
+			if(reclaimed == 0)
+				return;
+
+			List<TargetUpdate> updates;
+			long usedBefore;
+			synchronized(this) {
+				usedBefore = _usedBytes;
+				_usedBytes = Math.max(0, _usedBytes - reclaimed);
+				updates = rebalanceAfterFree();
+			}
 			if(OOCDebug.TRACE_HOT_PATH)
-				System.out.println("[BROKER-RECLAIM-ERROR] " + t.getMessage());
+				System.out.println("[BROKER-RECLAIM] reclaimed=" + reclaimed + " used=" + usedBefore + "->" + _usedBytes);
+			if(updates != null)
+				applyTargetUpdates(updates);
+			notifyReservationWaiters();
 		}
 		finally {
-			if(reschedule) {
+			Statistics.accumulateOOCMemoryReclaimTime(System.nanoTime() - nanos);
+			if(shouldRetryReclaim())
 				RECLAIM_EXECUTOR.schedule(this::runReclaim, RECLAIM_RETRY_DELAY_MS, TimeUnit.MILLISECONDS);
-			}
 			else {
 				_reclaimRunning.set(false);
-				if(_forceReclaimRequested.get() || hasReclaimPressure())
-					scheduleReclaimIfNeeded(_forceReclaimRequested.get());
+				if(shouldRetryReclaim() && _reclaimRunning.compareAndSet(false, true))
+					RECLAIM_EXECUTOR.execute(this::runReclaim);
 			}
 		}
-		Statistics.accumulateOOCMemoryReclaimTime(System.nanoTime() - nanos);
 	}
 
-	private long reclaimUnusedGrantedMemory(boolean force) {
-		List<MemoryAllowance> snapshot;
-		synchronized(this) {
-			if(!force && !hasReclaimPressureLocked())
-				return 0;
-			snapshot = new ArrayList<>(_allowances);
+	private boolean shouldRetryReclaim() {
+		if(!hasReclaimPressure())
+			return false;
+		for(MemoryAllowance allowance : _allowances) {
+			if(allowance instanceof SyncMemoryAllowance sync && sync.hasReservationWaiters())
+				return true;
 		}
+		return false;
+	}
 
-		long reclaimed = 0;
-		for(MemoryAllowance allowance : snapshot) {
-			if(allowance.isShutdown())
-				continue;
-			reclaimed += allowance.reclaimUnused();
-		}
-		if(reclaimed <= 0)
-			return 0;
-
-		List<TargetUpdate> updates;
-		long usedBefore;
-		synchronized(this) {
-			usedBefore = _usedBytes;
-			_usedBytes = Math.max(0, _usedBytes - reclaimed);
-			updates = rebalanceAfterFree();
-		}
-		if(OOCDebug.TRACE_HOT_PATH)
-			System.out.println("[BROKER-RECLAIM] reclaimed=" + reclaimed + " used=" + usedBefore + "->" + _usedBytes);
-		if(updates != null)
-			applyTargetUpdates(updates);
-		notifyReservationWaiters();
-		return reclaimed;
+	private synchronized boolean hasReclaimPressure() {
+		return _usedBytes >= _allowedBytes * RECLAIM_PRESSURE;
 	}
 
 	@Override
@@ -251,7 +220,8 @@ public class GlobalMemoryBroker implements MemoryBroker {
 
 	@Override
 	public void reservationBlocked(MemoryAllowance allowance, long bytes) {
-		scheduleReclaimIfNeeded(true);
+		if(_reclaimRunning.compareAndSet(false, true))
+			RECLAIM_EXECUTOR.execute(this::runReclaim);
 	}
 
 	public void shutdownAllAllowances() {
@@ -376,11 +346,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	}
 
 	private void notifyReservationWaiters() {
-		List<MemoryAllowance> snapshot;
-		synchronized(this) {
-			snapshot = new ArrayList<>(_allowances);
-		}
-		for(MemoryAllowance allowance : snapshot)
+		for(MemoryAllowance allowance : _allowances)
 			if(allowance instanceof SyncMemoryAllowance sync)
 				sync.onBrokerMemoryAvailable();
 	}

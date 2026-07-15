@@ -24,14 +24,11 @@ import org.apache.sysds.runtime.ooc.OOCDebug;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 
 import java.util.ArrayDeque;
-import java.util.Arrays;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.LongAdder;
 
 public class SyncMemoryAllowance implements MemoryAllowance {
 	private static final long RELEASE_TRIM_BUFFER_BYTES = 20_000_000L;
@@ -182,22 +179,20 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			return OOCFuture.completed(null);
 		if(bytes > _consumptionLimit)
 			return OOCFuture.failed(new IllegalArgumentException("Cannot reserve more memory than the consumption limit"));
+		if(_shutdown || _destroyed)
+			return OOCFuture.failed(new IllegalStateException("Cannot reserve memory on closed allowance."));
 		if(_reservationWaiters.isEmpty() && tryReserve(bytes))
 			return OOCFuture.completed(null);
-		return enqueueReservationWaiter(bytes);
-	}
-
-	private OOCFuture<Void> enqueueReservationWaiter(long bytes) {
 		OOCFuture<Void> future = new OOCFuture<>();
 		ReservationWaiter waiter = new ReservationWaiter(bytes, future);
 		_reservationWaiters.add(waiter);
-		if(_shutdown || _destroyed) {
-			if(_reservationWaiters.remove(waiter))
-				future.completeExceptionally(new IllegalStateException("Cannot reserve memory on closed allowance."));
+		if((_shutdown || _destroyed) && _reservationWaiters.remove(waiter)) {
+			future.completeExceptionally(new IllegalStateException("Cannot reserve memory on closed allowance."));
 			return future;
 		}
-		_broker.reservationBlocked(this, bytes);
 		requestReservationDrain();
+		if(!future.isDone())
+			_broker.reservationBlocked(this, bytes);
 		return future;
 	}
 
@@ -417,6 +412,10 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			requestReservationDrain();
 	}
 
+	boolean hasReservationWaiters() {
+		return !_reservationWaiters.isEmpty();
+	}
+
 	private String dbgId() {
 		return getClass().getSimpleName() + "@" + System.identityHashCode(this);
 	}
@@ -471,8 +470,6 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	}
 
 	private boolean removeReservationWaiter(ReservationWaiter waiter) {
-		if(_reservationWaiters.peek() == waiter)
-			return _reservationWaiters.poll() == waiter;
 		return _reservationWaiters.remove(waiter);
 	}
 
