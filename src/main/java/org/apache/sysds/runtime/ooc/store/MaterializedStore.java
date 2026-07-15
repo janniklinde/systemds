@@ -58,35 +58,31 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 	}
 
 	public void publishPinned(int index, T value, long bytes, MemoryAllowance allowance) {
-		if(_complete || _closed)
-			throw new IllegalStateException("Store no longer accepts published items");
-		if(index < 0 || index == Integer.MAX_VALUE)
-			throw new IndexOutOfBoundsException("Invalid index: " + index);
-		BlockEntry entry = _cache.putPinned(_streamId, index, value, bytes, allowance);
-		_cache.unpin(entry, allowance);
-		_publishedCount.incrementAndGet();
-		updatePublished(index + 1);
-		tryForget(index);
+		try(StoreLease<T> ignored = publishPinnedLive(index, value, bytes, allowance)) {
+			// The non-live publication path releases its initial pin immediately.
+		}
 	}
 
 	public void publishPinned(int index, ManagedPayload<T> payload) {
-		payload.transfer();
-		try {
-			publishPinned(index, payload.value(), payload.bytes(), payload.owner());
-		}
-		catch(RuntimeException ex) {
-			if(payload.bytes() > 0)
-				payload.owner().release(payload.bytes());
-			throw ex;
+		try(StoreLease<T> ignored = publishPinnedLive(index, payload)) {
+			// The non-live publication path releases its initial pin immediately.
 		}
 	}
 
 	StoreLease<T> publishPinnedLive(int index, T value, long bytes, MemoryAllowance allowance) {
-		if(_complete || _closed)
-			throw new IllegalStateException("Store no longer accepts published items");
-		if(index < 0 || index == Integer.MAX_VALUE)
-			throw new IndexOutOfBoundsException("Invalid index: " + index);
-		BlockEntry entry = _cache.putPinned(_streamId, index, value, bytes, allowance);
+		BlockEntry entry;
+		try {
+			if(_complete || _closed)
+				throw new IllegalStateException("Store no longer accepts published items");
+			if(index < 0 || index == Integer.MAX_VALUE)
+				throw new IndexOutOfBoundsException("Invalid index: " + index);
+			entry = _cache.putPinned(_streamId, index, value, bytes, allowance);
+		}
+		catch(RuntimeException ex) {
+			if(bytes > 0)
+				allowance.release(bytes);
+			throw ex;
+		}
 		_publishedCount.incrementAndGet();
 		updatePublished(index + 1);
 		return new StoreLease<>(lease -> {
@@ -97,14 +93,7 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 
 	StoreLease<T> publishPinnedLive(int index, ManagedPayload<T> payload) {
 		payload.transfer();
-		try {
-			return publishPinnedLive(index, payload.value(), payload.bytes(), payload.owner());
-		}
-		catch(RuntimeException ex) {
-			if(payload.bytes() > 0)
-				payload.owner().release(payload.bytes());
-			throw ex;
-		}
+		return publishPinnedLive(index, payload.value(), payload.bytes(), payload.owner());
 	}
 
 	public synchronized void complete() {

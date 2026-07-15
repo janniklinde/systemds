@@ -34,6 +34,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntConsumer;
 
 public final class OrderedMaterializedStoreReader<T extends SpillableObject> implements MaterializedStore.StoreReader<T> {
+	private static final Request CLOSED = new Request(-1, OOCFuture.completed(null));
+
 	private final OOCCache _cache;
 	private final long _streamId;
 	private final MaterializedStore.AccessPattern _pattern;
@@ -74,34 +76,68 @@ public final class OrderedMaterializedStoreReader<T extends SpillableObject> imp
 	}
 
 	public boolean hasNext() {
-		checkReady();
 		if(_softOrdering) {
+			checkReady();
 			fillSoft();
 			return _inFlightRequests.get() > 0;
 		}
-		fillStrict();
-		return !_requests.isEmpty();
+		synchronized(this) {
+			checkReady();
+			fillStrict();
+			return !_requests.isEmpty();
+		}
 	}
 
 	public MaterializedStore.Lease<T> next() throws InterruptedException {
-		checkReady();
-		if(_softOrdering)
+		if(_softOrdering) {
+			checkReady();
 			return nextSoft();
-		fillStrict();
-		if(_requests.isEmpty())
-			throw new IllegalStateException("No remaining item");
-		Request request = _requests.peekFirst();
-		BlockEntry entry = awaitEntry(request);
-		_requests.removeFirst();
-		fillStrict();
-		return new StoreLease<>(lease -> release(lease.index(), lease.entry()), request.index, entry);
+		}
+		Request request;
+		synchronized(this) {
+			checkReady();
+			fillStrict();
+			if(_requests.isEmpty())
+				throw new IllegalStateException("No remaining item");
+			request = _requests.removeFirst();
+		}
+		BlockEntry entry;
+		try {
+			entry = awaitEntry(request);
+		}
+		catch(InterruptedException | RuntimeException ex) {
+			releaseWhenReady(request);
+			throw ex;
+		}
+		synchronized(this) {
+			if(_closed) {
+				_cache.unpin(entry, _allowance);
+				throw new IllegalStateException("Reader is closed");
+			}
+			try {
+				fillStrict();
+			}
+			catch(RuntimeException ex) {
+				_cache.unpin(entry, _allowance);
+				throw ex;
+			}
+		}
+		return new StoreLease<>(lease -> release(lease.index(), lease.entryUnsafe()), request.index, entry);
 	}
 
 	@Override
 	public void close() {
-		if(_closed)
-			return;
-		_closed = true;
+		ArrayDeque<Request> pending = new ArrayDeque<>();
+		synchronized(this) {
+			if(_closed)
+				return;
+			_closed = true;
+			if(!_softOrdering) {
+				Request request;
+				while((request = _requests.pollFirst()) != null)
+					pending.addLast(request);
+			}
+		}
 		if(_softOrdering) {
 			Request request;
 			while((request = _readyRequests.poll()) != null) {
@@ -109,16 +145,11 @@ public final class OrderedMaterializedStoreReader<T extends SpillableObject> imp
 					_cache.unpin(request.entry, _allowance);
 				_inFlightRequests.decrementAndGet();
 			}
+			_readyRequests.offer(CLOSED);
 		}
-		else {
-			Request request;
-			while((request = _requests.pollFirst()) != null) {
-				request.future.whenComplete((entry, error) -> {
-					if(entry != null)
-						_cache.unpin(entry, _allowance);
-				});
-			}
-		}
+		else
+			for(Request request : pending)
+				releaseWhenReady(request);
 		_afterClose.run();
 	}
 
@@ -138,6 +169,8 @@ public final class OrderedMaterializedStoreReader<T extends SpillableObject> imp
 		if(_inFlightRequests.get() <= 0)
 			throw new IllegalStateException("No remaining item");
 		Request request = _readyRequests.take();
+		if(request == CLOSED)
+			throw new IllegalStateException("Reader is closed");
 		_inFlightRequests.decrementAndGet();
 		if(request.error != null)
 			throw DMLRuntimeException.of(request.error);
@@ -209,6 +242,13 @@ public final class OrderedMaterializedStoreReader<T extends SpillableObject> imp
 		catch(ExecutionException e) {
 			throw DMLRuntimeException.of(e.getCause());
 		}
+	}
+
+	private void releaseWhenReady(Request request) {
+		request.future.whenComplete((entry, error) -> {
+			if(entry != null)
+				_cache.unpin(entry, _allowance);
+		});
 	}
 
 	private static final class Request {

@@ -71,22 +71,17 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 			callback.close();
 			return;
 		}
-		try {
+		try(callback) {
 			if(callback.isFailure()) {
-				DMLRuntimeException failure;
 				try {
 					callback.get();
-					failure = new DMLRuntimeException("Source stream failed without cause");
 				}
 				catch(DMLRuntimeException ex) {
-					failure = ex;
+					fail(ex);
 				}
-				callback.close();
-				fail(failure);
 				return;
 			}
 			if(callback.isEos()) {
-				callback.close();
 				finish();
 				return;
 			}
@@ -100,54 +95,22 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 	private void publish(OOCStream.QueueCallback<IndexedMatrixValue> callback) {
 		IndexedMatrixValue value = callback.get();
 		int index = _linearize.applyAsInt(value.getIndexes());
-		if(_liveConsumers.isEmpty()) {
-			if(callback instanceof InMemoryQueueCallback managed && managed.getManagedBytes() > 0) {
-				_store.publishPinned(index, managed.extractManagedPayload());
-				managed.close();
-			}
-			else {
-				// To handle not-yet managed callbacks
-				long bytes = serializedSize(value);
-				_allowance.reserveBlocking(bytes);
-				try {
-					_store.publishPinned(index, value, bytes, _allowance);
-				}
-				catch(RuntimeException ex) {
-					_allowance.release(bytes);
-					throw ex;
-				}
-				callback.close();
-			}
-			return;
-		}
-
 		StoreLease<IndexedMatrixValue> lease;
 		if(callback instanceof InMemoryQueueCallback managed && managed.getManagedBytes() > 0) {
 			lease = _store.publishPinnedLive(index, managed.extractManagedPayload());
-			managed.close();
 		}
 		else {
 			// To handle not-yet managed callbacks
 			long bytes = serializedSize(value);
 			_allowance.reserveBlocking(bytes);
-			try {
-				lease = _store.publishPinnedLive(index, value, bytes, _allowance);
-			}
-			catch(RuntimeException ex) {
-				_allowance.release(bytes);
-				throw ex;
-			}
-			callback.close();
+			lease = _store.publishPinnedLive(index, value, bytes, _allowance);
 		}
-		try {
+		try(lease) {
 			for(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> liveConsumer : _liveConsumers) {
 				try(OOCStream.QueueCallback<IndexedMatrixValue> alias = new MaterializedCallback(lease.retain())) {
 					liveConsumer.accept(alias);
 				}
 			}
-		}
-		finally {
-			lease.close();
 		}
 	}
 

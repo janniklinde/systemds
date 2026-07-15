@@ -138,15 +138,12 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	private void publish(OOCStream.QueueCallback<IndexedMatrixValue> callback) {
 		try(callback) {
 			if(callback.isFailure()) {
-				DMLRuntimeException failure;
 				try {
 					callback.get();
-					failure = new DMLRuntimeException("Source stream failed without cause.");
 				}
 				catch(DMLRuntimeException ex) {
-					failure = ex;
+					fail(ex);
 				}
-				fail(failure);
 				return;
 			}
 			if(callback.isEos()) {
@@ -155,8 +152,8 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			}
 			publishTile(callback);
 		}
-		catch(Throwable t) {
-			fail(DMLRuntimeException.of(t));
+		catch(RuntimeException ex) {
+			fail(DMLRuntimeException.of(ex));
 		}
 	}
 
@@ -184,13 +181,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 					+ " index=" + index + " bytes=" + bytes + " readers=" + readers.size()
 					+ " cb=" + System.identityHashCode(callback));
 			_allowance.reserveBlocking(bytes);
-			try {
-				lease = _store.publishPinnedLive(index, value, bytes, _allowance);
-			}
-			catch(RuntimeException ex) {
-				_allowance.release(bytes);
-				throw ex;
-			}
+			lease = _store.publishPinnedLive(index, value, bytes, _allowance);
 		}
 		try {
 			for(LiveReader reader : readers) {

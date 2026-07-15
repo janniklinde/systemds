@@ -95,16 +95,16 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 		finalizer.accept(slot);
 	}
 
-	public OOCFuture<StateLease<T>> putOrTake(int index, ManagedPayload<T> payload, MemoryAllowance leaseAllowance) {
+	public OOCFuture<StoreLease<T>> putOrTake(int index, ManagedPayload<T> payload, MemoryAllowance leaseAllowance) {
 		return putSlotOrTake(index, leaseAllowance, slot -> finalizeOwnedPut(index, slot, payload));
 	}
 
-	public OOCFuture<StateLease<T>> putReferenceOrTake(int index, BlockEntry pinned, MemoryAllowance leaseAllowance) {
+	public OOCFuture<StoreLease<T>> putReferenceOrTake(int index, BlockEntry pinned, MemoryAllowance leaseAllowance) {
 		checkPinned(pinned);
 		return putSlotOrTake(index, leaseAllowance, slot -> finalizeReferencePut(index, slot, pinned));
 	}
 
-	private OOCFuture<StateLease<T>> putSlotOrTake(int index, MemoryAllowance leaseAllowance,
+	private OOCFuture<StoreLease<T>> putSlotOrTake(int index, MemoryAllowance leaseAllowance,
 		Consumer<Slot> finalizer) {
 		Slot putting = null;
 		Slot taken = null;
@@ -117,7 +117,7 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 				putting = new Slot();
 				_slots[index] = putting;
 			}
-			else if(existing._state == Slot.PUT) {
+			else if(existing._putFuture == null) {
 				_slots[index] = null;
 				taken = existing;
 			}
@@ -131,12 +131,12 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 		}
 		if(taken != null)
 			return pinTaken(taken, leaseAllowance);
-		OOCFuture<StateLease<T>> result = new OOCFuture<>();
+		OOCFuture<StoreLease<T>> result = new OOCFuture<>();
 		waitFor.whenComplete((ignored, error) -> retry(() -> putSlotOrTake(index, leaseAllowance, finalizer), result));
 		return result;
 	}
 
-	public OOCFuture<StateLease<T>> take(int index, MemoryAllowance leaseAllowance) {
+	public OOCFuture<StoreLease<T>> take(int index, MemoryAllowance leaseAllowance) {
 		Slot taken = null;
 		OOCFuture<Void> waitFor = null;
 		synchronized(this) {
@@ -146,7 +146,7 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 			Slot existing = _slots[index];
 			if(existing == null)
 				return OOCFuture.completed(null);
-			if(existing._state == Slot.PUT) {
+			if(existing._putFuture == null) {
 				_slots[index] = null;
 				taken = existing;
 			}
@@ -156,47 +156,48 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 		}
 		if(taken != null)
 			return pinTaken(taken, leaseAllowance);
-		OOCFuture<StateLease<T>> result = new OOCFuture<>();
+		OOCFuture<StoreLease<T>> result = new OOCFuture<>();
 		waitFor.whenComplete((ignored, error) -> retry(() -> take(index, leaseAllowance), result));
 		return result;
 	}
 
-	public OOCFuture<StateLease<T>> lease(int index, MemoryAllowance leaseAllowance) {
+	public OOCFuture<StoreLease<T>> lease(int index, MemoryAllowance leaseAllowance) {
 		BlockKey key;
 		synchronized(this) {
 			checkOpen();
 			if(index < 0 || index >= _slots.length)
 				return OOCFuture.completed(null);
 			Slot slot = _slots[index];
-			if(slot == null || slot._state != Slot.PUT)
+			if(slot == null || slot._putFuture != null)
 				return OOCFuture.completed(null);
 			key = slot._key;
 		}
 		OOCFuture<BlockEntry> pinned = StorePinAdmission.pinAdmitted(_cache, key.getStreamId(), key.getSequenceNumber(),
 			leaseAllowance, () -> _closed);
-		OOCFuture<StateLease<T>> result = new OOCFuture<>();
+		OOCFuture<StoreLease<T>> result = new OOCFuture<>();
 		pinned.whenComplete((entry, error) -> {
 			if(error != null)
 				result.completeExceptionally(error);
 			else
-				result.complete(entry == null ? null : new TableLease(entry, leaseAllowance));
+				result.complete(
+					entry == null ? null : new StoreLease<>(entry, () -> _cache.unpin(entry, leaseAllowance)));
 		});
 		return result;
 	}
 
-	public StateLease<T> peek(int index, MemoryAllowance leaseAllowance) {
+	public StoreLease<T> peek(int index, MemoryAllowance leaseAllowance) {
 		BlockKey key;
 		synchronized(this) {
 			checkOpen();
 			if(index < 0 || index >= _slots.length)
 				return null;
 			Slot slot = _slots[index];
-			if(slot == null || slot._state != Slot.PUT)
+			if(slot == null || slot._putFuture != null)
 				return null;
 			key = slot._key;
 		}
 		BlockEntry entry = _cache.pinIfLive(key.getStreamId(), key.getSequenceNumber(), leaseAllowance);
-		return entry == null ? null : new TableLease(entry, leaseAllowance);
+		return entry == null ? null : new StoreLease<>(entry, () -> _cache.unpin(entry, leaseAllowance));
 	}
 
 	public void clear(int index) {
@@ -208,11 +209,10 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 			if(slot == null)
 				return;
 			_slots[index] = null;
-			if(slot._state == Slot.PUT) {
-				slot._state = Slot.REMOVED;
+			if(slot._putFuture == null) {
 				removed = slot;
 			}
-			else if(slot._state == Slot.PUTTING) {
+			else {
 				slot._cleared = true;
 			}
 		}
@@ -232,11 +232,10 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 				if(slot == null)
 					continue;
 				_slots[i] = null;
-				if(slot._state == Slot.PUT) {
-					slot._state = Slot.REMOVED;
+				if(slot._putFuture == null) {
 					toRelease.add(slot);
 				}
-				else if(slot._state == Slot.PUTTING) {
+				else {
 					slot._cleared = true;
 				}
 			}
@@ -276,7 +275,6 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 			slot._tableOwnedKey = true;
 			registerSlotKey(key, index);
 			cleared = slot._cleared;
-			slot._state = cleared ? Slot.REMOVED : Slot.PUT;
 			putFuture = slot._putFuture;
 			slot._putFuture = null;
 		}
@@ -301,7 +299,6 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 			slot._key = pinned.getKey();
 			slot._tableOwnedKey = false;
 			cleared = slot._cleared;
-			slot._state = cleared ? Slot.REMOVED : Slot.PUT;
 			putFuture = slot._putFuture;
 			slot._putFuture = null;
 		}
@@ -315,7 +312,6 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 		synchronized(this) {
 			if(index < _slots.length && _slots[index] == slot)
 				_slots[index] = null;
-			slot._state = Slot.REMOVED;
 			putFuture = slot._putFuture;
 			slot._putFuture = null;
 		}
@@ -323,32 +319,34 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 			putFuture.completeExceptionally(ex);
 	}
 
-	private OOCFuture<StateLease<T>> pinTaken(Slot slot, MemoryAllowance leaseAllowance) {
+	private OOCFuture<StoreLease<T>> pinTaken(Slot slot, MemoryAllowance leaseAllowance) {
 		OOCFuture<BlockEntry> pinned = StorePinAdmission.pinAdmitted(_cache, slot._key.getStreamId(),
 			slot._key.getSequenceNumber(), leaseAllowance, () -> _closed);
-		OOCFuture<StateLease<T>> result = new OOCFuture<>();
+		OOCFuture<StoreLease<T>> result = new OOCFuture<>();
 		pinned.whenComplete((entry, error) -> {
 			Throwable completionError = error;
 			try {
 				releaseSlot(slot);
 			}
-			catch(Throwable releaseError) {
+			catch(RuntimeException releaseError) {
 				if(completionError == null)
 					completionError = releaseError;
 			}
+			if(completionError == null && entry == null)
+				completionError = new IllegalStateException("State table closed while a take was pending.");
 			if(completionError != null) {
 				if(entry != null) {
 					try {
 						_cache.unpin(entry, leaseAllowance);
 					}
-					catch(Throwable ignored) {
+					catch(RuntimeException ignored) {
 						// Preserve the original pin/release failure.
 					}
 				}
 				result.completeExceptionally(completionError);
 				return;
 			}
-			result.complete(entry == null ? null : new TableLease(entry, leaseAllowance));
+			result.complete(entry == null ? null : new StoreLease<>(entry, () -> _cache.unpin(entry, leaseAllowance)));
 		});
 		return result;
 	}
@@ -450,52 +448,13 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 		});
 	}
 
-	private final class TableLease implements StateLease<T> {
-		private final BlockEntry _entry;
-		private final MemoryAllowance _allowance;
-		private boolean _open;
-
-		private TableLease(BlockEntry entry, MemoryAllowance allowance) {
-			_entry = entry;
-			_allowance = allowance;
-			_open = true;
-		}
-
-		@SuppressWarnings("unchecked")
-		@Override
-		public synchronized T value() {
-			if(!_open)
-				throw new IllegalStateException("Lease is closed");
-			return (T) _entry.getData();
-		}
-
-		@Override
-		public long bytes() {
-			return _entry.getSize();
-		}
-
-		@Override
-		public synchronized void close() {
-			if(!_open)
-				return;
-			_open = false;
-			_cache.unpin(_entry, _allowance);
-		}
-	}
-
 	private static final class Slot {
-		private static final byte PUTTING = 0;
-		private static final byte PUT = 1;
-		private static final byte REMOVED = 2;
-
-		private byte _state;
 		private boolean _cleared;
 		private boolean _tableOwnedKey;
 		private BlockKey _key;
 		private OOCFuture<Void> _putFuture;
 
 		private Slot() {
-			_state = PUTTING;
 			_putFuture = new OOCFuture<>();
 		}
 	}

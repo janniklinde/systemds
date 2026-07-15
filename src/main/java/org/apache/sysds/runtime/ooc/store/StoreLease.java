@@ -25,21 +25,34 @@ import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
-public final class StoreLease<T extends SpillableObject> implements MaterializedStore.Lease<T> {
+public final class StoreLease<T extends SpillableObject> implements MaterializedStore.Lease<T>, StateLease<T> {
 	private final Consumer<StoreLease<T>> _releaser;
 	private final int _index;
+	private final T _value;
 	private final BlockEntry _entry;
+	private final long _bytes;
 	private boolean _open;
-	private AtomicInteger _shared;
+	private final AtomicInteger _shared;
 
 	StoreLease(Consumer<StoreLease<T>> releaser, int index, BlockEntry entry) {
-		this(releaser, index, entry, null);
+		this(releaser, index, null, entry, entry.getSize(), new AtomicInteger(1));
 	}
 
-	StoreLease(Consumer<StoreLease<T>> releaser, int index, BlockEntry entry, AtomicInteger shared) {
+	StoreLease(BlockEntry entry, Runnable releaser) {
+		this(ignored -> releaser.run(), -1, null, entry, entry.getSize(), new AtomicInteger(1));
+	}
+
+	StoreLease(T value, long bytes, Runnable releaser) {
+		this(ignored -> releaser.run(), -1, value, null, bytes, new AtomicInteger(1));
+	}
+
+	private StoreLease(Consumer<StoreLease<T>> releaser, int index, T value, BlockEntry entry, long bytes,
+		AtomicInteger shared) {
 		_releaser = releaser;
 		_index = index;
+		_value = value;
 		_entry = entry;
+		_bytes = bytes;
 		_open = true;
 		_shared = shared;
 	}
@@ -51,13 +64,18 @@ public final class StoreLease<T extends SpillableObject> implements Materialized
 
 	@SuppressWarnings("unchecked")
 	@Override
-	public T value() {
+	public synchronized T value() {
 		if(!_open)
 			throw new IllegalStateException("Lease is closed");
-		return (T) _entry.getData();
+		return _entry == null ? _value : (T) _entry.getData();
 	}
 
-	BlockEntry entry() {
+	@Override
+	public long bytes() {
+		return _bytes;
+	}
+
+	synchronized BlockEntry entry() {
 		if(!_open)
 			throw new IllegalStateException("Lease is closed");
 		return _entry;
@@ -68,22 +86,19 @@ public final class StoreLease<T extends SpillableObject> implements Materialized
 	}
 
 	@Override
-	public StoreLease<T> retain() {
+	public synchronized StoreLease<T> retain() {
 		if(!_open)
 			throw new IllegalStateException("Lease is closed");
-		if(_shared == null)
-			_shared = new AtomicInteger(2);
-		else
-			_shared.incrementAndGet();
-		return new StoreLease<>(_releaser, _index, _entry, _shared);
+		_shared.incrementAndGet();
+		return new StoreLease<>(_releaser, _index, _value, _entry, _bytes, _shared);
 	}
 
 	@Override
-	public void close() {
+	public synchronized void close() {
 		if(!_open)
 			return;
 		_open = false;
-		if(_shared == null || _shared.decrementAndGet() == 0)
+		if(_shared.decrementAndGet() == 0)
 			_releaser.accept(this);
 	}
 }

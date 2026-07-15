@@ -19,7 +19,6 @@
 
 package org.apache.sysds.runtime.ooc.store;
 
-import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
@@ -32,7 +31,7 @@ public final class JoinTable {
 
 	public static OOCFuture<Match> putIfAbsent(StateTable<IndexedMatrixValue> table, int slot,
 		OOCStream.QueueCallback<IndexedMatrixValue> tile, MemoryAllowance allowance) {
-		if(tile instanceof MaterializedCallback pinned)
+		if(tile instanceof MaterializedCallback pinned && pinned.pinnedEntry() != null)
 			return installReferenceOrTake(table, slot, pinned, allowance);
 		ManagedPayload<IndexedMatrixValue> payload;
 		if(tile instanceof InMemoryQueueCallback managed && managed.getManagedBytes() > 0) {
@@ -47,7 +46,15 @@ public final class JoinTable {
 			tile.close();
 		}
 		OOCFuture<Match> result = new OOCFuture<>();
-		table.putOrTake(slot, payload, allowance).whenComplete((lease, error) -> {
+		OOCFuture<StoreLease<IndexedMatrixValue>> matched;
+		try {
+			matched = table.putOrTake(slot, payload, allowance);
+		}
+		catch(RuntimeException ex) {
+			payload.release();
+			return OOCFuture.failed(ex);
+		}
+		matched.whenComplete((lease, error) -> {
 			if(error != null) {
 				payload.release();
 				result.completeExceptionally(error);
@@ -55,7 +62,9 @@ public final class JoinTable {
 			else if(lease == null)
 				result.complete(null); //installed: the reservation transferred into the table
 			else
-				result.complete(new Match(new PayloadCallback(payload), LeaseQueueCallbacks.state(lease)));
+				result.complete(new Match(
+					new MaterializedCallback(new StoreLease<>(payload.value(), payload.bytes(), payload::release)),
+					new MaterializedCallback(lease)));
 		});
 		return result;
 	}
@@ -70,7 +79,15 @@ public final class JoinTable {
 	private static OOCFuture<Match> installReferenceOrTake(StateTable<IndexedMatrixValue> table,
 		int slot, MaterializedCallback pinned, MemoryAllowance allowance) {
 		OOCFuture<Match> result = new OOCFuture<>();
-		table.putReferenceOrTake(slot, pinned.pinnedEntry(), allowance).whenComplete((lease, error) -> {
+		OOCFuture<StoreLease<IndexedMatrixValue>> matched;
+		try {
+			matched = table.putReferenceOrTake(slot, pinned.pinnedEntry(), allowance);
+		}
+		catch(RuntimeException ex) {
+			pinned.close();
+			return OOCFuture.failed(ex);
+		}
+		matched.whenComplete((lease, error) -> {
 			if(error != null) {
 				pinned.close();
 				result.completeExceptionally(error);
@@ -80,7 +97,7 @@ public final class JoinTable {
 				result.complete(null);
 			}
 			else
-				result.complete(new Match(pinned, LeaseQueueCallbacks.state(lease)));
+				result.complete(new Match(pinned, new MaterializedCallback(lease)));
 		});
 		return result;
 	}
@@ -106,59 +123,6 @@ public final class JoinTable {
 
 		public OOCStream.QueueCallback<IndexedMatrixValue> partner() {
 			return _partner;
-		}
-	}
-
-	/**
-	 * Wraps an unsettled {@link ManagedPayload} as a callback: the last close across all
-	 * {@code keepOpen} aliases releases the detached reservation.
-	 */
-	private static final class PayloadCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
-		private final ManagedPayload<IndexedMatrixValue> _payload;
-		private DMLRuntimeException _failure;
-		private int _references = 1;
-		private boolean _closed;
-
-		private PayloadCallback(ManagedPayload<IndexedMatrixValue> payload) {
-			_payload = payload;
-		}
-
-		@Override
-		public IndexedMatrixValue get() {
-			if(_failure != null)
-				throw _failure;
-			return _payload.value();
-		}
-
-		@Override
-		public synchronized OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
-			if(_closed)
-				throw new IllegalStateException("Cannot keep open a closed callback");
-			_references++;
-			return this;
-		}
-
-		@Override
-		public synchronized void close() {
-			if(_closed || --_references > 0)
-				return;
-			_closed = true;
-			_payload.release();
-		}
-
-		@Override
-		public void fail(DMLRuntimeException failure) {
-			_failure = failure;
-		}
-
-		@Override
-		public boolean isEos() {
-			return false;
-		}
-
-		@Override
-		public boolean isFailure() {
-			return _failure != null;
 		}
 	}
 

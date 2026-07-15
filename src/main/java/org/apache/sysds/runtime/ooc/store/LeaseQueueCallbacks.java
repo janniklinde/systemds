@@ -24,8 +24,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 
 /**
- * Common adapters from OOC store/table leases to stream callbacks. Store leases retain one physical
- * lease per alias; state-table leases share one taken lease and consume it when the last alias closes.
+ * Common adapters from OOC store leases to stream callbacks.
  */
 public final class LeaseQueueCallbacks {
 	private LeaseQueueCallbacks() {
@@ -41,11 +40,6 @@ public final class LeaseQueueCallbacks {
 	@SuppressWarnings("unchecked")
 	private static StoreLease<IndexedMatrixValue> castStoreLease(StoreLease<?> lease) {
 		return (StoreLease<IndexedMatrixValue>) lease;
-	}
-
-	public static OOCStream.QueueCallback<IndexedMatrixValue> state(
-		StateLease<IndexedMatrixValue> lease) {
-		return new StateLeaseBackedCallback(lease);
 	}
 
 	public static MaterializedCallback pinned(StoreLease<IndexedMatrixValue> lease) {
@@ -99,52 +93,4 @@ public final class LeaseQueueCallbacks {
 		}
 	}
 
-	private static final class StateLeaseBackedCallback implements OOCStream.QueueCallback<IndexedMatrixValue> {
-		private final StateLease<IndexedMatrixValue> _lease;
-		private DMLRuntimeException _failure;
-		private int _references = 1;
-		private boolean _closed;
-
-		private StateLeaseBackedCallback(StateLease<IndexedMatrixValue> lease) {
-			_lease = lease;
-		}
-
-		@Override
-		public IndexedMatrixValue get() {
-			if(_failure != null)
-				throw _failure;
-			return _lease.value();
-		}
-
-		@Override
-		public synchronized OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
-			if(_closed)
-				throw new IllegalStateException("Cannot keep open a closed callback");
-			_references++;
-			return this;
-		}
-
-		@Override
-		public synchronized void close() {
-			if(_closed || --_references > 0)
-				return;
-			_closed = true;
-			_lease.close();
-		}
-
-		@Override
-		public void fail(DMLRuntimeException failure) {
-			_failure = failure;
-		}
-
-		@Override
-		public boolean isEos() {
-			return false;
-		}
-
-		@Override
-		public boolean isFailure() {
-			return _failure != null;
-		}
-	}
 }
