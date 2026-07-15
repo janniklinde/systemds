@@ -33,7 +33,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public final class MaterializedStore<T extends SpillableObject> implements AutoCloseable {
+public final class MaterializedStore<T extends SpillableObject> {
 	private final OOCCache _cache;
 	private final long _streamId;
 	private final ArrayList<StoreReader<T>> _registeredReaders;
@@ -48,8 +48,8 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 	private volatile boolean _closed;
 
 	public MaterializedStore(OOCCache cache, long streamId) {
-		this._cache = cache;
-		this._streamId = streamId;
+		_cache = cache;
+		_streamId = streamId;
 		_registeredReaders = new ArrayList<>();
 		_forgotten = new BitSet();
 		_published = new AtomicInteger();
@@ -169,7 +169,6 @@ public final class MaterializedStore<T extends SpillableObject> implements AutoC
 		return _complete ? _completedSize : _published.get();
 	}
 
-	@Override
 	public void close() {
 		List<StoreReader<T>> localReaders;
 		synchronized(this) {
