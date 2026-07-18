@@ -57,7 +57,14 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 	}
 
 	public void attach(OOCStream<IndexedMatrixValue> source) {
-		source.setSubscriber(this);
+		try {
+			source.setSubscriber(this);
+		}
+		catch(Throwable failure) {
+			DMLRuntimeException wrapped = DMLRuntimeException.of(failure);
+			fail(wrapped);
+			throw wrapped;
+		}
 	}
 
 	public OOCFuture<Void> completion() {
@@ -120,6 +127,7 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 			_store.complete();
 		}
 		catch(RuntimeException ex) {
+			_store.failMaterialization(ex);
 			deliverEos(DMLRuntimeException.of(ex));
 			_completion.completeExceptionally(ex);
 			return;
@@ -131,6 +139,7 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 	private void fail(DMLRuntimeException failure) {
 		if(!_done.compareAndSet(false, true))
 			return;
+		_store.failMaterialization(failure);
 		deliverEos(failure);
 		_completion.completeExceptionally(failure);
 	}
