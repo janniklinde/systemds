@@ -21,10 +21,8 @@ package org.apache.sysds.runtime.ooc.planning;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.EnumMap;
 import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
@@ -58,16 +56,12 @@ public final class OOCPlanner {
 		for(OOCPrimitive.OOCMaterializedInputRequest request : primitive.requiredMaterializedInputs()) {
 			OOCStreamable<IndexedMatrixValue> input = (OOCStreamable<IndexedMatrixValue>) primitive
 				.getInput(request.inputIndex());
-			MaterializeOOCPrimitive boundary = boundaries.compute(input, (k, v) -> {
-				if(v == null) {
-					MaterializeOOCPrimitive p = new MaterializeOOCPrimitive(input, request.layout(),
-						primitive.getContext());
-					primitive.transferInputHandle(request.inputIndex());
-					return p;
-				}
-				primitive.discardInputHandle(request.inputIndex());
-				return v;
-			});
+			MaterializeOOCPrimitive boundary = boundaries.get(input);
+			if(boundary == null) {
+				boundary = new MaterializeOOCPrimitive(input, request.layout(), primitive.getContext());
+				boundaries.put(input, boundary);
+			}
+			primitive.discardInputHandle(request.inputIndex());
 			boundary.registerRequest(request.expectedReaders());
 			primitive.installMaterializedInput(request.inputIndex(), boundary);
 		}
