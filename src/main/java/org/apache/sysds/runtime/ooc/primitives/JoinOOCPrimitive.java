@@ -94,10 +94,8 @@ public class JoinOOCPrimitive extends OOCPrimitive {
 		CompletableFuture<Void> processing = OOCInstructionUtils.submitCloseableOOCTasks(matches, (JoinWork work) -> {
 			IndexedMatrixValue mleft = work._left.get();
 			IndexedMatrixValue mright = work._right.get();
-			OOCUtils.enqueueExact(output,
-				new IndexedMatrixValue(mleft.getIndexes(),
-					_operation.apply((MatrixBlock) mleft.getValue(), (MatrixBlock) mright.getValue())),
-				work._budget);
+			OOCUtils.enqueueExact(output, new IndexedMatrixValue(mleft.getIndexes(),
+				_operation.apply((MatrixBlock) mleft.getValue(), (MatrixBlock) mright.getValue())), work._budget);
 		}, getContext());
 		CompletableFuture.allOf(processing, _pendingCompletion).thenRun(() -> {
 			try {
