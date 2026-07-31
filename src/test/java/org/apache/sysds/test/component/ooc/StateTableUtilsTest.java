@@ -78,13 +78,13 @@ public class StateTableUtilsTest {
 		_source.put(0, new ManagedPayload<>(tile(1.0), TILE_BYTES, _producer));
 		StoreLease<IndexedMatrixValue> pinned = _source.peek(0, _reader);
 		Assert.assertNotNull(pinned);
-		Assert.assertNull(StateTableUtils.putOrTake(_table, 0, new MaterializedCallback(pinned), _reader)
+		Assert.assertNull(StateTableUtils.putOrTake(_table, 0, new MaterializedCallback<>(pinned), _reader)
 			.get(WAIT_SECONDS, TimeUnit.SECONDS));
 		Assert.assertEquals(0, _reader.getUsedMemory());
 
 		_producer.reserveBlocking(TILE_BYTES);
 		StateTableUtils.Match referenced = StateTableUtils
-			.putOrTake(_table, 0, new InMemoryQueueCallback(tile(2.0), null, _producer, TILE_BYTES), _reader)
+			.putOrTake(_table, 0, new InMemoryQueueCallback<>(tile(2.0), null, _producer, TILE_BYTES), _reader)
 			.get(WAIT_SECONDS, TimeUnit.SECONDS);
 		Assert.assertNotNull(referenced);
 		try(OOCStream.QueueCallback<IndexedMatrixValue> left = referenced.left();
@@ -95,7 +95,7 @@ public class StateTableUtilsTest {
 
 		_producer.reserveBlocking(TILE_BYTES);
 		Assert.assertNull(StateTableUtils
-			.putOrTake(_table, 1, new InMemoryQueueCallback(tile(3.0), null, _producer, TILE_BYTES), _reader)
+			.putOrTake(_table, 1, new InMemoryQueueCallback<>(tile(3.0), null, _producer, TILE_BYTES), _reader)
 			.get(WAIT_SECONDS, TimeUnit.SECONDS));
 		StateTableUtils.Match copied = StateTableUtils
 			.putOrTake(_table, 1, new OOCStream.SimpleQueueCallback<>(tile(4.0), null), _reader)
