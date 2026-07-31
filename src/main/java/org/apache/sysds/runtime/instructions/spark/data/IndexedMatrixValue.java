@@ -98,6 +98,14 @@ public class IndexedMatrixValue implements SpillableObject, Serializable
 	}
 
 	@Override
+	public long size() {
+		//the charge has to cover what the block holds in memory, not what it would take on disk: a dense-allocated
+		//block with few non-zeros serializes sparse and would otherwise be charged a fraction of its footprint
+		MatrixBlock block = (MatrixBlock) _value;
+		return Math.max(block.getExactSerializedSize(), block.getInMemorySize());
+	}
+
+	@Override
 	public void discard() {
 		_value = null;
 	}
