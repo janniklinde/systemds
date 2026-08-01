@@ -126,6 +126,47 @@ public class MaterializedStoreTest {
 	}
 
 	@Test
+	public void testLiveIndexedReader() throws Exception {
+		IndexedMaterializedStoreReader<IndexedMatrixValue> reader = _store
+			.openLiveIndexedReader(new CountingLiveness(1, 1));
+		_store.sealReaders();
+		OOCStreamMaterializer materializer = new OOCStreamMaterializer(_store, indexes -> 0, _materializerAllowance);
+		_producer.reserveBlocking(TILE_BYTES);
+		materializer.accept(new InMemoryQueueCallback<>(tile(0, 7), null, _producer, TILE_BYTES));
+
+		Assert.assertFalse(_store.completion().isDone());
+		try(StoreLease<IndexedMatrixValue> lease = reader.request(0, _readerAllowance).get(WAIT_SECONDS,
+			TimeUnit.SECONDS)) {
+			Assert.assertEquals(7, lease.value().getValue().get(0, 0), 0);
+		}
+		OOCCacheTestUtils.await(() -> _cache.getOwnedCacheSize() == 0, WAIT_SECONDS);
+		materializer.accept(OOCStream.eos(null));
+		materializer.completion().get(WAIT_SECONDS, TimeUnit.SECONDS);
+	}
+
+	@Test
+	public void testLateMaterializedReader() throws Exception {
+		MaterializedStore<IndexedMatrixValue> store = new MaterializedStore<>(_cache,
+			CachingStream._streamSeq.getNextID(), 1, 1);
+		IndexedMaterializedStoreReader<IndexedMatrixValue> live = store
+			.openLiveIndexedReader(new CountingLiveness(1, 1));
+		OOCStreamMaterializer materializer = new OOCStreamMaterializer(store, indexes -> 0, _materializerAllowance);
+		_producer.reserveBlocking(TILE_BYTES);
+		materializer.accept(new InMemoryQueueCallback<>(tile(0, 7), null, _producer, TILE_BYTES));
+		store.registerConsumer(1);
+		materializer.accept(OOCStream.eos(null));
+		IndexedMaterializedStoreReader<IndexedMatrixValue> late = store.openIndexedReader(new CountingLiveness(1, 1));
+
+		for(IndexedMaterializedStoreReader<IndexedMatrixValue> reader : List.of(live, late))
+			try(StoreLease<IndexedMatrixValue> lease = reader.request(0, _readerAllowance).get(WAIT_SECONDS,
+				TimeUnit.SECONDS)) {
+				Assert.assertEquals(7, lease.value().getValue().get(0, 0), 0);
+			}
+		store.close();
+		store.close();
+	}
+
+	@Test
 	public void testOrderedReaderRetries() throws Exception {
 		OOCStreamMaterializer materializer = new OOCStreamMaterializer(_store,
 			indexes -> (int) indexes.getRowIndex() - 1, _materializerAllowance);
