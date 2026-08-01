@@ -195,6 +195,45 @@ public class OOCPrimitiveTest {
 	}
 
 	@Test
+	public void testRepartitionSplitAndAssemble() {
+		SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
+		SubscribableTaskQueue<IndexedMatrixValue> split = new SubscribableTaskQueue<>();
+		SubscribableTaskQueue<IndexedMatrixValue> output = new SubscribableTaskQueue<>();
+		input.setData(new MatrixObject(ValueType.FP64, "/dev/null",
+			new MetaDataFormat(new MatrixCharacteristics(4, 4, 4), FileFormat.BINARY)));
+		split.setData(new MatrixObject(ValueType.FP64, "/dev/null",
+			new MetaDataFormat(new MatrixCharacteristics(4, 4, 2), FileFormat.BINARY)));
+		output.setData(new MatrixObject(ValueType.FP64, "/dev/null",
+			new MetaDataFormat(new MatrixCharacteristics(4, 4, 4), FileFormat.BINARY)));
+		MatrixBlock block = new MatrixBlock(4, 4, false);
+		for(int row = 0; row < 4; row++)
+			for(int col = 0; col < 4; col++)
+				block.set(row, col, row * 4 + col + 1);
+		input.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 1), block));
+		input.closeInput();
+
+		OOCInstructionUtils.repartition(input, split, ignored -> 1, (tile, emit) -> {
+			for(int row = 0; row < 2; row++)
+				for(int col = 0; col < 2; col++)
+					emit.copy(new MatrixIndexes(row + 1L, col + 1L), row * 2, col * 2, 2, 2, 0, 0);
+		}, new StreamContext());
+		OOCInstructionUtils.repartition(split, output, ignored -> 4, (tile, emit) -> {
+			int row = Math.toIntExact(tile.getIndexes().getRowIndex() - 1);
+			int col = Math.toIntExact(tile.getIndexes().getColumnIndex() - 1);
+			emit.copy(new MatrixIndexes(1, 1), 0, 0, 2, 2, row * 2, col * 2);
+		}, new StreamContext());
+
+		output.start();
+		try(OOCStream.QueueCallback<IndexedMatrixValue> callback = output.dequeueCB()) {
+			MatrixBlock result = (MatrixBlock) callback.get().getValue();
+			for(int row = 0; row < 4; row++)
+				for(int col = 0; col < 4; col++)
+					Assert.assertEquals(row * 4 + col + 1, result.get(row, col), 0);
+		}
+		Assert.assertNull(output.dequeueCB());
+	}
+
+	@Test
 	public void testReduce() {
 		SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
 		SubscribableTaskQueue<MatrixBlock> output = new SubscribableTaskQueue<>();
