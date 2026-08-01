@@ -113,6 +113,15 @@ public final class MaterializedStore<T extends SpillableObject> {
 				+ " published items for logical range [0, " + _completedSize + ")");
 		_complete = true;
 		_completion.complete(null);
+		if(_autoSealReaders && _pendingReaders == 0)
+			sealReaders();
+	}
+
+	public synchronized void registerConsumer(int expectedReaders) {
+		if(_readersSealed || _closed)
+			throw new IllegalStateException("Store no longer accepts consumers");
+		_pendingReaders += expectedReaders;
+		_consumers++;
 	}
 
 	void failMaterialization(Throwable error) {
@@ -157,6 +166,18 @@ public final class MaterializedStore<T extends SpillableObject> {
 		return reader;
 	}
 
+	public synchronized IndexedMaterializedStoreReader<T> openLiveIndexedReader(Liveness liveness) {
+		if(_closed)
+			throw new IllegalStateException("Store is closed");
+		if(_readersSealed)
+			throw new IllegalStateException("Store no longer accepts new readers");
+		IndexedMaterializedStoreReader<T> reader = new IndexedMaterializedStoreReader<>(_cache, _streamId, this::size,
+			liveness, this::forgetAfterReaderClose, this::tryForget);
+		_registeredReaders.add(reader);
+		readerRegistered();
+		return reader;
+	}
+
 	public OOCFuture<StoreLease<T>> requestPublished(int index, MemoryAllowance allowance) {
 		if(_closed)
 			throw new IllegalStateException("Store is closed");
@@ -194,7 +215,7 @@ public final class MaterializedStore<T extends SpillableObject> {
 			return;
 		if(_pendingReaders <= 0)
 			throw new IllegalStateException("More materialized readers opened than declared.");
-		if(--_pendingReaders == 0)
+		if(--_pendingReaders == 0 && _complete)
 			sealReaders();
 	}
 
