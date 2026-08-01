@@ -73,6 +73,14 @@ public class TSMMOOCInstruction extends ComputationOOCInstruction {
 			processSingleOutputTileInstruction(ec, min);
 			return;
 		}
+		if(min.getDataCharacteristics().dimsKnown() && min.getDataCharacteristics().getBlocksize() > 0) {
+			OOCStream<IndexedMatrixValue> out = createWritableStream();
+			ec.getMatrixObject(output).setStreamHandle(out);
+			BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
+			OOCInstructionUtils.tsmm(min.getStreamable(), out, _type, (AggregateBinaryOperator) _optr, plus,
+				getContext());
+			return;
+		}
 
 		int blocksPerJoinGroup = _type.isLeft() ? numColBlocks : numRowBlocks;
 		int partialsPerOutput = _type.isLeft() ? numRowBlocks : numColBlocks;
