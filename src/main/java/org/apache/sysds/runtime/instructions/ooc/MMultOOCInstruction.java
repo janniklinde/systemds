@@ -67,28 +67,30 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 			min.getDataCharacteristics().getRows() > 0 && min.getDataCharacteristics().getCols() > 0 &&
 			min.getDataCharacteristics().getBlocksize() > 0 && vin.getDataCharacteristics().getCols() > 0 &&
 			min.getDataCharacteristics().getCols() == vin.getDataCharacteristics().getRows() &&
-			min.getDataCharacteristics().getBlocksize() == vin.getDataCharacteristics().getBlocksize() &&
-			vin.getDataCharacteristics().getNumColBlocks() == 1) {
-			OOCStream<IndexedMatrixValue> partials = createWritableStream();
+			min.getDataCharacteristics().getBlocksize() == vin.getDataCharacteristics().getBlocksize()) {
 			OOCStream<IndexedMatrixValue> out = createWritableStream();
-			partials.setData(min);
 			ec.getMatrixObject(output).setStreamHandle(out);
-			OOCInstructionUtils.indexedBroadcastMap(min.getStreamable(), vin.getStreamable(), partials,
-				left -> Math.toIntExact(left.getIndexes().getColumnIndex() - 1),
-				() -> new CountingLiveness(Math.toIntExact(vin.getDataCharacteristics().getNumRowBlocks()),
-					Math.toIntExact(min.getDataCharacteristics().getNumRowBlocks())),
-				(left, right) -> {
-					MatrixBlock leftBlock = (MatrixBlock) left.getValue();
-					MatrixBlock rightBlock = (MatrixBlock) right.getValue();
-					MatrixBlock partial = leftBlock.aggregateBinaryOperations(leftBlock, rightBlock, new MatrixBlock(),
-						(AggregateBinaryOperator) _optr);
-					MatrixIndexes indexes = left.getIndexes();
-					return new IndexedMatrixValue(new MatrixIndexes(indexes.getRowIndex(), indexes.getColumnIndex()),
-						partial);
-				}, getContext());
 			BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
-			OOCInstructionUtils.rowGroupedReduce(partials, out,
-				(left, right) -> left.binaryOperations(plus, right, new MatrixBlock()), getContext());
+			if(vin.getDataCharacteristics().getNumColBlocks() == 1) {
+				OOCStream<IndexedMatrixValue> partials = createWritableStream();
+				partials.setData(min);
+				OOCInstructionUtils.indexedBroadcastMap(min.getStreamable(), vin.getStreamable(), partials,
+					left -> Math.toIntExact(left.getIndexes().getColumnIndex() - 1),
+					() -> new CountingLiveness(Math.toIntExact(vin.getDataCharacteristics().getNumRowBlocks()),
+						Math.toIntExact(min.getDataCharacteristics().getNumRowBlocks())),
+					(left, right) -> {
+						MatrixBlock leftBlock = (MatrixBlock) left.getValue();
+						MatrixBlock rightBlock = (MatrixBlock) right.getValue();
+						MatrixBlock partial = leftBlock.aggregateBinaryOperations(leftBlock, rightBlock,
+							new MatrixBlock(), (AggregateBinaryOperator) _optr);
+						return new IndexedMatrixValue(left.getIndexes(), partial);
+					}, getContext());
+				OOCInstructionUtils.rowGroupedReduce(partials, out,
+					(left, right) -> left.binaryOperations(plus, right, new MatrixBlock()), getContext());
+			}
+			else
+				OOCInstructionUtils.matrixMultiply(min.getStreamable(), vin.getStreamable(), out,
+					(AggregateBinaryOperator) _optr, plus, getContext());
 			return;
 		}
 
