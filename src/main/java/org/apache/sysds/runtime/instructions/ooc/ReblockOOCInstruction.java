@@ -27,61 +27,91 @@ import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class ReblockOOCInstruction extends ComputationOOCInstruction {
-	private int blen;
+	private final int blen;
 
-	private ReblockOOCInstruction(Operator op, CPOperand in, CPOperand out, 
-		int br, int bc, String opcode, String instr)
-	{
+	private ReblockOOCInstruction(Operator op, CPOperand in, CPOperand out, int blocksize, String opcode,
+		String instr) {
 		super(OOCType.Reblock, op, in, out, opcode, instr);
-		blen = br;
-		blen = bc;
+		blen = blocksize;
 	}
 
 	public static ReblockOOCInstruction parseInstruction(String str) {
-		String parts[] = InstructionUtils.getInstructionPartsWithValueType(str);
+		String[] parts = InstructionUtils.getInstructionPartsWithValueType(str);
 		String opcode = parts[0];
 		if(!opcode.equals(Opcodes.RBLK.toString()))
 			throw new DMLRuntimeException("Incorrect opcode for ReblockOOCInstruction:" + opcode);
 
 		CPOperand in = new CPOperand(parts[1]);
 		CPOperand out = new CPOperand(parts[2]);
-		int blen=Integer.parseInt(parts[3]);
-		return new ReblockOOCInstruction(null, in, out, blen, blen, opcode, str);
+		int blen = Integer.parseInt(parts[3]);
+		return new ReblockOOCInstruction(null, in, out, blen, opcode, str);
 	}
 
 	@Override
 	public void processInstruction(ExecutionContext ec) {
-		//set the output characteristics
 		MatrixObject min = ec.getMatrixObject(input1);
 		DataCharacteristics mc = ec.getDataCharacteristics(input1.getName());
 		DataCharacteristics mcOut = ec.getDataCharacteristics(output.getName());
 		mcOut.set(mc.getRows(), mc.getCols(), blen, mc.getNonZeros());
 
-		//get the source format from the meta data
-		//MetaDataFormat iimd = (MetaDataFormat) min.getMetaData();
-		//TODO support other formats than binary 
-		
-		//create queue, spawn thread for asynchronous reading, and return
-		OOCStream<IndexedMatrixValue> q = new SourceOOCStream();
+		SourceOOCStream source = new SourceOOCStream();
+		source.setData(min);
 		OOCIOHandler io = OOCCacheManager.getIOHandler();
-		OOCIOHandler.SourceReadRequest req = new OOCIOHandler.SourceReadRequest(
-			min.getFileName(), Types.FileFormat.BINARY, mc.getRows(), mc.getCols(), blen, mc.getNonZeros(),
-			Long.MAX_VALUE, true, q);
+		OOCIOHandler.SourceReadRequest req = new OOCIOHandler.SourceReadRequest(min.getFileName(),
+			Types.FileFormat.BINARY, mc.getRows(), mc.getCols(), mc.getBlocksize(), mc.getNonZeros(), Long.MAX_VALUE,
+			true, source);
 		io.scheduleSourceRead(req).whenComplete((res, err) -> {
-			if (err != null) {
+			if(err != null) {
 				Exception ex = err instanceof Exception ? (Exception) err : new Exception(err);
-				q.propagateFailure(new DMLRuntimeException(ex));
+				source.propagateFailure(new DMLRuntimeException(ex));
 			}
 		});
-		
+
 		MatrixObject mout = ec.getMatrixObject(output);
-		mout.setStreamHandle(q);
+		if(!mc.dimsKnown() || mc.getBlocksize() <= 0 || blen <= 0 || mc.getBlocksize() == blen) {
+			mout.setStreamHandle(source);
+			return;
+		}
+
+		OOCStream<IndexedMatrixValue> result = createWritableStream();
+		mout.setStreamHandle(result);
+		int inputBlen = mc.getBlocksize();
+		OOCInstructionUtils.repartition(source, result, outputIndex -> {
+			long outputRowStart = (outputIndex.getRowIndex() - 1) * blen;
+			long outputColStart = (outputIndex.getColumnIndex() - 1) * blen;
+			long outputRowEnd = Math.min(mc.getRows(), outputRowStart + blen) - 1;
+			long outputColEnd = Math.min(mc.getCols(), outputColStart + blen) - 1;
+			int rowFragments = (int) (outputRowEnd / inputBlen - outputRowStart / inputBlen + 1);
+			int colFragments = (int) (outputColEnd / inputBlen - outputColStart / inputBlen + 1);
+			return rowFragments * colFragments;
+		}, (tile, emit) -> {
+			MatrixBlock block = (MatrixBlock) tile.getValue();
+			long inputRowStart = (tile.getIndexes().getRowIndex() - 1) * inputBlen;
+			long inputColStart = (tile.getIndexes().getColumnIndex() - 1) * inputBlen;
+			long inputRowEnd = inputRowStart + block.getNumRows();
+			long inputColEnd = inputColStart + block.getNumColumns();
+			for(long outputRow = inputRowStart / blen; outputRow <= (inputRowEnd - 1) / blen; outputRow++)
+				for(long outputCol = inputColStart / blen; outputCol <= (inputColEnd - 1) / blen; outputCol++) {
+					long outputRowStart = outputRow * blen;
+					long outputColStart = outputCol * blen;
+					long rowStart = Math.max(inputRowStart, outputRowStart);
+					long colStart = Math.max(inputColStart, outputColStart);
+					int rows = (int) (Math.min(inputRowEnd, outputRowStart + blen) - rowStart);
+					int cols = (int) (Math.min(inputColEnd, outputColStart + blen) - colStart);
+					emit.copy(new MatrixIndexes(outputRow + 1, outputCol + 1), (int) (rowStart - inputRowStart),
+						(int) (colStart - inputColStart), rows, cols, (int) (rowStart - outputRowStart),
+						(int) (colStart - outputColStart));
+				}
+		}, getContext());
 	}
 }
