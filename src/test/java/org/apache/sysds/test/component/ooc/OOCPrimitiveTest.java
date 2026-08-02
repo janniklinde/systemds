@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.common.Types.FileFormat;
 import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.lops.MMTSJ.MMTSJType;
@@ -54,6 +55,7 @@ import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 import org.apache.sysds.runtime.ooc.stream.FilteredOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
+import org.apache.sysds.utils.Statistics;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -231,6 +233,56 @@ public class OOCPrimitiveTest {
 					Assert.assertEquals(row * 4 + col + 1, result.get(row, col), 0);
 		}
 		Assert.assertNull(output.dequeueCB());
+	}
+
+	@Test
+	public void testRepartitionSpill() throws InterruptedException {
+		OOCCacheManager.reset();
+		boolean statistics = DMLScript.OOC_STATISTICS;
+		DMLScript.OOC_STATISTICS = true;
+		Statistics.resetOOCEvictionStats();
+		OOCCacheManager.getGlobalCache().updateLimits(2_000_000, 100_000);
+		try {
+			SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> output = new SubscribableTaskQueue<>();
+			input.setData(new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(800, 400, 200), FileFormat.BINARY)));
+			output.setData(new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(800, 200, 200), FileFormat.BINARY)));
+			for(int row = 1; row <= 4; row++) {
+				MatrixBlock block = new MatrixBlock(200, 100, row * 10d + 1);
+				input.enqueue(new IndexedMatrixValue(new MatrixIndexes(row, 1), block));
+			}
+
+			OOCInstructionUtils.repartition(input, output, ignored -> 2, (tile, emit) -> {
+				int col = Math.toIntExact(tile.getIndexes().getColumnIndex() - 1);
+				emit.copy(new MatrixIndexes(tile.getIndexes().getRowIndex(), 1), 0, 0, 200, 100, 0, col * 100);
+			}, new StreamContext());
+			output.start();
+			for(int attempt = 0; attempt < 100 && Statistics.getOOCEvictionWriteCount() == 0; attempt++)
+				Thread.sleep(10);
+			Assert.assertTrue("Expected repartition state to spill", Statistics.getOOCEvictionWriteCount() > 0);
+			for(int row = 1; row <= 4; row++) {
+				MatrixBlock block = new MatrixBlock(200, 100, row * 10d + 2);
+				input.enqueue(new IndexedMatrixValue(new MatrixIndexes(row, 2), block));
+			}
+			input.closeInput();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = output.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue value = current.get();
+					MatrixBlock block = (MatrixBlock) value.getValue();
+					Assert.assertEquals(value.getIndexes().getRowIndex() * 10 + 1, block.get(0, 0), 0);
+					Assert.assertEquals(value.getIndexes().getRowIndex() * 10 + 2, block.get(0, 199), 0);
+					blocks++;
+				}
+			Assert.assertEquals(4, blocks);
+		}
+		finally {
+			OOCCacheManager.reset();
+			DMLScript.OOC_STATISTICS = statistics;
+		}
 	}
 
 	@Test
