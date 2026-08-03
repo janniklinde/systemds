@@ -31,15 +31,19 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 public abstract class OOCPrimitive {
 	private final StreamContext _context;
@@ -179,6 +183,40 @@ public abstract class OOCPrimitive {
 
 	protected final boolean hasFailed() {
 		return _failed.get();
+	}
+
+	/**
+	 * Emits a mapped output while preserving an unchanged input callback. Returning the input MatrixBlock means
+	 * read-only pass-through; in-place updates require explicit primitive support. Reindexed aliases are copied because
+	 * the retained callback exposes the original indexes.
+	 */
+	protected final void prepareOutput(OOCStream<IndexedMatrixValue> output,
+		OOCStream.QueueCallback<IndexedMatrixValue> input, IndexedMatrixValue result, ReservationBudget budget) {
+		try {
+			IndexedMatrixValue source = input.get();
+			if(result.getValue() == source.getValue()) {
+				if(result.getIndexes().equals(source.getIndexes())) {
+					OOCStream.QueueCallback<IndexedMatrixValue> retained = input.keepOpen();
+					try {
+						output.enqueue(retained);
+						retained = null;
+					}
+					finally {
+						if(retained != null)
+							retained.close();
+					}
+					return;
+				}
+				result = new IndexedMatrixValue(new MatrixIndexes(result.getIndexes()),
+					new MatrixBlock((MatrixBlock) result.getValue()));
+			}
+			OOCUtils.enqueueExact(output, result, budget);
+			budget = null;
+		}
+		finally {
+			if(budget != null)
+				budget.close();
+		}
 	}
 
 	public final void onComplete() {

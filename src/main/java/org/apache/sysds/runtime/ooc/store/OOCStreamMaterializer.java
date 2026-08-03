@@ -116,10 +116,12 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 			lease = _store.publishPinnedLive(index, managed.extractManagedPayload());
 		}
 		else {
-			// To handle not-yet managed callbacks
-			long bytes = serializedSize(value);
+			// Non-managed callbacks may retain another store, so materialization must establish independent ownership.
+			MatrixBlock block = new MatrixBlock((MatrixBlock) value.getValue());
+			IndexedMatrixValue copy = new IndexedMatrixValue(new MatrixIndexes(value.getIndexes()), block);
+			long bytes = serializedSize(copy);
 			_allowance.reserveBlocking(bytes);
-			lease = _store.publishPinnedLive(index, value, bytes, _allowance);
+			lease = _store.publishPinnedLive(index, copy, bytes, _allowance);
 		}
 		try(lease) {
 			for(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> liveConsumer : _liveConsumers) {
