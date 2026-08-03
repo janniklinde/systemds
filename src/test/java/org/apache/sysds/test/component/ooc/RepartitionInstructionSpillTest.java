@@ -19,6 +19,10 @@
 
 package org.apache.sysds.test.component.ooc;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.common.Types.FileFormat;
 import org.apache.sysds.common.Types.ValueType;
@@ -27,6 +31,7 @@ import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.cp.IndexingCPInstruction;
 import org.apache.sysds.runtime.instructions.ooc.AppendOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.CSVReblockOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.IndexingOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
@@ -36,11 +41,51 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
+import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.primitives.UncoordinatedDataGenOOCPrimitive;
 import org.apache.sysds.utils.Statistics;
 import org.junit.Assert;
 import org.junit.Test;
 
 public class RepartitionInstructionSpillTest {
+	@Test
+	public void testCSVReblockEmptyBlocks() throws IOException {
+		Path csv = Files.createTempFile("systemds-ooc-empty-csv-", ".csv");
+		String row = "0,".repeat(29) + "0\n";
+		Files.writeString(csv, row.repeat(20));
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			MatrixObject csvInput = matrixObject(-1, -1, 1000, csv.toString(), FileFormat.CSV);
+			MatrixObject output = matrixObject(-1, -1, 16);
+			ec.setVariable("X", csvInput);
+			ec.setVariable("A", output);
+			CSVReblockOOCInstruction.parseInstruction("OOC°csvrblk°X·MATRIX·FP64°A·MATRIX·FP64°16°true")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> stream = output.getStreamHandle();
+			stream.start();
+			int blocks = 0;
+			boolean[][] seen = new boolean[2][2];
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = stream.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue value = current.get();
+					int blockRow = (int) value.getIndexes().getRowIndex() - 1;
+					int blockCol = (int) value.getIndexes().getColumnIndex() - 1;
+					Assert.assertFalse(seen[blockRow][blockCol]);
+					seen[blockRow][blockCol] = true;
+					Assert.assertEquals(0, value.getValue().getNonZeros());
+					blocks++;
+				}
+			Assert.assertEquals(4, blocks);
+			Assert.assertEquals(20, output.getNumRows());
+			Assert.assertEquals(30, output.getNumColumns());
+		}
+		finally {
+			OOCCacheManager.reset();
+			Files.deleteIfExists(csv);
+		}
+	}
+
 	@Test
 	public void testRightIndexingSpill() throws InterruptedException {
 		boolean statistics = prepareSpillCache();
@@ -84,6 +129,52 @@ public class RepartitionInstructionSpillTest {
 		}
 		finally {
 			reset(statistics);
+		}
+	}
+
+	@Test
+	public void testCSVReblockSpill() throws IOException, InterruptedException {
+		Path csv = Files.createTempFile("systemds-ooc-csv-", ".csv");
+		String row = "1,".repeat(99) + "1\n";
+		Files.writeString(csv, row.repeat(200));
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			MatrixObject csvInput = matrixObject(200, 100, 1000, csv.toString(), FileFormat.CSV);
+			MatrixObject csvBlocks = matrixObject(200, 100, 200);
+			MatrixObject right = matrixObject(200, 100, 200);
+			MatrixObject out = matrixObject(200, 200, 200);
+			SubscribableTaskQueue<IndexedMatrixValue> rightInput = new SubscribableTaskQueue<>();
+			right.setStreamHandle(rightInput);
+			ec.setVariable("X", csvInput);
+			ec.setVariable("A", csvBlocks);
+			ec.setVariable("B", right);
+			ec.setVariable("C", out);
+
+			CSVReblockOOCInstruction.parseInstruction("OOC°csvrblk°X·MATRIX·FP64°A·MATRIX·FP64°200°true")
+				.processInstruction(ec);
+			Assert.assertTrue(csvBlocks.getStreamable().getPrimitive() instanceof UncoordinatedDataGenOOCPrimitive);
+			csvBlocks.getStreamable().getPrimitive().inferPatterns();
+			Assert.assertEquals(OOCAccessPattern.UNKNOWN, csvBlocks.getStreamable().getPrimitive().getAccessPattern());
+			Assert.assertFalse(csvBlocks.getStreamable().getPrimitive().hasStartedExecution());
+			AppendOOCInstruction.parseInstruction("OOC°append°A·MATRIX·FP64°B·MATRIX·FP64°C·MATRIX·FP64°true")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			result.start();
+			waitForSpill();
+
+			rightInput.enqueue(tile(1, 1, 200, 100, 2));
+			rightInput.closeInput();
+			try(OOCStream.QueueCallback<IndexedMatrixValue> callback = result.dequeueCB()) {
+				MatrixBlock block = (MatrixBlock) callback.get().getValue();
+				Assert.assertEquals(1, block.get(0, 0), 0);
+				Assert.assertEquals(2, block.get(0, 199), 0);
+			}
+			Assert.assertNull(result.dequeueCB());
+		}
+		finally {
+			reset(statistics);
+			Files.deleteIfExists(csv);
 		}
 	}
 
@@ -145,8 +236,12 @@ public class RepartitionInstructionSpillTest {
 	}
 
 	private static MatrixObject matrixObject(long rows, long cols, int blocksize) {
-		return new MatrixObject(ValueType.FP64, "/dev/null",
-			new MetaDataFormat(new MatrixCharacteristics(rows, cols, blocksize), FileFormat.BINARY));
+		return matrixObject(rows, cols, blocksize, "/dev/null", FileFormat.BINARY);
+	}
+
+	private static MatrixObject matrixObject(long rows, long cols, int blocksize, String fileName, FileFormat format) {
+		return new MatrixObject(ValueType.FP64, fileName,
+			new MetaDataFormat(new MatrixCharacteristics(rows, cols, blocksize, rows * cols), format));
 	}
 
 	private static void reset(boolean statistics) {
