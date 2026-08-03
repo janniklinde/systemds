@@ -29,6 +29,8 @@ import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
 import java.util.function.ToLongFunction;
@@ -48,6 +50,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
+import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GeneralMMultOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
@@ -59,6 +62,7 @@ import org.apache.sysds.runtime.ooc.primitives.ReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TSMMOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TransposeOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.UncoordinatedDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
@@ -76,6 +80,29 @@ public final class OOCInstructionUtils {
 	public static void dataGen(OOCStream<IndexedMatrixValue> output, Function<MatrixIndexes, MatrixBlock> operation,
 		StreamContext context) {
 		output.assignPrimitive(new PlannableDataGenOOCPrimitive(output, operation, context));
+	}
+
+	public static <T extends SpillableObject> void uncoordinatedDataGen(OOCStream<T> output, long bulkBytes,
+		long productionLimit, OOCAccessPattern pattern, BiFunction<Long, Consumer<T>, Boolean> producer,
+		Runnable cleanup, StreamContext context) {
+		output.assignPrimitive(new UncoordinatedDataGenOOCPrimitive<>(output, bulkBytes, productionLimit, pattern,
+			producer, cleanup, context));
+	}
+
+	public static <T extends SpillableObject> void uncoordinatedDataGen(OOCStream<T> output, long bulkBytes,
+		OOCAccessPattern pattern, BiFunction<Long, Consumer<T>, Boolean> producer, Runnable cleanup,
+		long outputBulkBytes, Predicate<T> startsOutputBulk, Predicate<T> endsOutputBulk,
+		Predicate<T> refillsOutputBulk, StreamContext context) {
+		output.assignPrimitive(new UncoordinatedDataGenOOCPrimitive<>(output, bulkBytes, bulkBytes, pattern, producer,
+			cleanup, outputBulkBytes, startsOutputBulk, endsOutputBulk, refillsOutputBulk, context));
+	}
+
+	public static <T extends SpillableObject> void uncoordinatedDataGen(OOCStream<T> output, LongSupplier bulkBytes,
+		OOCAccessPattern pattern, BiFunction<Long, Consumer<T>, Boolean> producer, Runnable cleanup,
+		LongSupplier outputBulkBytes, Predicate<T> startsOutputBulk, Predicate<T> endsOutputBulk,
+		Predicate<T> refillsOutputBulk, StreamContext context) {
+		output.assignPrimitive(new UncoordinatedDataGenOOCPrimitive<>(output, bulkBytes, pattern, producer, cleanup,
+			outputBulkBytes, startsOutputBulk, endsOutputBulk, refillsOutputBulk, context));
 	}
 
 	public static void equiMapBlock(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
