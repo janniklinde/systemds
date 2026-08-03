@@ -28,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.fs.FileSystem;
@@ -72,9 +73,17 @@ public class ReaderTextCSVParallel extends MatrixReader {
 	protected int _cLen;
 	protected JobConf _job;
 	protected boolean _streamSparse = false;
+	private InputSplit[] _streamSplits;
+	private Path _streamPath;
 
 	public ReaderTextCSVParallel(FileFormatPropertiesCSV props) {
-		_numThreads = OptimizerUtils.getParallelTextReadParallelism();
+		this(props, OptimizerUtils.getParallelTextReadParallelism());
+	}
+
+	public ReaderTextCSVParallel(FileFormatPropertiesCSV props, int numThreads) {
+		if(numThreads <= 0)
+			throw new IllegalArgumentException("Number of CSV reader threads must be positive: " + numThreads);
+		_numThreads = numThreads;
 		_props = props;
 	}
 
@@ -119,45 +128,41 @@ public class ReaderTextCSVParallel extends MatrixReader {
 		return ret;
 	}
 
-	public MatrixBlock readMatrixAsStream(OOCStream<IndexedMatrixValue> outStream, String fname, long rlen, long clen,
-		int blen, long estnnz) throws IOException, DMLRuntimeException {
+	public void prepareStreamRead(String fname, long rlen, long clen, int blen, long estnnz,
+		BiConsumer<Integer, Integer> dimensions) throws IOException {
 		_bLen = blen;
-
-		// prepare file access
 		_job = new JobConf(ConfigurationManager.getCachedJobConf());
-
-		Path path = new Path(fname);
-		FileSystem fs = IOUtilFunctions.getFileSystem(path, _job);
-
-		FileInputFormat.addInputPath(_job, path);
+		_streamPath = new Path(fname);
+		FileSystem fs = IOUtilFunctions.getFileSystem(_streamPath, _job);
+		FileInputFormat.addInputPath(_job, _streamPath);
 		TextInputFormat informat = new TextInputFormat();
 		informat.configure(_job);
+		_streamSplits = IOUtilFunctions.sortInputSplits(informat.getSplits(_job, _numThreads));
+		checkValidInputFile(fs, _streamPath);
 
-		InputSplit[] splits = informat.getSplits(_job, _numThreads);
-		splits = IOUtilFunctions.sortInputSplits(splits);
-
-		// check existence and non-empty file
-		checkValidInputFile(fs, path);
-
-		// count rows/cols to populate meta data and split offsets
-		long estnnz2;
+		long estimatedNonZeros;
 		ExecutorService pool = CommonThreadPool.get(_numThreads);
 		try {
-			estnnz2 = computeCSVSize(splits, path, rlen, clen, estnnz, pool);
+			estimatedNonZeros = computeCSVSize(_streamSplits, _streamPath, rlen, clen, estnnz, pool);
 		}
-		catch(Exception e) {
-			throw new IOException("Thread pool Error " + e.getMessage(), e);
+		catch(Exception error) {
+			throw new IOException("Thread pool Error " + error.getMessage(), error);
 		}
 		finally {
 			pool.shutdown();
 		}
+		_streamSparse = MatrixBlock.evalSparseFormatInMemory(_rLen, _cLen, estimatedNonZeros);
+		if(dimensions != null)
+			dimensions.accept(_rLen, _cLen);
+	}
 
-		_streamSparse = MatrixBlock.evalSparseFormatInMemory(_rLen, _cLen, estnnz2);
-
-		// stream CSV into blen x blen blocks
+	public MatrixBlock readPreparedMatrixAsStream(OOCStream<IndexedMatrixValue> outStream, int numThreads)
+		throws IOException {
+		if(_streamSplits == null)
+			throw new IllegalStateException("CSV stream read has not been prepared");
 		try {
 			BlockBuffer buffer = new BlockBuffer(outStream, _streamSparse);
-			readCSVMatrixFromHDFS(splits, path, null, buffer);
+			readCSVMatrixFromHDFS(_streamSplits, _streamPath, null, buffer, numThreads);
 			buffer.flushRemaining();
 		}
 		finally {
@@ -175,12 +180,17 @@ public class ReaderTextCSVParallel extends MatrixReader {
 
 	private void readCSVMatrixFromHDFS(InputSplit[] splits, Path path, MatrixBlock dest, BlockBuffer streamBuffer)
 		throws IOException {
+		readCSVMatrixFromHDFS(splits, path, dest, streamBuffer, _numThreads);
+	}
+
+	private void readCSVMatrixFromHDFS(InputSplit[] splits, Path path, MatrixBlock dest, BlockBuffer streamBuffer,
+		int numThreads) throws IOException {
 
 		FileInputFormat.addInputPath(_job, path);
 		TextInputFormat informat = new TextInputFormat();
 		informat.configure(_job);
 
-		ExecutorService pool = CommonThreadPool.get(_numThreads);
+		ExecutorService pool = CommonThreadPool.get(numThreads);
 
 		try {
 			// create read tasks for all splits
@@ -544,12 +554,14 @@ public class ReaderTextCSVParallel extends MatrixReader {
 			public void flush(int brow) {
 				for(int bci = 0; bci < _blocks.length; bci++) {
 					MatrixBlock block = _blocks[bci];
-					if(block == null)
-						continue;
-					block.recomputeNonZeros();
-					if(block.getNonZeros() == 0)
-						continue;
-					block.examSparsity();
+					if(block == null) {
+						int cols = Math.min(_bLen, _cLen - bci * _bLen);
+						block = new MatrixBlock(_rowsInBlock, cols, true);
+					}
+					else {
+						block.recomputeNonZeros();
+						block.examSparsity();
+					}
 					MatrixIndexes idx = new MatrixIndexes(brow + 1, bci + 1);
 					_stream.enqueue(new IndexedMatrixValue(idx, block));
 				}
