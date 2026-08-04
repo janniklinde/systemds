@@ -152,6 +152,20 @@ public final class OOCInstructionUtils {
 			inputBytes + OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + outputBytes, context);
 	}
 
+	public static <O> void equiJoinIndexed(OOCStreamable<IndexedMatrixValue> left,
+		OOCStreamable<IndexedMatrixValue> right, OOCStream<O> output,
+		BiFunction<IndexedMatrixValue, IndexedMatrixValue, O> operation, ToLongFunction<O> outputSize,
+		StreamContext context) {
+		long cols = left.getDataCharacteristics().getNumColBlocks();
+		long inputBytes = Math.max(OOCUtils.estimateOutputTileBytes(left.getDataCharacteristics()),
+			OOCUtils.estimateOutputTileBytes(right.getDataCharacteristics()));
+		long outputBytes = OOCUtils.estimateOutputTileBytes(output.getDataCharacteristics());
+		ToIntFunction<IndexedMatrixValue> key = value -> Math
+			.toIntExact((value.getIndexes().getRowIndex() - 1) * cols + value.getIndexes().getColumnIndex() - 1);
+		keyedJoin(left, right, output, key, key, outputSize, operation,
+			inputBytes + OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + outputBytes, context);
+	}
+
 	public static <L extends SpillableObject, R extends SpillableObject, O> void keyedJoin(OOCStreamable<L> left,
 		OOCStreamable<R> right, OOCStream<O> output, ToIntFunction<L> leftKey, ToIntFunction<R> rightKey,
 		ToLongFunction<O> outputSize, BiFunction<L, R, O> operation, long taskBytes, StreamContext context) {
@@ -162,17 +176,22 @@ public final class OOCInstructionUtils {
 	public static void naryEquiJoin(List<OOCStreamable<IndexedMatrixValue>> inputs,
 		OOCStream<IndexedMatrixValue> output, Function<List<IndexedMatrixValue>, IndexedMatrixValue> operation,
 		StreamContext context) {
+		naryEquiJoin(inputs, output, operation, value -> ((MatrixBlock) value.getValue()).getExactSerializedSize(),
+			context);
+	}
+
+	public static <O> void naryEquiJoin(List<OOCStreamable<IndexedMatrixValue>> inputs, OOCStream<O> output,
+		Function<List<IndexedMatrixValue>, O> operation, ToLongFunction<O> size, StreamContext context) {
 		long cols = inputs.get(0).getDataCharacteristics().getNumColBlocks();
 		long inputBytes = inputs.stream().map(OOCStreamable::getDataCharacteristics)
 			.mapToLong(OOCUtils::estimateOutputTileBytes).max().orElse(0);
 		long outputBytes = OOCUtils.estimateOutputTileBytes(output.getDataCharacteristics());
 		ToIntFunction<IndexedMatrixValue> key = value -> Math
 			.toIntExact((value.getIndexes().getRowIndex() - 1) * cols + value.getIndexes().getColumnIndex() - 1);
-		ToLongFunction<IndexedMatrixValue> size = value -> ((MatrixBlock) value.getValue()).getExactSerializedSize();
 		long joinBytes = (inputs.size() - 1) * OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) +
 			outputBytes;
 		output.assignPrimitive(
-			new NaryJoinOOCPrimitive(inputs, output, key, size, operation, inputBytes, joinBytes, context));
+			new NaryJoinOOCPrimitive<>(inputs, output, key, size, operation, inputBytes, joinBytes, context));
 	}
 
 	public static void tsmm(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,

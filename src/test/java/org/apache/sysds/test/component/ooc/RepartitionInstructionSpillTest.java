@@ -30,8 +30,11 @@ import org.apache.sysds.runtime.controlprogram.LocalVariableMap;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.cp.IndexingCPInstruction;
+import org.apache.sysds.runtime.instructions.cp.ScalarObject;
 import org.apache.sysds.runtime.instructions.ooc.AppendOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CSVReblockOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.CentralMomentOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.CovarianceOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.IndexingOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.MapMMChainOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
@@ -52,6 +55,46 @@ import org.junit.Assert;
 import org.junit.Test;
 
 public class RepartitionInstructionSpillTest {
+	@Test
+	public void testCentralMomentSpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			input(ec, "A", 40_000, 1, 200, 200, 1, false, 2);
+			input(ec, "W", 40_000, 1, 200, 200, 1, true, 1);
+			CentralMomentOOCInstruction
+				.parseInstruction("OOC°cm°A·MATRIX·FP64°W·MATRIX·FP64°" + "2·SCALAR·INT64·true°R·SCALAR·FP64°1")
+				.processInstruction(ec);
+			waitForSpill();
+			Assert.assertEquals(0, ((ScalarObject) ec.getVariable("R")).getDoubleValue(), 0);
+			Assert.assertNull("Central moment initialized the legacy LRU cache",
+				OOCCacheManager.getCacheIfInitialized());
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
+	@Test
+	public void testCovarianceSpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			input(ec, "A", 40_000, 1, 200, 200, 1, false, 2);
+			input(ec, "B", 40_000, 1, 200, 200, 1, true, 3);
+			input(ec, "W", 40_000, 1, 200, 200, 1, true, 1);
+			CovarianceOOCInstruction
+				.parseInstruction("OOC°cov°A·MATRIX·FP64°B·MATRIX·FP64°" + "W·MATRIX·FP64°R·SCALAR·FP64")
+				.processInstruction(ec);
+			waitForSpill();
+			Assert.assertEquals(0, ((ScalarObject) ec.getVariable("R")).getDoubleValue(), 0);
+			Assert.assertNull("Covariance initialized the legacy LRU cache", OOCCacheManager.getCacheIfInitialized());
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
 	@Test
 	public void testMapMMChainSpill() throws InterruptedException {
 		boolean statistics = prepareSpillCache();
@@ -400,14 +443,23 @@ public class RepartitionInstructionSpillTest {
 
 	private static MatrixObject input(ExecutionContext ec, String name, int rows, int cols, int blocksize,
 		int rowBlocks, int colBlocks) {
+		return input(ec, name, rows, cols, blocksize, rowBlocks, colBlocks, false, 1);
+	}
+
+	private static MatrixObject input(ExecutionContext ec, String name, int rows, int cols, int blocksize,
+		int rowBlocks, int colBlocks, boolean reverse, double value) {
 		SubscribableTaskQueue<IndexedMatrixValue> stream = new SubscribableTaskQueue<>();
 		MatrixObject matrix = matrixObject(rows, cols, blocksize);
 		matrix.setStreamHandle(stream);
 		ec.setVariable(name, matrix);
-		for(int row = 1; row <= rowBlocks; row++)
-			for(int col = 1; col <= colBlocks; col++)
-				stream.enqueue(tile(row, col, Math.min(blocksize, rows - (row - 1) * blocksize),
-					Math.min(blocksize, cols - (col - 1) * blocksize), 1));
+		int blocks = rowBlocks * colBlocks;
+		for(int index = 0; index < blocks; index++) {
+			int position = reverse ? blocks - index - 1 : index;
+			int row = position / colBlocks + 1;
+			int col = position % colBlocks + 1;
+			stream.enqueue(tile(row, col, Math.min(blocksize, rows - (row - 1) * blocksize),
+				Math.min(blocksize, cols - (col - 1) * blocksize), value));
+		}
 		stream.closeInput();
 		return matrix;
 	}
