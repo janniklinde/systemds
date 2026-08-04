@@ -25,16 +25,14 @@ import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
-import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.functionobjects.COV;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.cp.CmCovObject;
 import org.apache.sysds.runtime.instructions.cp.DoubleObject;
-import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.operators.COVOperator;
-import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class CovarianceOOCInstruction extends ComputationOOCInstruction {
 
@@ -75,49 +73,38 @@ public class CovarianceOOCInstruction extends ComputationOOCInstruction {
 	public void processInstruction(ExecutionContext ec) {
 		COVOperator cov_op = (COVOperator) _optr;
 
-		MatrixObject mo1 = ec.getMatrixObject(input1.getName());
-		MatrixObject mo2 = ec.getMatrixObject(input2.getName());
-
-		OOCStream<IndexedMatrixValue> q1 = mo1.getStreamHandle();
-		OOCStream<IndexedMatrixValue> q2 = mo2.getStreamHandle();
-
-		OOCStream<CmCovObject> covObjs = createWritableStream();
-
-		if(input3 == null) {
-			// unweighted covariance join the two tile streams by block index
-			joinOOC(q1, q2, covObjs,
-				(a, b) -> ((MatrixBlock) a.getValue()).covOperations(cov_op, (MatrixBlock) b.getValue()),
-				IndexedMatrixValue::getIndexes);
-		}
+		MatrixObject first = ec.getMatrixObject(input1.getName());
+		MatrixObject second = ec.getMatrixObject(input2.getName());
+		second.getDataCharacteristics().set(first.getNumRows(), first.getNumColumns(), first.getBlocksize(),
+			second.getNnz());
+		OOCStream<CmCovObject> partials = createWritableStream(first);
+		if(input3 == null)
+			OOCInstructionUtils.equiJoinIndexed(first.getStreamable(), second.getStreamable(), partials,
+				(left, right) -> ((MatrixBlock) left.getValue()).covOperations(cov_op, (MatrixBlock) right.getValue()),
+				ignored -> 256, getContext());
 		else {
-			// weighted covariance additionally join the weights tile stream
-			MatrixObject mo3 = ec.getMatrixObject(input3.getName());
-
-			DataCharacteristics dc1 = ec.getDataCharacteristics(input1.getName());
-			DataCharacteristics dc2 = ec.getDataCharacteristics(input2.getName());
-			DataCharacteristics dc3 = ec.getDataCharacteristics(input3.getName());
-			if(dc1.getBlocksize() != dc2.getBlocksize() || dc1.getBlocksize() != dc3.getBlocksize())
-				throw new DMLRuntimeException("Different block sizes are not yet supported");
-
-			OOCStream<IndexedMatrixValue> q3 = mo3.getStreamHandle();
-
-			joinOOC(List.of(q1, q2, q3), covObjs,
+			MatrixObject weights = ec.getMatrixObject(input3.getName());
+			weights.getDataCharacteristics().set(first.getNumRows(), first.getNumColumns(), first.getBlocksize(),
+				weights.getNnz());
+			OOCInstructionUtils.naryEquiJoin(
+				List.of(first.getStreamable(), second.getStreamable(), weights.getStreamable()), partials,
 				tiles -> ((MatrixBlock) tiles.get(0).getValue()).covOperations(cov_op,
 					(MatrixBlock) tiles.get(1).getValue(), (MatrixBlock) tiles.get(2).getValue()),
-				IndexedMatrixValue::getIndexes);
+				ignored -> 256, getContext());
 		}
 
-		try {
-			CmCovObject agg = covObjs.dequeue();
-			CmCovObject next;
-
-			while((next = covObjs.dequeue()) != LocalTaskQueue.NO_MORE_TASKS)
-				agg = (CmCovObject) cov_op.fn.execute(agg, next);
-
-			ec.setScalarOutput(output.getName(), new DoubleObject(agg.getRequiredResult(cov_op)));
+		OOCStream<CmCovObject> result = createWritableStream(4, 4, 4);
+		OOCInstructionUtils.reduce(partials, result, value -> value,
+			(left, right) -> (CmCovObject) cov_op.fn.execute(left, right), ignored -> 256, getContext());
+		result.start();
+		try(OOCStream.QueueCallback<CmCovObject> callback = result.dequeueCB()) {
+			if(callback == null)
+				throw new DMLRuntimeException("Covariance cannot reduce an empty OOC stream");
+			ec.setScalarOutput(output.getName(), new DoubleObject(callback.get().getRequiredResult(cov_op)));
 		}
-		catch(Exception ex) {
-			throw new DMLRuntimeException(ex);
+		try(OOCStream.QueueCallback<CmCovObject> callback = result.dequeueCB()) {
+			if(callback != null)
+				throw new DMLRuntimeException("Covariance produced multiple aggregate results");
 		}
 	}
 }
