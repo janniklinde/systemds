@@ -19,13 +19,14 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
+import java.util.List;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
-import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.functionobjects.KahanPlus;
 import org.apache.sysds.runtime.functionobjects.Multiply;
 import org.apache.sysds.runtime.functionobjects.ReduceAll;
@@ -34,20 +35,14 @@ import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.cp.DoubleObject;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
-import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.data.OperationsOnMatrixValues;
 import org.apache.sysds.runtime.matrix.operators.AggregateTernaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
-
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.CompletableFuture;
+import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class AggregateTernaryOOCInstruction extends ComputationOOCInstruction {
-
 	private static final Log LOG = LogFactory.getLog(AggregateTernaryOOCInstruction.class.getName());
 
 	private AggregateTernaryOOCInstruction(Operator op, CPOperand in1, CPOperand in2, CPOperand in3, CPOperand out,
@@ -58,16 +53,12 @@ public class AggregateTernaryOOCInstruction extends ComputationOOCInstruction {
 	public static AggregateTernaryOOCInstruction parseInstruction(String str) {
 		String[] parts = InstructionUtils.getInstructionPartsWithValueType(str);
 		String opcode = parts[0];
-
 		if(opcode.equalsIgnoreCase(Opcodes.TAKPM.toString()) || opcode.equalsIgnoreCase(Opcodes.TACKPM.toString())) {
-			InstructionUtils.checkNumFields(parts , 4, 5);
-
+			InstructionUtils.checkNumFields(parts, 4, 5);
 			CPOperand in1 = new CPOperand(parts[1]);
 			CPOperand in2 = new CPOperand(parts[2]);
 			CPOperand in3 = new CPOperand(parts[3]);
 			CPOperand out = new CPOperand(parts[4]);
-			//int numThreads = parts.length == 6 ? Integer.parseInt(parts[5]) : 1;
-
 			AggregateTernaryOperator op = InstructionUtils.parseAggregateTernaryOperator(opcode, 1);
 			return new AggregateTernaryOOCInstruction(op, in1, in2, in3, out, opcode, str);
 		}
@@ -76,166 +67,99 @@ public class AggregateTernaryOOCInstruction extends ComputationOOCInstruction {
 
 	@Override
 	public void processInstruction(ExecutionContext ec) {
-		MatrixObject m1 = ec.getMatrixObject(input1);
-		MatrixObject m2 = ec.getMatrixObject(input2);
-		MatrixObject m3 = input3.isLiteral() ? null : ec.getMatrixObject(input3);
+		MatrixObject first = ec.getMatrixObject(input1);
+		MatrixObject second = ec.getMatrixObject(input2);
+		MatrixObject third = input3.isLiteral() ? null : ec.getMatrixObject(input3);
+		AggregateTernaryOperator operator = (AggregateTernaryOperator) _optr;
+		validateInput(first, second, third, operator, input1.getName(), input2.getName(), input3.getName());
+		second.getDataCharacteristics().set(first.getNumRows(), first.getNumColumns(), first.getBlocksize(),
+			second.getNnz());
+		if(third != null)
+			third.getDataCharacteristics().set(first.getNumRows(), first.getNumColumns(), first.getBlocksize(),
+				third.getNnz());
 
-		AggregateTernaryOperator abOp = (AggregateTernaryOperator) _optr;
-		validateInput(m1, m2, m3, abOp, input1.getName(), input2.getName(), input3.getName());
-
-		boolean isReduceAll = abOp.indexFn instanceof ReduceAll;
-
-		OOCStream<IndexedMatrixValue> qIn1 = m1.getStreamHandle();
-		OOCStream<IndexedMatrixValue> qIn2 = m2.getStreamHandle();
-		OOCStream<IndexedMatrixValue> qIn3 = m3 == null ? null : m3.getStreamHandle();
-
-		if(isReduceAll)
-			processReduceAll(ec, abOp, qIn1, qIn2, qIn3);
+		OOCStream<IndexedMatrixValue> partials = createWritableStream(first);
+		if(third == null)
+			OOCInstructionUtils
+				.equiJoin(
+					first.getStreamable(), second.getStreamable(), partials, (left, right) -> MatrixBlock
+						.aggregateTernaryOperations(left, right, null, new MatrixBlock(), operator, false),
+					getContext());
 		else
-			processReduceRow(ec, abOp, qIn1, qIn2, qIn3, m1.getDataCharacteristics());
+			OOCInstructionUtils.naryEquiJoin(
+				List.of(first.getStreamable(), second.getStreamable(), third.getStreamable()), partials,
+				values -> new IndexedMatrixValue(values.get(0).getIndexes(),
+					MatrixBlock.aggregateTernaryOperations((MatrixBlock) values.get(0).getValue(),
+						(MatrixBlock) values.get(1).getValue(), (MatrixBlock) values.get(2).getValue(),
+						new MatrixBlock(), operator, false)),
+				getContext());
+
+		if(operator.indexFn instanceof ReduceAll)
+			processReduceAll(ec, operator, partials);
+		else
+			processReduceRows(ec, operator, first, partials);
 	}
 
-	private void processReduceAll(ExecutionContext ec, AggregateTernaryOperator abOp,
-		OOCStream<IndexedMatrixValue> qIn1, OOCStream<IndexedMatrixValue> qIn2, OOCStream<IndexedMatrixValue> qIn3) {
-
-		final int extra = abOp.aggOp.correction.getNumRemovedRowsColumns();
-		final MatrixBlock agg = new MatrixBlock(1, 1 + extra, false);
-		final MatrixBlock corr = new MatrixBlock(1, 1 + extra, false);
-
-		OOCStream<IndexedMatrixValue> qMid = createWritableStream();
-
-		List<OOCStream<IndexedMatrixValue>> streams = new ArrayList<>();
-		streams.add(qIn1);
-		streams.add(qIn2);
-		if(qIn3 != null)
-			streams.add(qIn3);
-
-		CompletableFuture<Void> fut = joinOOC(streams, qMid, blocks -> {
-			MatrixBlock b1 = (MatrixBlock) blocks.get(0).getValue();
-			MatrixBlock b2 = (MatrixBlock) blocks.get(1).getValue();
-			MatrixBlock b3 = blocks.size() == 3 ? (MatrixBlock) blocks.get(2).getValue() : null;
-			MatrixBlock partial = MatrixBlock.aggregateTernaryOperations(b1, b2, b3, new MatrixBlock(), abOp, false);
-			return new IndexedMatrixValue(blocks.get(0).getIndexes(), partial);
-		}, IndexedMatrixValue::getIndexes);
-
-		try {
-			IndexedMatrixValue imv;
-			while((imv = qMid.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
-				MatrixBlock partial = (MatrixBlock) imv.getValue();
-				OperationsOnMatrixValues.incrementalAggregation(agg,
-					abOp.aggOp.existsCorrection() ? corr : null, partial, abOp.aggOp, true);
-			}
-			fut.join();
+	private void processReduceAll(ExecutionContext ec, AggregateTernaryOperator operator,
+		OOCStream<IndexedMatrixValue> partials) {
+		OOCStream<MatrixBlock> result = createWritableStream(4, 4, 4);
+		OOCInstructionUtils.reduce(partials, result, value -> new MatrixBlock((MatrixBlock) value.getValue()),
+			(left, right) -> merge(left, right, operator), MatrixBlock::getExactSerializedSize, getContext());
+		result.start();
+		try(OOCStream.QueueCallback<MatrixBlock> callback = result.dequeueCB()) {
+			if(callback == null)
+				throw new DMLRuntimeException("Aggregate ternary cannot reduce an empty OOC stream");
+			MatrixBlock aggregate = callback.get();
+			aggregate.dropLastRowsOrColumns(operator.aggOp.correction);
+			ec.setScalarOutput(output.getName(), new DoubleObject(aggregate.get(0, 0)));
 		}
-		catch(Exception ex) {
-			throw new DMLRuntimeException(ex);
-		}
-
-		agg.dropLastRowsOrColumns(abOp.aggOp.correction);
-		ec.setScalarOutput(output.getName(), new DoubleObject(agg.get(0, 0)));
-	}
-
-	private void processReduceRow(ExecutionContext ec, AggregateTernaryOperator abOp,
-		OOCStream<IndexedMatrixValue> qIn1, OOCStream<IndexedMatrixValue> qIn2, OOCStream<IndexedMatrixValue> qIn3,
-		DataCharacteristics dc) {
-
-		long emitThreshold = dc.getNumRowBlocks();
-		if(emitThreshold <= 0)
-			throw new DMLRuntimeException("Unknown number of row blocks for out-of-core aggregate ternary.");
-
-		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
-		ec.getMatrixObject(output).setStreamHandle(qOut);
-
-		OOCStream<IndexedMatrixValue> qMid = createWritableStream();
-
-		List<OOCStream<IndexedMatrixValue>> streams = new ArrayList<>();
-		streams.add(qIn1);
-		streams.add(qIn2);
-		if(qIn3 != null)
-			streams.add(qIn3);
-
-		CompletableFuture<Void> fut = joinOOC(streams, qMid, blocks -> {
-			MatrixBlock b1 = (MatrixBlock) blocks.get(0).getValue();
-			MatrixBlock b2 = (MatrixBlock) blocks.get(1).getValue();
-			MatrixBlock b3 = blocks.size() == 3 ? (MatrixBlock) blocks.get(2).getValue() : null;
-			MatrixBlock partial = MatrixBlock.aggregateTernaryOperations(b1, b2, b3, new MatrixBlock(), abOp, false);
-			return new IndexedMatrixValue(blocks.get(0).getIndexes(), partial);
-		}, IndexedMatrixValue::getIndexes);
-
-		final Map<Long, MatrixBlock> aggMap = new HashMap<>();
-		final Map<Long, MatrixBlock> corrMap = new HashMap<>();
-		final Map<Long, Integer> cntMap = new HashMap<>();
-
-		try {
-			IndexedMatrixValue imv;
-			while((imv = qMid.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
-				MatrixIndexes idx = imv.getIndexes();
-				long colIx = idx.getColumnIndex();
-				MatrixBlock partial = (MatrixBlock) imv.getValue();
-
-				MatrixBlock curAgg = aggMap.get(colIx);
-				MatrixBlock curCorr = corrMap.get(colIx);
-				if(curAgg == null) {
-					aggMap.put(colIx, partial);
-					curCorr = new MatrixBlock(partial.getNumRows(), partial.getNumColumns(), false);
-					corrMap.put(colIx, curCorr);
-					cntMap.put(colIx, 1);
-				}
-				else {
-					OperationsOnMatrixValues.incrementalAggregation(curAgg, abOp.aggOp.existsCorrection() ? curCorr : null,
-						partial, abOp.aggOp, true);
-					cntMap.put(colIx, cntMap.get(colIx) + 1);
-				}
-
-				if(cntMap.get(colIx) >= emitThreshold) {
-					MatrixBlock finalAgg = aggMap.remove(colIx);
-					corrMap.remove(colIx);
-					cntMap.remove(colIx);
-
-					finalAgg.dropLastRowsOrColumns(abOp.aggOp.correction);
-					MatrixIndexes outIdx = new MatrixIndexes(1, colIx);
-					qOut.enqueue(new IndexedMatrixValue(outIdx, finalAgg));
-				}
-			}
-			fut.join();
-		}
-		catch(Exception ex) {
-			throw new DMLRuntimeException(ex);
-		}
-		finally {
-			qOut.closeInput();
+		try(OOCStream.QueueCallback<MatrixBlock> callback = result.dequeueCB()) {
+			if(callback != null)
+				throw new DMLRuntimeException("Aggregate ternary produced multiple scalar results");
 		}
 	}
 
-	private static void validateInput(MatrixObject m1, MatrixObject m2, MatrixObject m3, AggregateTernaryOperator op,
-		String name1, String name2, String name3) {
+	private void processReduceRows(ExecutionContext ec, AggregateTernaryOperator operator, MatrixObject input,
+		OOCStream<IndexedMatrixValue> partials) {
+		MatrixObject target = ec.getMatrixObject(output);
+		target.getDataCharacteristics().set(1, input.getNumColumns(), input.getBlocksize(), target.getNnz());
+		OOCStream<IndexedMatrixValue> result = createWritableStream(target);
+		target.setStreamHandle(result);
+		OOCInstructionUtils.groupedReduceIndexed(partials, result, GroupedReduceOOCPrimitive.Grouping.COL_BLOCKS,
+			value -> new MatrixBlock((MatrixBlock) value.getValue()), (left, right) -> merge(left, right, operator),
+			block -> {
+				block.dropLastRowsOrColumns(operator.aggOp.correction);
+				return block;
+			}, getContext());
+	}
 
-		DataCharacteristics c1 = m1.getDataCharacteristics();
-		DataCharacteristics c2 = m2.getDataCharacteristics();
-		DataCharacteristics c3 = m3 == null ? c2 : m3.getDataCharacteristics();
+	private static MatrixBlock merge(MatrixBlock left, MatrixBlock right, AggregateTernaryOperator operator) {
+		MatrixBlock result = new MatrixBlock(left);
+		OperationsOnMatrixValues.incrementalAggregation(result, null, right, operator.aggOp, true);
+		return result;
+	}
 
-		long m1r = c1.getRows();
-		long m2r = c2.getRows();
-		long m3r = c3.getRows();
-		long m1c = c1.getCols();
-		long m2c = c2.getCols();
-		long m3c = c3.getCols();
-
-		if(m1r <= 0 || m2r <= 0 || m3r <= 0 || m1c <= 0 || m2c <= 0 || m3c <= 0)
-			throw new DMLRuntimeException("Unknown dimensions for aggregate ternary inputs.");
-
-		if(m1r != m2r || m1c != m2c || m2r != m3r || m2c != m3c){
-			if(LOG.isTraceEnabled()){
-				LOG.trace("matBlock1:" + name1 + " (" + m1r + "x" + m1c + ")");
-				LOG.trace("matBlock2:" + name2 + " (" + m2r + "x" + m2c + ")");
-				LOG.trace("matBlock3:" + name3 + " (" + m3r + "x" + m3c + ")");
+	private static void validateInput(MatrixObject first, MatrixObject second, MatrixObject third,
+		AggregateTernaryOperator operator, String firstName, String secondName, String thirdName) {
+		DataCharacteristics firstDc = first.getDataCharacteristics();
+		DataCharacteristics secondDc = second.getDataCharacteristics();
+		DataCharacteristics thirdDc = third == null ? null : third.getDataCharacteristics();
+		if(!firstDc.dimsKnown() || firstDc.getBlocksize() <= 0)
+			throw new DMLRuntimeException("Unknown dimensions for first aggregate ternary input.");
+		boolean invalidSecond = secondDc.dimsKnown() &&
+			(firstDc.getRows() != secondDc.getRows() || firstDc.getCols() != secondDc.getCols());
+		boolean invalidThird = thirdDc != null && thirdDc.dimsKnown() &&
+			(firstDc.getRows() != thirdDc.getRows() || firstDc.getCols() != thirdDc.getCols());
+		if(invalidSecond || invalidThird) {
+			if(LOG.isTraceEnabled()) {
+				LOG.trace("matBlock1:" + firstName + " (" + firstDc.getRows() + "x" + firstDc.getCols() + ")");
+				LOG.trace("matBlock2:" + secondName + " (" + secondDc.getRows() + "x" + secondDc.getCols() + ")");
+				if(thirdDc != null)
+					LOG.trace("matBlock3:" + thirdName + " (" + thirdDc.getRows() + "x" + thirdDc.getCols() + ")");
 			}
-			throw new DMLRuntimeException("Invalid dimensions for aggregate ternary (" + m1r + "x" + m1c + ", "
-				+ m2r + "x" + m2c + ", " + m3r + "x" + m3c + ").");
+			throw new DMLRuntimeException("Invalid dimensions for aggregate ternary inputs.");
 		}
-
-		if(!(op.aggOp.increOp.fn instanceof KahanPlus && op.binaryFn instanceof Multiply))
+		if(!(operator.aggOp.increOp.fn instanceof KahanPlus && operator.binaryFn instanceof Multiply))
 			throw new DMLRuntimeException("Unsupported operator for aggregate ternary operations.");
-
 	}
 }
