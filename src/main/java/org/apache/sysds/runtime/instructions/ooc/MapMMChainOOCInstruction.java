@@ -19,8 +19,6 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
-import java.util.concurrent.CompletableFuture;
-
 import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.lops.MapMultChain.ChainType;
 import org.apache.sysds.runtime.DMLRuntimeException;
@@ -40,6 +38,9 @@ import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.RightScalarOperator;
+import org.apache.sysds.runtime.ooc.store.CountingLiveness;
+import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class MapMMChainOOCInstruction extends ComputationOOCInstruction {
 	private final ChainType _type;
@@ -72,155 +73,87 @@ public class MapMMChainOOCInstruction extends ComputationOOCInstruction {
 
 	@Override
 	public void processInstruction(ExecutionContext ec) {
-		MatrixObject min = ec.getMatrixObject(input1);
-		MatrixObject mv = ec.getMatrixObject(input2);
-		OOCStream<IndexedMatrixValue> qV = mv.getStreamHandle();
-
-		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
-		addOutStream(qOut);
-		ec.getMatrixObject(output).setStreamHandle(qOut);
-
-		OOCStreamable<IndexedMatrixValue> xStreamable = min.getStreamable();
-		boolean createdCache = !xStreamable.hasStreamCache();
-		CachingStream xCache = createdCache ? new CachingStream(min.getStreamHandle()) : xStreamable.getStreamCache();
-
-		long numRowBlocksL = min.getDataCharacteristics().getNumRowBlocks();
-		long numColBlocksL = min.getDataCharacteristics().getNumColBlocks();
-		int numRowBlocks = Math.toIntExact(numRowBlocksL);
-		int numColBlocks = Math.toIntExact(numColBlocksL);
-		long vRows = mv.getDataCharacteristics().getRows();
-
-		AggregateOperator agg = new AggregateOperator(0, Plus.getPlusFnObject());
-		AggregateBinaryOperator mmOp = new AggregateBinaryOperator(Multiply.getMultiplyFnObject(), agg);
-		BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
-
-		boolean hasV = !mv.getDataCharacteristics().rowsKnown() || vRows > 0;
+		MatrixObject x = ec.getMatrixObject(input1);
+		MatrixObject v = ec.getMatrixObject(input2);
+		MatrixObject w = _type.isWeighted() ? ec.getMatrixObject(input3) : null;
+		boolean hasV = !v.getDataCharacteristics().rowsKnown() || v.getNumRows() > 0;
 		if(!hasV && _type != ChainType.XtXvy)
 			throw new DMLRuntimeException("MMChain requires non-empty v for chain type " + _type);
+		if(!x.getDataCharacteristics().dimsKnown() || x.getNumRows() <= 0 || x.getNumColumns() <= 0 ||
+			x.getBlocksize() <= 0)
+			throw new DMLRuntimeException("Planner-backed MMChain requires known, positive matrix dimensions.");
+		if(hasV)
+			v.getDataCharacteristics().set(x.getNumColumns(), 1, x.getBlocksize(), v.getNnz());
+		if(w != null)
+			w.getDataCharacteristics().set(x.getNumRows(), 1, x.getBlocksize(), w.getNnz());
+		processPlannerInstruction(ec, x, v, w, hasV);
+	}
 
-		OOCStream<IndexedMatrixValue> qU;
-		CompletableFuture<Void> uFuture;
-		CompletableFuture<Void> mapXvFuture = null;
-		boolean directXtFromXv = false;
-		OOCStream<IndexedMatrixValue> qPartialXtDirect = null;
+	private void processPlannerInstruction(ExecutionContext ec, MatrixObject x, MatrixObject v, MatrixObject w,
+		boolean hasV) {
+		int rowBlocks = Math.toIntExact(x.getDataCharacteristics().getNumRowBlocks());
+		int colBlocks = Math.toIntExact(x.getDataCharacteristics().getNumColBlocks());
+		int blocksize = x.getBlocksize();
+		OOCStreamable<IndexedMatrixValue> sharedX = x.getStreamable();
+		MaterializedStoreStreamable createdX = null;
+		if(!sharedX.hasMaterializedStore()) {
+			createdX = new MaterializedStoreStreamable(x.getStreamHandle(), x);
+			sharedX = createdX;
+		}
+		BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
+		AggregateOperator aggregate = new AggregateOperator(0, Plus.getPlusFnObject());
+		AggregateBinaryOperator multiply = new AggregateBinaryOperator(Multiply.getMultiplyFnObject(), aggregate);
 
-		if(!hasV && _type == ChainType.XtXvy) {
-			MatrixObject mw = ec.getMatrixObject(input3);
-			OOCStream<IndexedMatrixValue> qW = mw.getStreamHandle();
-			OOCStream<IndexedMatrixValue> qNegW = createWritableStream();
-			RightScalarOperator negOp = new RightScalarOperator(Multiply.getMultiplyFnObject(), -1);
-
-			uFuture = mapOOC(qW, qNegW, tmp -> {
-				MatrixBlock wBlock = (MatrixBlock) tmp.getValue();
-				MatrixBlock neg = wBlock.scalarOperations(negOp, new MatrixBlock());
-				return new IndexedMatrixValue(new MatrixIndexes(tmp.getIndexes().getRowIndex(), 1L), neg);
-			});
-			qU = qNegW;
+		OOCStream<IndexedMatrixValue> u;
+		if(!hasV) {
+			u = createWritableStream(w);
+			RightScalarOperator negate = new RightScalarOperator(Multiply.getMultiplyFnObject(), -1);
+			OOCInstructionUtils.equiMapBlock(w.getStreamable(), u,
+				block -> block.scalarOperations(negate, new MatrixBlock()), getContext());
 		}
 		else {
-			if(numColBlocks == 1 && !_type.isWeighted()) {
-				directXtFromXv = true;
-				qPartialXtDirect = createWritableStream();
-				mapXvFuture = broadcastJoinOOC(xCache.getReadStream(), qV, qPartialXtDirect, (x, v) -> {
-					MatrixBlock xBlock = (MatrixBlock) x.getValue();
-					MatrixBlock vBlock = (MatrixBlock) v.getValue().getValue();
-					MatrixBlock xv = xBlock.aggregateBinaryOperations(xBlock, vBlock, new MatrixBlock(), mmOp);
-					MatrixBlock partial = multTransposeVector(xBlock, xv);
-					return new IndexedMatrixValue(new MatrixIndexes(x.getIndexes().getColumnIndex(), 1L), partial);
-				}, tmp -> tmp.getIndexes().getColumnIndex(), tmp -> tmp.getIndexes().getRowIndex());
-				uFuture = mapXvFuture;
-				qU = null;
+			OOCStream<IndexedMatrixValue> xvPartials = createWritableStream(x);
+			OOCInstructionUtils.indexedBroadcastMap(sharedX, v.getStreamable(), xvPartials,
+				value -> Math.toIntExact(value.getIndexes().getColumnIndex() - 1),
+				() -> new CountingLiveness(colBlocks, rowBlocks), (xValue, vValue) -> {
+					MatrixBlock xBlock = (MatrixBlock) xValue.getValue();
+					MatrixBlock vBlock = (MatrixBlock) vValue.getValue();
+					MatrixBlock partial = xBlock.aggregateBinaryOperations(xBlock, vBlock, new MatrixBlock(), multiply);
+					return new IndexedMatrixValue(xValue.getIndexes(), partial);
+				}, getContext());
+
+			OOCStream<IndexedMatrixValue> xv = createWritableStream(x.getNumRows(), 1, blocksize);
+			OOCInstructionUtils.rowGroupedReduce(xvPartials, xv,
+				(left, right) -> left.binaryOperations(plus, right, new MatrixBlock()), getContext());
+			if(_type.isWeighted()) {
+				u = createWritableStream(w);
+				BinaryOperator weight = InstructionUtils
+					.parseBinaryOperator(_type == ChainType.XtwXv ? Opcodes.MULT.toString() : Opcodes.MINUS.toString());
+				OOCInstructionUtils.equiJoin(xv, w.getStreamable(), u,
+					(left, right) -> left.binaryOperations(weight, right, new MatrixBlock()), getContext());
 			}
-			else {
-				OOCStream<IndexedMatrixValue> qPartialXv = createWritableStream();
-				OOCStream<IndexedMatrixValue> qXv = createWritableStream();
-				OOCStream<IndexedMatrixValue> qInXv = xCache.getReadStream();
-
-				mapXvFuture = broadcastJoinOOC(qInXv, qV, qPartialXv, (x, v) -> {
-					MatrixBlock xBlock = (MatrixBlock) x.getValue();
-					MatrixBlock vBlock = (MatrixBlock) v.getValue().getValue();
-					MatrixBlock partial = xBlock.aggregateBinaryOperations(xBlock, vBlock, new MatrixBlock(), mmOp);
-					return new IndexedMatrixValue(new MatrixIndexes(x.getIndexes().getRowIndex(), 1L), partial);
-				}, tmp -> tmp.getIndexes().getColumnIndex(), tmp -> tmp.getIndexes().getRowIndex());
-
-				CompletableFuture<Void> reduceXvFuture = groupedReduceOOC(qPartialXv, qXv, (left, right) -> {
-					MatrixBlock mb = ((MatrixBlock) left.getValue()).binaryOperations(plus, right.getValue());
-					left.setValue(mb);
-					return left;
-				}, numColBlocks);
-
-				if(_type.isWeighted()) {
-					MatrixObject mw = ec.getMatrixObject(input3);
-					OOCStream<IndexedMatrixValue> qW = mw.getStreamHandle();
-					OOCStream<IndexedMatrixValue> qWeighted = createWritableStream();
-					BinaryOperator weightOp = InstructionUtils.parseBinaryOperator(
-						_type == ChainType.XtwXv ? Opcodes.MULT.toString() : Opcodes.MINUS.toString());
-
-					uFuture = broadcastJoinOOC(qXv, qW, qWeighted, (u, w) -> {
-						MatrixBlock uBlock = (MatrixBlock) u.getValue();
-						MatrixBlock wBlock = (MatrixBlock) w.getValue().getValue();
-						MatrixBlock updated = uBlock.binaryOperations(weightOp, wBlock);
-						u.setValue(updated);
-						return u;
-					}, tmp -> tmp.getIndexes().getRowIndex(), tmp -> tmp.getIndexes().getRowIndex());
-					qU = qWeighted;
-				}
-				else {
-					uFuture = reduceXvFuture;
-					qU = qXv;
-				}
-			}
-
+			else
+				u = xv;
 		}
 
-		OOCStream<IndexedMatrixValue> qPartialXtOut;
-		CompletableFuture<Void> joinXtFuture;
-		if(directXtFromXv) {
-			joinXtFuture = CompletableFuture.completedFuture(null);
-			qPartialXtOut = qPartialXtDirect;
-		}
-		else {
-			OOCStream<IndexedMatrixValue> qInXt = xCache.getReadStream();
-			OOCStream<IndexedMatrixValue> qPartialXt = createWritableStream();
-			joinXtFuture = broadcastJoinOOC(qInXt, qU, qPartialXt, (x, u) -> {
-				MatrixBlock xBlock = (MatrixBlock) x.getValue();
-				MatrixBlock uBlock = (MatrixBlock) u.getValue().getValue();
-				MatrixBlock partial = multTransposeVector(xBlock, uBlock);
-				return new IndexedMatrixValue(new MatrixIndexes(x.getIndexes().getColumnIndex(), 1L), partial);
-			}, tmp -> tmp.getIndexes().getRowIndex(), tmp -> tmp.getIndexes().getRowIndex());
-			qPartialXtOut = qPartialXt;
-		}
+		OOCStream<IndexedMatrixValue> xtPartials = createWritableStream(x.getNumColumns(), x.getNumRows(), blocksize);
+		OOCInstructionUtils.indexedBroadcastMap(sharedX, u, xtPartials,
+			value -> Math.toIntExact(value.getIndexes().getRowIndex() - 1),
+			() -> new CountingLiveness(rowBlocks, colBlocks), (xValue, uValue) -> {
+				MatrixBlock partial = multTransposeVector((MatrixBlock) xValue.getValue(),
+					(MatrixBlock) uValue.getValue());
+				return new IndexedMatrixValue(
+					new MatrixIndexes(xValue.getIndexes().getColumnIndex(), xValue.getIndexes().getRowIndex()),
+					partial);
+			}, getContext());
 
-		CompletableFuture<Void> outFuture = groupedReduceOOC(qPartialXtOut, qOut, (left, right) -> {
-			MatrixBlock mb = ((MatrixBlock) left.getValue()).binaryOperationsInPlace(plus, right.getValue());
-			left.setValue(mb);
-			return left;
-		}, numRowBlocks);
-
-		final boolean deleteXCache = createdCache;
-		outFuture.whenComplete((res, err) -> {
-			if(deleteXCache)
-				xCache.scheduleDeletion();
-		});
-
-		if(mapXvFuture != null) {
-			mapXvFuture.exceptionally(err -> {
-				qOut.propagateFailure(DMLRuntimeException.of(err));
-				return null;
-			});
-		}
-		uFuture.exceptionally(err -> {
-			qOut.propagateFailure(DMLRuntimeException.of(err));
-			return null;
-		});
-		joinXtFuture.exceptionally(err -> {
-			qOut.propagateFailure(DMLRuntimeException.of(err));
-			return null;
-		});
-		outFuture.exceptionally(err -> {
-			qOut.propagateFailure(DMLRuntimeException.of(err));
-			return null;
-		});
+		ec.getDataCharacteristics(output.getName()).set(x.getNumColumns(), 1, blocksize, -1);
+		OOCStream<IndexedMatrixValue> out = createWritableStream();
+		ec.getMatrixObject(output).setStreamHandle(out);
+		OOCInstructionUtils.rowGroupedReduce(xtPartials, out,
+			(left, right) -> left.binaryOperations(plus, right, new MatrixBlock()), getContext());
+		if(createdX != null)
+			createdX.scheduleMaterializedStoreDeletion();
 	}
 
 	private static MatrixBlock multTransposeVector(MatrixBlock x, MatrixBlock u) {
