@@ -31,6 +31,7 @@ import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.cp.IndexingCPInstruction;
 import org.apache.sysds.runtime.instructions.cp.ScalarObject;
+import org.apache.sysds.runtime.instructions.ooc.AggregateTernaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.AppendOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CSVReblockOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CentralMomentOOCInstruction;
@@ -55,6 +56,40 @@ import org.junit.Assert;
 import org.junit.Test;
 
 public class RepartitionInstructionSpillTest {
+	@Test
+	public void testAggregateTernarySpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			input(ec, "A", 400, 400, 200, 2, 2, false, 2);
+			MatrixObject second = input(ec, "B", 400, 400, 200, 2, 2, true, 3);
+			MatrixObject third = input(ec, "C", 400, 400, 200, 2, 2, true, 4);
+			second.getDataCharacteristics().set(-1, -1, -1, -1);
+			third.getDataCharacteristics().set(-1, -1, -1, -1);
+			MatrixObject output = matrixObject(1, 400, 200);
+			ec.setVariable("R", output);
+			AggregateTernaryOOCInstruction
+				.parseInstruction("OOC°tack+*°A·MATRIX·FP64°B·MATRIX·FP64°C·MATRIX·FP64°R·MATRIX·FP64")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = output.getStreamHandle();
+			result.start();
+			waitForSpill();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					Assert.assertEquals(9_600, current.get().getValue().get(0, 0), 0);
+					blocks++;
+				}
+			Assert.assertEquals(2, blocks);
+			Assert.assertNull("Aggregate ternary initialized the legacy LRU cache",
+				OOCCacheManager.getCacheIfInitialized());
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
 	@Test
 	public void testCentralMomentSpill() throws InterruptedException {
 		boolean statistics = prepareSpillCache();
