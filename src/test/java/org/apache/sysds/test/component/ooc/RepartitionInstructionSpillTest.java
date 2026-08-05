@@ -33,15 +33,18 @@ import org.apache.sysds.runtime.instructions.cp.IndexingCPInstruction;
 import org.apache.sysds.runtime.instructions.cp.ScalarObject;
 import org.apache.sysds.runtime.instructions.ooc.AggregateTernaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.AppendOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.BinaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CSVReblockOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CentralMomentOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CovarianceOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.IndexingOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.MMultOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.MapMMChainOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.QuaternaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.ooc.TSMMOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.TernaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.UnaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
@@ -208,6 +211,102 @@ public class RepartitionInstructionSpillTest {
 	}
 
 	@Test
+	public void testAliasedMMultSpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			input(ec, "X", 400, 400, 200, 2, 2);
+			MatrixObject out = matrixObject(400, 400, 200);
+			ec.setVariable("R", out);
+
+			MMultOOCInstruction.parseInstruction("OOC°ba+*°X·MATRIX·FP64°X·MATRIX·FP64°R·MATRIX·FP64°1")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			result.start();
+			waitForSpill();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					Assert.assertEquals(400, current.get().getValue().get(0, 0), 0);
+					blocks++;
+				}
+			Assert.assertEquals(4, blocks);
+			Assert.assertNull("Aliased MMult initialized the legacy LRU cache",
+				OOCCacheManager.getCacheIfInitialized());
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
+	@Test
+	public void testUnknownGeometryBinarySpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			MatrixObject first = input(ec, "A", 400, 400, 200, 2, 2, true, 1);
+			MatrixObject second = input(ec, "B", 400, 400, 200, 2, 2, false, 2);
+			first.getDataCharacteristics().set(-1, -1, 200, -1);
+			second.getDataCharacteristics().set(-1, -1, 200, -1);
+			MatrixObject out = matrixObject(400, 400, 200);
+			ec.setVariable("R", out);
+
+			BinaryOOCInstruction.parseInstruction("OOC°+°A·MATRIX·FP64°B·MATRIX·FP64°R·MATRIX·FP64")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			result.start();
+			waitForSpill();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					Assert.assertEquals(3, current.get().getValue().get(0, 0), 0);
+					blocks++;
+				}
+			Assert.assertEquals(4, blocks);
+			Assert.assertNull("Binary initialized the legacy LRU cache", OOCCacheManager.getCacheIfInitialized());
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
+	@Test
+	public void testUnknownGeometryTernarySpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			MatrixObject first = input(ec, "A", 400, 400, 200, 2, 2, true, 1);
+			MatrixObject second = input(ec, "B", 400, 400, 200, 2, 2, false, 1);
+			MatrixObject third = input(ec, "C", 400, 400, 200, 2, 2, true, 1);
+			first.getDataCharacteristics().set(-1, -1, 200, -1);
+			second.getDataCharacteristics().set(-1, -1, 200, -1);
+			third.getDataCharacteristics().set(-1, -1, 200, -1);
+			MatrixObject out = matrixObject(400, 400, 200);
+			ec.setVariable("R", out);
+
+			TernaryOOCInstruction.parseInstruction("OOC°+*°A·MATRIX·FP64°B·MATRIX·FP64°C·MATRIX·FP64°R·MATRIX·FP64°1")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			result.start();
+			waitForSpill();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					Assert.assertEquals(2, current.get().getValue().get(0, 0), 0);
+					blocks++;
+				}
+			Assert.assertEquals(4, blocks);
+			Assert.assertNull("Ternary initialized the legacy LRU cache", OOCCacheManager.getCacheIfInitialized());
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
+	@Test
 	public void testWDivMMSpill() throws InterruptedException {
 		boolean statistics = prepareSpillCache();
 		try {
@@ -289,6 +388,7 @@ public class RepartitionInstructionSpillTest {
 			ec.setVariable("A", in);
 			ec.setVariable("C", out);
 			input.enqueue(tile(1, 1, 200, 200, 11));
+			in.getDataCharacteristics().set(-1, -1, 200, -1);
 
 			IndexingCPInstruction cp = IndexingCPInstruction
 				.parseInstruction("CP°rightIndex°A·MATRIX·FP64°51·SCALAR·INT64·true°350·SCALAR·INT64·true°"
@@ -317,6 +417,8 @@ public class RepartitionInstructionSpillTest {
 					blocks++;
 				}
 			Assert.assertEquals(4, blocks);
+			Assert.assertNull("Right indexing initialized the legacy LRU cache",
+				OOCCacheManager.getCacheIfInitialized());
 		}
 		finally {
 			reset(statistics);
@@ -478,7 +580,7 @@ public class RepartitionInstructionSpillTest {
 			SubscribableTaskQueue<IndexedMatrixValue> leftInput = new SubscribableTaskQueue<>();
 			SubscribableTaskQueue<IndexedMatrixValue> rightInput = new SubscribableTaskQueue<>();
 			MatrixObject left = matrixObject(200, 100, 200);
-			MatrixObject right = matrixObject(200, 100, 200);
+			MatrixObject right = matrixObject(200, 100, 100);
 			MatrixObject out = matrixObject(200, 200, 200);
 			left.setStreamHandle(leftInput);
 			right.setStreamHandle(rightInput);
@@ -494,12 +596,14 @@ public class RepartitionInstructionSpillTest {
 			result.start();
 			waitForSpill();
 
-			rightInput.enqueue(tile(1, 1, 200, 100, 2));
+			rightInput.enqueue(tile(2, 1, 100, 100, 2));
+			rightInput.enqueue(tile(1, 1, 100, 100, 2));
 			rightInput.closeInput();
 			try(OOCStream.QueueCallback<IndexedMatrixValue> callback = result.dequeueCB()) {
 				MatrixBlock block = (MatrixBlock) callback.get().getValue();
 				Assert.assertEquals(1, block.get(0, 0), 0);
 				Assert.assertEquals(2, block.get(0, 199), 0);
+				Assert.assertEquals(2, block.get(199, 199), 0);
 			}
 			Assert.assertNull(result.dequeueCB());
 		}

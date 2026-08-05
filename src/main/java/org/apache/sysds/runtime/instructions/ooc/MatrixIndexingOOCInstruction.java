@@ -35,7 +35,6 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.data.OperationsOnMatrixValues;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
-import org.apache.sysds.runtime.ooc.stream.FilteredOOCStream;
 import org.apache.sysds.runtime.ooc.stream.SubOOCStream;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.util.IndexRange;
@@ -44,10 +43,7 @@ import org.apache.sysds.runtime.util.UtilFunctions;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 
 public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 
@@ -68,12 +64,13 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 
 		MatrixObject mo = ec.getMatrixObject(input1.getName());
 		int blocksize = mo.getBlocksize();
+		if(blocksize <= 0)
+			throw new DMLRuntimeException("Planner-backed OOC indexing requires a positive block size.");
 		long firstBlockRow = ix.rowStart / blocksize;
-		long lastBlockRow = ix.rowEnd / blocksize;
 		long firstBlockCol = ix.colStart / blocksize;
-		long lastBlockCol = ix.colEnd / blocksize;
 
-		boolean inRange = ix.rowStart < mo.getNumRows() && ix.colStart < mo.getNumColumns();
+		boolean inRange = (mo.getNumRows() < 0 || ix.rowStart < mo.getNumRows()) &&
+			(mo.getNumColumns() < 0 || ix.colStart < mo.getNumColumns());
 
 		//right indexing
 		if(opcode.equalsIgnoreCase(Opcodes.RIGHT_INDEX.toString())) {
@@ -104,9 +101,9 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 				return;
 			}
 
-			if(ix.rowStart < 0 || ix.rowStart >= mo.getNumRows() || ix.rowEnd < ix.rowStart ||
-				ix.rowEnd >= mo.getNumRows() || ix.colStart < 0 || ix.colStart >= mo.getNumColumns() ||
-				ix.colEnd < ix.colStart || ix.colEnd >= mo.getNumColumns()) {
+			if(ix.rowStart < 0 || ix.rowEnd < ix.rowStart || ix.colStart < 0 || ix.colEnd < ix.colStart ||
+				(mo.getNumRows() >= 0 && ix.rowEnd >= mo.getNumRows()) ||
+				(mo.getNumColumns() >= 0 && ix.colEnd >= mo.getNumColumns())) {
 				String dbg = "inst=\"" + instString + "\", input=" + input1.getName() + ", output=" + output.getName() +
 					", rowLower=" + debugScalarOperand(rowLower, ec) + ", rowUpper=" +
 					debugScalarOperand(rowUpper, ec) + ", colLower=" + debugScalarOperand(colLower, ec) +
@@ -126,228 +123,43 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 			addOutStream(qOut);
 			mOut.setStreamHandle(qOut);
 
-			if(mo.getDataCharacteristics().dimsKnown()) {
-				OOCInstructionUtils.repartition(qIn, qOut, outputIndex -> {
-					long sourceRowStart = ix.rowStart + (outputIndex.getRowIndex() - 1) * blocksize;
-					long sourceColStart = ix.colStart + (outputIndex.getColumnIndex() - 1) * blocksize;
-					long sourceRowEnd = Math.min(ix.rowEnd, sourceRowStart + blocksize - 1);
-					long sourceColEnd = Math.min(ix.colEnd, sourceColStart + blocksize - 1);
-					int rowFragments = (int) (sourceRowEnd / blocksize - sourceRowStart / blocksize + 1);
-					int colFragments = (int) (sourceColEnd / blocksize - sourceColStart / blocksize + 1);
-					return rowFragments * colFragments;
-				}, (tile, emit) -> {
-					MatrixBlock block = (MatrixBlock) tile.getValue();
-					long inputRowStart = (tile.getIndexes().getRowIndex() - 1) * blocksize;
-					long inputColStart = (tile.getIndexes().getColumnIndex() - 1) * blocksize;
-					long rowStart = Math.max(ix.rowStart, inputRowStart);
-					long colStart = Math.max(ix.colStart, inputColStart);
-					long rowEnd = Math.min(ix.rowEnd + 1, inputRowStart + block.getNumRows());
-					long colEnd = Math.min(ix.colEnd + 1, inputColStart + block.getNumColumns());
-					if(rowStart >= rowEnd || colStart >= colEnd)
-						return;
+			OOCInstructionUtils.repartition(qIn, qOut, outputIndex -> {
+				long sourceRowStart = ix.rowStart + (outputIndex.getRowIndex() - 1) * blocksize;
+				long sourceColStart = ix.colStart + (outputIndex.getColumnIndex() - 1) * blocksize;
+				long sourceRowEnd = Math.min(ix.rowEnd, sourceRowStart + blocksize - 1);
+				long sourceColEnd = Math.min(ix.colEnd, sourceColStart + blocksize - 1);
+				int rowFragments = (int) (sourceRowEnd / blocksize - sourceRowStart / blocksize + 1);
+				int colFragments = (int) (sourceColEnd / blocksize - sourceColStart / blocksize + 1);
+				return rowFragments * colFragments;
+			}, (tile, emit) -> {
+				MatrixBlock block = (MatrixBlock) tile.getValue();
+				long inputRowStart = (tile.getIndexes().getRowIndex() - 1) * blocksize;
+				long inputColStart = (tile.getIndexes().getColumnIndex() - 1) * blocksize;
+				long rowStart = Math.max(ix.rowStart, inputRowStart);
+				long colStart = Math.max(ix.colStart, inputColStart);
+				long rowEnd = Math.min(ix.rowEnd + 1, inputRowStart + block.getNumRows());
+				long colEnd = Math.min(ix.colEnd + 1, inputColStart + block.getNumColumns());
+				if(rowStart >= rowEnd || colStart >= colEnd)
+					return;
 
-					long outputRowStart = (rowStart - ix.rowStart) / blocksize;
-					long outputRowEnd = (rowEnd - ix.rowStart - 1) / blocksize;
-					long outputColStart = (colStart - ix.colStart) / blocksize;
-					long outputColEnd = (colEnd - ix.colStart - 1) / blocksize;
-					for(long outputRow = outputRowStart; outputRow <= outputRowEnd; outputRow++)
-						for(long outputCol = outputColStart; outputCol <= outputColEnd; outputCol++) {
-							long targetRowStart = ix.rowStart + outputRow * blocksize;
-							long targetColStart = ix.colStart + outputCol * blocksize;
-							long copyRowStart = Math.max(rowStart, targetRowStart);
-							long copyColStart = Math.max(colStart, targetColStart);
-							int rows = (int) (Math.min(rowEnd, targetRowStart + blocksize) - copyRowStart);
-							int cols = (int) (Math.min(colEnd, targetColStart + blocksize) - copyColStart);
-							emit.copy(new MatrixIndexes(outputRow + 1, outputCol + 1),
-								(int) (copyRowStart - inputRowStart), (int) (copyColStart - inputColStart), rows, cols,
-								(int) (copyRowStart - targetRowStart), (int) (copyColStart - targetColStart));
-						}
-				}, getContext());
-				return;
-			}
-
-			if(firstBlockRow == lastBlockRow && firstBlockCol == lastBlockCol) {
-				MatrixIndexes srcBlock = new MatrixIndexes(firstBlockRow + 1, firstBlockCol + 1);
-				OOCStream<IndexedMatrixValue> filteredStream = new FilteredOOCStream<>(qIn,
-					tmp -> tmp.getIndexes().equals(srcBlock));
-				mapOOC(filteredStream, qOut, tmp -> {
-					MatrixBlock block = (MatrixBlock) tmp.getValue();
-					int rowStartLocal = (int) (ix.rowStart % blocksize);
-					int rowEndLocal = Math.min(block.getNumRows() - 1, (int) (ix.rowEnd % blocksize));
-					int colStartLocal = (int) (ix.colStart % blocksize);
-					int colEndLocal = Math.min(block.getNumColumns() - 1, (int) (ix.colEnd % blocksize));
-					MatrixBlock outBlock = block.slice(rowStartLocal, rowEndLocal, colStartLocal, colEndLocal);
-					return new IndexedMatrixValue(new MatrixIndexes(1, 1), outBlock);
-				});
-				return;
-			}
-
-			if(ix.rowStart % blocksize == 0 && ix.colStart % blocksize == 0) {
-				// Aligned case: interior blocks can be forwarded directly, borders may require slicing
-				final int outBlockRows = (int) Math.ceil((double) (ix.rowSpan() + 1) / blocksize);
-				final int outBlockCols = (int) Math.ceil((double) (ix.colSpan() + 1) / blocksize);
-				final int totalBlocks = outBlockRows * outBlockCols;
-				final boolean isCached = qIn.hasStreamCache();
-				final AtomicInteger producedBlocks = new AtomicInteger(0);
-				CompletableFuture<Void> future = new CompletableFuture<>();
-
-				mapOptionalOOC(qIn, qOut, tmp -> {
-					if(future.isDone())
-						return Optional.empty();
-
-					long blockRow = tmp.getIndexes().getRowIndex() - 1;
-					long blockCol = tmp.getIndexes().getColumnIndex() - 1;
-					boolean within =
-						blockRow >= firstBlockRow && blockRow <= lastBlockRow && blockCol >= firstBlockCol &&
-							blockCol <= lastBlockCol;
-					if(!within)
-						return Optional.empty();
-
-					MatrixBlock block = (MatrixBlock) tmp.getValue();
-
-					int rowStartLocal = (blockRow == firstBlockRow) ? (int) (ix.rowStart % blocksize) : 0;
-					int rowEndLocal = (blockRow == lastBlockRow) ? Math.min(block.getNumRows() - 1,
-						(int) (ix.rowEnd % blocksize)) : block.getNumRows() - 1;
-					int colStartLocal = (blockCol == firstBlockCol) ? (int) (ix.colStart % blocksize) : 0;
-					int colEndLocal = (blockCol == lastBlockCol) ? Math.min(block.getNumColumns() - 1,
-						(int) (ix.colEnd % blocksize)) : block.getNumColumns() - 1;
-
-					MatrixBlock outBlock;
-					if(rowStartLocal == 0 && rowEndLocal == block.getNumRows() - 1 && colStartLocal == 0 &&
-						colEndLocal == block.getNumColumns() - 1) {
-						// If the block is cached, we need to copy because otherwise it could lead to nullpointers
-						outBlock = isCached ? new MatrixBlock(block) : block;
+				long outputRowStart = (rowStart - ix.rowStart) / blocksize;
+				long outputRowEnd = (rowEnd - ix.rowStart - 1) / blocksize;
+				long outputColStart = (colStart - ix.colStart) / blocksize;
+				long outputColEnd = (colEnd - ix.colStart - 1) / blocksize;
+				for(long outputRow = outputRowStart; outputRow <= outputRowEnd; outputRow++)
+					for(long outputCol = outputColStart; outputCol <= outputColEnd; outputCol++) {
+						long targetRowStart = ix.rowStart + outputRow * blocksize;
+						long targetColStart = ix.colStart + outputCol * blocksize;
+						long copyRowStart = Math.max(rowStart, targetRowStart);
+						long copyColStart = Math.max(colStart, targetColStart);
+						int rows = (int) (Math.min(rowEnd, targetRowStart + blocksize) - copyRowStart);
+						int cols = (int) (Math.min(colEnd, targetColStart + blocksize) - copyColStart);
+						emit.copy(new MatrixIndexes(outputRow + 1, outputCol + 1), (int) (copyRowStart - inputRowStart),
+							(int) (copyColStart - inputColStart), rows, cols, (int) (copyRowStart - targetRowStart),
+							(int) (copyColStart - targetColStart));
 					}
-					else {
-						outBlock = block.slice(rowStartLocal, rowEndLocal, colStartLocal, colEndLocal);
-					}
-
-					long outBlockRow = blockRow - firstBlockRow + 1;
-					long outBlockCol = blockCol - firstBlockCol + 1;
-
-					if(producedBlocks.incrementAndGet() >= totalBlocks)
-						future.complete(null);
-					return Optional.of(new IndexedMatrixValue(new MatrixIndexes(outBlockRow, outBlockCol), outBlock));
-				});
-				return;
-			}
-
-			final BlockAligner<MatrixIndexes> aligner = new BlockAligner<>(ix, blocksize);
-			final ConcurrentHashMap<MatrixIndexes, Integer> consumptionCounts = new ConcurrentHashMap<>();
-
-			// We may need to construct our own intermediate stream to properly manage the cached items
-			boolean hasIntermediateStream = !qIn.hasStreamCache();
-			final CompletableFuture<Void> future = new CompletableFuture<>();
-
-			OOCStream<IndexedMatrixValue> filteredStream = filteredOOCStream(qIn, tmp -> {
-				boolean pass = !future.isDone();
-				// Pre-filter incoming blocks to avoid unnecessary task submission
-				long blockRow = tmp.getIndexes().getRowIndex() - 1;
-				long blockCol = tmp.getIndexes().getColumnIndex() - 1;
-				pass &= blockRow >= firstBlockRow && blockRow <= lastBlockRow && blockCol >= firstBlockCol &&
-					blockCol <= lastBlockCol;
-
-				if(!pass && !hasIntermediateStream)
-					qIn.getStreamCache().incrProcessingCount(tmp.getIndexes(), 1);
-				return pass;
-			});
-
-			final CachingStream cachedStream = hasIntermediateStream ? new CachingStream(
-				filteredStream) : qIn.getStreamCache();
-			cachedStream.activateIndexing();
-			cachedStream.incrSubscriberCount(1); // We may require re-consumption of blocks (up to 4 times)
-			OOCStream<IndexedMatrixValue> readStream = cachedStream.getReadStream();
-
-			submitOOCTasks(readStream, tmp -> {
-				boolean completed = aligner.putNext(tmp.get().getIndexes(), tmp.get().getIndexes(), (idx, sector) -> {
-					int targetBlockRow = (int) (idx.getRowIndex() - 1);
-					int targetBlockCol = (int) (idx.getColumnIndex() - 1);
-
-					long targetRowStartGlobal = ix.rowStart + (long) targetBlockRow * blocksize;
-					long targetRowEndGlobal = Math.min(ix.rowEnd, targetRowStartGlobal + blocksize - 1);
-					long targetColStartGlobal = ix.colStart + (long) targetBlockCol * blocksize;
-					long targetColEndGlobal = Math.min(ix.colEnd, targetColStartGlobal + blocksize - 1);
-
-					int nRows = (int) (targetRowEndGlobal - targetRowStartGlobal + 1);
-					int nCols = (int) (targetColEndGlobal - targetColStartGlobal + 1);
-
-					long firstSrcBlockRow = targetRowStartGlobal / blocksize;
-					long lastSrcBlockRow = targetRowEndGlobal / blocksize;
-					int rowSegments = (int) (lastSrcBlockRow - firstSrcBlockRow + 1);
-
-					long firstSrcBlockCol = targetColStartGlobal / blocksize;
-					long lastSrcBlockCol = targetColEndGlobal / blocksize;
-					int colSegments = (int) (lastSrcBlockCol - firstSrcBlockCol + 1);
-
-					MatrixBlock target = null;
-
-					for(int r = 0; r < rowSegments; r++) {
-						for(int c = 0; c < colSegments; c++) {
-							MatrixIndexes mIdx = sector.get(r, c);
-							if(mIdx == null)
-								continue;
-
-							try(OOCStream.QueueCallback<IndexedMatrixValue> cb = cachedStream.peekCached(mIdx)) {
-								IndexedMatrixValue mv = cb.get();
-								MatrixBlock srcBlock = (MatrixBlock) mv.getValue();
-
-								if(target == null)
-									target = new MatrixBlock(nRows, nCols, srcBlock.isInSparseFormat());
-
-								long srcBlockRowStart = (mIdx.getRowIndex() - 1) * blocksize;
-								long srcBlockColStart = (mIdx.getColumnIndex() - 1) * blocksize;
-								long sliceRowStartGlobal = Math.max(targetRowStartGlobal, srcBlockRowStart);
-								long sliceRowEndGlobal = Math.min(targetRowEndGlobal,
-									srcBlockRowStart + srcBlock.getNumRows() - 1);
-								long sliceColStartGlobal = Math.max(targetColStartGlobal, srcBlockColStart);
-								long sliceColEndGlobal = Math.min(targetColEndGlobal,
-									srcBlockColStart + srcBlock.getNumColumns() - 1);
-
-								int sliceRowStart = (int) (sliceRowStartGlobal - srcBlockRowStart);
-								int sliceRowEnd = (int) (sliceRowEndGlobal - srcBlockRowStart);
-								int sliceColStart = (int) (sliceColStartGlobal - srcBlockColStart);
-								int sliceColEnd = (int) (sliceColEndGlobal - srcBlockColStart);
-
-								int targetRowOffset = (int) (sliceRowStartGlobal - targetRowStartGlobal);
-								int targetColOffset = (int) (sliceColStartGlobal - targetColStartGlobal);
-
-								MatrixBlock sliced = srcBlock.slice(sliceRowStart, sliceRowEnd, sliceColStart,
-									sliceColEnd);
-								sliced.putInto(target, targetRowOffset, targetColOffset, true);
-							}
-
-							final int maxConsumptions = aligner.getNumConsumptions(mIdx);
-
-							Integer con = consumptionCounts.compute(mIdx, (k, v) -> {
-								if(v == null)
-									v = 0;
-								v = v + 1;
-								if(v == maxConsumptions)
-									return null;
-								return v;
-							});
-
-							if(con == null)
-								cachedStream.incrProcessingCount(mIdx, 1);
-						}
-					}
-
-					qOut.enqueue(new IndexedMatrixValue(idx, target));
-				});
-
-				if(completed)
-					future.complete(null);
-			}).thenRun(() -> {
-				aligner.close();
-				qOut.closeInput();
-			}).exceptionally(err -> {
-				qOut.propagateFailure(DMLRuntimeException.of(err));
-				return null;
-			});
-			qIn.start();
-
-			if(hasIntermediateStream)
-				cachedStream.scheduleDeletion(); // We can immediately delete blocks after consumption
+			}, getContext());
+			return;
 		}
 		else if(opcode.equalsIgnoreCase(Opcodes.LEFT_INDEX.toString())) {
 			MatrixObject mOut = ec.getMatrixObject(output);

@@ -134,26 +134,12 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 		ec.getMatrixObject(output).setStreamHandle(qOut);
 
-		if(left.getDataCharacteristics().dimsKnown() && right.getDataCharacteristics().dimsKnown()) {
-			OOCInstructionUtils.equiJoin(left.getStreamable(), right.getStreamable(), qOut, (l, r) -> {
-				MatrixBlock op1 = resolveOperandBlock(1, l, r, leftPos, rightPos, s1, s2, s3);
-				MatrixBlock op2 = resolveOperandBlock(2, l, r, leftPos, rightPos, s1, s2, s3);
-				MatrixBlock op3 = resolveOperandBlock(3, l, r, leftPos, rightPos, s1, s2, s3);
-				return op1.ternaryOperations((TernaryOperator) _optr, op2, op3, new MatrixBlock());
-			}, getContext());
-		}
-		else {
-			OOCStream<IndexedMatrixValue> leftStream = left.getStreamHandle();
-			OOCStream<IndexedMatrixValue> rightStream = right.getStreamHandle();
-			joinOOC(leftStream, rightStream, qOut, (l, r) -> {
-				IndexedMatrixValue outVal = new IndexedMatrixValue();
-				MatrixBlock op1 = resolveOperandBlock(1, l, r, leftPos, rightPos, s1, s2, s3);
-				MatrixBlock op2 = resolveOperandBlock(2, l, r, leftPos, rightPos, s1, s2, s3);
-				MatrixBlock op3 = resolveOperandBlock(3, l, r, leftPos, rightPos, s1, s2, s3);
-				outVal.set(l.getIndexes(), op1.ternaryOperations((TernaryOperator) _optr, op2, op3, new MatrixBlock()));
-				return outVal;
-			}, IndexedMatrixValue::getIndexes);
-		}
+		OOCInstructionUtils.equiJoin(left.getStreamable(), right.getStreamable(), qOut, (l, r) -> {
+			MatrixBlock op1 = resolveOperandBlock(1, l, r, leftPos, rightPos, s1, s2, s3);
+			MatrixBlock op2 = resolveOperandBlock(2, l, r, leftPos, rightPos, s1, s2, s3);
+			MatrixBlock op3 = resolveOperandBlock(3, l, r, leftPos, rightPos, s1, s2, s3);
+			return op1.ternaryOperations((TernaryOperator) _optr, op2, op3, new MatrixBlock());
+		}, getContext());
 	}
 
 	private void processThreeMatrixInstruction(ExecutionContext ec) {
@@ -190,18 +176,11 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 			}
 		}
 
-		List<OOCStream<IndexedMatrixValue>> streams = List.of(
-			m1.getStreamHandle(), m2.getStreamHandle(), m3.getStreamHandle());
-
-		joinOOC(streams, qOut, blocks -> {
-			IndexedMatrixValue b1 = blocks.get(0);
-			IndexedMatrixValue b2 = blocks.get(1);
-			IndexedMatrixValue b3 = blocks.get(2);
-			IndexedMatrixValue outVal = new IndexedMatrixValue();
-			outVal.set(b1.getIndexes(),
-				((MatrixBlock)b1.getValue()).ternaryOperations((TernaryOperator)_optr, (MatrixBlock)b2.getValue(), (MatrixBlock)b3.getValue(), new MatrixBlock()));
-			return outVal;
-		}, IndexedMatrixValue::getIndexes);
+		OOCInstructionUtils.naryEquiJoin(List.of(m1.getStreamable(), m2.getStreamable(), m3.getStreamable()), qOut,
+			blocks -> new IndexedMatrixValue(blocks.get(0).getIndexes(),
+				((MatrixBlock) blocks.get(0).getValue()).ternaryOperations((TernaryOperator) _optr,
+					(MatrixBlock) blocks.get(1).getValue(), (MatrixBlock) blocks.get(2).getValue(), new MatrixBlock())),
+			getContext());
 	}
 
 	private MatrixObject getMatrixObject(ExecutionContext ec, int pos) {
