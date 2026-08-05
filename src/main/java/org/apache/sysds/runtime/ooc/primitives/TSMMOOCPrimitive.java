@@ -198,9 +198,13 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 				return;
 			}
 			ReservationBudget budget = new ReservationBudget(_allowance, _taskBytes).enableReuse();
+			long leftRow = _type.isLeft() ? group + 1L : left + 1L;
+			long leftCol = _type.isLeft() ? left + 1L : group + 1L;
+			long rightRow = _type.isLeft() ? group + 1L : right + 1L;
+			long rightCol = _type.isLeft() ? right + 1L : group + 1L;
 			OOCFuture
-				.allOf(List.of(_inputReader.request(group * _width + left, budget),
-					_inputReader.request(group * _width + right, budget)), StoreLease::close)
+				.allOf(List.of(_inputReader.request(leftRow, leftCol, budget),
+					_inputReader.request(rightRow, rightCol, budget)), StoreLease::close)
 				.whenComplete((inputs, inputError) -> {
 					if(inputError != null) {
 						budget.close();

@@ -56,6 +56,13 @@ public final class OOCPlanner {
 		for(OOCPrimitive.OOCMaterializedInputRequest request : primitive.requiredMaterializedInputs()) {
 			OOCStreamable<IndexedMatrixValue> input = (OOCStreamable<IndexedMatrixValue>) primitive
 				.getInput(request.inputIndex());
+			OOCPrimitive dependency = primitive.getInputDependency(request.inputIndex());
+			if(input.hasMaterializedStore() && dependency instanceof MaterializeOOCPrimitive existingBoundary) {
+				boolean live = existingBoundary.registerRequest(request.expectedReaders(), request.liveConsumer());
+				if(request.liveRegistration() != null)
+					request.liveRegistration().accept(live);
+				continue;
+			}
 			MaterializeOOCPrimitive boundary = boundaries.get(input);
 			if(boundary == null) {
 				boundary = new MaterializeOOCPrimitive(input, request.layout(), primitive.getContext());

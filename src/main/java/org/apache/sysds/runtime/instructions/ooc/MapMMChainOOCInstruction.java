@@ -114,7 +114,7 @@ public class MapMMChainOOCInstruction extends ComputationOOCInstruction {
 		else {
 			OOCStream<IndexedMatrixValue> xvPartials = createWritableStream(x);
 			OOCInstructionUtils.indexedBroadcastMap(sharedX, v.getStreamable(), xvPartials,
-				value -> Math.toIntExact(value.getIndexes().getColumnIndex() - 1),
+				value -> value.getIndexes().getColumnIndex(), value -> 1,
 				() -> new CountingLiveness(colBlocks, rowBlocks), (xValue, vValue) -> {
 					MatrixBlock xBlock = (MatrixBlock) xValue.getValue();
 					MatrixBlock vBlock = (MatrixBlock) vValue.getValue();
@@ -137,9 +137,8 @@ public class MapMMChainOOCInstruction extends ComputationOOCInstruction {
 		}
 
 		OOCStream<IndexedMatrixValue> xtPartials = createWritableStream(x.getNumColumns(), x.getNumRows(), blocksize);
-		OOCInstructionUtils.indexedBroadcastMap(sharedX, u, xtPartials,
-			value -> Math.toIntExact(value.getIndexes().getRowIndex() - 1),
-			() -> new CountingLiveness(rowBlocks, colBlocks), (xValue, uValue) -> {
+		OOCInstructionUtils.indexedBroadcastMap(sharedX, u, xtPartials, value -> value.getIndexes().getRowIndex(),
+			value -> 1, () -> new CountingLiveness(rowBlocks, colBlocks), (xValue, uValue) -> {
 				MatrixBlock partial = multTransposeVector((MatrixBlock) xValue.getValue(),
 					(MatrixBlock) uValue.getValue());
 				return new IndexedMatrixValue(

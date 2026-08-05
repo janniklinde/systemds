@@ -35,6 +35,7 @@ import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.RightScalarOperator;
 import org.apache.sysds.runtime.matrix.operators.QuaternaryOperator;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
@@ -84,18 +85,13 @@ public class WDivMMOOCInstruction extends QuaternaryOOCInstruction {
 		OOCStreamable<IndexedMatrixValue> sharedU = u.getStreamable();
 		OOCStreamable<IndexedMatrixValue> sharedV = v.getStreamable();
 		MaterializedStoreStreamable createdX = null;
-		MaterializedStoreStreamable createdU = null;
 		MaterializedStoreStreamable createdV = null;
 		if(type.isMinus() && !type.hasFourInputs() && !sharedX.hasMaterializedStore()) {
 			createdX = new MaterializedStoreStreamable(x.getStreamHandle(), x);
 			sharedX = createdX;
 		}
-		if(!type.isBasic() && !sharedU.hasMaterializedStore()) {
-			createdU = new MaterializedStoreStreamable(u.getStreamHandle(), u);
-			sharedU = createdU;
-		}
 		if(type.isRight() && !sharedV.hasMaterializedStore()) {
-			createdV = new MaterializedStoreStreamable(v.getStreamHandle(), v);
+			createdV = new MaterializedStoreStreamable(v.getStreamHandle(), v, OOCStoreLayout.COL_MAJOR);
 			sharedV = createdV;
 		}
 
@@ -110,8 +106,6 @@ public class WDivMMOOCInstruction extends QuaternaryOOCInstruction {
 			ec.getMatrixObject(output).setStreamHandle(out);
 			if(createdX != null)
 				createdX.scheduleMaterializedStoreDeletion();
-			if(createdU != null)
-				createdU.scheduleMaterializedStoreDeletion();
 			if(createdV != null)
 				createdV.scheduleMaterializedStoreDeletion();
 			return;
@@ -159,8 +153,6 @@ public class WDivMMOOCInstruction extends QuaternaryOOCInstruction {
 			OOCInstructionUtils.matrixMultiply(intermediate, sharedV, out, multiply, plus, getContext());
 		if(createdX != null)
 			createdX.scheduleMaterializedStoreDeletion();
-		if(createdU != null)
-			createdU.scheduleMaterializedStoreDeletion();
 		if(createdV != null)
 			createdV.scheduleMaterializedStoreDeletion();
 	}

@@ -75,7 +75,7 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 				OOCStream<IndexedMatrixValue> partials = createWritableStream();
 				partials.setData(min);
 				OOCInstructionUtils.indexedBroadcastMap(min.getStreamable(), vin.getStreamable(), partials,
-					left -> Math.toIntExact(left.getIndexes().getColumnIndex() - 1),
+					left -> left.getIndexes().getColumnIndex(), left -> 1,
 					() -> new CountingLiveness(Math.toIntExact(vin.getDataCharacteristics().getNumRowBlocks()),
 						Math.toIntExact(min.getDataCharacteristics().getNumRowBlocks())),
 					(left, right) -> {

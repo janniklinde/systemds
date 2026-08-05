@@ -32,6 +32,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
@@ -51,10 +52,15 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	private int _activeReaders;
 
 	public MaterializedStoreStreamable(OOCStream<IndexedMatrixValue> source, CacheableData<?> data) {
+		this(source, data, OOCStoreLayout.ROW_MAJOR);
+	}
+
+	public MaterializedStoreStreamable(OOCStream<IndexedMatrixValue> source, CacheableData<?> data,
+		OOCStoreLayout layout) {
 		if(source == null)
 			throw new IllegalArgumentException("Materialized stream requires a source.");
 		_data = data;
-		_primitive = MaterializeOOCPrimitive.reusable(source);
+		_primitive = MaterializeOOCPrimitive.reusable(source, layout);
 		_primitive.store().whenComplete((store, error) -> {
 			if(error != null) {
 				markMaterializationDone();
