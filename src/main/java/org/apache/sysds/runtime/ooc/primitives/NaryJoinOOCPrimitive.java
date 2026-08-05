@@ -20,7 +20,9 @@
 package org.apache.sysds.runtime.ooc.primitives;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
@@ -96,8 +98,7 @@ public final class NaryJoinOOCPrimitive<O> extends OOCPrimitive {
 		for(int i = 0; i < _inputs.size(); i++)
 			inputs.add(getInputReadStream(i));
 
-		int groups = (int) OOCUtils.getNumBlocks(inputs.get(0).getDataCharacteristics());
-		_table = new StateTable<>(groups * inputs.size());
+		_table = new StateTable<>();
 		_outputStream = _output.getWriteStream();
 		_ready = new SubscribableTaskQueue<>();
 		getContext().addOutStream(_outputStream, _ready);
@@ -121,7 +122,7 @@ public final class NaryJoinOOCPrimitive<O> extends OOCPrimitive {
 
 	private void drive(List<OOCStream<IndexedMatrixValue>> inputs) {
 		try {
-			byte[] groupCtr = new byte[(int) OOCUtils.getNumBlocks(inputs.get(0).getDataCharacteristics())];
+			Map<Integer, Integer> groupCounts = new HashMap<>();
 			int n = inputs.size();
 			int unmatchedGroups = 0;
 			while(true) {
@@ -145,10 +146,11 @@ public final class NaryJoinOOCPrimitive<O> extends OOCPrimitive {
 					for(int i = 0; i < n; i++) {
 						OOCStream.QueueCallback<IndexedMatrixValue> callback = callbacks.get(i);
 						int group = _key.applyAsInt(callback.get());
-						int count = ++groupCtr[group];
+						int count = groupCounts.merge(group, 1, Integer::sum);
 						if(count == 1)
 							unmatchedGroups++;
 						if(count == n) {
+							groupCounts.remove(group);
 							unmatchedGroups--;
 							onJoinGroupAvailable(group, callback, i, n);
 						}

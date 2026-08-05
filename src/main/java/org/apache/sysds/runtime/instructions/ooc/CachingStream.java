@@ -51,10 +51,12 @@ import java.util.function.Consumer;
  */
 public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
+	private static final long LARGE_LRU_WARNING_BYTES = 100_000_000L;
 	public static final IDSequence _streamSeq = new IDSequence();
 
 	// original live stream
 	private final OOCStream<IndexedMatrixValue> _source;
+	private final String _callerContext;
 	private final IntArrayList _consumptionCounts = new IntArrayList();
 	private final IntArrayList _consumerConsumptionCounts = new IntArrayList();
 	private final IntArrayList _groupIndices = new IntArrayList();
@@ -81,6 +83,8 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	private int _maxConsumptionCount = 0;
 	private int _lazyHandleReservations = 0;
 	private String _watchdogId = null;
+	private long _cachedBytes = 0;
+	private boolean _warnedLargeCache = false;
 
 	public CachingStream(OOCStream<IndexedMatrixValue> source) {
 		this(source, _streamSeq.getNextID());
@@ -89,6 +93,9 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 	public CachingStream(OOCStream<IndexedMatrixValue> source, long streamId) {
 		_source = source;
 		_streamId = streamId;
+		_callerContext = StackWalker.getInstance()
+			.walk(frames -> frames.filter(frame -> !frame.getClassName().equals(CachingStream.class.getName()))
+				.findFirst().map(frame -> frame.getClassName() + "#" + frame.getMethodName()).orElse("unknown"));
 		if(OOCWatchdog.WATCH) {
 			_watchdogId = "CS-" + hashCode();
 			// Capture a short context to help identify origin
@@ -112,14 +119,17 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 							OOCStream.GroupQueueCallback<IndexedMatrixValue> group =
 								(OOCStream.GroupQueueCallback<IndexedMatrixValue>) tmp;
 							groupSize = group.size();
+							long groupBytes = 0;
 							for(int gi = 0; gi < groupSize; gi++) {
 								OOCStream.QueueCallback<IndexedMatrixValue> sub = group.getCallback(gi);
 								try(sub) {
 									IndexedMatrixValue imv = sub.get();
+									groupBytes += ((MatrixBlock) imv.getValue()).getExactSerializedSize();
 									if(_index != null)
 										_index.put(imv.getIndexes(), _numBlocks + gi);
 								}
 							}
+							recordCachedBytes(groupBytes);
 
 							BlockKey baseKey;
 							boolean ownsEntry = true;
@@ -173,6 +183,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 						}
 						else {
 							final IndexedMatrixValue task = tmp.get();
+							recordCachedBytes(((MatrixBlock) task.getValue()).getExactSerializedSize());
 							OOCIOHandler.SourceBlockDescriptor descriptor = null;
 							BlockKey blockKey = null;
 							boolean ownsEntry = true;
@@ -716,6 +727,15 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 
 		if (!cacheInProgress && onNoMoreTasks(consumerIdx))
 			subscriber.accept(OOCStream.eos(_failure)); // NO_MORE_TASKS
+	}
+
+	private void recordCachedBytes(long bytes) {
+		_cachedBytes = Math.addExact(_cachedBytes, bytes);
+		if(!_warnedLargeCache && _cachedBytes > LARGE_LRU_WARNING_BYTES) {
+			_warnedLargeCache = true;
+			System.out.println("[WARN] Legacy OOC LRU cached more than 100MB for " + _callerContext + " ("
+				+ String.format("%.2f", _cachedBytes / 1_000_000d) + "MB).");
+		}
 	}
 
 	/**
