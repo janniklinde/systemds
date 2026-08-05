@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.ooc.cache;
 
+import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.function.LongUnaryOperator;
@@ -72,6 +73,20 @@ public interface OOCCache {
 	 * pin/unpin.
 	 */
 	BlockEntry putPinned(long sId, long tId, Object data, long size, MemoryAllowance allowance);
+
+	/**
+	 * Adds a pinned entry without allowing a cache to combine it with other logical entries.
+	 */
+	default BlockEntry putUnpackedPinned(long sId, long tId, Object data, long size, MemoryAllowance allowance) {
+		return putPinned(sId, tId, data, size, allowance);
+	}
+
+	/**
+	 * Marks a pinned physical entry as having an external backing resource registered with the I/O handler.
+	 */
+	void markBacked(BlockEntry entry);
+
+	OOCIOHandler getIOHandler();
 
 	/**
 	 * Pins an item backed by an allowance. A successful pin transfers memory ownership from the cache to the owner of

@@ -81,7 +81,8 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 			throw new DMLRuntimeException("Cannot enqueue into closed SubscribableTaskQueue");
 		}
 
-		_blockCount.incrementAndGet();
+		int blocks = cb instanceof GroupQueueCallback<?> group ? group.size() : 1;
+		_blockCount.addAndGet(blocks);
 
 		Consumer<QueueCallback<T>> s = _subscriber;
 		final Consumer<QueueCallback<T>> fS = s;
