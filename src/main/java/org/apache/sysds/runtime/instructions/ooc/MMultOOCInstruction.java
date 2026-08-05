@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.common.Opcodes;
+import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.functionobjects.Multiply;
@@ -28,7 +29,6 @@ import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
-import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.AggregateBinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
@@ -94,32 +94,9 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 			return;
 		}
 
-		int emitLeftThreshold = (int)vin.getDataCharacteristics().getNumColBlocks();
-		int emitRightThreshold = (int)min.getDataCharacteristics().getNumRowBlocks();
-
-		OOCStream<IndexedMatrixValue> intermediateStream = createWritableStream();
-		OOCStream<IndexedMatrixValue> outStream = createWritableStream();
-		ec.getMatrixObject(output).setStreamHandle(outStream);
-
-		joinManyOOC(min.getStreamHandle(), vin.getStreamHandle(), intermediateStream,
-			(left, right) -> {
-				MatrixBlock leftBlock = (MatrixBlock) left.getValue();
-				MatrixBlock rightBlock = (MatrixBlock) right.getValue();
-				MatrixBlock partialResult = leftBlock.aggregateBinaryOperations(leftBlock, rightBlock,
-					new MatrixBlock(), (AggregateBinaryOperator) _optr);
-				return new IndexedMatrixValue(new MatrixIndexes(left.getIndexes().getRowIndex(), right.getIndexes().getColumnIndex()), partialResult);
-			},
-			tmp -> tmp.getIndexes().getColumnIndex(),
-			tmp -> tmp.getIndexes().getRowIndex(),
-			emitLeftThreshold, emitRightThreshold);
-
-		BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
-		int emitAggThreshold = (int)min.getDataCharacteristics().getNumColBlocks();
-
-		groupedReduceOOC(intermediateStream, outStream, (left, right) -> {
-			MatrixBlock mb = ((MatrixBlock)left.getValue()).binaryOperations(plus, right.getValue());
-			left.setValue(mb);
-			return left;
-		}, emitAggThreshold);
+		throw new DMLRuntimeException("Planner-backed OOC matrix multiplication requires known positive dimensions, "
+			+ "matching inner dimensions, and equal positive block sizes: " + min.getNumRows() + "x"
+			+ min.getNumColumns() + " (blocksize " + min.getBlocksize() + ") %*% " + vin.getNumRows() + "x"
+			+ vin.getNumColumns() + " (blocksize " + vin.getBlocksize() + ")");
 	}
 }
