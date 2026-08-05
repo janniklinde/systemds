@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.ooc.util;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -51,12 +52,15 @@ import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.FlatMapOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GeneralMMultOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.NaryJoinOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.OrderedMappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.PlannableDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.ReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
@@ -113,6 +117,16 @@ public final class OOCInstructionUtils {
 	public static void equiMap(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
 		Function<IndexedMatrixValue, MatrixBlock> operation, StreamContext context) {
 		output.assignPrimitive(new MappingOOCPrimitive(input, output, operation, context));
+	}
+
+	public static <I, O> void flatMap(OOCStreamable<I> input, OOCStream<O> output, Function<I, Collection<O>> operation,
+		ToLongFunction<O> outputSize, long taskBytes, StreamContext context) {
+		output.assignPrimitive(new FlatMapOOCPrimitive<>(input, output, operation, outputSize, taskBytes, context));
+	}
+
+	public static void orderedMap(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
+		OOCStoreLayout layout, Function<IndexedMatrixValue, IndexedMatrixValue> operation, StreamContext context) {
+		output.assignPrimitive(new OrderedMappingOOCPrimitive(input, output, layout, operation, context));
 	}
 
 	public static void transposedMap(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
