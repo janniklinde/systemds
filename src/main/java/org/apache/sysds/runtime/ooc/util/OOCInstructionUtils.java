@@ -57,6 +57,7 @@ import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.CtableOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.FlatMapOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GeneralMMultOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
@@ -150,6 +151,11 @@ public final class OOCInstructionUtils {
 		output.assignPrimitive(new SourceReadOOCPrimitive(output, path, rows, cols, blocksize, nonZeros, bulkBytes,
 			productionLimit, context));
 		return new MaterializedStoreStreamable(output, data);
+	}
+
+	public static void ctable(List<OOCStreamable<IndexedMatrixValue>> inputs, OOCStream<IndexedMatrixValue> output,
+		double secondScalar, double weight, StreamContext context) {
+		output.assignPrimitive(new CtableOOCPrimitive(inputs, output, secondScalar, weight, context));
 	}
 
 	public static void repartition(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,

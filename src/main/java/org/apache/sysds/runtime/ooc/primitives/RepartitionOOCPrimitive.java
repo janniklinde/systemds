@@ -118,8 +118,19 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 			BiConsumer<IndexedMatrixValue, FragmentEmitter> router = _routers.get(i);
 			OOCInstructionUtils.submitOOCTasks(input, callback -> {
 				IndexedMatrixValue value = callback.get();
-				router.accept(value, (outputIndex, srcRow, srcCol, rows, cols, dstRow, dstCol) -> schedule(callback,
-					outputIndex, srcRow, srcCol, rows, cols, dstRow, dstCol));
+				router.accept(value, new FragmentEmitter() {
+					@Override
+					public void copy(MatrixIndexes outputIndex, int srcRow, int srcCol, int rows, int cols, int dstRow,
+						int dstCol) {
+						schedule(callback, outputIndex, srcRow, srcCol, rows, cols, dstRow, dstCol, false);
+					}
+
+					@Override
+					public void copyRowToColumn(MatrixIndexes outputIndex, int srcRow, int srcCol, int length,
+						int dstRow) {
+						schedule(callback, outputIndex, srcRow, srcCol, 1, length, dstRow, 0, true);
+					}
+				});
 			}, getContext()).whenComplete((ignored, error) -> {
 				if(error != null)
 					fail(error);
@@ -129,7 +140,7 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 	}
 
 	private void schedule(OOCStream.QueueCallback<IndexedMatrixValue> input, MatrixIndexes outputIndex, int srcRow,
-		int srcCol, int rows, int cols, int dstRow, int dstCol) {
+		int srcCol, int rows, int cols, int dstRow, int dstCol, boolean rowToColumn) {
 		_active.incrementAndGet();
 		OOCStream.QueueCallback<IndexedMatrixValue> retained = input.keepOpen();
 		_allowance.reserveAsync(_taskBytes).whenComplete((ignored, error) -> {
@@ -143,7 +154,8 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 			try {
 				int slot = Math
 					.toIntExact((outputIndex.getRowIndex() - 1) * _outputColBlocks + outputIndex.getColumnIndex() - 1);
-				_ready.enqueue(new FragmentWork(retained, slot, srcRow, srcCol, rows, cols, dstRow, dstCol, budget));
+				_ready.enqueue(
+					new FragmentWork(retained, slot, srcRow, srcCol, rows, cols, dstRow, dstCol, rowToColumn, budget));
 			}
 			catch(Throwable failure) {
 				retained.close();
@@ -167,6 +179,13 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 			MatrixBlock source = (MatrixBlock) work._input.get().getValue();
 			MatrixBlock slice = source.slice(work._srcRow, work._srcRow + work._rows - 1, work._srcCol,
 				work._srcCol + work._cols - 1);
+			int fragmentRows = work._rows;
+			int fragmentCols = work._cols;
+			if(work._rowToColumn) {
+				slice = slice.reshape(work._cols, 1, true);
+				fragmentRows = work._cols;
+				fragmentCols = 1;
+			}
 			DataCharacteristics outputDC = _output.getDataCharacteristics();
 			int row = work._slot / _outputColBlocks;
 			int col = work._slot % _outputColBlocks;
@@ -175,8 +194,8 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 			int outputCols = (int) Math.min(outputDC.getBlocksize(),
 				outputDC.getCols() - (long) col * outputDC.getBlocksize());
 			MatrixBlock block = new MatrixBlock(outputRows, outputCols, source.isInSparseFormat());
-			block.copy(work._dstRow, work._dstRow + work._rows - 1, work._dstCol, work._dstCol + work._cols - 1, slice,
-				false);
+			block.copy(work._dstRow, work._dstRow + fragmentRows - 1, work._dstCol, work._dstCol + fragmentCols - 1,
+				slice, false);
 			block.examSparsity();
 			work.releaseInput();
 			ManagedPayload<IndexedMatrixValue> result = payload(work._slot, 1, block, budget);
@@ -306,9 +325,10 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 		}
 	}
 
-	@FunctionalInterface
 	public interface FragmentEmitter {
 		void copy(MatrixIndexes outputIndex, int srcRow, int srcCol, int rows, int cols, int dstRow, int dstCol);
+
+		void copyRowToColumn(MatrixIndexes outputIndex, int srcRow, int srcCol, int length, int dstRow);
 	}
 
 	private interface ComputeWork extends AutoCloseable {
@@ -323,10 +343,11 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 		private final int _cols;
 		private final int _dstRow;
 		private final int _dstCol;
+		private final boolean _rowToColumn;
 		private ReservationBudget _budget;
 
 		private FragmentWork(OOCStream.QueueCallback<IndexedMatrixValue> input, int slot, int srcRow, int srcCol,
-			int rows, int cols, int dstRow, int dstCol, ReservationBudget budget) {
+			int rows, int cols, int dstRow, int dstCol, boolean rowToColumn, ReservationBudget budget) {
 			_input = input;
 			_slot = slot;
 			_srcRow = srcRow;
@@ -335,6 +356,7 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 			_cols = cols;
 			_dstRow = dstRow;
 			_dstCol = dstCol;
+			_rowToColumn = rowToColumn;
 			_budget = budget;
 		}
 
