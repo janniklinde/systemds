@@ -39,6 +39,7 @@ import java.util.function.ToLongFunction;
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.lops.MMTSJ.MMTSJType;
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
@@ -64,11 +65,13 @@ import org.apache.sysds.runtime.ooc.primitives.OrderedMappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.PlannableDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.ReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.SourceReadOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TSMMOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TransposeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.UncoordinatedDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
+import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.stream.TaskContext;
@@ -137,6 +140,14 @@ public final class OOCInstructionUtils {
 	public static void transpose(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
 		StreamContext context) {
 		transposedMap(input, output, MatrixBlock::transpose, context);
+	}
+
+	public static MaterializedStoreStreamable sourceRead(OOCStream<IndexedMatrixValue> output, CacheableData<?> data,
+		String path, long rows, long cols, int blocksize, long nonZeros, long bulkBytes, long productionLimit,
+		StreamContext context) {
+		output.assignPrimitive(new SourceReadOOCPrimitive(output, path, rows, cols, blocksize, nonZeros, bulkBytes,
+			productionLimit, context));
+		return new MaterializedStoreStreamable(output, data);
 	}
 
 	public static void repartition(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,

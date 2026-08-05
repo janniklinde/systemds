@@ -93,6 +93,12 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		DeferredReader stream = new DeferredReader(this);
 		stream.setData(_data);
 		stream.assignPrimitive(_primitive);
+		boolean live = _primitive.registerRequest(1, stream::acceptLive);
+		stream.setLive(live);
+		if(live) {
+			_pendingReaders--;
+			_activeReaders++;
+		}
 		return stream;
 	}
 
@@ -190,6 +196,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		}
 		finally {
 			output.shutdownAllowance();
+			releaseConsumer();
 			tryFinalize();
 		}
 	}
@@ -201,7 +208,15 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			_activeReaders--;
 		}
 		output.shutdownAllowance();
+		releaseConsumer();
 		tryFinalize();
+	}
+
+	private void releaseConsumer() {
+		_primitive.store().whenComplete((store, error) -> {
+			if(store != null)
+				store.close();
+		});
 	}
 
 	private void markMaterializationDone() {
@@ -308,6 +323,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		private final MaterializedStoreStreamable _owner;
 		private final AtomicBoolean _activated;
 		private final AtomicBoolean _finished;
+		private volatile boolean _live;
 		private SyncMemoryAllowance _allowance;
 
 		private DeferredReader(MaterializedStoreStreamable owner) {
@@ -334,6 +350,10 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			return super.dequeueCB();
 		}
 
+		private void setLive(boolean live) {
+			_live = live;
+		}
+
 		private synchronized void setAllowance(SyncMemoryAllowance allowance) {
 			_allowance = allowance;
 		}
@@ -345,8 +365,47 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			}
 		}
 
+		private void acceptLive(QueueCallback<IndexedMatrixValue> callback) {
+			if(callback.isFailure()) {
+				DMLRuntimeException failure;
+				try(callback) {
+					callback.get();
+					failure = new DMLRuntimeException("Live source materialization failed.");
+				}
+				catch(Throwable error) {
+					failure = DMLRuntimeException.of(error);
+				}
+				try {
+					propagateFailure(failure);
+				}
+				finally {
+					_owner.finishReader(this);
+				}
+				return;
+			}
+			if(callback.isEos()) {
+				callback.close();
+				try {
+					closeInput();
+				}
+				finally {
+					_owner.finishReader(this);
+				}
+				return;
+			}
+			QueueCallback<IndexedMatrixValue> retained = callback.keepOpen();
+			try {
+				enqueue(retained);
+				retained = null;
+			}
+			finally {
+				if(retained != null)
+					retained.close();
+			}
+		}
+
 		private void activate() {
-			if(_activated.compareAndSet(false, true))
+			if(_activated.compareAndSet(false, true) && !_live)
 				_owner.openReader(this);
 		}
 
