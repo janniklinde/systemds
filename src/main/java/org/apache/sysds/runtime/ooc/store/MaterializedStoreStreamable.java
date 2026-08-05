@@ -215,8 +215,10 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	}
 
 	private synchronized SyncMemoryAllowance readerAllowance() {
-		if(_readerAllowance == null)
-			_readerAllowance = new SyncMemoryAllowance(GlobalMemoryBroker.get());
+		if(_readerAllowance == null) {
+			GlobalMemoryBroker broker = GlobalMemoryBroker.get();
+			_readerAllowance = new SyncMemoryAllowance(broker, broker.getAllowedMemory() / 5);
+		}
 		return _readerAllowance;
 	}
 

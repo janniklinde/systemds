@@ -43,6 +43,10 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		return BROKER;
 	}
 
+	public long getAllowedMemory() {
+		return _allowedBytes;
+	}
+
 	private final long _allowedBytes;
 	private final CopyOnWriteArrayList<MemoryAllowance> _allowances;
 	private final AtomicBoolean _reclaimRunning;

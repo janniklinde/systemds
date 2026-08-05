@@ -104,7 +104,8 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 			}
 		});
 		ReaderTextCSVParallel reader = new ReaderTextCSVParallel(csvProps);
-		OOCInstructionUtils.uncoordinatedDataGen(qOut, bulkBytes::get, OOCAccessPattern.UNKNOWN, (ignored, active) -> {
+		OOCInstructionUtils.uncoordinatedDataGen(qOut, bulkBytes::get, maxBulkBytes, OOCAccessPattern.UNKNOWN,
+			(ignored, active) -> {
 			try {
 				if(prepared.compareAndSet(false, true)) {
 					reader.prepareStreamRead(min.getFileName(), mc.getRows(), mc.getCols(), blen, mc.getNonZeros(),

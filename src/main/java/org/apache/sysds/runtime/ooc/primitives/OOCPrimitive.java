@@ -168,9 +168,14 @@ public abstract class OOCPrimitive {
 
 	public final void tryStartExecution() {
 		if(_executionStarted.compareAndSet(false, true)) {
-			_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get());
+			GlobalMemoryBroker broker = GlobalMemoryBroker.get();
+			_allowance = new SyncMemoryAllowance(broker, getAllowanceLimit(broker));
 			startExecution();
 		}
+	}
+
+	protected long getAllowanceLimit(GlobalMemoryBroker broker) {
+		return broker.getAllowedMemory() / 3;
 	}
 
 	protected final boolean fail(Throwable error) {
