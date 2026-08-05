@@ -25,6 +25,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
+import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.io.MatrixWriter;
 import org.apache.sysds.runtime.io.MatrixWriterFactory;
@@ -32,11 +33,13 @@ import org.apache.sysds.test.AutomatedTestBase;
 import org.apache.sysds.test.TestConfiguration;
 import org.apache.sysds.test.TestUtils;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class SourceReadOOCIOHandlerTest extends AutomatedTestBase {
 	private static final String TEST_NAME = "SourceReadOOCIOHandler";
@@ -79,11 +82,11 @@ public class SourceReadOOCIOHandlerTest extends AutomatedTestBase {
 		MatrixBlock reconstructed = drainToMatrix(target, rows, cols, blen);
 
 		TestUtils.compareMatrices(src, reconstructed, 1e-12);
-		org.junit.Assert.assertTrue(res.eof);
-		org.junit.Assert.assertNull(res.continuation);
-		org.junit.Assert.assertNotNull(res.blocks);
-		org.junit.Assert.assertEquals((rows / blen) * (cols / blen), res.blocks.size());
-		org.junit.Assert.assertTrue(res.blocks.stream().allMatch(b -> b.indexes != null));
+		Assert.assertTrue(res.eof);
+		Assert.assertNull(res.continuation);
+		Assert.assertNotNull(res.blocks);
+		Assert.assertEquals((rows / blen) * (cols / blen), res.blocks.size());
+		Assert.assertTrue(res.blocks.stream().allMatch(b -> b.indexes != null));
 	}
 
 	@Test
@@ -105,18 +108,62 @@ public class SourceReadOOCIOHandlerTest extends AutomatedTestBase {
 			rows, cols, blen, src.getNonZeros(), budget, true, target);
 
 		OOCIOHandler.SourceReadResult first = handler.scheduleSourceRead(req).get();
-		org.junit.Assert.assertFalse(first.eof);
-		org.junit.Assert.assertNotNull(first.continuation);
-		org.junit.Assert.assertNotNull(first.blocks);
+		Assert.assertFalse(first.eof);
+		Assert.assertNotNull(first.continuation);
+		Assert.assertNotNull(first.blocks);
 
 		OOCIOHandler.SourceReadResult second = handler.continueSourceRead(first.continuation, Long.MAX_VALUE).get();
-		org.junit.Assert.assertTrue(second.eof);
-		org.junit.Assert.assertNull(second.continuation);
-		org.junit.Assert.assertNotNull(second.blocks);
-		org.junit.Assert.assertEquals((rows / blen) * (cols / blen), first.blocks.size() + second.blocks.size());
+		Assert.assertTrue(second.eof);
+		Assert.assertNull(second.continuation);
+		Assert.assertNotNull(second.blocks);
+		Assert.assertEquals((rows / blen) * (cols / blen), first.blocks.size() + second.blocks.size());
 
 		MatrixBlock reconstructed = drainToMatrix(target, rows, cols, blen);
 		TestUtils.compareMatrices(src, reconstructed, 1e-12);
+	}
+
+	@Test
+	public void testLargeTileSeparatesSmallSourceTiles() throws Exception {
+		getAndLoadTestConfiguration(TEST_NAME);
+		int rows = 10;
+		int cols = 30;
+		int blocksize = 10;
+		MatrixBlock source = new MatrixBlock(rows, cols, true);
+		source.set(0, 0, 1);
+		for(int row = 0; row < rows; row++)
+			for(int col = 10; col < 20; col++)
+				source.set(row, col, 2);
+		source.set(0, 20, 3);
+		source.recomputeNonZeros();
+		String file = input("binary_pack_boundary");
+		writeBinaryMatrix(source, file, blocksize);
+
+		MatrixBlock small = source.slice(0, rows - 1, 0, blocksize - 1);
+		MatrixBlock large = source.slice(0, rows - 1, blocksize, 2 * blocksize - 1);
+		long threshold = (small.getExactSerializedSize() + large.getExactSerializedSize()) / 2;
+		SourceOOCStream target = new SourceOOCStream(false);
+		AtomicInteger groups = new AtomicInteger();
+		AtomicInteger singles = new AtomicInteger();
+		target.setSubscriber(callback -> {
+			try(callback) {
+				if(callback.isEos())
+					return;
+				if(callback instanceof SourceOOCStream.SourceGroupCallback)
+					groups.incrementAndGet();
+				else
+					singles.incrementAndGet();
+			}
+		});
+		OOCIOHandler.SourceReadRequest request = new OOCIOHandler.SourceReadRequest(file, Types.FileFormat.BINARY, rows,
+			cols, blocksize, source.getNonZeros(), Long.MAX_VALUE, true, target, threshold, 2 * threshold);
+		OOCIOHandler.SourceReadResult result = handler.scheduleSourceRead(request).get();
+
+		Assert.assertTrue(result.eof);
+		Assert.assertEquals(3, result.blocks.size());
+		Assert.assertEquals(2, result.blocks.stream().filter(block -> block.serializedSize < threshold).count());
+		Assert.assertEquals(1, result.blocks.stream().filter(block -> block.serializedSize >= threshold).count());
+		Assert.assertEquals(0, groups.get());
+		Assert.assertEquals(3, singles.get());
 	}
 
 	private void writeBinaryMatrix(MatrixBlock mb, String fname, int blen) throws Exception {
