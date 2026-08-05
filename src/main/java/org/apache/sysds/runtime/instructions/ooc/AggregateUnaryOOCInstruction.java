@@ -35,7 +35,6 @@ import org.apache.sysds.runtime.matrix.operators.AggregateUnaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
-import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
@@ -151,15 +150,8 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 
 	private void processScalarAggregate(ExecutionContext ec, MatrixObject input, AggregateUnaryOperator operator,
 		int blocksize) {
-		OOCStreamable<IndexedMatrixValue> source = input.getStreamable();
-		if(input.hasStreamHandle() && !source.hasMaterializedStore()) {
-			MaterializedStoreStreamable materialized = new MaterializedStoreStreamable(input.getStreamHandle(), input);
-			input.setStreamHandle(materialized);
-			TeeOOCInstruction.incrRef(materialized, 1);
-			source = materialized;
-		}
 		OOCStream<MatrixBlock> result = createWritableStream(4, 4, 4);
-		OOCInstructionUtils.reduce(source, result, value -> aggregatePartial(value, operator, blocksize),
+		OOCInstructionUtils.reduce(input.getStreamable(), result, value -> aggregatePartial(value, operator, blocksize),
 			this::mergeAggregate, MatrixBlock::getExactSerializedSize, getContext());
 		result.start();
 		try(OOCStream.QueueCallback<MatrixBlock> callback = result.dequeueCB()) {
