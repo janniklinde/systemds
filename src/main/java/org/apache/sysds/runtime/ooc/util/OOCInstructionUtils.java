@@ -21,7 +21,9 @@ package org.apache.sysds.runtime.ooc.util;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -151,6 +153,14 @@ public final class OOCInstructionUtils {
 		output.assignPrimitive(new RepartitionOOCPrimitive(inputs, output, expectedFragments, routers, context));
 	}
 
+	private static ToIntFunction<IndexedMatrixValue> matrixIndexKey(long columnBlocks) {
+		if(columnBlocks > 0)
+			return value -> Math.toIntExact(
+				(value.getIndexes().getRowIndex() - 1) * columnBlocks + value.getIndexes().getColumnIndex() - 1);
+		Map<MatrixIndexes, Integer> keys = new HashMap<>();
+		return value -> keys.computeIfAbsent(new MatrixIndexes(value.getIndexes()), ignored -> keys.size());
+	}
+
 	public static void equiJoin(OOCStreamable<IndexedMatrixValue> left, OOCStreamable<IndexedMatrixValue> right,
 		OOCStream<IndexedMatrixValue> output, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> operation,
 		StreamContext context) {
@@ -158,8 +168,7 @@ public final class OOCInstructionUtils {
 		long inputBytes = Math.max(OOCUtils.estimateOutputTileBytes(left.getDataCharacteristics()),
 			OOCUtils.estimateOutputTileBytes(right.getDataCharacteristics()));
 		long outputBytes = OOCUtils.estimateOutputTileBytes(output.getDataCharacteristics());
-		ToIntFunction<IndexedMatrixValue> key = value -> Math
-			.toIntExact((value.getIndexes().getRowIndex() - 1) * cols + value.getIndexes().getColumnIndex() - 1);
+		ToIntFunction<IndexedMatrixValue> key = matrixIndexKey(cols);
 		keyedJoin(left, right, output, key, key, value -> ((MatrixBlock) value.getValue()).getExactSerializedSize(),
 			(leftValue, rightValue) -> new IndexedMatrixValue(leftValue.getIndexes(),
 				operation.apply((MatrixBlock) leftValue.getValue(), (MatrixBlock) rightValue.getValue())),
@@ -174,8 +183,7 @@ public final class OOCInstructionUtils {
 		long inputBytes = Math.max(OOCUtils.estimateOutputTileBytes(left.getDataCharacteristics()),
 			OOCUtils.estimateOutputTileBytes(right.getDataCharacteristics()));
 		long outputBytes = OOCUtils.estimateOutputTileBytes(output.getDataCharacteristics());
-		ToIntFunction<IndexedMatrixValue> key = value -> Math
-			.toIntExact((value.getIndexes().getRowIndex() - 1) * cols + value.getIndexes().getColumnIndex() - 1);
+		ToIntFunction<IndexedMatrixValue> key = matrixIndexKey(cols);
 		keyedJoin(left, right, output, key, key, outputSize, operation,
 			inputBytes + OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + outputBytes, context);
 	}
@@ -200,8 +208,7 @@ public final class OOCInstructionUtils {
 		long inputBytes = inputs.stream().map(OOCStreamable::getDataCharacteristics)
 			.mapToLong(OOCUtils::estimateOutputTileBytes).max().orElse(0);
 		long outputBytes = OOCUtils.estimateOutputTileBytes(output.getDataCharacteristics());
-		ToIntFunction<IndexedMatrixValue> key = value -> Math
-			.toIntExact((value.getIndexes().getRowIndex() - 1) * cols + value.getIndexes().getColumnIndex() - 1);
+		ToIntFunction<IndexedMatrixValue> key = matrixIndexKey(cols);
 		long joinBytes = (inputs.size() - 1) * OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) +
 			outputBytes;
 		output.assignPrimitive(
