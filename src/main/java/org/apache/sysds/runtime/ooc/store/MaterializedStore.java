@@ -102,6 +102,16 @@ public final class MaterializedStore<T extends SpillableObject> {
 				allowance.release(bytes);
 			throw ex;
 		}
+		return publishPinnedEntryLive(index, entry, allowance);
+	}
+
+	public StoreLease<T> publishPinnedEntryLive(int index, BlockEntry entry, MemoryAllowance allowance) {
+		if(entry == null || !entry.isPinned())
+			throw new IllegalArgumentException("Materialized store requires a pinned cache entry.");
+		if(_complete || _closed)
+			throw new IllegalStateException("Store no longer accepts published items");
+		if(index < 0 || index == Integer.MAX_VALUE)
+			throw new IndexOutOfBoundsException("Invalid index: " + index);
 		_publishedCount.incrementAndGet();
 		updatePublished(index + 1);
 		return StoreLease.createAsync(entry, () -> {
@@ -138,6 +148,14 @@ public final class MaterializedStore<T extends SpillableObject> {
 
 	void failMaterialization(Throwable error) {
 		_completion.completeExceptionally(error);
+	}
+
+	OOCCache cache() {
+		return _cache;
+	}
+
+	long streamId() {
+		return _streamId;
 	}
 
 	public OOCFuture<Void> completion() {
