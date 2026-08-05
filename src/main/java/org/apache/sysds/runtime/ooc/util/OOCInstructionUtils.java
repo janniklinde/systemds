@@ -111,8 +111,8 @@ public final class OOCInstructionUtils {
 		long maxBulkBytes, OOCAccessPattern pattern, BiFunction<Long, Consumer<T>, Boolean> producer, Runnable cleanup,
 		LongSupplier outputBulkBytes, Predicate<T> startsOutputBulk, Predicate<T> endsOutputBulk,
 		Predicate<T> refillsOutputBulk, StreamContext context) {
-		output.assignPrimitive(new UncoordinatedDataGenOOCPrimitive<>(output, bulkBytes, maxBulkBytes, pattern, producer,
-			cleanup, outputBulkBytes, startsOutputBulk, endsOutputBulk, refillsOutputBulk, context));
+		output.assignPrimitive(new UncoordinatedDataGenOOCPrimitive<>(output, bulkBytes, maxBulkBytes, pattern,
+			producer, cleanup, outputBulkBytes, startsOutputBulk, endsOutputBulk, refillsOutputBulk, context));
 	}
 
 	public static void equiMapBlock(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
