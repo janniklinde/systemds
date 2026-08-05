@@ -34,11 +34,17 @@ import java.util.concurrent.locks.LockSupport;
 
 public class SourceOOCStream extends SubscribableTaskQueue<IndexedMatrixValue> {
 	private final ConcurrentHashMap<MatrixIndexes, OOCIOHandler.SourceBlockDescriptor> _idx;
+	private final boolean _backpressure;
 	private static final long BACKPRESSURE_PARK_NANOS = 1_000_000L;
 	private static final long MAX_BACKPRESSURE_PARK_NANOS = 200_000_000L;
 
 	public SourceOOCStream() {
-		this._idx = new ConcurrentHashMap<>();
+		this(true);
+	}
+
+	public SourceOOCStream(boolean backpressure) {
+		_idx = new ConcurrentHashMap<>();
+		_backpressure = backpressure;
 	}
 
 	public void enqueue(IndexedMatrixValue value, OOCIOHandler.SourceBlockDescriptor descriptor) {
@@ -76,6 +82,8 @@ public class SourceOOCStream extends SubscribableTaskQueue<IndexedMatrixValue> {
 	}
 
 	private void waitForBackpressure() {
+		if(!_backpressure)
+			return;
 		int limit = OOCInstruction.getComputeBackpressureThreshold();
 		if(limit <= 0)
 			return;

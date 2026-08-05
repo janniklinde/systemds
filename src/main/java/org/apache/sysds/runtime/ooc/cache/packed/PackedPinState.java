@@ -52,6 +52,13 @@ final class PackedPinState {
 		_releaseHandles = new PackedUnpinHandle[2];
 	}
 
+	synchronized void adoptProducerPins(MemoryAllowance allowance, int count) {
+		if(count <= 0 || _size != 0)
+			throw new IllegalStateException("Packed producer pins can only be adopted once.");
+		addAllowance(allowance, OOCFuture.completed(physicalEntry));
+		_counts[0] = count;
+	}
+
 	synchronized OOCFuture<BlockEntry> pin(OOCCacheImpl physical, MemoryAllowance allowance, boolean liveOnly) {
 		int ix = indexOf(allowance);
 		if(ix >= 0) {

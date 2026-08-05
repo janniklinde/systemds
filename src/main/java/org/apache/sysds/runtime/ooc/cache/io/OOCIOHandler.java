@@ -74,10 +74,21 @@ public interface OOCIOHandler {
 		public final long maxBytesInFlight;
 		public final boolean keepOpenOnLimit;
 		public final OOCStream<IndexedMatrixValue> target;
+		public final long packThresholdBytes;
+		public final long packTargetBytes;
 
-		public SourceReadRequest(String path, Types.FileFormat format, long rows, long cols,
-			int blen, long estNnz, long maxBytesInFlight, boolean keepOpenOnLimit,
-			OOCStream<IndexedMatrixValue> target) {
+		public SourceReadRequest(String path, Types.FileFormat format, long rows, long cols, int blen, long estNnz,
+			long maxBytesInFlight, boolean keepOpenOnLimit, OOCStream<IndexedMatrixValue> target) {
+			this(path, format, rows, cols, blen, estNnz, maxBytesInFlight, keepOpenOnLimit, target, 0, 0);
+		}
+
+		public SourceReadRequest(String path, Types.FileFormat format, long rows, long cols, int blen, long estNnz,
+			long maxBytesInFlight, boolean keepOpenOnLimit, OOCStream<IndexedMatrixValue> target,
+			long packThresholdBytes, long packTargetBytes) {
+			if(packThresholdBytes < 0 || packTargetBytes < 0 ||
+				packThresholdBytes > 0 && packTargetBytes < packThresholdBytes)
+				throw new IllegalArgumentException(
+					"Invalid source packing policy: " + packThresholdBytes + "/" + packTargetBytes);
 			this.path = path;
 			this.format = format;
 			this.rows = rows;
@@ -87,6 +98,8 @@ public interface OOCIOHandler {
 			this.maxBytesInFlight = maxBytesInFlight;
 			this.keepOpenOnLimit = keepOpenOnLimit;
 			this.target = target;
+			this.packThresholdBytes = packThresholdBytes;
+			this.packTargetBytes = packTargetBytes;
 		}
 	}
 
@@ -128,12 +141,19 @@ public interface OOCIOHandler {
 	class GroupSourceBlockDescriptor extends SourceBlockDescriptor {
 		public final List<SourceBlockDescriptor> blocks;
 		public final int count;
+		public final boolean packed;
 
-		public GroupSourceBlockDescriptor(String path, Types.FileFormat format, MatrixIndexes indexes, long offset, int recordLength,
-			long serializedSize, List<SourceBlockDescriptor> blocks) {
+		public GroupSourceBlockDescriptor(String path, Types.FileFormat format, MatrixIndexes indexes, long offset,
+			int recordLength, long serializedSize, List<SourceBlockDescriptor> blocks) {
+			this(path, format, indexes, offset, recordLength, serializedSize, blocks, false);
+		}
+
+		public GroupSourceBlockDescriptor(String path, Types.FileFormat format, MatrixIndexes indexes, long offset,
+			int recordLength, long serializedSize, List<SourceBlockDescriptor> blocks, boolean packed) {
 			super(path, format, indexes, offset, recordLength, serializedSize);
-			this.blocks = blocks;
+			this.blocks = List.copyOf(blocks);
 			this.count = blocks.size();
+			this.packed = packed;
 		}
 	}
 }

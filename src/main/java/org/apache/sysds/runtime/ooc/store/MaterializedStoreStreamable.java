@@ -93,6 +93,12 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		DeferredReader stream = new DeferredReader(this);
 		stream.setData(_data);
 		stream.assignPrimitive(_primitive);
+		boolean live = _primitive.registerRequest(1, stream::acceptLive);
+		stream.setLive(live);
+		if(live) {
+			_pendingReaders--;
+			_activeReaders++;
+		}
 		return stream;
 	}
 
@@ -186,6 +192,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			output.propagateFailure(DMLRuntimeException.of(error));
 		}
 		finally {
+			releaseConsumer();
 			tryFinalize();
 		}
 	}
@@ -196,7 +203,15 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		synchronized(this) {
 			_activeReaders--;
 		}
+		releaseConsumer();
 		tryFinalize();
+	}
+
+	private void releaseConsumer() {
+		_primitive.store().whenComplete((store, error) -> {
+			if(store != null)
+				store.close();
+		});
 	}
 
 	private synchronized SyncMemoryAllowance readerAllowance() {
@@ -313,6 +328,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		private final MaterializedStoreStreamable _owner;
 		private final AtomicBoolean _activated;
 		private final AtomicBoolean _finished;
+		private volatile boolean _live;
 
 		private DeferredReader(MaterializedStoreStreamable owner) {
 			_owner = owner;
@@ -338,8 +354,51 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			return super.dequeueCB();
 		}
 
+		private void setLive(boolean live) {
+			_live = live;
+		}
+
+		private void acceptLive(QueueCallback<IndexedMatrixValue> callback) {
+			if(callback.isFailure()) {
+				DMLRuntimeException failure;
+				try(callback) {
+					callback.get();
+					failure = new DMLRuntimeException("Live source materialization failed.");
+				}
+				catch(Throwable error) {
+					failure = DMLRuntimeException.of(error);
+				}
+				try {
+					propagateFailure(failure);
+				}
+				finally {
+					_owner.finishReader(this);
+				}
+				return;
+			}
+			if(callback.isEos()) {
+				callback.close();
+				try {
+					closeInput();
+				}
+				finally {
+					_owner.finishReader(this);
+				}
+				return;
+			}
+			QueueCallback<IndexedMatrixValue> retained = callback.keepOpen();
+			try {
+				enqueue(retained);
+				retained = null;
+			}
+			finally {
+				if(retained != null)
+					retained.close();
+			}
+		}
+
 		private void activate() {
-			if(_activated.compareAndSet(false, true))
+			if(_activated.compareAndSet(false, true) && !_live)
 				_owner.openReader(this);
 		}
 

@@ -46,6 +46,9 @@ import java.util.function.LongUnaryOperator;
 import java.util.function.Supplier;
 
 public final class OOCPackedCache implements OOCCache {
+	public record PrepackedEntries(BlockEntry physicalEntry, BlockEntry[] logicalEntries) {
+	}
+
 	private static final long PACKED_STREAM_ID = CachingStream._streamSeq.getNextID();
 	private static final long DEFAULT_PACK_THRESHOLD_BYTES = 1L << 18;
 	private static final long DEFAULT_PACK_TARGET_BYTES = 1L << 19; // 512 KB tile packing
@@ -130,12 +133,35 @@ public final class OOCPackedCache implements OOCCache {
 		});
 	}
 
+	public long getPackThresholdBytes() {
+		return _packThresholdBytes;
+	}
+
+	public long getPackTargetBytes() {
+		return _packTargetBytes;
+	}
+
 	@Override
 	public long maxPhysicalPinBytes(long logicalBytes) {
 		if(logicalBytes >= _packThresholdBytes)
 			return logicalBytes;
 		return _packTargetBytes > Long.MAX_VALUE - _packThresholdBytes ? Long.MAX_VALUE : _packTargetBytes +
 			_packThresholdBytes;
+	}
+
+	@Override
+	public BlockEntry putUnpackedPinned(long sId, long tId, Object data, long size, MemoryAllowance allowance) {
+		return _physical.putPinned(sId, tId, data, size, allowance);
+	}
+
+	@Override
+	public void markBacked(BlockEntry entry) {
+		_physical.markBacked(entry);
+	}
+
+	@Override
+	public OOCIOHandler getIOHandler() {
+		return _physical.getIOHandler();
 	}
 
 	@Override
@@ -179,6 +205,28 @@ public final class OOCPackedCache implements OOCCache {
 			}
 		}
 		return entries;
+	}
+
+	public PrepackedEntries putPrepackedPinned(long streamId, long[] tileIds, PackedBlock block,
+		MemoryAllowance allowance) {
+		if(tileIds.length != block.values.length || tileIds.length < 2)
+			throw new IllegalArgumentException("A pre-packed block requires matching IDs for at least two tiles.");
+		synchronized(this) {
+			checkRunning();
+			BlockEntry physicalEntry = putSealedBlockPinned(block, allowance);
+			int[] ids = Arrays.stream(tileIds).mapToInt(Math::toIntExact).toArray();
+			PackedPinState state = new PackedPinState(physicalEntry, streamId, ids, 0, ids.length, ids.length);
+			state.adoptProducerPins(allowance, ids.length);
+			registerPackedState(state);
+			BlockEntry[] logicalEntries = new BlockEntry[ids.length];
+			for(int i = 0; i < ids.length; i++) {
+				BlockKey key = new BlockKey(streamId, ids[i]);
+				SealedPackLocation location = new SealedPackLocation(state, i, 2);
+				putLocation(key, location);
+				logicalEntries[i] = createLogicalPin(key, location);
+			}
+			return new PrepackedEntries(physicalEntry, logicalEntries);
+		}
 	}
 
 	public BlockEntry putSealedPackPinned(long sId, long[] tIds, Object[] data, long[] sizes, int off, int len,
