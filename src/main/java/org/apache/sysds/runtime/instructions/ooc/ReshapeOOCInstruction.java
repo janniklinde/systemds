@@ -448,16 +448,27 @@ public class ReshapeOOCInstruction extends ComputationOOCInstruction {
 		MatrixBlock block = (MatrixBlock) tile.getValue();
 		long inputRowStart = (tile.getIndexes().getRowIndex() - 1) * inputBlocksize;
 		long inputColStart = (tile.getIndexes().getColumnIndex() - 1) * inputBlocksize;
-		for(int row = 0; row < block.getNumRows(); row++) {
+		for(int row = 0; row < block.getNumRows();) {
+			long position = (inputRowStart + row) * inputCols + inputColStart;
+			int destinationRow = (int) (position % outputBlocksize);
+			int rows = inputColStart == 0 && block.getNumColumns() == inputCols ? Math.min(block.getNumRows() - row,
+				(outputBlocksize - destinationRow) / block.getNumColumns()) : 0;
+			if(rows > 0) {
+				emit.copyToColumn(new MatrixIndexes(position / outputBlocksize + 1, 1), row, 0, rows,
+					block.getNumColumns(), destinationRow);
+				row += rows;
+				continue;
+			}
 			int col = 0;
 			while(col < block.getNumColumns()) {
-				long position = (inputRowStart + row) * inputCols + inputColStart + col;
-				int destinationRow = (int) (position % outputBlocksize);
+				position = (inputRowStart + row) * inputCols + inputColStart + col;
+				destinationRow = (int) (position % outputBlocksize);
 				int length = Math.min(block.getNumColumns() - col, outputBlocksize - destinationRow);
 				emit.copyRowToColumn(new MatrixIndexes(position / outputBlocksize + 1, 1), row, col, length,
 					destinationRow);
 				col += length;
 			}
+			row++;
 		}
 	}
 
