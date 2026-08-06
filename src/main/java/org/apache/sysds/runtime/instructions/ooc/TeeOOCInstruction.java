@@ -90,10 +90,6 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 	public void processInstruction(ExecutionContext ec) {
 		//get input stream
 		MatrixObject min = ec.getMatrixObject(input1);
-		if(min.getNumRows() == 0 || min.getNumColumns() == 0) {
-			ec.setVariable(output.getName(), min);
-			return;
-		}
 		OOCStreamable<IndexedMatrixValue> streamable = min.getStreamable();
 		OOCStreamable<IndexedMatrixValue> handle;
 

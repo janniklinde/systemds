@@ -270,6 +270,11 @@ public final class OOCInstructionUtils {
 		output.assignPrimitive(new ReduceOOCPrimitive<>(input, output, partial, merge, size, context));
 	}
 
+	public static <I, O> void reduce(OOCStreamable<I> input, OOCStream<O> output, Function<I, O> partial,
+		BiFunction<O, O, O> merge, ToLongFunction<O> size, Supplier<O> empty, StreamContext context) {
+		output.assignPrimitive(new ReduceOOCPrimitive<>(input, output, partial, merge, size, empty, context));
+	}
+
 	public static int getComputeInFlight() {
 		return COMPUTE_IN_FLIGHT.get();
 	}

@@ -290,12 +290,9 @@ public class DataGenOp extends MultiThreadedHop
 	@Override
 	protected ExecType optFindExecType(boolean transitive) {
 		checkAndSetForcedPlatform();
-		
-		if(_etypeForced != null) {
+
+		if(_etypeForced != null)
 			_etype = _etypeForced;
-			if(_etype == ExecType.OOC && _op == OpOpDG.RAND && hasLiteralZeroDimension())
-				_etype = ExecType.CP;
-		}
 		else 
 		{
 			if ( OptimizerUtils.isMemoryBasedOptLevel() ) {
@@ -322,15 +319,6 @@ public class DataGenOp extends MultiThreadedHop
 		return _etype;
 	}
 	
-	private boolean hasLiteralZeroDimension() {
-		Integer rows = _paramIndexMap.get(DataExpression.RAND_ROWS);
-		Integer cols = _paramIndexMap.get(DataExpression.RAND_COLS);
-		return rows != null && getInput().get(rows) instanceof LiteralOp &&
-			((LiteralOp) getInput().get(rows)).getLongValue() == 0 ||
-			cols != null && getInput().get(cols) instanceof LiteralOp &&
-				((LiteralOp) getInput().get(cols)).getLongValue() == 0;
-	}
-
 	@Override
 	public void refreshSizeInformation()
 	{

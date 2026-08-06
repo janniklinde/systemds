@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.ooc.primitives;
 
 import java.util.function.BiFunction;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.function.ToLongFunction;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
@@ -42,16 +43,23 @@ public final class ReduceOOCPrimitive<I, O> extends OOCPrimitive {
 	private final Function<I, O> _partial;
 	private final BiFunction<O, O, O> _merge;
 	private final ToLongFunction<O> _size;
+	private final Supplier<O> _empty;
 	private ManagedPayload<O> _accumulator;
 
 	public ReduceOOCPrimitive(OOCStreamable<I> input, OOCStreamable<O> output, Function<I, O> partial,
 		BiFunction<O, O, O> merge, ToLongFunction<O> size, StreamContext context) {
+		this(input, output, partial, merge, size, null, context);
+	}
+
+	public ReduceOOCPrimitive(OOCStreamable<I> input, OOCStreamable<O> output, Function<I, O> partial,
+		BiFunction<O, O, O> merge, ToLongFunction<O> size, Supplier<O> empty, StreamContext context) {
 		super(context, input);
 		_input = input;
 		_output = output;
 		_partial = partial;
 		_merge = merge;
 		_size = size;
+		_empty = empty;
 	}
 
 	@Override
@@ -120,8 +128,14 @@ public final class ReduceOOCPrimitive<I, O> extends OOCPrimitive {
 						result.release();
 					return;
 				}
-				if(result == null)
-					throw new DMLRuntimeException("Cannot reduce an empty OOC stream");
+				if(result == null) {
+					if(_empty == null)
+						throw new DMLRuntimeException("Cannot reduce an empty OOC stream");
+					O value = _empty.get();
+					long bytes = _size.applyAsLong(value);
+					_allowance.reserveBlocking(bytes);
+					result = new ManagedPayload<>(value, bytes, _allowance);
+				}
 				OOCStream.QueueCallback<O> callback = new InMemoryQueueCallback<>(result);
 				try {
 					output.enqueue(callback);

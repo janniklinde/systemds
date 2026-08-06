@@ -765,9 +765,9 @@ public class BinaryOp extends MultiThreadedHop {
 		
 		final DataType dt1 = getInput(0).getDataType();
 		final DataType dt2 = getInput(1).getDataType();
-		
+
 		if(_etypeForced != null) {
-			setExecType(_etypeForced == ExecType.OOC && op == OpOp2.RBIND ? ExecType.CP : _etypeForced);
+			setExecType(_etypeForced);
 		}
 		else 
 		{
