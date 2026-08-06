@@ -126,16 +126,22 @@ public final class MaterializedStore<T extends SpillableObject> {
 		return publishPinnedLive(index, payload.value(), payload.bytes(), payload.owner());
 	}
 
-	public synchronized void complete() {
-		if(_complete)
-			return;
-		_completedSize = _published.get();
-		if(_publishedCount.get() != _completedSize)
-			throw new IllegalStateException("Incomplete publication: " + _publishedCount.get()
-				+ " published items for logical range [0, " + _completedSize + ")");
-		_complete = true;
+	public void complete() {
+		boolean seal;
+		synchronized(this) {
+			if(_complete)
+				return;
+			_completedSize = _published.get();
+			if(_publishedCount.get() != _completedSize)
+				throw new IllegalStateException("Incomplete publication: " + _publishedCount.get()
+					+ " published items for logical range [0, " + _completedSize + ")");
+			_complete = true;
+			seal = _autoSealReaders && _pendingReaders == 0;
+		}
+		// Completion subscribers run inline and may register consumers or open readers on this store,
+		// either directly or through an owning streamable. They must never observe the store monitor.
 		_completion.complete(null);
-		if(_autoSealReaders && _pendingReaders == 0)
+		if(seal)
 			sealReaders();
 	}
 
@@ -166,45 +172,63 @@ public final class MaterializedStore<T extends SpillableObject> {
 		return _readersSealedFuture;
 	}
 
-	public synchronized OrderedMaterializedStoreReader<T> openReader(AccessPattern pattern, MemoryAllowance allowance,
+	public OrderedMaterializedStoreReader<T> openReader(AccessPattern pattern, MemoryAllowance allowance,
 		int maxPrefetch) {
 		return openReader(pattern, allowance, maxPrefetch, true);
 	}
 
-	public synchronized OrderedMaterializedStoreReader<T> openReader(AccessPattern pattern, MemoryAllowance allowance,
+	public OrderedMaterializedStoreReader<T> openReader(AccessPattern pattern, MemoryAllowance allowance,
 		int maxPrefetch, boolean softOrdering) {
-		if(!_complete || _closed)
-			throw new IllegalStateException("Readers require a completed store");
-		if(_readersSealed)
-			throw new IllegalStateException("Store no longer accepts new readers");
-		OrderedMaterializedStoreReader<T> reader = new OrderedMaterializedStoreReader<>(_cache, _streamId, pattern,
-			allowance, Math.max(1, maxPrefetch), softOrdering, this::forgetAfterReaderClose, this::tryForget);
-		_registeredReaders.add(reader);
-		readerRegistered();
+		OrderedMaterializedStoreReader<T> reader;
+		boolean seal;
+		synchronized(this) {
+			if(!_complete || _closed)
+				throw new IllegalStateException("Readers require a completed store");
+			if(_readersSealed)
+				throw new IllegalStateException("Store no longer accepts new readers");
+			reader = new OrderedMaterializedStoreReader<>(_cache, _streamId, pattern, allowance,
+				Math.max(1, maxPrefetch), softOrdering, this::forgetAfterReaderClose, this::tryForget);
+			_registeredReaders.add(reader);
+			seal = readerRegistered();
+		}
+		if(seal)
+			sealReaders();
 		return reader;
 	}
 
-	public synchronized IndexedMaterializedStoreReader<T> openIndexedReader(Liveness liveness) {
-		if(!_complete || _closed)
-			throw new IllegalStateException("Readers require a completed store");
-		if(_readersSealed)
-			throw new IllegalStateException("Store no longer accepts new readers");
-		IndexedMaterializedStoreReader<T> reader = new IndexedMaterializedStoreReader<>(_cache, _streamId,
-			() -> _completedSize, liveness, _layout, _characteristics, this::forgetAfterReaderClose, this::tryForget);
-		_registeredReaders.add(reader);
-		readerRegistered();
+	public IndexedMaterializedStoreReader<T> openIndexedReader(Liveness liveness) {
+		IndexedMaterializedStoreReader<T> reader;
+		boolean seal;
+		synchronized(this) {
+			if(!_complete || _closed)
+				throw new IllegalStateException("Readers require a completed store");
+			if(_readersSealed)
+				throw new IllegalStateException("Store no longer accepts new readers");
+			reader = new IndexedMaterializedStoreReader<>(_cache, _streamId, () -> _completedSize, liveness, _layout,
+				_characteristics, this::forgetAfterReaderClose, this::tryForget);
+			_registeredReaders.add(reader);
+			seal = readerRegistered();
+		}
+		if(seal)
+			sealReaders();
 		return reader;
 	}
 
-	public synchronized IndexedMaterializedStoreReader<T> openLiveIndexedReader(Liveness liveness) {
-		if(_closed)
-			throw new IllegalStateException("Store is closed");
-		if(_readersSealed)
-			throw new IllegalStateException("Store no longer accepts new readers");
-		IndexedMaterializedStoreReader<T> reader = new IndexedMaterializedStoreReader<>(_cache, _streamId, this::size,
-			liveness, _layout, _characteristics, this::forgetAfterReaderClose, this::tryForget);
-		_registeredReaders.add(reader);
-		readerRegistered();
+	public IndexedMaterializedStoreReader<T> openLiveIndexedReader(Liveness liveness) {
+		IndexedMaterializedStoreReader<T> reader;
+		boolean seal;
+		synchronized(this) {
+			if(_closed)
+				throw new IllegalStateException("Store is closed");
+			if(_readersSealed)
+				throw new IllegalStateException("Store no longer accepts new readers");
+			reader = new IndexedMaterializedStoreReader<>(_cache, _streamId, this::size, liveness, _layout,
+				_characteristics, this::forgetAfterReaderClose, this::tryForget);
+			_registeredReaders.add(reader);
+			seal = readerRegistered();
+		}
+		if(seal)
+			sealReaders();
 		return reader;
 	}
 
@@ -237,26 +261,28 @@ public final class MaterializedStore<T extends SpillableObject> {
 		return result;
 	}
 
-	public synchronized void sealReaders() {
-		if(_closed)
-			throw new IllegalStateException("Cannot seal readers for a closed store");
-		if(_readersSealed)
-			return;
-		_readers = new ArrayList<>(_registeredReaders);
-		_readersSealed = true;
-		int publishedSize = _complete ? _completedSize : _published.get();
+	public void sealReaders() {
+		int publishedSize;
+		synchronized(this) {
+			if(_closed)
+				throw new IllegalStateException("Cannot seal readers for a closed store");
+			if(_readersSealed)
+				return;
+			_readers = new ArrayList<>(_registeredReaders);
+			_readersSealed = true;
+			publishedSize = _complete ? _completedSize : _published.get();
+		}
 		for(int i = 0; i < publishedSize; i++)
 			tryForget(i);
 		_readersSealedFuture.complete(null);
 	}
 
-	private void readerRegistered() {
+	private boolean readerRegistered() {
 		if(!_autoSealReaders)
-			return;
+			return false;
 		if(_pendingReaders <= 0)
 			throw new IllegalStateException("More materialized readers opened than declared.");
-		if(--_pendingReaders == 0 && _complete)
-			sealReaders();
+		return --_pendingReaders == 0 && _complete;
 	}
 
 	public int size() {
