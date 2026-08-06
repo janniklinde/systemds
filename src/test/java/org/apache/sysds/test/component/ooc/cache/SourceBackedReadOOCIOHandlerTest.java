@@ -29,7 +29,7 @@ import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.BlockState;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
-import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
+import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerImpl;
 import org.apache.sysds.test.AutomatedTestBase;
 import org.apache.sysds.test.TestConfiguration;
 import org.apache.sysds.test.TestUtils;
@@ -43,14 +43,14 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 	private static final String TEST_DIR = "functions/ooc/";
 	private static final String TEST_CLASS_DIR = TEST_DIR + SourceBackedReadOOCIOHandlerTest.class.getSimpleName() + "/";
 
-	private OOCMatrixIOHandler handler;
+	private OOCIOHandlerImpl handler;
 
 	@Override
 	@Before
 	public void setUp() {
 		TestUtils.clearAssertionInformation();
 		addTestConfiguration(TEST_NAME, new TestConfiguration(TEST_CLASS_DIR, TEST_NAME));
-		handler = new OOCMatrixIOHandler();
+		handler = new OOCIOHandlerImpl();
 	}
 
 	@After

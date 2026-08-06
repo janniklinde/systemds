@@ -27,10 +27,9 @@ import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
-import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
+import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerImpl;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCCacheScheduler;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCLRUCacheScheduler;
-import org.apache.sysds.runtime.ooc.cache.packed.OOCPackedCache;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.utils.Statistics;
@@ -106,7 +105,7 @@ public class OOCCacheManager {
 			if(scheduler != null)
 				return scheduler;
 
-			OOCIOHandler ioHandler = new OOCMatrixIOHandler();
+			OOCIOHandler ioHandler = new OOCIOHandlerImpl();
 			scheduler = new OOCLRUCacheScheduler(ioHandler, _evictionLimit, _hardLimit, Math.max(40000000, (long)((_hardLimit - _evictionLimit) * 0.1)));
 
 			if(_scheduler.compareAndSet(null, scheduler)) {
@@ -129,7 +128,7 @@ public class OOCCacheManager {
 			OOCCache cache = _globalCache.get();
 			if(cache != null)
 				return cache;
-			cache = new OOCPackedCache(new OOCMatrixIOHandler(), _hardLimit, _evictionLimit);
+			cache = new OOCCacheImpl(new OOCIOHandlerImpl(), _hardLimit, _evictionLimit);
 			if(_globalCache.compareAndSet(null, cache))
 				return cache;
 			cache.shutdown();

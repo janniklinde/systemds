@@ -24,7 +24,7 @@ import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
-import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
+import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerImpl;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.io.MatrixWriter;
@@ -46,14 +46,14 @@ public class SourceReadOOCIOHandlerTest extends AutomatedTestBase {
 	private static final String TEST_DIR = "functions/ooc/";
 	private static final String TEST_CLASS_DIR = TEST_DIR + SourceReadOOCIOHandlerTest.class.getSimpleName() + "/";
 
-	private OOCMatrixIOHandler handler;
+	private OOCIOHandlerImpl handler;
 
 	@Override
 	@Before
 	public void setUp() {
 		TestUtils.clearAssertionInformation();
 		addTestConfiguration(TEST_NAME, new TestConfiguration(TEST_CLASS_DIR, TEST_NAME));
-		handler = new OOCMatrixIOHandler();
+		handler = new OOCIOHandlerImpl();
 	}
 
 	@After

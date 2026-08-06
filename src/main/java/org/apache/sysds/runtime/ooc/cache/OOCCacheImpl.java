@@ -41,6 +41,7 @@ public class OOCCacheImpl implements OOCCache {
 	private static final int MIN_EVICTION_CANDIDATES = 1024;
 	private static final int MAX_EVICTION_CANDIDATES = 65536;
 	private static final long EVICTION_CANDIDATE_BYTE_FACTOR = 250_000;
+	private static final long MAX_READ_AHEAD_BYTES = 1L << 19;
 
 	private final OOCIOHandler _ioHandler;
 	private final SegmentedStreamTableList<BlockEntry> _blocks;
@@ -73,6 +74,7 @@ public class OOCCacheImpl implements OOCCache {
 			return t;
 		});
 		_evictionRunning = new AtomicBoolean(false);
+		ioHandler.setCache(this);
 	}
 
 	@Override
@@ -93,6 +95,36 @@ public class OOCCacheImpl implements OOCCache {
 	@Override
 	public OOCIOHandler getIOHandler() {
 		return _ioHandler;
+	}
+
+	@Override
+	public synchronized long readAheadBudget() {
+		if(!_running)
+			return 0;
+		return Math.max(0, Math.min(MAX_READ_AHEAD_BYTES, _hardLimit - _ownedBytes));
+	}
+
+	@Override
+	public boolean activate(BlockKey key, Object data) {
+		synchronized(this) {
+			if(!_running)
+				return false;
+			BlockEntry entry = findEntry(key);
+			EntryMeta meta = getMeta(entry);
+			// Unknown or forgotten blocks, blocks that are already resident, and blocks whose read is in flight are
+			// left alone: adopting them would either leak memory or race with the owner of the pending read.
+			if(meta == null || entry.getDataUnsafe() != null || entry.getState() == BlockState.READING)
+				return false;
+			if(!canAcceptOwnedBytes(entry.getSize()))
+				return false;
+			entry.setDataUnsafe(data);
+			entry.setState(meta.backed ? BlockState.WARM : BlockState.HOT);
+			setLive(entry);
+			_ownedBytes += entry.getSize();
+			scheduleEvictionIfNeeded();
+		}
+		Statistics.incrementOOCEvictionPut();
+		return true;
 	}
 
 	@Override

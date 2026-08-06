@@ -25,6 +25,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
+import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 
 import java.util.concurrent.CompletableFuture;
@@ -33,14 +34,16 @@ import java.util.List;
 public interface OOCIOHandler {
 	void shutdown();
 
-	CompletableFuture<Void> scheduleEviction(BlockEntry block);
+	/**
+	 * Attaches the cache that owns this handler. Reads offer the on-disk neighbours they decode along the way back to
+	 * this cache, which decides whether to adopt them.
+	 */
+	default void setCache(OOCCache cache) {
+	}
+
+	OOCFuture<Void> scheduleEviction(BlockEntry block);
 
 	OOCFuture<BlockEntry> scheduleRead(BlockEntry block);
-
-	/**
-	 * Increase priority for a pending scheduled read if it has not started yet.
-	 */
-	void prioritizeRead(BlockKey key, double priority);
 
 	CompletableFuture<Boolean> scheduleDeletion(BlockEntry block);
 

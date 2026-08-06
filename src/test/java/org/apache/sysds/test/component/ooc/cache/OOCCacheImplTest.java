@@ -229,6 +229,69 @@ public class OOCCacheImplTest {
 		Assert.assertEquals(0, _reader.getUsedMemory());
 	}
 
+	@Test
+	public void testActivateAdoptsColdEntryWithoutRead() throws Exception {
+		useEvictingCache();
+		BlockKey key = new BlockKey(STREAM_ID, BLOCK_ID);
+
+		_producer.reserveBlocking(BYTES);
+		BlockEntry entry = _cache.putPinned(key, "evicted", BYTES, _producer);
+		await(_cache.unpin(entry, _producer), WAIT_TIMEOUT_SEC);
+		await(() -> _io.evictionCount() == 1 && BlockEntryTestAccess.getDataUnsafe(entry) == null, WAIT_TIMEOUT_SEC);
+
+		Assert.assertTrue(_cache.activate(key, "read-ahead"));
+		Assert.assertEquals(BYTES, _cache.getOwnedCacheSize());
+
+		BlockEntry pinned = _cache.pinIfLive(STREAM_ID, BLOCK_ID, _reader);
+		Assert.assertSame(entry, pinned);
+		Assert.assertEquals("read-ahead", pinned.getData());
+		Assert.assertEquals(0, _io.readCount());
+
+		await(_cache.unpin(pinned, _reader), WAIT_TIMEOUT_SEC);
+	}
+
+	@Test
+	public void testActivateDeclinesUnknownAndResidentEntries() throws Exception {
+		BlockKey key = new BlockKey(STREAM_ID, BLOCK_ID);
+
+		// Never published: the block was forgotten, so its data must be dropped rather than adopted.
+		Assert.assertFalse(_cache.activate(key, "ghost"));
+
+		_producer.reserveBlocking(BYTES);
+		BlockEntry entry = _cache.putPinned(key, "resident", BYTES, _producer);
+		Assert.assertFalse(_cache.activate(key, "duplicate"));
+		await(_cache.unpin(entry, _producer), WAIT_TIMEOUT_SEC);
+		Assert.assertFalse(_cache.activate(key, "duplicate"));
+		Assert.assertEquals("resident", BlockEntryTestAccess.getDataUnsafe(entry));
+	}
+
+	@Test
+	public void testActivateDeclinesWhenHardLimitIsExhausted() throws Exception {
+		useZeroHardLimitCache();
+		BlockKey key = new BlockKey(STREAM_ID, BLOCK_ID);
+
+		_producer.reserveBlocking(BYTES);
+		BlockEntry entry = _cache.putPinned(key, "no-room", BYTES, _producer);
+		BlockEntryTestAccess.setDataUnsafe(entry, null);
+
+		Assert.assertEquals(0, _cache.readAheadBudget());
+		Assert.assertFalse(_cache.activate(key, "read-ahead"));
+		Assert.assertEquals(0, _cache.getOwnedCacheSize());
+	}
+
+	@Test
+	public void testReadAheadBudgetShrinksWithOwnedBytes() throws Exception {
+		BlockKey key = new BlockKey(STREAM_ID, BLOCK_ID);
+		long empty = _cache.readAheadBudget();
+		Assert.assertTrue(empty > 0);
+
+		_producer.reserveBlocking(BYTES);
+		BlockEntry entry = _cache.putPinned(key, "owned", BYTES, _producer);
+		await(_cache.unpin(entry, _producer), WAIT_TIMEOUT_SEC);
+
+		Assert.assertEquals(empty - BYTES, _cache.readAheadBudget());
+	}
+
 	private void useEvictingCache() {
 		_cache.shutdown();
 		_io.reset();

@@ -167,6 +167,16 @@ public final class OOCPackedCache implements OOCCache {
 	}
 
 	@Override
+	public long readAheadBudget() {
+		return _physical.readAheadBudget();
+	}
+
+	@Override
+	public boolean activate(BlockKey key, Object data) {
+		return _physical.activate(key, data);
+	}
+
+	@Override
 	public BlockEntry putPinned(long sId, long tId, Object data, long size, MemoryAllowance allowance) {
 		if(size >= _packThresholdBytes)
 			return _physical.putPinned(sId, tId, data, size, allowance);

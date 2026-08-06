@@ -72,6 +72,14 @@ class OOCBufferedDataInputStream implements DataInput, MatrixBlockDataInput {
 		_count = 0;
 	}
 
+	/**
+	 * Logical position in the underlying file, i.e. the offset of the next byte to be decoded. Buffered-but-unconsumed
+	 * bytes are subtracted from the raw file pointer.
+	 */
+	long getPosition() {
+		return _filePos - (_count - _pos);
+	}
+
 	@Override
 	public void readFully(byte[] b) throws IOException {
 		readFully(b, 0, b.length);

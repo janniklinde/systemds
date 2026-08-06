@@ -97,6 +97,27 @@ public interface OOCCache {
 	OOCIOHandler getIOHandler();
 
 	/**
+	 * Bytes the cache is currently willing to absorb from opportunistic read-ahead. The I/O handler reads this once per
+	 * disk read and uses it as the budget for decoding the on-disk neighbours of the requested block, so a small tile
+	 * does not cost a whole seek on its own. Zero disables read-ahead.
+	 */
+	default long readAheadBudget() {
+		return 0;
+	}
+
+	/**
+	 * Offers a block that was decoded as a by-product of reading one of its on-disk neighbours. The cache adopts the
+	 * data only if the block is still referenced, not resident, not already being read, and fits within the hard limit;
+	 * otherwise the offer is declined and the caller drops the data. Adopted bytes become cache-owned immediately and
+	 * are never charged to any allowance.
+	 *
+	 * @return true if the cache took ownership of {@code data}
+	 */
+	default boolean activate(BlockKey key, Object data) {
+		return false;
+	}
+
+	/**
 	 * Pins an item backed by an allowance. A successful pin transfers memory ownership from the cache to the owner of
 	 * the allowance and guarantees data availability. While pinned, the bytes of the entry are not counted as
 	 * cache-owned memory.
