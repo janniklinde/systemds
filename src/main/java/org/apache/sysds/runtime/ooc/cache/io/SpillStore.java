@@ -300,8 +300,8 @@ final class SpillStore {
 		throws IOException {
 
 		if(entry.getBackingLocation() != BackingLocation.NONE) {
-			future.completeExceptionally(
-				new DMLRuntimeException("Duplicate OOC spill location for: " + entry.getKey()));
+			future
+				.completeExceptionally(new DMLRuntimeException("Duplicate OOC spill location for: " + entry.getKey()));
 			return 0;
 		}
 

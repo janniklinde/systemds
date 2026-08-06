@@ -30,7 +30,8 @@ import java.lang.invoke.VarHandle;
  * {@code i}. This lets a reader that has just decoded one block continue decoding its on-disk neighbours without a
  * second seek, which is how read amplification for small tiles is avoided.
  *
- * <p>Backed by two primitive arrays (16 bytes per record) rather than per-record objects. Appends are serialized on the
+ * <p>
+ * Backed by two primitive arrays (16 bytes per record) rather than per-record objects. Appends are serialized on the
  * index monitor and are off the hot path; lookups are lock-free and only need the volatile {@code _count} fence, since
  * arrays grow by copy and never shrink.
  */

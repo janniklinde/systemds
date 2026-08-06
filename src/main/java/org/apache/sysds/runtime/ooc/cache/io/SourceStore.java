@@ -137,7 +137,8 @@ final class SourceStore {
 		try(SequenceFile.Reader reader = new SequenceFile.Reader(job, SequenceFile.Reader.file(path))) {
 			reader.seek(src.offset);
 			if(!reader.next(ix, mb))
-				throw new DMLRuntimeException("Failed to read source block at offset " + src.offset + " in " + src.path);
+				throw new DMLRuntimeException(
+					"Failed to read source block at offset " + src.offset + " in " + src.path);
 			if(readAheadBudget > 0)
 				readAhead(src, reader, readAheadBudget, cache);
 		}
@@ -216,16 +217,16 @@ final class SourceStore {
 	CompletableFuture<OOCIOHandler.SourceReadResult> scan(OOCIOHandler.SourceReadRequest request,
 		long maxBytesInFlight) {
 		if(request.format != Types.FileFormat.BINARY)
-			return CompletableFuture.failedFuture(
-				new DMLRuntimeException("Unsupported format for source read: " + request.format));
+			return CompletableFuture
+				.failedFuture(new DMLRuntimeException("Unsupported format for source read: " + request.format));
 		return readBinarySourceParallel(request, null, maxBytesInFlight);
 	}
 
 	CompletableFuture<OOCIOHandler.SourceReadResult> continueScan(OOCIOHandler.SourceReadContinuation continuation,
 		long maxBytesInFlight) {
 		if(!(continuation instanceof SourceReadState state))
-			return CompletableFuture.failedFuture(
-				new DMLRuntimeException("Unsupported continuation type: " + continuation));
+			return CompletableFuture
+				.failedFuture(new DMLRuntimeException("Unsupported continuation type: " + continuation));
 		return readBinarySourceParallel(state.request, state, maxBytesInFlight);
 	}
 
@@ -333,15 +334,16 @@ final class SourceStore {
 			if(budgetHit.get()) {
 				if(!request.keepOpenOnLimit)
 					closeTarget(request.target, false);
-				OOCIOHandler.SourceReadContinuation cont = new SourceReadState(request, files, filePositions, completed);
-				future.complete(new OOCIOHandler.SourceReadResult(bytesRead.get(), false, cont,
-					new ArrayList<>(descriptors)));
+				OOCIOHandler.SourceReadContinuation cont = new SourceReadState(request, files, filePositions,
+					completed);
+				future.complete(
+					new OOCIOHandler.SourceReadResult(bytesRead.get(), false, cont, new ArrayList<>(descriptors)));
 				return;
 			}
 
 			closeTarget(request.target, true);
-			future.complete(
-				new OOCIOHandler.SourceReadResult(bytesRead.get(), true, null, new ArrayList<>(descriptors)));
+			future
+				.complete(new OOCIOHandler.SourceReadResult(bytesRead.get(), true, null, new ArrayList<>(descriptors)));
 		}
 		catch(DMLRuntimeException e) {
 			future.completeExceptionally(e);

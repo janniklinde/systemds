@@ -128,8 +128,8 @@ public class OOCIOHandlerImpl implements OOCIOHandler {
 			try {
 				long ioStart = DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
 				long budget = readAheadBudget(_block);
-				Object data = _source.contains(_block.getKey()) ? _source.read(_block, budget, _cache) : _spill.read(
-					_block, budget, _cache);
+				Object data = _source.contains(_block.getKey()) ? _source.read(_block, budget, _cache) : _spill
+					.read(_block, budget, _cache);
 				if(data != null)
 					_block.setDataUnsafe(data);
 				if(DMLScript.OOC_LOG_EVENTS)
