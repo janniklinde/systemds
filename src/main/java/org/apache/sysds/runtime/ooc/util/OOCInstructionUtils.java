@@ -42,6 +42,9 @@ import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.lops.MMTSJ.MMTSJType;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
+import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
+import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
+import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
@@ -49,6 +52,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.AggregateBinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
@@ -86,6 +90,17 @@ public final class OOCInstructionUtils {
 	public static final ExecutorService COMPUTE_EXECUTOR = CommonThreadPool.get();
 	private static final AtomicInteger COMPUTE_IN_FLIGHT = new AtomicInteger();
 	private static final int COMPUTE_BACKPRESSURE_THRESHOLD = 100;
+
+	public static boolean known(MatrixObject matrix) {
+		DataCharacteristics dc = matrix.getDataCharacteristics();
+		return dc.dimsKnown() && dc.getBlocksize() > 0;
+	}
+
+	public static void propagateDims(ExecutionContext ec, CPOperand output, long rows, long cols, int blocksize,
+		long nonZeros) {
+		if(rows >= 0 && cols >= 0 && blocksize > 0)
+			ec.getDataCharacteristics(output.getName()).set(rows, cols, blocksize, nonZeros);
+	}
 
 	public static void dataGen(OOCStream<IndexedMatrixValue> output, Function<MatrixIndexes, MatrixBlock> operation,
 		StreamContext context) {

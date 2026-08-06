@@ -115,6 +115,7 @@ public class AppendOOCInstruction extends BinaryOOCInstruction {
 			return;
 		}
 		if(contributing.size() == 1) {
+			output.getDataCharacteristics().set(rows, cols, contributing.get(0).getBlocksize(), nonZeros);
 			output.setStreamHandle(contributing.get(0).getStreamHandle());
 			return;
 		}

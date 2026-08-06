@@ -32,9 +32,14 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.LocalVariableMap;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
+import org.apache.sysds.runtime.instructions.ooc.AppendOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.BinaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CtableOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.DataGenOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
+import org.apache.sysds.runtime.instructions.ooc.ParameterizedBuiltinOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
+import org.apache.sysds.runtime.instructions.cp.IntObject;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
@@ -50,6 +55,61 @@ import org.junit.Assert;
 import org.junit.Test;
 
 public class OOCInstructionUtilsTest {
+	@Test
+	public void testSingleContributorAppendPropagatesDimensions() {
+		MatrixObject empty = matrixObject(0, 4, 2);
+		MatrixObject input = matrixObject(2, 4, 2);
+		MatrixObject output = matrixObject(-1, -1, 2);
+		empty.setStreamHandle(new SubscribableTaskQueue<>());
+		input.setStreamHandle(new SubscribableTaskQueue<>());
+
+		AppendOOCInstruction.bind(List.of(empty, input), output, false, new StreamContext());
+
+		Assert.assertEquals(2, output.getNumRows());
+		Assert.assertEquals(4, output.getNumColumns());
+		Assert.assertEquals(2, output.getBlocksize());
+	}
+
+	@Test
+	public void testZeroRowDataGenPropagatesRuntimeDimensions() {
+		ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+		ec.setScalarOutput("rows", new IntObject(0));
+		ec.setScalarOutput("cols", new IntObject(3));
+		ec.setVariable("R", matrixObject(-1, -1, 2));
+
+		DataGenOOCInstruction
+			.parseInstruction(
+				"OOC°rand°rows·SCALAR·INT64·false°cols·SCALAR·INT64·false°2°0°0°1.0°-1°uniform°1.0°1°R·MATRIX·FP64")
+			.processInstruction(ec);
+
+		Assert.assertEquals(0, ec.getMatrixObject("R").getNumRows());
+		Assert.assertEquals(3, ec.getMatrixObject("R").getNumColumns());
+		Assert.assertEquals(0, ec.getMatrixObject("R").getNnz());
+	}
+
+	@Test
+	public void testDimensionPropagationThroughElementwiseChain() {
+		ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+		MatrixObject input = matrixObject(7, 3, 2);
+		input.setStreamHandle(new SubscribableTaskQueue<>());
+		ec.setVariable("A", input);
+		for(String name : List.of("B", "C", "D", "E"))
+			ec.setVariable(name, matrixObject(-1, -1, 2));
+
+		BinaryOOCInstruction.parseInstruction("OOC°/°A·MATRIX·FP64°2·SCALAR·FP64·true°B·MATRIX·FP64")
+			.processInstruction(ec);
+		BinaryOOCInstruction.parseInstruction("OOC°-°B·MATRIX·FP64°1·SCALAR·FP64·true°C·MATRIX·FP64")
+			.processInstruction(ec);
+		BinaryOOCInstruction.parseInstruction("OOC°*°C·MATRIX·FP64°0.5·SCALAR·FP64·true°D·MATRIX·FP64")
+			.processInstruction(ec);
+		ParameterizedBuiltinOOCInstruction
+			.parseInstruction("OOC°replace°pattern=NaN°replacement=0°target=D°E·MATRIX·FP64").processInstruction(ec);
+
+		Assert.assertEquals(7, ec.getMatrixObject("E").getNumRows());
+		Assert.assertEquals(3, ec.getMatrixObject("E").getNumColumns());
+		Assert.assertEquals(2, ec.getMatrixObject("E").getBlocksize());
+	}
+
 	@Test
 	public void testSliceLineCtable() {
 		OOCCacheManager.reset();
