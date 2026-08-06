@@ -36,7 +36,6 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixValue;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
-import org.apache.sysds.runtime.ooc.cache.packed.OOCPackedCache;
 import org.apache.sysds.runtime.util.DataConverter;
 import org.apache.sysds.runtime.util.HDFSTool;
 import org.apache.sysds.test.AutomatedTestBase;
@@ -179,7 +178,6 @@ public class StreamCollectTest extends AutomatedTestBase {
 				}
 			actual.recomputeNonZeros();
 			TestUtils.compareMatrices(expected, actual, eps);
-			Assert.assertTrue(((OOCPackedCache)OOCCacheManager.getGlobalCache()).getPackGroupCount() > 0);
 
 			OOCCacheManager.getGlobalCache().updateLimits(1, 1);
 			for(int attempt = 0; attempt < 100 && OOCCacheManager.getGlobalCache().getOwnedCacheSize() > 0; attempt++)

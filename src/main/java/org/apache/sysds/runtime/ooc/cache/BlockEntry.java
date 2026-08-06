@@ -29,6 +29,7 @@ public final class BlockEntry {
 	private int _referenceCount; // The number of references from different managing instances (e.g. CachingStream)
 	// Optional implementation-local cache metadata; null for cache implementations that do not need it.
 	private volatile Object _cacheMeta;
+	private volatile long _backingLocation;
 
 	public BlockEntry(BlockKey key) {
 		this._key = key;
@@ -117,6 +118,17 @@ public final class BlockEntry {
 
 	public void setCacheMeta(Object meta) {
 		_cacheMeta = meta;
+	}
+
+	/**
+	 * Opaque disk-backing handle. Written and interpreted exclusively by the I/O handler; zero means not backed.
+	 */
+	public long getBackingLocation() {
+		return _backingLocation;
+	}
+
+	public void setBackingLocation(long location) {
+		_backingLocation = location;
 	}
 
 	public synchronized void setState(BlockState state) {

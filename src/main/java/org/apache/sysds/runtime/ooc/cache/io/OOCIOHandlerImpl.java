@@ -71,7 +71,7 @@ public class OOCIOHandlerImpl implements OOCIOHandler {
 	@Override
 	public OOCFuture<BlockEntry> scheduleRead(final BlockEntry block) {
 		final OOCFuture<BlockEntry> future = new OOCFuture<>();
-		int pinnedPartitionId = _spill.pinPartitionForRead(block.getKey());
+		int pinnedPartitionId = _spill.pinPartitionForRead(block);
 		try {
 			_readExec.execute(new ReadTask(block, future, pinnedPartitionId));
 		}
@@ -84,7 +84,7 @@ public class OOCIOHandlerImpl implements OOCIOHandler {
 
 	@Override
 	public CompletableFuture<Boolean> scheduleDeletion(BlockEntry block) {
-		_spill.delete(block.getKey());
+		_spill.delete(block);
 		_source.delete(block.getKey());
 		return CompletableFuture.completedFuture(true);
 	}

@@ -23,7 +23,6 @@ import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.io.IOUtilFunctions;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
-import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
@@ -35,9 +34,10 @@ import scala.Tuple3;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.nio.channels.ClosedByInterruptException;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -54,17 +54,18 @@ final class SpillStore {
 	private static final int MAX_READ_AHEAD_COUNT = 64;
 	private static final int MAX_DECLINED_OFFERS = 4;
 
+	private static final VarHandle PARTITIONS = MethodHandles.arrayElementVarHandle(PartitionFile[].class);
+
 	private final String _spillDir;
 	private final ThreadPoolExecutor _writeExec;
 	private final ThreadPoolExecutor _deleteExec;
 	private final CloseableQueue<Tuple2<BlockEntry, OOCFuture<Void>>>[] _q;
-	private final ConcurrentHashMap<BlockKey, SpillLocation> _locations = new ConcurrentHashMap<>();
-	private final ConcurrentHashMap<Integer, PartitionFile> _partitions = new ConcurrentHashMap<>();
 	private final AtomicInteger _partitionCounter = new AtomicInteger(0);
 	private final Object _spillLock = new Object();
 	private final AtomicLong _wCtr = new AtomicLong(0);
 	private final AtomicBoolean _started = new AtomicBoolean(false);
 	private final int _evictCallerId = OOCEventLog.registerCaller("write");
+	private volatile PartitionFile[] _partitions = new PartitionFile[16];
 
 	@SuppressWarnings("unchecked")
 	SpillStore() {
@@ -73,10 +74,6 @@ final class SpillStore {
 			new ArrayBlockingQueue<>(100000));
 		_deleteExec = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(100000));
 		_q = new CloseableQueue[WRITER_SIZE];
-	}
-
-	boolean contains(BlockKey key) {
-		return _locations.containsKey(key);
 	}
 
 	OOCFuture<Void> write(BlockEntry block) {
@@ -95,26 +92,22 @@ final class SpillStore {
 		return future;
 	}
 
-	void delete(BlockKey key) {
-		removeLocation(key);
+	void delete(BlockEntry block) {
+		removeLocation(block);
 	}
 
-	/**
-	 * Reads one block and, if {@code readAheadBudget} allows, keeps decoding the blocks that follow it in the same
-	 * partition, offering each to the cache.
-	 *
-	 * @return the decoded object, or null if the read was interrupted
-	 */
 	Object read(BlockEntry block, long readAheadBudget, OOCCache cache) {
-		SpillLocation location = _locations.get(block.getKey());
-		if(location == null)
+		long location = block.getBackingLocation();
+		if(!BackingLocation.isSpill(location))
 			throw new DMLRuntimeException("Failed to load spill location for: " + block.getKey());
-		PartitionFile partition = _partitions.get(location.partitionId);
+		int partitionId = BackingLocation.spillPartition(location);
+		long offset = BackingLocation.spillOffset(location);
+		PartitionFile partition = partition(partitionId);
 		if(partition == null)
-			throw new DMLRuntimeException("Failed to load partition for: " + location.partitionId);
+			throw new DMLRuntimeException("Failed to load partition for: " + partitionId);
 
-		try(RandomAccessFile raf = new RandomAccessFile(partition.filePath, "r")) {
-			raf.seek(location.offset);
+		try(RandomAccessFile raf = new RandomAccessFile(partitionPath(partitionId), "r")) {
+			raf.seek(offset);
 			OOCBufferedDataInputStream in = new OOCBufferedDataInputStream(raf);
 			long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 			SpillableObject obj = SpillableObjectRegistry.read(in);
@@ -123,8 +116,10 @@ final class SpillStore {
 				Statistics.accumulateOOCLoadFromDiskTime(System.nanoTime() - ioStart);
 				Statistics.accumulateOOCLoadFromDiskBytes(block.getSize());
 			}
+			// The layout slot is derived rather than stored: a binary search over an in-memory array is free next to
+			// the disk read that just happened, and it keeps the location down to a single packed long.
 			if(readAheadBudget > 0)
-				readAhead(partition, location.slot, in, readAheadBudget, cache);
+				readAhead(partition, partition.index.slotOf(offset), in, readAheadBudget, cache);
 			return obj;
 		}
 		catch(ClosedByInterruptException ignored) {
@@ -135,11 +130,6 @@ final class SpillStore {
 		}
 	}
 
-	/**
-	 * Decodes the on-disk successors of the block at {@code slot} straight out of the already open stream. Stops as soon
-	 * as the next record is not exactly where the layout index says it should be, which covers gaps left by abandoned
-	 * writes, and stops early once the cache keeps declining offers.
-	 */
 	private void readAhead(PartitionFile partition, int slot, OOCBufferedDataInputStream in, long budget,
 		OOCCache cache) {
 		BlockLayoutIndex index = partition.index;
@@ -172,17 +162,17 @@ final class SpillStore {
 		}
 	}
 
-	/** Pins the partition holding {@code key} so it survives until the scheduled read runs. -1 if there is none. */
-	int pinPartitionForRead(BlockKey key) {
+	int pinPartitionForRead(BlockEntry block) {
+		long location = block.getBackingLocation();
+		if(!BackingLocation.isSpill(location))
+			return -1;
+		int partitionId = BackingLocation.spillPartition(location);
 		synchronized(_spillLock) {
-			SpillLocation location = _locations.get(key);
-			if(location == null)
-				return -1;
-			PartitionFile partition = _partitions.get(location.partitionId);
+			PartitionFile partition = partition(partitionId);
 			if(partition == null)
 				return -1;
-			partition.incrementRefCount();
-			return location.partitionId;
+			partition.refCount++;
+			return partitionId;
 		}
 	}
 
@@ -190,9 +180,7 @@ final class SpillStore {
 		if(partitionId < 0)
 			return;
 		synchronized(_spillLock) {
-			PartitionFile partition = _partitions.get(partitionId);
-			if(partition != null)
-				releaseIfUnused(partitionId, partition);
+			releaseIfUnused(partitionId);
 		}
 	}
 
@@ -211,8 +199,9 @@ final class SpillStore {
 		_writeExec.shutdownNow();
 		_deleteExec.getQueue().clear();
 		_deleteExec.shutdownNow();
-		_locations.clear();
-		_partitions.clear();
+		synchronized(_spillLock) {
+			_partitions = new PartitionFile[0];
+		}
 		if(started)
 			LocalFileUtils.deleteFileIfExists(_spillDir);
 	}
@@ -233,11 +222,8 @@ final class SpillStore {
 		while(!q.isFinished()) {
 			int partitionId = _partitionCounter.getAndIncrement();
 			LocalFileUtils.createLocalFileIfNotExist(_spillDir);
-			String filename = _spillDir + "/stream_batch_part_" + partitionId;
-
-			PartitionFile partition = new PartitionFile(filename);
-			_partitions.put(partitionId, partition);
-			partition.incrementRefCount(); // Writer pin; released when the partition closes
+			String filename = partitionPath(partitionId);
+			PartitionFile partition = openPartition(partitionId);
 
 			FileOutputStream fos = null;
 			OOCBufferedDataOutputStream dos = null;
@@ -313,9 +299,9 @@ final class SpillStore {
 		OOCBufferedDataOutputStream dos, ConcurrentLinkedDeque<Tuple3<Long, Long, OOCFuture<Void>>> flushQueue)
 		throws IOException {
 
-		BlockKey key = entry.getKey();
-		if(_locations.containsKey(key)) {
-			future.completeExceptionally(new DMLRuntimeException("Duplicate OOC spill location for: " + key));
+		if(entry.getBackingLocation() != BackingLocation.NONE) {
+			future.completeExceptionally(
+				new DMLRuntimeException("Duplicate OOC spill location for: " + entry.getKey()));
 			return 0;
 		}
 
@@ -336,10 +322,10 @@ final class SpillStore {
 			return offsetAfter - offsetBefore;
 		flushQueue.offer(new Tuple3<>(offsetBefore, offsetAfter, future));
 
-		int slot = partition.index.append(offsetBefore, offsetAfter, BlockLayoutIndex.packKey(key));
-		addLocation(key, new SpillLocation(partitionId, offsetBefore, slot));
+		partition.index.append(offsetBefore, offsetAfter, BlockLayoutIndex.packKey(entry.getKey()));
+		addLocation(entry, partitionId, offsetBefore);
 		if(future.isDone()) {
-			removeLocation(key);
+			removeLocation(entry);
 			return offsetAfter - offsetBefore;
 		}
 		flushQueue(dos.getFlushedPosition(), flushQueue);
@@ -363,66 +349,78 @@ final class SpillStore {
 		flushQueue(dos.getFlushedPosition(), flushQueue);
 	}
 
-	private void addLocation(BlockKey key, SpillLocation location) {
+	private void addLocation(BlockEntry entry, int partitionId, long offset) {
 		synchronized(_spillLock) {
-			if(_locations.putIfAbsent(key, location) == null) {
-				PartitionFile partition = _partitions.get(location.partitionId);
-				if(partition != null)
-					partition.incrementRefCount();
-			}
+			if(entry.getBackingLocation() != BackingLocation.NONE)
+				return;
+			PartitionFile partition = partition(partitionId);
+			if(partition == null)
+				return;
+			partition.refCount++;
+			entry.setBackingLocation(BackingLocation.spill(partitionId, offset));
 		}
 	}
 
-	private void removeLocation(BlockKey key) {
+	private void removeLocation(BlockEntry entry) {
 		synchronized(_spillLock) {
-			SpillLocation location = _locations.remove(key);
-			if(location == null)
+			long location = entry.getBackingLocation();
+			if(!BackingLocation.isSpill(location))
 				return;
-			PartitionFile partition = _partitions.get(location.partitionId);
-			if(partition != null)
-				releaseIfUnused(location.partitionId, partition);
+			entry.setBackingLocation(BackingLocation.NONE);
+			releaseIfUnused(BackingLocation.spillPartition(location));
 		}
+	}
+
+	private PartitionFile openPartition(int partitionId) {
+		PartitionFile partition = new PartitionFile();
+		partition.refCount = 1; // Writer pin; released when the partition closes
+		synchronized(_spillLock) {
+			PartitionFile[] partitions = _partitions;
+			if(partitionId >= partitions.length) {
+				int capacity = Math.max(partitions.length, 1);
+				while(partitionId >= capacity)
+					capacity <<= 1;
+				partitions = new PartitionFile[capacity];
+				System.arraycopy(_partitions, 0, partitions, 0, _partitions.length);
+				_partitions = partitions;
+			}
+			PARTITIONS.setRelease(partitions, partitionId, partition);
+		}
+		return partition;
 	}
 
 	private void releasePartitionWriter(int partitionId) {
 		synchronized(_spillLock) {
-			PartitionFile partition = _partitions.get(partitionId);
-			if(partition != null)
-				releaseIfUnused(partitionId, partition);
+			releaseIfUnused(partitionId);
 		}
 	}
 
-	private void releaseIfUnused(int partitionId, PartitionFile partition) {
-		if(partition.decrementRefCount() != 0 || !_partitions.remove(partitionId, partition))
+	/** Must be called while holding {@link #_spillLock}. */
+	private void releaseIfUnused(int partitionId) {
+		PartitionFile partition = partition(partitionId);
+		if(partition == null || --partition.refCount != 0)
 			return;
+		PARTITIONS.setRelease(_partitions, partitionId, null);
 		try {
-			_deleteExec.execute(() -> LocalFileUtils.deleteFileIfExists(partition.filePath, true));
+			_deleteExec.execute(() -> LocalFileUtils.deleteFileIfExists(partitionPath(partitionId), true));
 		}
 		catch(RejectedExecutionException ignored) {
 		}
 	}
 
-	/** Where a block lives: which partition, at which byte offset, and which slot of that partition's layout index. */
-	private record SpillLocation(int partitionId, long offset, int slot) {
+	private PartitionFile partition(int partitionId) {
+		PartitionFile[] partitions = _partitions;
+		if(partitionId < 0 || partitionId >= partitions.length)
+			return null;
+		return (PartitionFile) PARTITIONS.getAcquire(partitions, partitionId);
+	}
+
+	private String partitionPath(int partitionId) {
+		return _spillDir + "/stream_batch_part_" + partitionId;
 	}
 
 	private static final class PartitionFile {
-		final String filePath;
-		final BlockLayoutIndex index;
-		private final AtomicInteger refCount;
-
-		PartitionFile(String filePath) {
-			this.filePath = filePath;
-			this.index = new BlockLayoutIndex();
-			this.refCount = new AtomicInteger(0);
-		}
-
-		int incrementRefCount() {
-			return refCount.incrementAndGet();
-		}
-
-		int decrementRefCount() {
-			return refCount.decrementAndGet();
-		}
+		final BlockLayoutIndex index = new BlockLayoutIndex();
+		int refCount;
 	}
 }
