@@ -53,7 +53,7 @@ public class OOCCacheManager {
 
 	private static final AtomicReference<OOCIOHandler> _ioHandler;
 	private static final AtomicReference<OOCCacheScheduler> _scheduler;
-	private static final AtomicReference<OOCPackedCache> _globalCache;
+	private static final AtomicReference<OOCCache> _globalCache;
 
 	static {
 		_evictionLimit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE);
@@ -67,7 +67,7 @@ public class OOCCacheManager {
 		TeeOOCInstruction.reset();
 		OOCIOHandler ioHandler = _ioHandler.getAndSet(null);
 		OOCCacheScheduler cacheScheduler = _scheduler.getAndSet(null);
-		OOCPackedCache globalCache = _globalCache.getAndSet(null);
+		OOCCache globalCache = _globalCache.getAndSet(null);
 		if (ioHandler != null)
 			ioHandler.shutdown();
 		if (cacheScheduler != null)
@@ -124,9 +124,9 @@ public class OOCCacheManager {
 		return _scheduler.get();
 	}
 
-	public static OOCPackedCache getGlobalCache() {
+	public static OOCCache getGlobalCache() {
 		while(true) {
-			OOCPackedCache cache = _globalCache.get();
+			OOCCache cache = _globalCache.get();
 			if(cache != null)
 				return cache;
 			cache = new OOCPackedCache(new OOCMatrixIOHandler(), _hardLimit, _evictionLimit);

@@ -33,6 +33,14 @@ public interface OOCCache {
 		return logicalBytes;
 	}
 
+	default long getPackThresholdBytes() {
+		return 0L;
+	}
+
+	default long getPackTargetBytes() {
+		return 0L;
+	}
+
 	/**
 	 * Pins an item backed by an allowance. A successful pin transfers memory ownership from the cache to the owner of
 	 * the allowance and guarantees data availability. While pinned, the bytes of the entry are not counted as

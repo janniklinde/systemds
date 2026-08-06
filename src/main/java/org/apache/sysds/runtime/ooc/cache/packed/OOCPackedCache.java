@@ -133,10 +133,12 @@ public final class OOCPackedCache implements OOCCache {
 		});
 	}
 
+	@Override
 	public long getPackThresholdBytes() {
 		return _packThresholdBytes;
 	}
 
+	@Override
 	public long getPackTargetBytes() {
 		return _packTargetBytes;
 	}
