@@ -25,6 +25,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
+import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 
 import java.util.concurrent.CompletableFuture;
@@ -33,14 +34,15 @@ import java.util.List;
 public interface OOCIOHandler {
 	void shutdown();
 
-	CompletableFuture<Void> scheduleEviction(BlockEntry block);
+	/**
+	 * Attaches the cache that owns this handler.
+	 */
+	default void setCache(OOCCache cache) {
+	}
+
+	OOCFuture<Void> scheduleEviction(BlockEntry block);
 
 	OOCFuture<BlockEntry> scheduleRead(BlockEntry block);
-
-	/**
-	 * Increase priority for a pending scheduled read if it has not started yet.
-	 */
-	void prioritizeRead(BlockKey key, double priority);
 
 	CompletableFuture<Boolean> scheduleDeletion(BlockEntry block);
 
@@ -74,21 +76,9 @@ public interface OOCIOHandler {
 		public final long maxBytesInFlight;
 		public final boolean keepOpenOnLimit;
 		public final OOCStream<IndexedMatrixValue> target;
-		public final long packThresholdBytes;
-		public final long packTargetBytes;
 
 		public SourceReadRequest(String path, Types.FileFormat format, long rows, long cols, int blen, long estNnz,
 			long maxBytesInFlight, boolean keepOpenOnLimit, OOCStream<IndexedMatrixValue> target) {
-			this(path, format, rows, cols, blen, estNnz, maxBytesInFlight, keepOpenOnLimit, target, 0, 0);
-		}
-
-		public SourceReadRequest(String path, Types.FileFormat format, long rows, long cols, int blen, long estNnz,
-			long maxBytesInFlight, boolean keepOpenOnLimit, OOCStream<IndexedMatrixValue> target,
-			long packThresholdBytes, long packTargetBytes) {
-			if(packThresholdBytes < 0 || packTargetBytes < 0 ||
-				packThresholdBytes > 0 && packTargetBytes < packThresholdBytes)
-				throw new IllegalArgumentException(
-					"Invalid source packing policy: " + packThresholdBytes + "/" + packTargetBytes);
 			this.path = path;
 			this.format = format;
 			this.rows = rows;
@@ -98,8 +88,6 @@ public interface OOCIOHandler {
 			this.maxBytesInFlight = maxBytesInFlight;
 			this.keepOpenOnLimit = keepOpenOnLimit;
 			this.target = target;
-			this.packThresholdBytes = packThresholdBytes;
-			this.packTargetBytes = packTargetBytes;
 		}
 	}
 
