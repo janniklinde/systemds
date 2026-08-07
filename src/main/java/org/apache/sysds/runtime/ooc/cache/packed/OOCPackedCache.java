@@ -133,13 +133,6 @@ public final class OOCPackedCache implements OOCCache {
 		});
 	}
 
-	public long getPackThresholdBytes() {
-		return _packThresholdBytes;
-	}
-
-	public long getPackTargetBytes() {
-		return _packTargetBytes;
-	}
 
 	@Override
 	public long maxPhysicalPinBytes(long logicalBytes) {
@@ -162,6 +155,16 @@ public final class OOCPackedCache implements OOCCache {
 	@Override
 	public OOCIOHandler getIOHandler() {
 		return _physical.getIOHandler();
+	}
+
+	@Override
+	public long readAheadBudget() {
+		return _physical.readAheadBudget();
+	}
+
+	@Override
+	public boolean activate(BlockKey key, Object data) {
+		return _physical.activate(key, data);
 	}
 
 	@Override
