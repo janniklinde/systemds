@@ -31,7 +31,7 @@ import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
-import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
+import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerImpl;
 import org.apache.sysds.runtime.ooc.cache.packed.OOCPackedCache;
 import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
@@ -52,7 +52,7 @@ public class OOCPackedCacheTest {
 		producer.setTargetMemory(1L << 30);
 		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker);
 		reader.setTargetMemory(1L << 30);
-		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30),
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCIOHandlerImpl(), 1L << 30, 1L << 30),
 			2 * BYTES, 10 * BYTES, -1, 0);
 		try {
 			BlockEntry[] entries = publishSmallTiles(cache, producer, STREAM_ID, 3);
@@ -91,7 +91,7 @@ public class OOCPackedCacheTest {
 		producer.setTargetMemory(1L << 30);
 		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker);
 		reader.setTargetMemory(1L << 30);
-		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30),
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCIOHandlerImpl(), 1L << 30, 1L << 30),
 			2 * BYTES, 10 * BYTES, -1, 0);
 		try {
 			long largeBytes = 2 * BYTES;
@@ -134,7 +134,7 @@ public class OOCPackedCacheTest {
 		producer.setTargetMemory(1L << 30);
 		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker);
 		reader.setTargetMemory(1L << 30);
-		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30),
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCIOHandlerImpl(), 1L << 30, 1L << 30),
 			2 * BYTES, 10 * BYTES, -1, 0);
 		try {
 			producer.reserveBlocking(4 * BYTES);
@@ -178,7 +178,7 @@ public class OOCPackedCacheTest {
 		producer.setTargetMemory(1L << 30);
 		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker);
 		reader.setTargetMemory(1L << 30);
-		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30),
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCIOHandlerImpl(), 1L << 30, 1L << 30),
 			2 * BYTES, 10 * BYTES, -1, 1000);
 		try {
 			BlockEntry[] entries = publishSmallTiles(cache, producer, STREAM_ID, 2);
@@ -219,7 +219,7 @@ public class OOCPackedCacheTest {
 		producer.setTargetMemory(1L << 30);
 		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker);
 		reader.setTargetMemory(1L << 30);
-		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30),
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCIOHandlerImpl(), 1L << 30, 1L << 30),
 			2 * BYTES, 10 * BYTES, -1, 0);
 		try {
 			producer.reserveBlocking(BYTES);
@@ -257,7 +257,7 @@ public class OOCPackedCacheTest {
 		producer.setTargetMemory(1L << 30);
 		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker);
 		reader.setTargetMemory(1L << 30);
-		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30),
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCIOHandlerImpl(), 1L << 30, 1L << 30),
 			2 * BYTES, 10 * BYTES, -1, 0);
 		long largeBytes = 2 * BYTES;
 		try {
@@ -289,7 +289,7 @@ public class OOCPackedCacheTest {
 		producer.setTargetMemory(1L << 30);
 		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker);
 		reader.setTargetMemory(1L << 30);
-		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30),
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCIOHandlerImpl(), 1L << 30, 1L << 30),
 			2 * BYTES, 10 * BYTES, -1, 0);
 		try {
 			long[] tileIds = new long[] {2, 5};

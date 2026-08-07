@@ -64,10 +64,10 @@ public class OOCCacheTestUtils {
 		}
 
 		@Override
-		public CompletableFuture<Void> scheduleEviction(BlockEntry block) {
+		public OOCFuture<Void> scheduleEviction(BlockEntry block) {
 			_spilled.put(block.getKey(), BlockEntryTestAccess.getDataUnsafe(block));
 			_evictions.incrementAndGet();
-			return CompletableFuture.completedFuture(null);
+			return OOCFuture.completed(null);
 		}
 
 		@Override
@@ -80,10 +80,6 @@ public class OOCCacheTestUtils {
 				return OOCFuture.completed(null);
 			BlockEntryTestAccess.setDataUnsafe(block, data);
 			return OOCFuture.completed(block);
-		}
-
-		@Override
-		public void prioritizeRead(BlockKey key, double priority) {
 		}
 
 		@Override

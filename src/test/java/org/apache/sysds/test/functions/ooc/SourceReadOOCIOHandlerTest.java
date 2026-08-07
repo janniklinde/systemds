@@ -24,7 +24,7 @@ import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
-import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
+import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerImpl;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.io.MatrixWriter;
@@ -46,14 +46,14 @@ public class SourceReadOOCIOHandlerTest extends AutomatedTestBase {
 	private static final String TEST_DIR = "functions/ooc/";
 	private static final String TEST_CLASS_DIR = TEST_DIR + SourceReadOOCIOHandlerTest.class.getSimpleName() + "/";
 
-	private OOCMatrixIOHandler handler;
+	private OOCIOHandlerImpl handler;
 
 	@Override
 	@Before
 	public void setUp() {
 		TestUtils.clearAssertionInformation();
 		addTestConfiguration(TEST_NAME, new TestConfiguration(TEST_CLASS_DIR, TEST_NAME));
-		handler = new OOCMatrixIOHandler();
+		handler = new OOCIOHandlerImpl();
 	}
 
 	@After
@@ -123,7 +123,7 @@ public class SourceReadOOCIOHandlerTest extends AutomatedTestBase {
 	}
 
 	@Test
-	public void testLargeTileSeparatesSmallSourceTiles() throws Exception {
+	public void testSourceTilesAreEmittedIndividually() throws Exception {
 		getAndLoadTestConfiguration(TEST_NAME);
 		int rows = 10;
 		int cols = 30;
@@ -138,9 +138,6 @@ public class SourceReadOOCIOHandlerTest extends AutomatedTestBase {
 		String file = input("binary_pack_boundary");
 		writeBinaryMatrix(source, file, blocksize);
 
-		MatrixBlock small = source.slice(0, rows - 1, 0, blocksize - 1);
-		MatrixBlock large = source.slice(0, rows - 1, blocksize, 2 * blocksize - 1);
-		long threshold = (small.getExactSerializedSize() + large.getExactSerializedSize()) / 2;
 		SourceOOCStream target = new SourceOOCStream(false);
 		AtomicInteger groups = new AtomicInteger();
 		AtomicInteger singles = new AtomicInteger();
@@ -155,13 +152,11 @@ public class SourceReadOOCIOHandlerTest extends AutomatedTestBase {
 			}
 		});
 		OOCIOHandler.SourceReadRequest request = new OOCIOHandler.SourceReadRequest(file, Types.FileFormat.BINARY, rows,
-			cols, blocksize, source.getNonZeros(), Long.MAX_VALUE, true, target, threshold, 2 * threshold);
+			cols, blocksize, source.getNonZeros(), Long.MAX_VALUE, true, target);
 		OOCIOHandler.SourceReadResult result = handler.scheduleSourceRead(request).get();
 
 		Assert.assertTrue(result.eof);
 		Assert.assertEquals(3, result.blocks.size());
-		Assert.assertEquals(2, result.blocks.stream().filter(block -> block.serializedSize < threshold).count());
-		Assert.assertEquals(1, result.blocks.stream().filter(block -> block.serializedSize >= threshold).count());
 		Assert.assertEquals(0, groups.get());
 		Assert.assertEquals(3, singles.get());
 	}
