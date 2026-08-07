@@ -246,6 +246,8 @@ public abstract class OOCPrimitive {
 		sb.append(getClass().getSimpleName()).append('@').append(System.identityHashCode(this)).append(" started=")
 			.append(_executionStarted.get()).append(" compiled=").append(_started.get()).append(" failed=")
 			.append(_failed.get()).append(" pattern=").append(_pattern);
+		if(_allowance != null)
+			sb.append(" allowance[").append(_allowance.debugState()).append(']');
 		if(_failure != null)
 			sb.append(" failure=").append(_failure);
 		for(int i = 0; i < _inputs.size(); i++) {

@@ -22,6 +22,7 @@ package org.apache.sysds.runtime.instructions.ooc;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCCacheScheduler;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 import java.util.ArrayList;
@@ -98,7 +99,7 @@ public final class OOCWatchdog {
 			return;
 		long now = System.currentTimeMillis();
 		StringBuilder sb = new StringBuilder("[OOCWatchdog] ").append(pending.size())
-			.append(" incomplete primitive(s):");
+			.append(" incomplete primitive(s); ").append(describeMemory()).append(':');
 		for(Map.Entry<OOCPrimitive, Long> entry : pending) {
 			OOCPrimitive primitive = entry.getKey();
 			sb.append("\n   age=").append(now - entry.getValue()).append("ms ").append(primitive.debugState());
@@ -188,6 +189,18 @@ public final class OOCWatchdog {
 		}
 		sb.append("]");
 		System.err.println(sb);
+	}
+
+	private static String describeMemory() {
+		GlobalMemoryBroker broker = GlobalMemoryBroker.get();
+		StringBuilder sb = new StringBuilder("broker used=").append(toMiB(broker.getUsedMemory())).append("MiB/")
+			.append(toMiB(broker.getAllowedMemory())).append("MiB");
+		OOCCacheScheduler cache = OOCCacheManager.getCacheIfInitialized();
+		if(cache != null)
+			sb.append(", cache=").append(toMiB(cache.getCacheSize())).append("MiB (pinned ")
+				.append(toMiB(cache.getPinnedBytes())).append("MiB, hard ").append(toMiB(cache.getHardLimit()))
+				.append("MiB)");
+		return sb.toString();
 	}
 
 	private static long toMiB(long bytes) {
