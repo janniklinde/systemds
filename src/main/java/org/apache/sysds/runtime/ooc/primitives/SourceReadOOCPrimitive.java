@@ -39,10 +39,6 @@ import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
-/**
- * Bounded binary source reader. Its output is an internal handoff stream which must be attached directly to a
- * materialization boundary; source-backed callbacks deliberately reject ordinary primitive access.
- */
 public final class SourceReadOOCPrimitive extends OOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _output;
 	private final String _path;

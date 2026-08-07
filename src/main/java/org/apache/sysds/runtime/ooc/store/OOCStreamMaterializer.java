@@ -71,7 +71,6 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 	public void attach(OOCStream<IndexedMatrixValue> source) {
 		try {
 			source.setSubscriber(this);
-			source.start();
 		}
 		catch(Throwable failure) {
 			DMLRuntimeException wrapped = DMLRuntimeException.of(failure);

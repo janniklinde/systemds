@@ -62,6 +62,8 @@ public final class CtableOOCPrimitive extends OOCPrimitive {
 	private final double _weight;
 	private final AtomicInteger _active = new AtomicInteger(1);
 	private final AtomicBoolean _flushing = new AtomicBoolean();
+	private final AtomicBoolean _flushPending = new AtomicBoolean();
+	private final AtomicBoolean _schedulePending = new AtomicBoolean();
 	private final AtomicBoolean _finished = new AtomicBoolean();
 	private List<MaterializedStore<IndexedMatrixValue>> _stores;
 	private List<IndexedMaterializedStoreReader<IndexedMatrixValue>> _readers;
@@ -71,7 +73,8 @@ public final class CtableOOCPrimitive extends OOCPrimitive {
 	private int _inputColBlocks;
 	private int _outputColBlocks;
 	private int _outputBlocks;
-	private int _nextTile;
+	private volatile int _nextTile;
+	private volatile int _flushSlot;
 	private int _inputTiles;
 	private long _taskBytes;
 	private long _outputBytes;
@@ -164,10 +167,24 @@ public final class CtableOOCPrimitive extends OOCPrimitive {
 	}
 
 	private void scheduleNext() {
-		if(hasFailed() || _nextTile == _inputTiles) {
-			completeOne();
-			return;
+		while(true) {
+			if(hasFailed() || _nextTile == _inputTiles) {
+				completeOne();
+				return;
+			}
+			_schedulePending.set(true);
+			scheduleTile();
+			if(_schedulePending.compareAndSet(true, false))
+				return;
 		}
+	}
+
+	private void resumeSchedule() {
+		if(!_schedulePending.compareAndSet(true, false))
+			scheduleNext();
+	}
+
+	private void scheduleTile() {
 		_allowance.reserveAsync(_taskBytes).whenComplete((ignored, error) -> {
 			if(error != null) {
 				fail(error);
@@ -178,7 +195,7 @@ public final class CtableOOCPrimitive extends OOCPrimitive {
 			int tile = _nextTile++;
 			_active.incrementAndGet();
 			requestInputs(tile, budget);
-			scheduleNext();
+			resumeSchedule();
 		});
 	}
 
@@ -379,12 +396,32 @@ public final class CtableOOCPrimitive extends OOCPrimitive {
 	}
 
 	private void flush(int slot) {
-		if(slot == _outputBlocks) {
-			finish();
-			return;
-		}
 		if(!_flushing.compareAndSet(false, true))
 			return;
+		_flushSlot = slot;
+		driveFlush();
+	}
+
+	private void driveFlush() {
+		while(true) {
+			int slot = _flushSlot;
+			if(slot == _outputBlocks) {
+				finish();
+				return;
+			}
+			_flushPending.set(true);
+			flushSlot(slot);
+			if(_flushPending.compareAndSet(true, false))
+				return;
+		}
+	}
+
+	private void resumeFlush() {
+		if(!_flushPending.compareAndSet(true, false))
+			driveFlush();
+	}
+
+	private void flushSlot(int slot) {
 		long bytes = OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(_outputBytes) + _outputBytes;
 		_allowance.reserveAsync(bytes).whenComplete((ignored, admissionError) -> {
 			if(admissionError != null) {
@@ -419,8 +456,8 @@ public final class CtableOOCPrimitive extends OOCPrimitive {
 						OOCUtils.enqueueExact(_outputStream, new IndexedMatrixValue(outputIndex(slot), empty), budget);
 					}
 					budget.close();
-					_flushing.set(false);
-					flush(slot + 1);
+					_flushSlot = slot + 1;
+					resumeFlush();
 				}
 				catch(Throwable failure) {
 					budget.close();

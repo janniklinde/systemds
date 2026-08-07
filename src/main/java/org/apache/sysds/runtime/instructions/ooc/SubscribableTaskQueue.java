@@ -320,4 +320,11 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 	public synchronized String toString() {
 		return "STQ-" + hashCode();
 	}
+
+	@Override
+	public synchronized String debugState() {
+		return "STQ@" + System.identityHashCode(this) + "[avail=" + _availableCtr.get() + ", blocks=" + _blockCount.get()
+			+ ", buffered=" + _data.size() + ", closed=" + _closed.get() + ", eosDelivered=" + _terminalDelivered.get()
+			+ ", subscriber=" + (_subscriber == null ? "none" : _subscriber.getClass().getName()) + "]";
+	}
 }
