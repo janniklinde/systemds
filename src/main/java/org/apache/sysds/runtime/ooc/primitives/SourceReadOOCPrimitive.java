@@ -116,9 +116,7 @@ public final class SourceReadOOCPrimitive extends OOCPrimitive {
 			OOCIOHandler.SourceReadResult result;
 			if(_continuation == null) {
 				OOCIOHandler.SourceReadRequest request = new OOCIOHandler.SourceReadRequest(_path,
-					Types.FileFormat.BINARY, _rows, _cols, _blocksize, _nonZeros, _productionLimit, true, _ioOutput,
-					OOCCacheManager.getGlobalCache().getPackThresholdBytes(),
-					OOCCacheManager.getGlobalCache().getPackTargetBytes());
+					Types.FileFormat.BINARY, _rows, _cols, _blocksize, _nonZeros, _productionLimit, true, _ioOutput);
 				result = io.scheduleSourceRead(request).get();
 			}
 			else

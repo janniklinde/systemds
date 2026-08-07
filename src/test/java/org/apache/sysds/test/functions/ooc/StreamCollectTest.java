@@ -178,7 +178,6 @@ public class StreamCollectTest extends AutomatedTestBase {
 				}
 			actual.recomputeNonZeros();
 			TestUtils.compareMatrices(expected, actual, eps);
-			Assert.assertTrue(OOCCacheManager.getGlobalCache().getPackGroupCount() > 0);
 
 			OOCCacheManager.getGlobalCache().updateLimits(1, 1);
 			for(int attempt = 0; attempt < 100 && OOCCacheManager.getGlobalCache().getOwnedCacheSize() > 0; attempt++)
