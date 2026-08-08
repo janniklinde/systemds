@@ -280,6 +280,24 @@ public final class OOCInstructionUtils {
 		output.assignPrimitive(new GroupedReduceOOCPrimitive(input, output, grouping, partial, merge, finish, context));
 	}
 
+	/**
+	 * Folds aligned input streams cell-wise, one reduction group per block index. Unlike an n-ary join this keeps a
+	 * single accumulator per block index instead of buffering the unmatched tiles of every stream, so the state and the
+	 * peak pinned memory do not grow with the number of inputs.
+	 *
+	 * @param inputs  aligned streams, all with the same block geometry
+	 * @param output  merged stream
+	 * @param merge   associative and commutative combiner
+	 * @param finish  applied once to each completed accumulator
+	 * @param context stream context
+	 */
+	public static void naryEquiReduce(List<OOCStreamable<IndexedMatrixValue>> inputs,
+		OOCStream<IndexedMatrixValue> output, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> merge,
+		Function<MatrixBlock, MatrixBlock> finish, StreamContext context) {
+		output.assignPrimitive(new GroupedReduceOOCPrimitive(inputs, output, GroupedReduceOOCPrimitive.Grouping.BLOCK_INDEX,
+			value -> (MatrixBlock) value.getValue(), merge, finish, context));
+	}
+
 	public static <I, O> void reduce(OOCStreamable<I> input, OOCStream<O> output, Function<I, O> partial,
 		BiFunction<O, O, O> merge, ToLongFunction<O> size, StreamContext context) {
 		output.assignPrimitive(new ReduceOOCPrimitive<>(input, output, partial, merge, size, context));

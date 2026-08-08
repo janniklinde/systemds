@@ -39,6 +39,8 @@ import org.apache.sysds.runtime.matrix.operators.SimpleOperator;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class BuiltinNaryOOCInstruction extends ComputationOOCInstruction {
+	private static final ScalarObject[] NO_SCALARS = new ScalarObject[0];
+
 	private final CPOperand[] _inputs;
 	private final boolean _cbind;
 	private final boolean _bind;
@@ -122,15 +124,17 @@ public class BuiltinNaryOOCInstruction extends ComputationOOCInstruction {
 				getContext());
 			return;
 		}
+		//min and max are associative and commutative, so tiles fold pairwise as soon as two of them share a block
+		//index; that keeps one accumulator per index instead of the n-1 unmatched tiles an n-ary join would hold
 		List<OOCStreamable<IndexedMatrixValue>> streams = new ArrayList<>(matrices.size());
 		for(MatrixObject matrix : matrices)
 			streams.add(matrix.getStreamable());
-		OOCInstructionUtils.naryEquiJoin(streams, qOut, blocks -> {
-			MatrixBlock[] values = new MatrixBlock[blocks.size()];
-			for(int i = 0; i < blocks.size(); i++)
-				values[i] = (MatrixBlock) blocks.get(i).getValue();
-			return new IndexedMatrixValue(blocks.get(0).getIndexes(),
-				MatrixBlock.naryOperations(_optr, values, scalarOperands, new MatrixBlock()));
-		}, getContext());
+		OOCInstructionUtils.naryEquiReduce(streams, qOut,
+			(left, right) -> MatrixBlock.naryOperations(_optr, new MatrixBlock[] {left, right}, NO_SCALARS,
+				new MatrixBlock()),
+			//the scalar operands fold in once at the end, which is equivalent under idempotent extrema
+			block -> scalarOperands.length == 0 ? block :
+				MatrixBlock.naryOperations(_optr, new MatrixBlock[] {block}, scalarOperands, new MatrixBlock()),
+			getContext());
 	}
 }
