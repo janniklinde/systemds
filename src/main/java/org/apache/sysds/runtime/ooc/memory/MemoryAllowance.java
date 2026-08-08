@@ -57,4 +57,8 @@ public interface MemoryAllowance {
 	default long reclaimUnused() {
 		return 0;
 	}
+
+	default String debugState() {
+		return getClass().getSimpleName();
+	}
 }
