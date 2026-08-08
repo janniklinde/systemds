@@ -146,8 +146,6 @@ public class NaryOp extends Hop {
 		// forced / memory-based / threshold-based decision
 		if(_etypeForced != null) {
 			_etype = _etypeForced;
-			if(_etype == ExecType.OOC && (_op == OpOpN.MIN || _op == OpOpN.MAX))
-				_etype = ExecType.CP;
 		}
 		else
 		{

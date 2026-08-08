@@ -136,8 +136,8 @@ public class OOCPrimitiveTest {
 				new MetaDataFormat(new MatrixCharacteristics(1, 2, 1), FileFormat.BINARY));
 			SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
 			source.setData(data);
-			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(1, 1, 3)));
-			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 2), new MatrixBlock(1, 1, 4)));
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(1, 1, 3d)));
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 2), new MatrixBlock(1, 1, 4d)));
 			source.closeInput();
 
 			MaterializedStoreStreamable handle = new MaterializedStoreStreamable(source, data);
