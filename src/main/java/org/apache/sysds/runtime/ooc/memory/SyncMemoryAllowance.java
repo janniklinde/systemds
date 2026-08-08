@@ -289,6 +289,14 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	}
 
 	@Override
+	public String debugState() {
+		synchronized(this) {
+			return "used=" + _usedBytes + " granted=" + _grantedBytes + " target=" + _targetBytes + " limit="
+				+ _consumptionLimit + " waiters=" + _reservationWaiters.size() + (_shutdown ? " shutdown" : "");
+		}
+	}
+
+	@Override
 	public boolean isShutdown() {
 		return _shutdown || _destroyed;
 	}

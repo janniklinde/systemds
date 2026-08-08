@@ -115,20 +115,21 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 		catch(Exception error) {
 			throw DMLRuntimeException.of(error);
 		}
-		OOCInstructionUtils.uncoordinatedDataGen(qOut, bulkBytes::get, OOCAccessPattern.UNKNOWN, (ignored, active) -> {
-			try {
-				emitter.set(active);
-				reader.readPreparedMatrixAsStream(untracked, readWorkers.get());
-				return true;
-			}
-			catch(Exception error) {
-				throw DMLRuntimeException.of(error);
-			}
-			finally {
-				emitter.set(null);
-			}
-		}, () -> {
-		}, rowBytes::get, value -> value.getIndexes().getColumnIndex() == 1,
+		OOCInstructionUtils.uncoordinatedDataGen(qOut, bulkBytes::get, maxBulkBytes, OOCAccessPattern.UNKNOWN,
+			(ignored, active) -> {
+				try {
+					emitter.set(active);
+					reader.readPreparedMatrixAsStream(untracked, readWorkers.get());
+					return true;
+				}
+				catch(Exception error) {
+					throw DMLRuntimeException.of(error);
+				}
+				finally {
+					emitter.set(null);
+				}
+			}, () -> {
+			}, rowBytes::get, value -> value.getIndexes().getColumnIndex() == 1,
 			value -> value.getIndexes().getColumnIndex() == columnBlocks.get(),
 			value -> value.getIndexes().getRowIndex() < blockRows.get(), getContext());
 	}
