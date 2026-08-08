@@ -104,26 +104,27 @@ public class CSVReblockOOCInstruction extends ComputationOOCInstruction {
 			}
 		});
 		ReaderTextCSVParallel reader = new ReaderTextCSVParallel(csvProps);
-		OOCInstructionUtils.uncoordinatedDataGen(qOut, bulkBytes::get, OOCAccessPattern.UNKNOWN, (ignored, active) -> {
-			try {
-				if(prepared.compareAndSet(false, true)) {
-					reader.prepareStreamRead(min.getFileName(), mc.getRows(), mc.getCols(), blen, mc.getNonZeros(),
-						(rows, cols) -> configureParallelRead(rows, cols, mc, mcOut, maxBulkBytes, bulkBytes, rowBytes,
-							blockRows, columnBlocks, readWorkers, legacy));
-					return false;
+		OOCInstructionUtils.uncoordinatedDataGen(qOut, bulkBytes::get, maxBulkBytes, OOCAccessPattern.UNKNOWN,
+			(ignored, active) -> {
+				try {
+					if(prepared.compareAndSet(false, true)) {
+						reader.prepareStreamRead(min.getFileName(), mc.getRows(), mc.getCols(), blen, mc.getNonZeros(),
+							(rows, cols) -> configureParallelRead(rows, cols, mc, mcOut, maxBulkBytes, bulkBytes,
+								rowBytes, blockRows, columnBlocks, readWorkers, legacy));
+						return false;
+					}
+					emitter.set(active);
+					reader.readPreparedMatrixAsStream(untracked, readWorkers.get());
+					return true;
 				}
-				emitter.set(active);
-				reader.readPreparedMatrixAsStream(untracked, readWorkers.get());
-				return true;
-			}
-			catch(Exception error) {
-				throw DMLRuntimeException.of(error);
-			}
-			finally {
-				emitter.set(null);
-			}
-		}, () -> {
-		}, rowBytes::get, value -> value.getIndexes().getColumnIndex() == 1,
+				catch(Exception error) {
+					throw DMLRuntimeException.of(error);
+				}
+				finally {
+					emitter.set(null);
+				}
+			}, () -> {
+			}, rowBytes::get, value -> value.getIndexes().getColumnIndex() == 1,
 			value -> value.getIndexes().getColumnIndex() == columnBlocks.get(),
 			value -> value.getIndexes().getRowIndex() < blockRows.get(), getContext());
 	}

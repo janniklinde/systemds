@@ -31,6 +31,7 @@ import java.util.function.Predicate;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
@@ -41,6 +42,7 @@ public final class UncoordinatedDataGenOOCPrimitive<T extends SpillableObject> e
 	private final OOCStreamable<T> _output;
 	private final long _bulkBytes;
 	private final long _productionLimit;
+	private final long _maxBulkBytes;
 	private final LongSupplier _bulkBytesSupplier;
 	private final OOCAccessPattern _emissionPattern;
 	private final BiFunction<Long, Consumer<T>, Boolean> _producer;
@@ -73,6 +75,7 @@ public final class UncoordinatedDataGenOOCPrimitive<T extends SpillableObject> e
 		_output = output;
 		_bulkBytes = bulkBytes;
 		_productionLimit = productionLimit;
+		_maxBulkBytes = bulkBytes;
 		_bulkBytesSupplier = null;
 		_emissionPattern = emissionPattern;
 		_producer = producer;
@@ -84,17 +87,18 @@ public final class UncoordinatedDataGenOOCPrimitive<T extends SpillableObject> e
 		_refillsOutputBulk = refillsOutputBulk;
 	}
 
-	public UncoordinatedDataGenOOCPrimitive(OOCStreamable<T> output, LongSupplier bulkBytes,
+	public UncoordinatedDataGenOOCPrimitive(OOCStreamable<T> output, LongSupplier bulkBytes, long maxBulkBytes,
 		OOCAccessPattern emissionPattern, BiFunction<Long, Consumer<T>, Boolean> producer, Runnable cleanup,
 		LongSupplier outputBulkBytes, Predicate<T> startsOutputBulk, Predicate<T> endsOutputBulk,
 		Predicate<T> refillsOutputBulk, StreamContext context) {
 		super(context);
-		if(bulkBytes == null || outputBulkBytes == null || startsOutputBulk == null || endsOutputBulk == null ||
-			refillsOutputBulk == null)
+		if(maxBulkBytes <= 0 || bulkBytes == null || outputBulkBytes == null || startsOutputBulk == null ||
+			endsOutputBulk == null || refillsOutputBulk == null)
 			throw new IllegalArgumentException("Dynamic bulk allocation requires bulk suppliers and boundaries");
 		_output = output;
 		_bulkBytes = 0;
 		_productionLimit = 0;
+		_maxBulkBytes = maxBulkBytes;
 		_bulkBytesSupplier = bulkBytes;
 		_emissionPattern = emissionPattern;
 		_producer = producer;
@@ -104,6 +108,11 @@ public final class UncoordinatedDataGenOOCPrimitive<T extends SpillableObject> e
 		_startsOutputBulk = startsOutputBulk;
 		_endsOutputBulk = endsOutputBulk;
 		_refillsOutputBulk = refillsOutputBulk;
+	}
+
+	@Override
+	protected long getAllowanceLimit(GlobalMemoryBroker broker) {
+		return Math.min(super.getAllowanceLimit(broker), 3 * _maxBulkBytes);
 	}
 
 	@Override
@@ -129,7 +138,8 @@ public final class UncoordinatedDataGenOOCPrimitive<T extends SpillableObject> e
 		long productionLimit = _bulkBytesSupplier != null ? bulkBytes : _productionLimit;
 		long outputBulkBytes = _outputBulkBytesSupplier != null ? _outputBulkBytesSupplier
 			.getAsLong() : _outputBulkBytes;
-		if(bulkBytes <= 0 || outputBulkBytes < 0 || outputBulkBytes > 0 && bulkBytes % outputBulkBytes != 0) {
+		if(bulkBytes <= 0 || bulkBytes > _maxBulkBytes || outputBulkBytes < 0 ||
+			outputBulkBytes > 0 && bulkBytes % outputBulkBytes != 0) {
 			failAndFinish(
 				new IllegalArgumentException("Invalid dynamic bulk allocation: " + outputBulkBytes + "/" + bulkBytes));
 			return;

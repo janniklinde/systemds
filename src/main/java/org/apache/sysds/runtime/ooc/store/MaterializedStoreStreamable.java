@@ -215,6 +215,10 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	}
 
 	private synchronized SyncMemoryAllowance readerAllowance() {
+		// Every reader of this stream shares this allowance, so it must stay uncapped: a shared consumption limit
+		// deadlocks once the prefetch windows of the live readers exceed it, because a reader only releases its pins
+		// after its consumer drains and that consumer is fed by the other readers. Bounding replay memory requires a
+		// per-reader allowance.
 		if(_readerAllowance == null)
 			_readerAllowance = new SyncMemoryAllowance(GlobalMemoryBroker.get());
 		return _readerAllowance;
