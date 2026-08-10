@@ -31,15 +31,19 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.ReorgOperator;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
+import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.function.BiConsumer;
 
 public class AppendOOCInstruction extends BinaryOOCInstruction {
 
 	public enum AppendType {
-		CBIND
+		CBIND, RBIND
 	}
 
 	protected final AppendType _type;
@@ -60,10 +64,10 @@ public class AppendOOCInstruction extends BinaryOOCInstruction {
 		CPOperand out = new CPOperand(parts[parts.length-2]);
 		boolean cbind = Boolean.parseBoolean(parts[parts.length-1]);
 
-		if(in1.getDataType() != Types.DataType.MATRIX || in2.getDataType() != Types.DataType.MATRIX || !cbind){
-			throw new DMLRuntimeException("Only matrix-matrix cbind is supported");
+		if(in1.getDataType() != Types.DataType.MATRIX || in2.getDataType() != Types.DataType.MATRIX) {
+			throw new DMLRuntimeException("Only matrix-matrix cbind and rbind are supported");
 		}
-		AppendType type = AppendType.CBIND;
+		AppendType type = cbind ? AppendType.CBIND : AppendType.RBIND;
 
 		Operator op = new ReorgOperator(OffsetColumnIndex.getOffsetColumnIndexFnObject(-1));
 		return new AppendOOCInstruction(op, in1, in2, out, type, opcode, str);
@@ -71,89 +75,93 @@ public class AppendOOCInstruction extends BinaryOOCInstruction {
 
 	@Override
 	public void processInstruction(ExecutionContext ec) {
-		MatrixObject in1 = ec.getMatrixObject(input1);
-		MatrixObject in2 = ec.getMatrixObject(input2);
-		validateInput(in1, in2);
-		if(handleZeroDims(in1, in2, ec))
-			return;
-
-		if(!in1.getDataCharacteristics().dimsKnown() || !in2.getDataCharacteristics().dimsKnown() ||
-			in1.getBlocksize() <= 0 || in2.getBlocksize() <= 0)
-			throw new DMLRuntimeException(
-				"Planner-backed OOC append requires known dimensions and positive block sizes.");
-
-		int outputBlocksize = in1.getBlocksize();
-		int rightBlocksize = in2.getBlocksize();
-		long rows = in1.getNumRows();
-		long cols1 = in1.getNumColumns();
-		long cols2 = in2.getNumColumns();
-		long nonZeros = in1.getNnz() >= 0 && in2.getNnz() >= 0 ? in1.getNnz() + in2.getNnz() : -1;
-		ec.getDataCharacteristics(output.getName()).set(rows, cols1 + cols2, outputBlocksize, nonZeros);
-		OOCStream<IndexedMatrixValue> result = createWritableStream();
-		ec.getMatrixObject(output).setStreamHandle(result);
-		OOCInstructionUtils.repartition(List.of(in1.getStreamable(), in2.getStreamable()), result,
-			outputIndex -> expectedFragments(outputIndex, rows, cols1, cols2, outputBlocksize, rightBlocksize),
-			List.of((tile, emit) -> route(tile, 0, outputBlocksize, outputBlocksize, emit),
-				(tile, emit) -> route(tile, cols1, rightBlocksize, outputBlocksize, emit)),
-			getContext());
+		bind(List.of(ec.getMatrixObject(input1), ec.getMatrixObject(input2)), ec.getMatrixObject(output),
+			_type == AppendType.CBIND, getContext());
 	}
 
-	private void validateInput(MatrixObject m1, MatrixObject m2) {
-		if(_type == AppendType.CBIND && m1.getNumRows() >= 0 && m2.getNumRows() >= 0 &&
-			m1.getNumRows() != m2.getNumRows()) {
-			throw new DMLRuntimeException(
-				"Append-cbind is not possible for input matrices " + input1.getName() + " and " + input2.getName()
-					+ " with different number of rows: " + m1.getNumRows() + " vs " + m2.getNumRows());
+
+	public static void bind(List<MatrixObject> inputs, MatrixObject output, boolean cbind, StreamContext context) {
+		if(inputs.isEmpty())
+			throw new IllegalArgumentException("Bind requires at least one input.");
+		List<MatrixObject> contributing = new ArrayList<>(inputs.size());
+		long concatenated = 0;
+		long crossDimension = -1;
+		long nonZeros = 0;
+		for(MatrixObject input : inputs) {
+			DataCharacteristics dc = input.getDataCharacteristics();
+			if(!dc.dimsKnown() || dc.getBlocksize() <= 0)
+				throw new DMLRuntimeException(
+					"Planner-backed OOC bind requires known dimensions and positive block sizes.");
+			if((cbind ? dc.getCols() : dc.getRows()) == 0)
+				continue;
+			long own = cbind ? dc.getRows() : dc.getCols();
+			if(crossDimension < 0)
+				crossDimension = own;
+			else if(crossDimension != own)
+				throw new DMLRuntimeException("Bind is not possible for inputs with different number of "
+					+ (cbind ? "rows: " : "columns: ") + crossDimension + " vs " + own);
+			concatenated += cbind ? dc.getCols() : dc.getRows();
+			nonZeros = nonZeros < 0 || dc.getNonZeros() < 0 ? -1 : nonZeros + dc.getNonZeros();
+			contributing.add(input);
 		}
-	}
+		long rows = cbind ? Math.max(crossDimension, 0) : concatenated;
+		long cols = cbind ? concatenated : Math.max(crossDimension, 0);
 
-	private boolean handleZeroDims(MatrixObject m1, MatrixObject m2, ExecutionContext ec) {
-		long rows = m1.getNumRows();
-		long cols1 = m1.getNumColumns();
-		long cols2 = m2.getNumColumns();
-		if(rows == 0 || (cols1 == 0 && cols2 == 0)) {
-			OOCStream<IndexedMatrixValue> empty = createWritableStream();
+		if(contributing.isEmpty() || rows == 0 || cols == 0) {
+			output.getDataCharacteristics().set(rows, cols, inputs.get(0).getBlocksize(), 0);
+			OOCStream<IndexedMatrixValue> empty = new SubscribableTaskQueue<>();
+			output.setStreamHandle(empty);
 			empty.closeInput();
-			ec.getMatrixObject(output).setStreamHandle(empty);
+			return;
 		}
-		else if(cols1 == 0) {
-			ec.getMatrixObject(output).setStreamHandle(m2.getStreamHandle());
+		if(contributing.size() == 1) {
+			output.getDataCharacteristics().set(rows, cols, contributing.get(0).getBlocksize(), nonZeros);
+			output.setStreamHandle(contributing.get(0).getStreamHandle());
+			return;
 		}
-		else if(cols2 == 0) {
-			ec.getMatrixObject(output).setStreamHandle(m1.getStreamHandle());
-		}
-		else return false;
 
-		return true;
+		int outputBlocksize = contributing.get(0).getBlocksize();
+		output.getDataCharacteristics().set(rows, cols, outputBlocksize, nonZeros);
+		OOCStream<IndexedMatrixValue> result = new SubscribableTaskQueue<>();
+		output.setStreamHandle(result);
+
+		BindPlacement[] placements = new BindPlacement[contributing.size()];
+		List<OOCStreamable<IndexedMatrixValue>> streams = new ArrayList<>(contributing.size());
+		List<BiConsumer<IndexedMatrixValue, RepartitionOOCPrimitive.FragmentEmitter>> routers = new ArrayList<>(
+			contributing.size());
+		long rowOffset = 0;
+		long colOffset = 0;
+		for(int i = 0; i < placements.length; i++) {
+			DataCharacteristics dc = contributing.get(i).getDataCharacteristics();
+			BindPlacement placement = new BindPlacement(rowOffset, colOffset, dc.getRows(), dc.getCols(),
+				dc.getBlocksize());
+			placements[i] = placement;
+			streams.add(contributing.get(i).getStreamable());
+			routers.add((tile, emit) -> route(tile, placement, outputBlocksize, emit));
+			rowOffset += cbind ? 0 : dc.getRows();
+			colOffset += cbind ? dc.getCols() : 0;
+		}
+		OOCInstructionUtils.repartition(streams, result,
+			outputIndex -> expectedFragments(outputIndex, placements, rows, cols, outputBlocksize), routers, context);
 	}
 
-	private static int expectedFragments(MatrixIndexes outputIndex, long rows, long cols1, long cols2,
-		int outputBlocksize, int rightBlocksize) {
+	private static int expectedFragments(MatrixIndexes outputIndex, BindPlacement[] placements, long outputRows,
+		long outputCols, int outputBlocksize) {
 		long rowStart = (outputIndex.getRowIndex() - 1) * outputBlocksize;
-		long rowEnd = Math.min(rows, rowStart + outputBlocksize);
+		long rowEnd = Math.min(outputRows, rowStart + outputBlocksize);
 		long colStart = (outputIndex.getColumnIndex() - 1) * outputBlocksize;
-		long colEnd = Math.min(cols1 + cols2, colStart + outputBlocksize);
-		long fragments = sourceFragments(rowStart, rowEnd, colStart, Math.min(cols1, colEnd), outputBlocksize, 0);
-		fragments += sourceFragments(rowStart, rowEnd, Math.max(cols1, colStart), colEnd, rightBlocksize, cols1);
+		long colEnd = Math.min(outputCols, colStart + outputBlocksize);
+		long fragments = 0;
+		for(BindPlacement placement : placements)
+			fragments += placement.fragments(rowStart, rowEnd, colStart, colEnd);
 		return Math.toIntExact(fragments);
 	}
 
-	private static long sourceFragments(long rowStart, long rowEnd, long colStart, long colEnd, int blocksize,
-		long columnOffset) {
-		if(rowStart >= rowEnd || colStart >= colEnd)
-			return 0;
-		long localColStart = colStart - columnOffset;
-		long localColEnd = colEnd - columnOffset;
-		long rowFragments = (rowEnd - 1) / blocksize - rowStart / blocksize + 1;
-		long colFragments = (localColEnd - 1) / blocksize - localColStart / blocksize + 1;
-		return Math.multiplyExact(rowFragments, colFragments);
-	}
-
-	private static void route(IndexedMatrixValue tile, long columnOffset, int inputBlocksize, int outputBlocksize,
+	private static void route(IndexedMatrixValue tile, BindPlacement placement, int outputBlocksize,
 		RepartitionOOCPrimitive.FragmentEmitter emit) {
 		MatrixBlock block = (MatrixBlock) tile.getValue();
-		long inputRowStart = (tile.getIndexes().getRowIndex() - 1) * inputBlocksize;
-		long inputColStart = columnOffset + (tile.getIndexes().getColumnIndex() - 1) * inputBlocksize;
+		long inputRowStart = placement._rowOffset + (tile.getIndexes().getRowIndex() - 1) * placement._blocksize;
+		long inputColStart = placement._colOffset + (tile.getIndexes().getColumnIndex() - 1) * placement._blocksize;
 		long inputRowEnd = inputRowStart + block.getNumRows();
 		long inputColEnd = inputColStart + block.getNumColumns();
 		for(long outputRow = inputRowStart / outputBlocksize;
@@ -172,5 +180,33 @@ public class AppendOOCInstruction extends BinaryOOCInstruction {
 					(int) (colStart - inputColStart), rows, cols, (int) (rowStart - outputRowStart),
 					(int) (colStart - outputColStart));
 			}
+	}
+
+	private static final class BindPlacement {
+		private final long _rowOffset;
+		private final long _colOffset;
+		private final long _rows;
+		private final long _cols;
+		private final int _blocksize;
+
+		private BindPlacement(long rowOffset, long colOffset, long rows, long cols, int blocksize) {
+			_rowOffset = rowOffset;
+			_colOffset = colOffset;
+			_rows = rows;
+			_cols = cols;
+			_blocksize = blocksize;
+		}
+
+		private long fragments(long rowStart, long rowEnd, long colStart, long colEnd) {
+			long localRowStart = Math.max(rowStart, _rowOffset) - _rowOffset;
+			long localRowEnd = Math.min(rowEnd, _rowOffset + _rows) - _rowOffset;
+			long localColStart = Math.max(colStart, _colOffset) - _colOffset;
+			long localColEnd = Math.min(colEnd, _colOffset + _cols) - _colOffset;
+			if(localRowStart >= localRowEnd || localColStart >= localColEnd)
+				return 0;
+			long rowFragments = (localRowEnd - 1) / _blocksize - localRowStart / _blocksize + 1;
+			long colFragments = (localColEnd - 1) / _blocksize - localColStart / _blocksize + 1;
+			return Math.multiplyExact(rowFragments, colFragments);
+		}
 	}
 }
