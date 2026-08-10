@@ -41,6 +41,7 @@ import org.apache.sysds.runtime.instructions.ooc.MapMMChainOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.QuaternaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
+import org.apache.sysds.runtime.instructions.ooc.UnaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
@@ -56,6 +57,36 @@ import org.junit.Assert;
 import org.junit.Test;
 
 public class RepartitionInstructionSpillTest {
+	@Test
+	public void testCumulativeUnarySpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			input(ec, "A", 800, 800, 200, 4, 4, true, 1);
+			MatrixObject output = matrixObject(800, 800, 200);
+			ec.setVariable("R", output);
+			UnaryOOCInstruction.parseInstruction("OOC°ucumk+°A·MATRIX·FP64°R·MATRIX·FP64").processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = output.getStreamHandle();
+			result.start();
+			waitForSpill();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue value = current.get();
+					Assert.assertEquals((value.getIndexes().getRowIndex() - 1) * 200 + 1, value.getValue().get(0, 0),
+						0);
+					blocks++;
+				}
+			Assert.assertEquals(16, blocks);
+			Assert.assertNull("Cumulative unary initialized the legacy LRU cache",
+				OOCCacheManager.getCacheIfInitialized());
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
 	@Test
 	public void testAggregateTernarySpill() throws InterruptedException {
 		boolean statistics = prepareSpillCache();
