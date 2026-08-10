@@ -151,8 +151,10 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 	private void processScalarAggregate(ExecutionContext ec, MatrixObject input, AggregateUnaryOperator operator,
 		int blocksize) {
 		OOCStream<MatrixBlock> result = createWritableStream(4, 4, 4);
+		DataCharacteristics dc = input.getDataCharacteristics();
 		OOCInstructionUtils.reduce(input.getStreamable(), result, value -> aggregatePartial(value, operator, blocksize),
-			this::mergeAggregate, MatrixBlock::getExactSerializedSize, getContext());
+			this::mergeAggregate, MatrixBlock::getExactSerializedSize, () -> emptyAggregate(dc, operator, blocksize),
+			getContext());
 		result.start();
 		try(OOCStream.QueueCallback<MatrixBlock> callback = result.dequeueCB()) {
 			if(callback == null)
@@ -164,6 +166,13 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 			if(callback != null)
 				throw new IllegalStateException("Scalar aggregate produced multiple results");
 		}
+	}
+
+	private static MatrixBlock emptyAggregate(DataCharacteristics dc, AggregateUnaryOperator operator, int blocksize) {
+		int rows = dc.dimsKnown() ? Math.toIntExact(Math.min(dc.getRows(), dc.getBlocksize())) : 0;
+		int cols = dc.dimsKnown() ? Math.toIntExact(Math.min(dc.getCols(), dc.getBlocksize())) : 0;
+		return aggregatePartial(new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(rows, cols, true)),
+			operator, blocksize);
 	}
 
 	private static MatrixBlock aggregatePartial(IndexedMatrixValue value, AggregateUnaryOperator operator,

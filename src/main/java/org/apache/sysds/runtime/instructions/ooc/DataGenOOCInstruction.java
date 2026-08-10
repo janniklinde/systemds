@@ -178,7 +178,6 @@ public class DataGenOOCInstruction extends UnaryOOCInstruction {
 	@Override
 	public void processInstruction(ExecutionContext ec) {
 		final OOCStream<IndexedMatrixValue> qOut = createWritableStream();
-		ec.getMatrixObject(output).setStreamHandle(qOut);
 
 		// process specific datagen operator
 		if (method == Types.OpOpDG.RAND) {
@@ -189,6 +188,8 @@ public class DataGenOOCInstruction extends UnaryOOCInstruction {
 			long lrows = ec.getScalarInput(rows).getLongValue();
 			long lcols = ec.getScalarInput(cols).getLongValue();
 			checkValidDimensions(lrows, lcols);
+			OOCInstructionUtils.propagateDims(ec, output, lrows, lcols, blen, lrows == 0 || lcols == 0 ? 0 : -1);
+			ec.getMatrixObject(output).setStreamHandle(qOut);
 
 			if(sparsity == 0.0 && lrows < Integer.MAX_VALUE && lcols < Integer.MAX_VALUE) {
 				OOCInstructionUtils.dataGen(qOut, idx -> {
@@ -249,7 +250,8 @@ public class DataGenOOCInstruction extends UnaryOOCInstruction {
 
 			final int maxK = (int) UtilFunctions.getSeqLength(lfrom, lto, lincr);
 			final double finalLincr = lincr;
-			ec.getDataCharacteristics(output.getName()).set(maxK, 1, blen, -1);
+			OOCInstructionUtils.propagateDims(ec, output, maxK, 1, blen, maxK == 0 ? 0 : -1);
+			ec.getMatrixObject(output).setStreamHandle(qOut);
 
 			OOCInstructionUtils.dataGen(qOut, idx -> {
 				long offset = (idx.getRowIndex() - 1) * blen;

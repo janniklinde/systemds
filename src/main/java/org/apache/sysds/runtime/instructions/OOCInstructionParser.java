@@ -44,6 +44,7 @@ import org.apache.sysds.runtime.instructions.ooc.MapMMChainOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.ReorgOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.AppendOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.BuiltinNaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.ReshapeOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.QuaternaryOOCInstruction;
 
@@ -116,6 +117,8 @@ public class OOCInstructionParser extends InstructionParser {
 				return DataGenOOCInstruction.parseInstruction(str);
 			case Append:
 				return AppendOOCInstruction.parseInstruction(str);
+			case BuiltinNary:
+				return BuiltinNaryOOCInstruction.parseInstruction(str);
 			case Quaternary:
 				return QuaternaryOOCInstruction.parseInstruction(str);
 
