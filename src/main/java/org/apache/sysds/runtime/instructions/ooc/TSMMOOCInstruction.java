@@ -22,7 +22,6 @@ package org.apache.sysds.runtime.instructions.ooc;
 import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.lops.MMTSJ;
 import org.apache.sysds.lops.MMTSJ.MMTSJType;
-import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.functionobjects.Multiply;
@@ -36,6 +35,7 @@ import org.apache.sysds.runtime.matrix.operators.AggregateBinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
+import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class TSMMOOCInstruction extends ComputationOOCInstruction {
@@ -63,10 +63,7 @@ public class TSMMOOCInstruction extends ComputationOOCInstruction {
 	@Override
 	public void processInstruction(ExecutionContext ec) {
 		MatrixObject min = ec.getMatrixObject(input1);
-		if(!min.getDataCharacteristics().dimsKnown() || min.getBlocksize() <= 0)
-			throw new DMLRuntimeException(
-				"Planner-backed OOC TSMM requires known dimensions and a positive block size: " + min.getNumRows() + "x"
-					+ min.getNumColumns() + " (blocksize " + min.getBlocksize() + ")");
+		OOCDimensions.require(getOpcode(), min);
 
 		int numRowBlocks = Math.toIntExact(min.getDataCharacteristics().getNumRowBlocks());
 		int numColBlocks = Math.toIntExact(min.getDataCharacteristics().getNumColBlocks());

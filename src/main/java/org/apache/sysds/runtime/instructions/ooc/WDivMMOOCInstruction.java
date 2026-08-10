@@ -37,6 +37,7 @@ import org.apache.sysds.runtime.matrix.operators.RightScalarOperator;
 import org.apache.sysds.runtime.matrix.operators.QuaternaryOperator;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
+import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class WDivMMOOCInstruction extends QuaternaryOOCInstruction {
@@ -62,9 +63,9 @@ public class WDivMMOOCInstruction extends QuaternaryOOCInstruction {
 		MatrixObject v = ec.getMatrixObject(input3);
 		MatrixObject w = type.hasFourInputs() && !type.hasScalar() ? ec.getMatrixObject(input4) : null;
 		long rank = u.getDataCharacteristics().colsKnown() ? u.getNumColumns() : v.getNumColumns();
-		if(!x.getDataCharacteristics().dimsKnown() || x.getNumRows() <= 0 || x.getNumColumns() <= 0 ||
-			x.getBlocksize() <= 0 || rank <= 0)
-			throw new DMLRuntimeException("Planner-backed WDivMM requires known, positive matrix dimensions and rank.");
+		OOCDimensions.require(getOpcode(), x);
+		if(x.getNumRows() <= 0 || x.getNumColumns() <= 0 || rank <= 0)
+			throw new DMLRuntimeException("Planner-backed WDivMM requires a non-empty matrix and a positive rank.");
 		u.getDataCharacteristics().set(x.getNumRows(), rank, x.getBlocksize(), u.getNnz());
 		v.getDataCharacteristics().set(x.getNumColumns(), rank, x.getBlocksize(), v.getNnz());
 		if(w != null)

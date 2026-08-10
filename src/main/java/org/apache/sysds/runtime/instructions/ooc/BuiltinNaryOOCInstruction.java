@@ -36,6 +36,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.SimpleOperator;
+import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class BuiltinNaryOOCInstruction extends ComputationOOCInstruction {
@@ -105,8 +106,7 @@ public class BuiltinNaryOOCInstruction extends ComputationOOCInstruction {
 			throw new DMLRuntimeException("N-ary " + getOpcode() + " requires at least one matrix input");
 
 		MatrixObject first = matrices.get(0);
-		if(!OOCInstructionUtils.known(first))
-			throw new DMLRuntimeException("Planner-backed OOC " + getOpcode() + " requires known input dimensions");
+		OOCDimensions.require(getOpcode(), first);
 		for(MatrixObject matrix : matrices)
 			if(matrix.getNumRows() != first.getNumRows() || matrix.getNumColumns() != first.getNumColumns() ||
 				matrix.getBlocksize() != first.getBlocksize())
