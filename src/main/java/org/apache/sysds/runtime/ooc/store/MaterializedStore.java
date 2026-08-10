@@ -25,7 +25,10 @@ import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 import java.util.ArrayList;
@@ -44,6 +47,8 @@ public final class MaterializedStore<T extends SpillableObject> {
 	private final OOCFuture<Void> _completion;
 	private final OOCFuture<Void> _readersSealedFuture;
 	private final boolean _autoSealReaders;
+	private final OOCStoreLayout _layout;
+	private final DataCharacteristics _characteristics;
 
 	private volatile List<StoreReader> _readers;
 	private volatile int _completedSize;
@@ -54,10 +59,15 @@ public final class MaterializedStore<T extends SpillableObject> {
 	private int _consumers;
 
 	public MaterializedStore(OOCCache cache, long streamId) {
-		this(cache, streamId, -1, 1);
+		this(cache, streamId, -1, 1, null, null);
 	}
 
 	public MaterializedStore(OOCCache cache, long streamId, int expectedReaders, int consumers) {
+		this(cache, streamId, expectedReaders, consumers, null, null);
+	}
+
+	public MaterializedStore(OOCCache cache, long streamId, int expectedReaders, int consumers, OOCStoreLayout layout,
+		DataCharacteristics characteristics) {
 		if(expectedReaders == 0 || expectedReaders < -1)
 			throw new IllegalArgumentException("Expected reader count must be positive or disabled.");
 		if(consumers <= 0)
@@ -71,6 +81,8 @@ public final class MaterializedStore<T extends SpillableObject> {
 		_completion = new OOCFuture<>();
 		_readersSealedFuture = new OOCFuture<>();
 		_autoSealReaders = expectedReaders > 0;
+		_layout = layout;
+		_characteristics = characteristics;
 		_pendingReaders = expectedReaders;
 		_consumers = consumers;
 		_readers = Collections.emptyList();
@@ -160,7 +172,7 @@ public final class MaterializedStore<T extends SpillableObject> {
 		if(_readersSealed)
 			throw new IllegalStateException("Store no longer accepts new readers");
 		IndexedMaterializedStoreReader<T> reader = new IndexedMaterializedStoreReader<>(_cache, _streamId,
-			() -> _completedSize, liveness, this::forgetAfterReaderClose, this::tryForget);
+			() -> _completedSize, liveness, _layout, _characteristics, this::forgetAfterReaderClose, this::tryForget);
 		_registeredReaders.add(reader);
 		readerRegistered();
 		return reader;
@@ -172,10 +184,20 @@ public final class MaterializedStore<T extends SpillableObject> {
 		if(_readersSealed)
 			throw new IllegalStateException("Store no longer accepts new readers");
 		IndexedMaterializedStoreReader<T> reader = new IndexedMaterializedStoreReader<>(_cache, _streamId, this::size,
-			liveness, this::forgetAfterReaderClose, this::tryForget);
+			liveness, _layout, _characteristics, this::forgetAfterReaderClose, this::tryForget);
 		_registeredReaders.add(reader);
 		readerRegistered();
 		return reader;
+	}
+
+	public OOCFuture<StoreLease<T>> requestPublished(MatrixIndexes indexes, MemoryAllowance allowance) {
+		return requestPublished(indexes.getRowIndex(), indexes.getColumnIndex(), allowance);
+	}
+
+	public OOCFuture<StoreLease<T>> requestPublished(long row, long col, MemoryAllowance allowance) {
+		if(_layout == null)
+			throw new IllegalStateException("Materialized store has no logical matrix-index layout.");
+		return requestPublished(_layout.linearize(row, col, _characteristics), allowance);
 	}
 
 	public OOCFuture<StoreLease<T>> requestPublished(int index, MemoryAllowance allowance) {

@@ -98,7 +98,7 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 			int broadcastBlocks = Math.toIntExact(m2.getDataCharacteristics().getNumRowBlocks());
 			int usesPerBlock = Math.toIntExact(m1.getDataCharacteristics().getNumColBlocks());
 			OOCInstructionUtils.indexedBroadcastMap(m1.getStreamable(), m2.getStreamable(), qOut,
-				tmp -> Math.toIntExact(tmp.getIndexes().getRowIndex() - 1),
+				tmp -> tmp.getIndexes().getRowIndex(), tmp -> 1,
 				() -> new CountingLiveness(broadcastBlocks, usesPerBlock), (tmp, broadcast) -> {
 					IndexedMatrixValue tmpOut = new IndexedMatrixValue();
 					tmpOut.set(tmp.getIndexes(), tmp.getValue().binaryOperations((BinaryOperator) _optr,
@@ -109,9 +109,9 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 		else if (isRowBroadcast && !isColBroadcast) {
 			int broadcastBlocks = Math.toIntExact(m2.getDataCharacteristics().getNumColBlocks());
 			int usesPerBlock = Math.toIntExact(m1.getDataCharacteristics().getNumRowBlocks());
-			OOCInstructionUtils.indexedBroadcastMap(m1.getStreamable(), m2.getStreamable(), qOut,
-				tmp -> Math.toIntExact(tmp.getIndexes().getColumnIndex() - 1),
-				() -> new CountingLiveness(broadcastBlocks, usesPerBlock), (tmp, broadcast) -> {
+			OOCInstructionUtils.indexedBroadcastMap(m1.getStreamable(), m2.getStreamable(), qOut, tmp -> 1,
+				tmp -> tmp.getIndexes().getColumnIndex(), () -> new CountingLiveness(broadcastBlocks, usesPerBlock),
+				(tmp, broadcast) -> {
 					IndexedMatrixValue tmpOut = new IndexedMatrixValue();
 					tmpOut.set(tmp.getIndexes(), tmp.getValue().binaryOperations((BinaryOperator) _optr,
 						broadcast.getValue(), tmpOut.getValue()));

@@ -178,8 +178,14 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 	private void schedulePair(int group, int left, int right) {
 		ReservationBudget budget = OOCUtils.reserveBudget(_allowance, _taskBytes).enableReuse();
 		_active.incrementAndGet();
-		OOCFuture.allOf(List.of(_inputReader.request(group * _width + left, budget),
-			_inputReader.request(group * _width + right, budget)), TSMMOOCPrimitive::closeLease)
+		long groupIndex = group + 1L;
+		long leftIndex = left + 1L;
+		long rightIndex = right + 1L;
+		OOCFuture.allOf(List.of(
+			_inputReader.request(_type.isLeft() ? groupIndex : leftIndex,
+				_type.isLeft() ? leftIndex : groupIndex, budget),
+			_inputReader.request(_type.isLeft() ? groupIndex : rightIndex,
+				_type.isLeft() ? rightIndex : groupIndex, budget)), TSMMOOCPrimitive::closeLease)
 			.whenComplete((inputs, inputError) -> {
 			if(inputError != null) {
 				budget.close();

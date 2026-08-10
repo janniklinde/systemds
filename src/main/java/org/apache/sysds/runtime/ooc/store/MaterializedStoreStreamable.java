@@ -32,15 +32,16 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 public final class MaterializedStoreStreamable implements OOCStreamable<IndexedMatrixValue> {
 	private static final int REPLAY_PREFETCH = 8;
+	private static final long REPLAY_MEMORY_LIMIT = 100L * 1024 * 1024;
 
 	private final MaterializeOOCPrimitive _primitive;
 	private MaterializedStore<IndexedMatrixValue> _store;
-	private SyncMemoryAllowance _readerAllowance;
 	private CacheableData<?> _data;
 	private boolean _deleteScheduled;
 	private boolean _materializationDone;
@@ -51,10 +52,15 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	private int _activeReaders;
 
 	public MaterializedStoreStreamable(OOCStream<IndexedMatrixValue> source, CacheableData<?> data) {
+		this(source, data, OOCStoreLayout.ROW_MAJOR);
+	}
+
+	public MaterializedStoreStreamable(OOCStream<IndexedMatrixValue> source, CacheableData<?> data,
+		OOCStoreLayout layout) {
 		if(source == null)
 			throw new IllegalArgumentException("Materialized stream requires a source.");
 		_data = data;
-		_primitive = MaterializeOOCPrimitive.reusable(source);
+		_primitive = MaterializeOOCPrimitive.reusable(source, layout);
 		_primitive.store().whenComplete((store, error) -> {
 			if(error != null) {
 				markMaterializationDone();
@@ -102,9 +108,10 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 					return;
 				}
 				OrderedMaterializedStoreReader<IndexedMatrixValue> reader = null;
+				SyncMemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), REPLAY_MEMORY_LIMIT);
 				try {
-					reader = store.openReader(new SequentialAccessPattern(store.size()), readerAllowance(),
-						REPLAY_PREFETCH);
+					reader = store.openReader(new SequentialAccessPattern(store.size()), allowance, REPLAY_PREFETCH);
+					output.setAllowance(allowance);
 					synchronized(this) {
 						_pendingReaders--;
 						_activeReaders++;
@@ -113,8 +120,10 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 					drive(output, reader);
 				}
 				catch(Throwable failure) {
-					if(reader == null)
+					if(reader == null) {
+						allowance.shutdown();
 						failPendingReader(output, failure);
+					}
 					else {
 						reader.close();
 						try {
@@ -180,6 +189,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			output.propagateFailure(DMLRuntimeException.of(error));
 		}
 		finally {
+			output.shutdownAllowance();
 			tryFinalize();
 		}
 	}
@@ -190,13 +200,8 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		synchronized(this) {
 			_activeReaders--;
 		}
+		output.shutdownAllowance();
 		tryFinalize();
-	}
-
-	private synchronized SyncMemoryAllowance readerAllowance() {
-		if(_readerAllowance == null)
-			_readerAllowance = new SyncMemoryAllowance(GlobalMemoryBroker.get());
-		return _readerAllowance;
 	}
 
 	private void markMaterializationDone() {
@@ -233,7 +238,6 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 
 	private void tryFinalize() {
 		MaterializedStore<IndexedMatrixValue> store;
-		SyncMemoryAllowance allowance = null;
 		boolean seal = false;
 		boolean close = false;
 		synchronized(this) {
@@ -247,15 +251,12 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			if(_materializationDone && _activeReaders == 0 && !_closed) {
 				_closed = true;
 				close = store != null;
-				allowance = _readerAllowance;
 			}
 		}
 		if(seal)
 			store.sealReaders();
 		if(close)
 			store.close();
-		if(allowance != null)
-			allowance.shutdown();
 	}
 
 	@Override
@@ -307,6 +308,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		private final MaterializedStoreStreamable _owner;
 		private final AtomicBoolean _activated;
 		private final AtomicBoolean _finished;
+		private SyncMemoryAllowance _allowance;
 
 		private DeferredReader(MaterializedStoreStreamable owner) {
 			_owner = owner;
@@ -330,6 +332,17 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		public QueueCallback<IndexedMatrixValue> dequeueCB() {
 			activate();
 			return super.dequeueCB();
+		}
+
+		private synchronized void setAllowance(SyncMemoryAllowance allowance) {
+			_allowance = allowance;
+		}
+
+		private synchronized void shutdownAllowance() {
+			if(_allowance != null) {
+				_allowance.shutdown();
+				_allowance = null;
+			}
 		}
 
 		private void activate() {
