@@ -19,7 +19,7 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.ToIntFunction;
@@ -50,9 +50,8 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 
 	private final OOCStreamable<IndexedMatrixValue> _output;
 	private final ToIntFunction<MatrixIndexes> _expectedFragments;
-	private final BiConsumer<IndexedMatrixValue, FragmentEmitter> _router;
-	private final AtomicBoolean _inputComplete = new AtomicBoolean();
-	private final AtomicInteger _active = new AtomicInteger(1);
+	private final List<BiConsumer<IndexedMatrixValue, FragmentEmitter>> _routers;
+	private final AtomicInteger _active;
 	private StateTable<IndexedMatrixValue> _accumulators;
 	private OOCStream<ComputeWork> _ready;
 	private OOCStream<IndexedMatrixValue> _outputStream;
@@ -62,10 +61,19 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 	public RepartitionOOCPrimitive(OOCStreamable<IndexedMatrixValue> input, OOCStreamable<IndexedMatrixValue> output,
 		ToIntFunction<MatrixIndexes> expectedFragments, BiConsumer<IndexedMatrixValue, FragmentEmitter> router,
 		StreamContext context) {
-		super(context, input);
+		this(List.of(input), output, expectedFragments, List.of(router), context);
+	}
+
+	public RepartitionOOCPrimitive(List<? extends OOCStreamable<IndexedMatrixValue>> inputs,
+		OOCStreamable<IndexedMatrixValue> output, ToIntFunction<MatrixIndexes> expectedFragments,
+		List<BiConsumer<IndexedMatrixValue, FragmentEmitter>> routers, StreamContext context) {
+		super(context, inputs.toArray(OOCStreamable<?>[]::new));
+		if(inputs.isEmpty() || inputs.size() != routers.size())
+			throw new IllegalArgumentException("Repartition requires one router for each input");
 		_output = output;
 		_expectedFragments = expectedFragments;
-		_router = router;
+		_routers = List.copyOf(routers);
+		_active = new AtomicInteger(inputs.size());
 	}
 
 	@Override
@@ -105,16 +113,19 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 				}
 			});
 
-		OOCStream<IndexedMatrixValue> input = getInputReadStream(0);
-		OOCInstructionUtils.submitOOCTasks(input, callback -> {
-			IndexedMatrixValue value = callback.get();
-			_router.accept(value, (outputIndex, srcRow, srcCol, rows, cols, dstRow, dstCol) -> schedule(callback,
-				outputIndex, srcRow, srcCol, rows, cols, dstRow, dstCol));
-		}, getContext()).whenComplete((ignored, error) -> {
-			if(error != null)
-				fail(error);
-			finishInput();
-		});
+		for(int i = 0; i < _routers.size(); i++) {
+			OOCStream<IndexedMatrixValue> input = getInputReadStream(i);
+			BiConsumer<IndexedMatrixValue, FragmentEmitter> router = _routers.get(i);
+			OOCInstructionUtils.submitOOCTasks(input, callback -> {
+				IndexedMatrixValue value = callback.get();
+				router.accept(value, (outputIndex, srcRow, srcCol, rows, cols, dstRow, dstCol) -> schedule(callback,
+					outputIndex, srcRow, srcCol, rows, cols, dstRow, dstCol));
+			}, getContext()).whenComplete((ignored, error) -> {
+				if(error != null)
+					fail(error);
+				completeOne();
+			});
+		}
 	}
 
 	private void schedule(OOCStream.QueueCallback<IndexedMatrixValue> input, MatrixIndexes outputIndex, int srcRow,
@@ -282,11 +293,6 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 
 	private static int count(IndexedMatrixValue value) {
 		return Math.toIntExact(value.getIndexes().getColumnIndex());
-	}
-
-	private void finishInput() {
-		if(_inputComplete.compareAndSet(false, true))
-			completeOne();
 	}
 
 	private void completeOne() {
