@@ -33,7 +33,9 @@ import org.apache.sysds.runtime.instructions.cp.IndexingCPInstruction;
 import org.apache.sysds.runtime.instructions.ooc.AppendOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CSVReblockOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.IndexingOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.MapMMChainOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
+import org.apache.sysds.runtime.instructions.ooc.QuaternaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
@@ -50,6 +52,83 @@ import org.junit.Assert;
 import org.junit.Test;
 
 public class RepartitionInstructionSpillTest {
+	@Test
+	public void testMapMMChainSpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			SubscribableTaskQueue<IndexedMatrixValue> xInput = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> vInput = new SubscribableTaskQueue<>();
+			MatrixObject x = matrixObject(400, 400, 200);
+			MatrixObject v = matrixObject(400, 1, 200);
+			MatrixObject out = matrixObject(400, 1, 200);
+			x.setStreamHandle(xInput);
+			v.setStreamHandle(vInput);
+			ec.setVariable("X", x);
+			ec.setVariable("v", v);
+			ec.setVariable("R", out);
+			for(int row = 1; row <= 2; row++)
+				for(int col = 1; col <= 2; col++)
+					xInput.enqueue(tile(row, col, 200, 200, 1));
+			xInput.closeInput();
+			vInput.enqueue(tile(1, 1, 200, 1, 1));
+			vInput.enqueue(tile(2, 1, 200, 1, 1));
+			vInput.closeInput();
+			v.getDataCharacteristics().set(-1, -1, -1, -1);
+
+			MapMMChainOOCInstruction
+				.parseInstruction("OOC°mapmmchain°X·MATRIX·FP64°v·MATRIX·FP64°" + "R·MATRIX·FP64°XtXv")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			result.start();
+			waitForSpill();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					Assert.assertEquals(160_000, current.get().getValue().get(0, 0), 0);
+					blocks++;
+				}
+			Assert.assertEquals(2, blocks);
+			Assert.assertNull("MapMMChain initialized the legacy LRU cache", OOCCacheManager.getCacheIfInitialized());
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
+	@Test
+	public void testWDivMMSpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			input(ec, "X", 400, 400, 200, 2, 2);
+			input(ec, "U", 400, 100, 200, 2, 1);
+			MatrixObject v = input(ec, "V", 400, 100, 200, 2, 1);
+			v.getDataCharacteristics().set(-1, -1, -1, -1);
+			MatrixObject out = matrixObject(400, 100, 200);
+			ec.setVariable("R", out);
+
+			QuaternaryOOCInstruction.parseInstruction("OOC°mapwdivmm°X·MATRIX·FP64°U·MATRIX·FP64°"
+				+ "V·MATRIX·FP64°-1·SCALAR·INT64·true°R·MATRIX·FP64°MULT_RIGHT").processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			result.start();
+			waitForSpill();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					Assert.assertEquals(40_000, current.get().getValue().get(0, 0), 0);
+					blocks++;
+				}
+			Assert.assertEquals(2, blocks);
+			Assert.assertNull("WDivMM initialized the legacy LRU cache", OOCCacheManager.getCacheIfInitialized());
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
 	@Test
 	public void testCSVReblockEmptyBlocks() throws IOException {
 		Path csv = Files.createTempFile("systemds-ooc-empty-csv-", ".csv");
@@ -317,6 +396,20 @@ public class RepartitionInstructionSpillTest {
 		finally {
 			reset(statistics);
 		}
+	}
+
+	private static MatrixObject input(ExecutionContext ec, String name, int rows, int cols, int blocksize,
+		int rowBlocks, int colBlocks) {
+		SubscribableTaskQueue<IndexedMatrixValue> stream = new SubscribableTaskQueue<>();
+		MatrixObject matrix = matrixObject(rows, cols, blocksize);
+		matrix.setStreamHandle(stream);
+		ec.setVariable(name, matrix);
+		for(int row = 1; row <= rowBlocks; row++)
+			for(int col = 1; col <= colBlocks; col++)
+				stream.enqueue(tile(row, col, Math.min(blocksize, rows - (row - 1) * blocksize),
+					Math.min(blocksize, cols - (col - 1) * blocksize), 1));
+		stream.closeInput();
+		return matrix;
 	}
 
 	private static boolean prepareSpillCache() {
