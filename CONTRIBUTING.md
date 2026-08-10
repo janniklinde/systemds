@@ -54,8 +54,8 @@ meaningfully contributed to the submitted work:
 Assisted-by: AI
 ```
 
-The use of AI for inline autocomplete does not need to be disclosed. See the
-[disclosure examples](AGENTS.md#disclosure) for additional guidance.
+Minor assistance such as inline autocomplete, spelling corrections, or grammar corrections does
+not need to be disclosed. When in doubt, disclose the use of AI.
 
 Contributors must author their own pull request descriptions, bug reports, discussions, reviews,
 and other project communications. Autonomous agents must not generate content intended for use in

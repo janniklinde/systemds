@@ -65,12 +65,4 @@ to the submitted work:
 Assisted-by: AI
 ```
 
-Examples:
-
-- Generated or rewritten code, tests, or documentation: **disclose.**
-- Adopted AI suggestions: **disclose.**
-- AI review or validation that motivated code changes: **disclose.**
-- General learning, exploration, or unused output: **no disclosure.**
-- Inline autocomplete: **no disclosure.**
-
 Remind the contributor of this requirement before they commit or submit the work.
