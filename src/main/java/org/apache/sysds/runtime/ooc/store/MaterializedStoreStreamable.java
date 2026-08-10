@@ -30,6 +30,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
@@ -41,6 +42,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	private static final long REPLAY_MEMORY_LIMIT = 100L * 1024 * 1024;
 
 	private final MaterializeOOCPrimitive _primitive;
+	private final OOCFuture<DataCharacteristics> _dimensions;
 	private MaterializedStore<IndexedMatrixValue> _store;
 	private CacheableData<?> _data;
 	private boolean _deleteScheduled;
@@ -60,15 +62,18 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		if(source == null)
 			throw new IllegalArgumentException("Materialized stream requires a source.");
 		_data = data;
+		_dimensions = new OOCFuture<>();
 		_primitive = MaterializeOOCPrimitive.reusable(source, layout);
 		_primitive.store().whenComplete((store, error) -> {
 			if(error != null) {
+				_dimensions.completeExceptionally(error);
 				markMaterializationDone();
 				return;
 			}
 			synchronized(this) {
 				_store = store;
 			}
+			store.dimensions().whenComplete(this::resolveDimensions);
 			store.completion().whenComplete((ignored, completionError) -> markMaterializationDone());
 			tryFinalize();
 		});
@@ -306,6 +311,27 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	@Override
 	public synchronized DataCharacteristics getDataCharacteristics() {
 		return _data == null ? null : _data.getDataCharacteristics();
+	}
+
+	@Override
+	public OOCFuture<DataCharacteristics> dimensions() {
+		DataCharacteristics known = getDataCharacteristics();
+		if(known != null && known.dimsKnown() && known.getBlocksize() > 0)
+			return OOCFuture.completed(known);
+		return _dimensions;
+	}
+
+	private void resolveDimensions(DataCharacteristics observed, Throwable error) {
+		if(error != null) {
+			_dimensions.completeExceptionally(error);
+			return;
+		}
+		synchronized(this) {
+			DataCharacteristics current = _data == null ? null : _data.getDataCharacteristics();
+			if(current != null && !current.dimsKnown())
+				current.set(observed.getRows(), observed.getCols(), observed.getBlocksize(), observed.getNonZeros());
+		}
+		_dimensions.complete(observed);
 	}
 
 	@Override

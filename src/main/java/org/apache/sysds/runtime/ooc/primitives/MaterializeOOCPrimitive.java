@@ -137,7 +137,7 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 			ToIntFunction<MatrixIndexes> publicationIndex = linearize != null ? linearize : ignored -> nextIndex
 				.getAndIncrement();
 			OOCStreamMaterializer materializer = new OOCStreamMaterializer(store, publicationIndex, _allowance,
-				_liveConsumers);
+				_liveConsumers, characteristics != null ? characteristics.getBlocksize() : 0);
 			materializer.completion().whenComplete((ignored, error) -> {
 				if(error != null)
 					fail(error);
