@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.function.Supplier;
-import java.util.function.ToIntFunction;
+import java.util.function.ToLongFunction;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
@@ -47,7 +47,8 @@ import org.apache.sysds.runtime.ooc.util.OOCUtils;
 public final class BroadcastOOCPrimitive extends OOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _broadcast;
 	private final OOCStreamable<IndexedMatrixValue> _output;
-	private final ToIntFunction<IndexedMatrixValue> _lookup;
+	private final ToLongFunction<IndexedMatrixValue> _lookupRow;
+	private final ToLongFunction<IndexedMatrixValue> _lookupCol;
 	private final Supplier<MaterializedStore.Liveness> _liveness;
 	private final BiFunction<IndexedMatrixValue, IndexedMatrixValue, IndexedMatrixValue> _operation;
 	private final AtomicBoolean _cleaned;
@@ -60,12 +61,14 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 
 	public BroadcastOOCPrimitive(OOCStreamable<IndexedMatrixValue> streamed,
 		OOCStreamable<IndexedMatrixValue> broadcast, OOCStreamable<IndexedMatrixValue> output,
-		ToIntFunction<IndexedMatrixValue> lookup, Supplier<MaterializedStore.Liveness> liveness,
+		ToLongFunction<IndexedMatrixValue> lookupRow, ToLongFunction<IndexedMatrixValue> lookupCol,
+		Supplier<MaterializedStore.Liveness> liveness,
 		BiFunction<IndexedMatrixValue, IndexedMatrixValue, IndexedMatrixValue> operation, StreamContext context) {
 		super(context, streamed, broadcast);
 		_broadcast = broadcast;
 		_output = output;
-		_lookup = lookup;
+		_lookupRow = lookupRow;
+		_lookupCol = lookupCol;
 		_liveness = liveness;
 		_operation = operation;
 		_cleaned = new AtomicBoolean();
@@ -171,15 +174,16 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 			if(budget == null)
 				throw new DMLRuntimeException("Missing admitted broadcast task budget.");
 			IndexedMatrixValue streamed = callback.get();
-			int lookup = _lookup.applyAsInt(streamed);
+			long lookupRow = _lookupRow.applyAsLong(streamed);
+			long lookupCol = _lookupCol.applyAsLong(streamed);
 			retained = callback.keepOpen();
-			OOCFuture<StoreLease<IndexedMatrixValue>> requested = _reader.request(lookup, budget);
+			OOCFuture<StoreLease<IndexedMatrixValue>> requested = _reader.request(lookupRow, lookupCol, budget);
 			OOCStream.QueueCallback<IndexedMatrixValue> pendingStreamed = retained;
 			ReservationBudget pendingBudget = budget;
 			retained = null;
 			budget = null;
-			requested.whenComplete(
-				(broadcast, error) -> broadcastReady(pendingStreamed, broadcast, pendingBudget, lookup, error));
+			requested.whenComplete((broadcast, error) -> broadcastReady(pendingStreamed, broadcast, pendingBudget,
+				lookupRow, lookupCol, error));
 		}
 		catch(Throwable failure) {
 			fail(failure);
@@ -194,7 +198,8 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 	}
 
 	private void broadcastReady(OOCStream.QueueCallback<IndexedMatrixValue> streamed,
-		StoreLease<IndexedMatrixValue> broadcast, ReservationBudget budget, int lookup, Throwable error) {
+		StoreLease<IndexedMatrixValue> broadcast, ReservationBudget budget, long lookupRow, long lookupCol,
+		Throwable error) {
 		if(error != null || broadcast == null) {
 			try {
 				streamed.close();
@@ -203,7 +208,8 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 				budget.close();
 			}
 			finally {
-				fail(error != null ? error : new IllegalStateException("Missing broadcast tile " + lookup));
+				fail(error != null ? error : new IllegalStateException(
+					"Missing broadcast tile (" + lookupRow + "," + lookupCol + ")"));
 				completeOne();
 			}
 			return;
