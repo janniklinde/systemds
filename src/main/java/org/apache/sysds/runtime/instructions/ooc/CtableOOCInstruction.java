@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import java.util.HashMap;
+import java.util.List;
 
 import org.apache.sysds.common.Types;
 import org.apache.sysds.lops.Ctable;
@@ -34,6 +35,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.CTableMap;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.operators.Operator;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.util.DataConverter;
 import org.apache.sysds.runtime.util.LongLongDoubleHashMap;
 
@@ -79,7 +81,6 @@ public class CtableOOCInstruction extends ComputationOOCInstruction {
 	public void processInstruction( ExecutionContext ec ) {
 
 		MatrixObject in1 = ec.getMatrixObject(input1); // stream
-		OOCStream<IndexedMatrixValue> qIn1 = in1.getStreamHandle();
 		IndexedMatrixValue tmp1 = null;
 
 		long outputDim1 = ec.getScalarInput(_outDim1).getLongValue();
@@ -89,6 +90,26 @@ public class CtableOOCInstruction extends ComputationOOCInstruction {
 		CTableMap map = new CTableMap(LongLongDoubleHashMap.EntryType.INT);
 
 		Ctable.OperationTypes ctableOp = findCtableOperation();
+		if(outputDim1 > 0 && outputDim2 > 0 && (ctableOp == Ctable.OperationTypes.CTABLE_TRANSFORM_SCALAR_WEIGHT ||
+			ctableOp == Ctable.OperationTypes.CTABLE_TRANSFORM_HISTOGRAM)) {
+			MatrixObject outputObject = ec.getMatrixObject(output);
+			outputObject.getDataCharacteristics().set(outputDim1, outputDim2, in1.getBlocksize(), -1);
+			OOCStream<IndexedMatrixValue> result = createWritableStream(outputObject);
+			outputObject.setStreamHandle(result);
+			if(ctableOp == Ctable.OperationTypes.CTABLE_TRANSFORM_SCALAR_WEIGHT) {
+				MatrixObject second = ec.getMatrixObject(input2);
+				double weight = ec.getScalarInput(input3).getDoubleValue();
+				OOCInstructionUtils.ctable(List.of(in1.getStreamable(), second.getStreamable()), result, 0, weight,
+					getContext());
+			}
+			else {
+				double second = ec.getScalarInput(input2).getDoubleValue();
+				double weight = ec.getScalarInput(input3).getDoubleValue();
+				OOCInstructionUtils.ctable(List.of(in1.getStreamable()), result, second, weight, getContext());
+			}
+			return;
+		}
+		OOCStream<IndexedMatrixValue> qIn1 = in1.getStreamHandle();
 		MatrixObject in2 = null, in3 = null;
 		OOCStream<IndexedMatrixValue> qIn2 = null, qIn3 = null;
 		double cst2 = 0, cst3 = 0;
