@@ -471,6 +471,10 @@ public class Statistics
 		oocEvictionWriteCalls.increment();
 	}
 
+	public static long getOOCEvictionWriteCount() {
+		return oocEvictionWriteCalls.longValue();
+	}
+
 	public static void accumulateOOCLoadFromDiskTime(long nanos) {
 		oocLoadFromDiskTimeNanos.add(nanos);
 	}
