@@ -51,6 +51,7 @@ import org.apache.sysds.runtime.frame.data.FrameBlock;
 import org.apache.sysds.runtime.functionobjects.ParameterizedBuiltin;
 import org.apache.sysds.runtime.functionobjects.ValueFunction;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
+import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.lineage.LineageItem;
 import org.apache.sysds.runtime.lineage.LineageItemUtils;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
@@ -240,8 +241,12 @@ public class ParameterizedBuiltinCPInstruction extends ComputationCPInstruction 
 				MatrixBlock ret = target.removeEmptyOperations(new MatrixBlock(), margin.equals("rows"), emptyReturn, select);
 
 				// release locks
-				if( target == ret ) //short-circuit (avoid buffer pool pollution)
-					ec.setVariable(output.getName(), ec.getVariable(params.get("target")));
+				if(target == ret) { // short-circuit (avoid buffer pool pollution)
+					Data targetData = ec.getVariable(params.get("target"));
+					if(DMLScript.USE_OOC && targetData instanceof MatrixObject)
+						TeeOOCInstruction.incrRef(((MatrixObject) targetData).getStreamable(), 1);
+					ec.setVariable(output.getName(), targetData);
+				}
 				else
 					ec.setMatrixOutput(output.getName(), ret);
 				ec.releaseMatrixInput(params.get("target"));
