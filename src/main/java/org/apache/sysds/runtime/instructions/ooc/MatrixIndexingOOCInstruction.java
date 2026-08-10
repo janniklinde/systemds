@@ -74,10 +74,9 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 
 		//right indexing
 		if(opcode.equalsIgnoreCase(Opcodes.RIGHT_INDEX.toString())) {
-			OOCStream<IndexedMatrixValue> qIn = mo.getStreamHandle();
-			addInStream(qIn);
-
 			if(output.isScalar()) {
+				OOCStream<IndexedMatrixValue> qIn = mo.getStreamHandle();
+				addInStream(qIn);
 				if(!inRange)
 					throw new DMLRuntimeException(
 						"Invalid values for matrix indexing: [" + (ix.rowStart + 1) + ":" + (ix.rowEnd + 1) + "," +
@@ -123,7 +122,7 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 			addOutStream(qOut);
 			mOut.setStreamHandle(qOut);
 
-			OOCInstructionUtils.repartition(qIn, qOut, outputIndex -> {
+			OOCInstructionUtils.repartition(mo.getStreamable(), qOut, outputIndex -> {
 				long sourceRowStart = ix.rowStart + (outputIndex.getRowIndex() - 1) * blocksize;
 				long sourceColStart = ix.colStart + (outputIndex.getColumnIndex() - 1) * blocksize;
 				long sourceRowEnd = Math.min(ix.rowEnd, sourceRowStart + blocksize - 1);

@@ -25,7 +25,9 @@ import org.apache.sysds.common.Types.OpOpData;
 import org.apache.sysds.hops.DataOp;
 import org.apache.sysds.hops.Hop;
 import org.apache.sysds.hops.ReorgOp;
+import org.apache.sysds.parser.IfStatementBlock;
 import org.apache.sysds.parser.StatementBlock;
+import org.apache.sysds.parser.WhileStatementBlock;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -248,6 +250,13 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 				hop.resetVisitStatus();
 				findRewriteCandidates(hop);
 			}
+		}
+		Hop predicate = sb instanceof IfStatementBlock ? ((IfStatementBlock) sb)
+			.getPredicateHops() : sb instanceof WhileStatementBlock ? ((WhileStatementBlock) sb)
+				.getPredicateHops() : null;
+		if(predicate != null) {
+			predicate.resetVisitStatus();
+			findRewriteCandidates(predicate);
 		}
 
 		for (Hop candidate : rewriteCandidates) {
