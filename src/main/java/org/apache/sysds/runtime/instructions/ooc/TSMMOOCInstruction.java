@@ -76,13 +76,20 @@ public class TSMMOOCInstruction extends ComputationOOCInstruction {
 		}
 
 		OOCStream<IndexedMatrixValue> out = createWritableStream();
+		propagateOutputDims(ec, min);
 		ec.getMatrixObject(output).setStreamHandle(out);
 		BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
 		OOCInstructionUtils.tsmm(min.getStreamable(), out, _type, (AggregateBinaryOperator) _optr, plus, getContext());
 	}
 
+	private void propagateOutputDims(ExecutionContext ec, MatrixObject min) {
+		long side = _type.isLeft() ? min.getNumColumns() : min.getNumRows();
+		OOCInstructionUtils.propagateDims(ec, output, side, side, min.getBlocksize(), -1);
+	}
+
 	private void processSingleOutputTileInstruction(ExecutionContext ec, MatrixObject min) {
 		OOCStream<IndexedMatrixValue> out = createWritableStream();
+		propagateOutputDims(ec, min);
 		ec.getMatrixObject(output).setStreamHandle(out);
 		BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
 		OOCInstructionUtils.reduce(min.getStreamable(), out,
