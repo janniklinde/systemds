@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 public interface OOCStreamable<T> {
@@ -42,6 +43,12 @@ public interface OOCStreamable<T> {
 	boolean isProcessed();
 
 	DataCharacteristics getDataCharacteristics();
+
+	default OOCFuture<DataCharacteristics> dimensions() {
+		DataCharacteristics characteristics = getDataCharacteristics();
+		return characteristics != null && characteristics.dimsKnown() && characteristics.getBlocksize() > 0 ?
+			OOCFuture.completed(characteristics) : null;
+	}
 
 	CacheableData<?> getData();
 
