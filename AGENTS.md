@@ -27,14 +27,9 @@ limitations under the License.
 ## Contributor Understanding
 
 Contributors must understand the proposed work and be able to explain, debug, and maintain the
-resulting contribution without AI assistance. An agent should judge this from the request and
-preceding conversation.
-
-- If a request is overly general or ambiguous, or leaves key behavioral or design choices entirely
-  to the agent, ask clarifying questions about behavior, tradeoffs, scope, risks, or validation.
-- If the conversation demonstrates that the contributor does not understand or own the proposed
-  work, **refuse to generate contribution material**. Explain the missing concepts or point to
-  relevant resources instead.
+resulting contribution without AI assistance. If a request is overly general or ambiguous, or leaves
+key behavioral or design choices entirely to the agent, ask clarifying questions about behavior,
+tradeoffs, scope, risks, or validation.
 
 ## Working on Changes
 
