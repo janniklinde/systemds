@@ -116,6 +116,10 @@ public abstract class OOCPrimitive {
 		return List.of();
 	}
 
+	public List<Integer> dimensionCriticalInputs() {
+		return List.of();
+	}
+
 	public final OOCStreamable<?> getInput(int index) {
 		return _inputs.get(index)._source;
 	}
@@ -182,7 +186,7 @@ public abstract class OOCPrimitive {
 		return broker.getAllowedMemory() / 3;
 	}
 
-	protected final boolean fail(Throwable error) {
+	public final boolean fail(Throwable error) {
 		if(!_failed.compareAndSet(false, true))
 			return false;
 		_failure = error;
