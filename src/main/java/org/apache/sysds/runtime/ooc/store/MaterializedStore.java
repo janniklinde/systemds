@@ -25,6 +25,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
+import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
@@ -45,6 +46,7 @@ public final class MaterializedStore<T extends SpillableObject> {
 	private final AtomicInteger _published;
 	private final AtomicInteger _publishedCount;
 	private final OOCFuture<Void> _completion;
+	private final OOCFuture<DataCharacteristics> _dimensions;
 	private final OOCFuture<Void> _readersSealedFuture;
 	private final boolean _autoSealReaders;
 	private final OOCStoreLayout _layout;
@@ -79,6 +81,9 @@ public final class MaterializedStore<T extends SpillableObject> {
 		_published = new AtomicInteger();
 		_publishedCount = new AtomicInteger();
 		_completion = new OOCFuture<>();
+		_dimensions = new OOCFuture<>();
+		if(characteristics != null && characteristics.dimsKnown() && characteristics.getBlocksize() > 0)
+			_dimensions.complete(characteristics);
 		_readersSealedFuture = new OOCFuture<>();
 		_autoSealReaders = expectedReaders > 0;
 		_layout = layout;
@@ -127,6 +132,17 @@ public final class MaterializedStore<T extends SpillableObject> {
 	}
 
 	public void complete() {
+		complete(null);
+	}
+
+	/**
+	 * Seals the store. Block arrival is unordered, so dimensions observed during materialization only become final
+	 * here; they are resolved before the completion subscribers run so that a subscriber never sees a sealed store
+	 * with unresolved dimensions.
+	 *
+	 * @param observed dimensions measured while publishing, or null if they were not tracked
+	 */
+	public void complete(DataCharacteristics observed) {
 		boolean seal;
 		synchronized(this) {
 			if(_complete)
@@ -138,11 +154,26 @@ public final class MaterializedStore<T extends SpillableObject> {
 			_complete = true;
 			seal = _autoSealReaders && _pendingReaders == 0;
 		}
+		resolveDimensions(observed);
 		// Completion subscribers run inline and may register consumers or open readers on this store,
 		// either directly or through an owning streamable. They must never observe the store monitor.
 		_completion.complete(null);
 		if(seal)
 			sealReaders();
+	}
+
+	public OOCFuture<DataCharacteristics> dimensions() {
+		return _dimensions;
+	}
+
+	private void resolveDimensions(DataCharacteristics observed) {
+		if(_dimensions.isDone())
+			return;
+		if(observed != null)
+			_dimensions.complete(observed);
+		else
+			_dimensions.completeExceptionally(new DMLRuntimeException(
+				"Materialized store " + _streamId + " completed without observing dimensions."));
 	}
 
 	public synchronized void registerConsumer(int expectedReaders) {
@@ -153,6 +184,8 @@ public final class MaterializedStore<T extends SpillableObject> {
 	}
 
 	void failMaterialization(Throwable error) {
+		if(!_dimensions.isDone())
+			_dimensions.completeExceptionally(error);
 		_completion.completeExceptionally(error);
 	}
 
