@@ -288,12 +288,13 @@ public class ParameterizedBuiltinOp extends MultiThreadedHop {
 		Hop marginHop = getParameterHop("margin");
 		Hop selectHop = getParameterHop("select");
 		
-		if(et == ExecType.CP) {
+		//OOC uses the same operand set as CP; it compacts the streamed target against the select vector
+		if(et == ExecType.CP || et == ExecType.OOC) {
 			ParameterizedBuiltin pbilop = new ParameterizedBuiltin(inputlops, _op, getDataType(), getValueType(), et);
 			setOutputDimensions(pbilop);
 			setLineNumbers(pbilop);
 			setLops(pbilop);
-			
+
 			/*DISABLED CP PMM (see for example, MDA Bivar test, requires size propagation on recompile)
 			if( et == ExecType.CP && isTargetDiagInput() && marginHop instanceof LiteralOp 
 					 && ((LiteralOp)marginHop).getStringValue().equals("rows")
@@ -754,10 +755,16 @@ public class ParameterizedBuiltinOp extends MultiThreadedHop {
 		// 2. For paramserv function, always be CP mode so that
 		// the parameter server could have a central instruction
 		// to determine the local or remote workers
-		if(_op == ParamBuiltinOp.RMEMPTY || _op == ParamBuiltinOp.LOWER_TRI || _op == ParamBuiltinOp.UPPER_TRI ||
+		if(_op == ParamBuiltinOp.LOWER_TRI || _op == ParamBuiltinOp.UPPER_TRI ||
 			_op == ParamBuiltinOp.TRANSFORMCOLMAP || _op == ParamBuiltinOp.TRANSFORMMETA ||
 			_op == ParamBuiltinOp.TOSTRING || _op == ParamBuiltinOp.LIST || _op == ParamBuiltinOp.CDF ||
 			_op == ParamBuiltinOp.INVCDF || _op == ParamBuiltinOp.PARAMSERV) {
+			_etype = ExecType.CP;
+		}
+
+		// The OOC removeEmpty compacts against an explicit select vector. Without one the kept rows and hence the
+		// output dimension are data dependent, which needs a materialization barrier that does not exist yet.
+		if(_op == ParamBuiltinOp.RMEMPTY && (_etype != ExecType.OOC || getParameterHop("select") == null)) {
 			_etype = ExecType.CP;
 		}
 
