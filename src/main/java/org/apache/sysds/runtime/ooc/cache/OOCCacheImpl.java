@@ -173,6 +173,9 @@ public class OOCCacheImpl implements OOCCache {
 				CacheUnpinHandle handle = CacheUnpinHandle.deferred(entry, allowance);
 				meta.deferredUnpin = handle;
 				_deferredUnpins.offer(entry.getKey());
+				//only an eviction pass drains the deferred unpins, and until it does the bytes stay charged to the
+				//allowance; without a pass here a reader waiting for them can wait forever
+				forceEviction();
 				return handle;
 			}
 		}
@@ -538,15 +541,26 @@ public class OOCCacheImpl implements OOCCache {
 		_collectorExecutor.execute(this::runEviction);
 	}
 
+	/** Starts an eviction pass regardless of pressure, for progress rather than headroom. */
+	private void forceEviction() {
+		if(!_running || !_evictionRunning.compareAndSet(false, true))
+			return;
+		_collectorExecutor.execute(this::runEviction);
+	}
+
 	private void runEviction() {
 		try {
 			while(true) {
 				long bytes;
+				List<DeferredCompletion> drained;
 				synchronized(this) {
+					//drained before the pressure check, since a pass may be started purely to hand these bytes back
+					drained = processDeferredUnpins();
 					bytes = evictionPressure() - _evictionLimit;
-					if(bytes <= 0)
-						return;
 				}
+				drained.forEach(this::completeDeferred);
+				if(bytes <= 0)
+					return;
 
 				List<IndexedObjectPair<BlockEntry>> candidates = collectEvictionCandidates(bytes);
 				if(candidates.isEmpty())

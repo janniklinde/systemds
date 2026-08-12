@@ -23,7 +23,6 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.parfor.util.IDSequence;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
-import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
@@ -124,7 +123,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 								OOCStream.QueueCallback<IndexedMatrixValue> sub = group.getCallback(gi);
 								try(sub) {
 									IndexedMatrixValue imv = sub.get();
-									groupBytes += ((MatrixBlock) imv.getValue()).getExactSerializedSize();
+									groupBytes += OOCUtils.memoryCharge(imv);
 									if(_index != null)
 										_index.put(imv.getIndexes(), _numBlocks + gi);
 								}
@@ -148,7 +147,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 									try(sub) {
 										IndexedMatrixValue imv = sub.get();
 										values.add(imv);
-										totalSize += ((MatrixBlock) imv.getValue()).getExactSerializedSize();
+										totalSize += OOCUtils.memoryCharge(imv);
 									}
 								}
 
@@ -183,7 +182,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 						}
 						else {
 							final IndexedMatrixValue task = tmp.get();
-							recordCachedBytes(((MatrixBlock) task.getValue()).getExactSerializedSize());
+							recordCachedBytes(OOCUtils.memoryCharge(task));
 							OOCIOHandler.SourceBlockDescriptor descriptor = null;
 							BlockKey blockKey = null;
 							boolean ownsEntry = true;
@@ -314,7 +313,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 		}
 		catch(IllegalArgumentException ex) {
 			try {
-				OOCCacheManager.putRaw(key, value, ((MatrixBlock) value.getValue()).getExactSerializedSize());
+				OOCCacheManager.putRaw(key, value, OOCUtils.memoryCharge(value));
 			}
 			catch(IllegalStateException putEx) {
 				// Another downstream stream may have re-materialized the same entry first.
@@ -338,7 +337,7 @@ public class CachingStream implements OOCStreamable<IndexedMatrixValue> {
 					try(sub) {
 						IndexedMatrixValue imv = sub.get();
 						values.add(imv);
-						totalSize += ((MatrixBlock) imv.getValue()).getExactSerializedSize();
+						totalSize += OOCUtils.memoryCharge(imv);
 					}
 				}
 				OOCCacheManager.putRaw(key, values, totalSize);

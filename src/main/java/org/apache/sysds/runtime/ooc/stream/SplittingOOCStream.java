@@ -105,27 +105,27 @@ public class SplittingOOCStream<T> implements OOCStream<T> {
 
 	@Override
 	public void enqueue(T t) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException("A splitting stream has no queue of its own; enqueue on the source stream instead");
 	}
 
 	@Override
 	public void enqueue(QueueCallback<T> callback) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException("A splitting stream has no queue of its own; enqueue on the source stream instead");
 	}
 
 	@Override
 	public T dequeue() {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException("A splitting stream has no queue of its own; dequeue from a sub stream instead");
 	}
 
 	@Override
 	public QueueCallback<T> dequeueCB() {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException("A splitting stream has no queue of its own; dequeue from a sub stream instead");
 	}
 
 	@Override
 	public void closeInput() {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException("A splitting stream does not own its input; close the source stream instead");
 	}
 
 	@Override
@@ -152,12 +152,12 @@ public class SplittingOOCStream<T> implements OOCStream<T> {
 
 	@Override
 	public void setSubscriber(Consumer<QueueCallback<T>> subscriber) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException("A splitting stream cannot be subscribed to; subscribe to a sub stream instead");
 	}
 
 	@Override
 	public OOCStream<T> getReadStream() {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException("A splitting stream cannot be read directly; use getSubStream(idx)");
 	}
 
 	@Override
@@ -182,6 +182,6 @@ public class SplittingOOCStream<T> implements OOCStream<T> {
 
 	@Override
 	public void setData(CacheableData<?> data) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException("A splitting stream does not own a data handle; set it on the source stream instead");
 	}
 }

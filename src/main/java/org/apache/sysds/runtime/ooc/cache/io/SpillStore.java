@@ -285,7 +285,12 @@ final class SpillStore {
 					}
 				}
 			}
-			catch(IOException | InterruptedException ex) {
+			catch(InterruptedException ex) {
+				//writers are interrupted by a normal shutdown, so this is termination rather than a failure
+				Thread.currentThread().interrupt();
+				return;
+			}
+			catch(IOException ex) {
 				ex.printStackTrace();
 				throw new DMLRuntimeException(ex);
 			}

@@ -29,7 +29,6 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
-import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
@@ -38,6 +37,7 @@ import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 /**
  * Bounded binary source reader. Its output is an internal handoff stream which must be attached directly to a
@@ -161,7 +161,7 @@ public final class SourceReadOOCPrimitive extends OOCPrimitive {
 			}
 			long bytes = 0;
 			for(IndexedMatrixValue value : values)
-				bytes = Math.addExact(bytes, ((MatrixBlock) value.getValue()).getExactSerializedSize());
+				bytes = Math.addExact(bytes, OOCUtils.memoryCharge(value));
 			phase.reserveBlocking(bytes);
 			ReservationBudget ownership = new ReservationBudget(phase, bytes);
 			OOCStream.QueueCallback<IndexedMatrixValue> source = null;
