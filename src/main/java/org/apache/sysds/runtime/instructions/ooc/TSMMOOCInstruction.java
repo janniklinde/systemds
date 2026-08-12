@@ -37,6 +37,7 @@ import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 public class TSMMOOCInstruction extends ComputationOOCInstruction {
 	private final MMTSJType _type;
@@ -94,6 +95,6 @@ public class TSMMOOCInstruction extends ComputationOOCInstruction {
 				((MatrixBlock) value.getValue()).transposeSelfMatrixMultOperations(new MatrixBlock(), _type)),
 			(left, right) -> new IndexedMatrixValue(new MatrixIndexes(1, 1),
 				((MatrixBlock) left.getValue()).binaryOperationsInPlace(plus, right.getValue())),
-			value -> ((MatrixBlock) value.getValue()).getExactSerializedSize(), getContext());
+			OOCUtils::memoryCharge, getContext());
 	}
 }

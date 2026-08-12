@@ -345,7 +345,7 @@ public final class GroupedReduceOOCPrimitive extends OOCPrimitive {
 	}
 
 	private static ManagedPayload<IndexedMatrixValue> payload(IndexedMatrixValue value, ReservationBudget budget) {
-		long bytes = ((MatrixBlock) value.getValue()).getExactSerializedSize();
+		long bytes = OOCUtils.memoryCharge(value);
 		budget.reserveBlocking(bytes);
 		return new ManagedPayload<>(value, bytes, budget);
 	}
