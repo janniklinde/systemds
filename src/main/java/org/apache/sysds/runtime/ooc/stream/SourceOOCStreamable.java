@@ -71,7 +71,7 @@ public class SourceOOCStreamable implements OOCStreamable<IndexedMatrixValue> {
 
 	@Override
 	public void setData(CacheableData<?> data) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException("A source streamable is bound to the cacheable data it was created from");
 	}
 
 	@Override

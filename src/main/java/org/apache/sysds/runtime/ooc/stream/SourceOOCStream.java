@@ -123,7 +123,7 @@ public class SourceOOCStream extends SubscribableTaskQueue<IndexedMatrixValue> {
 
 		@Override
 		public IndexedMatrixValue get() {
-			throw new UnsupportedOperationException();
+			throw new UnsupportedOperationException("A group source callback holds several values; use getCallback(idx)");
 		}
 
 		@Override

@@ -121,12 +121,12 @@ public class MergedOOCStream<T> implements OOCStream<T> {
 
 	@Override
 	public void enqueue(T t) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException("A merged stream is read-only; enqueue on one of its source streams instead");
 	}
 
 	@Override
 	public void enqueue(QueueCallback<T> callback) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException("A merged stream is read-only; enqueue on one of its source streams instead");
 	}
 
 	@Override
@@ -149,7 +149,7 @@ public class MergedOOCStream<T> implements OOCStream<T> {
 
 	@Override
 	public void closeInput() {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException("A merged stream does not own its inputs; close the source streams instead");
 	}
 
 	@Override
@@ -205,7 +205,7 @@ public class MergedOOCStream<T> implements OOCStream<T> {
 
 	@Override
 	public OOCStream<T> getWriteStream() {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException("A merged stream is read-only and has no write stream");
 	}
 
 	@Override
