@@ -145,6 +145,7 @@ public final class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		_ready = new SubscribableTaskQueue<>();
 		getContext().addOutStream(_outputStream, _ready);
 		_table = new StateTable<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
+		_table.addEvictionPolicy(slot -> slot - (long) _numGroups);
 
 		OOCInstructionUtils.submitCloseableOOCTasks(_ready, this::process, getContext())
 			.whenComplete((ignored, error) -> {
