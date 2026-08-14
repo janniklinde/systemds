@@ -33,15 +33,22 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 	private final OOCStream<T> _source;
 	private final MemoryAllowance _allowance;
 	private final ToLongFunction<T> _reservationSize;
+	private final boolean _limitPassiveOutput;
 	private volatile DMLRuntimeException _failure;
 	private int _pendingReservations;
 	private boolean _sourceComplete;
 	private boolean _outputClosed;
 
 	public AllocatedOOCStream(OOCStream<T> source, MemoryAllowance allowance, ToLongFunction<T> reservationSize) {
+		this(source, allowance, reservationSize, false);
+	}
+
+	public AllocatedOOCStream(OOCStream<T> source, MemoryAllowance allowance, ToLongFunction<T> reservationSize,
+		boolean limitPassiveOutput) {
 		_source = source;
 		_allowance = allowance;
 		_reservationSize = reservationSize;
+		_limitPassiveOutput = limitPassiveOutput;
 		setData(source.getData());
 		source.setSubscriber(this::admit);
 	}
@@ -83,7 +90,8 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 				enqueueOwned(callback.keepOpen(), null);
 				return;
 			}
-			if(_allowance.tryReserve(bytes)) {
+			boolean reserved = _limitPassiveOutput ? _allowance.tryReserveTask(bytes) : _allowance.tryReserve(bytes);
+			if(reserved) {
 				enqueueOwned(callback.keepOpen(), new ReservationBudget(_allowance, bytes));
 				return;
 			}
@@ -101,7 +109,7 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 			_pendingReservations++;
 		}
 		try {
-			reservation = _allowance.reserveAsync(bytes);
+			reservation = _limitPassiveOutput ? _allowance.reserveTaskAsync(bytes) : _allowance.reserveAsync(bytes);
 		}
 		catch(RuntimeException error) {
 			try {

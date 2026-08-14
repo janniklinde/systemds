@@ -146,7 +146,7 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 		long broadcastPin = OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(broadcastLogical);
 		OOCStream<IndexedMatrixValue> streamed = getInputReadStream(0);
 		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(streamed, _allowance, value ->
-			broadcastPin * 2 + OOCUtils.memoryCharge(value) * 2);
+			broadcastPin * 2 + OOCUtils.memoryCharge(value) * 2, true);
 		getContext().addInStream(streamed, admitted);
 		admitted.setSubscriber(this::accept);
 	}
