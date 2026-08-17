@@ -25,6 +25,7 @@ import org.apache.sysds.runtime.ooc.cache.eviction.EvictController;
 import org.apache.sysds.runtime.ooc.cache.eviction.IndexedObjectPair;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.stats.StreamTrace;
 import org.apache.sysds.utils.Statistics;
 
 import java.util.ArrayList;
@@ -88,6 +89,7 @@ public class OOCCacheImpl implements OOCCache {
 			checkRunning();
 			putEntry(entry);
 		}
+		StreamTrace.put(sId, size);
 		Statistics.incrementOOCEvictionPut();
 		return entry;
 	}
@@ -236,6 +238,7 @@ public class OOCCacheImpl implements OOCCache {
 
 	@Override
 	public synchronized void shutdown() {
+		StreamTrace.dump();
 		_running = false;
 		_blocks.clear();
 		_deferredUnpins.clear();
@@ -597,6 +600,7 @@ public class OOCCacheImpl implements OOCCache {
 							continue;
 						BlockEntry entry = meta.entry;
 						if(entry.getState() == BlockState.WARM) {
+							StreamTrace.dropWarm(entry.getKey().getStreamId());
 							entry.clear();
 							entry.setState(BlockState.COLD);
 							clearLive(entry);
