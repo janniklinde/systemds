@@ -35,6 +35,7 @@ import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
@@ -97,8 +98,7 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 	}
 
 	public void startOnDemand() {
-		start();
-		tryStartExecution();
+		OOCPlanner.compileAndStart(this);
 	}
 
 	@Override
