@@ -196,7 +196,7 @@ public final class OOCInstructionUtils {
 			OOCUtils.estimateOutputTileBytes(right.getDataCharacteristics()));
 		long outputBytes = OOCUtils.estimateOutputTileBytes(output.getDataCharacteristics());
 		ToIntFunction<IndexedMatrixValue> key = matrixIndexKey(cols);
-		keyedJoin(left, right, output, key, key, value -> ((MatrixBlock) value.getValue()).getExactSerializedSize(),
+		keyedJoin(left, right, output, key, key, OOCUtils::memoryCharge,
 			(leftValue, rightValue) -> new IndexedMatrixValue(leftValue.getIndexes(),
 				operation.apply((MatrixBlock) leftValue.getValue(), (MatrixBlock) rightValue.getValue())),
 			inputBytes + OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + outputBytes, context);
@@ -225,7 +225,7 @@ public final class OOCInstructionUtils {
 	public static void naryEquiJoin(List<OOCStreamable<IndexedMatrixValue>> inputs,
 		OOCStream<IndexedMatrixValue> output, Function<List<IndexedMatrixValue>, IndexedMatrixValue> operation,
 		StreamContext context) {
-		naryEquiJoin(inputs, output, operation, value -> ((MatrixBlock) value.getValue()).getExactSerializedSize(),
+		naryEquiJoin(inputs, output, operation, OOCUtils::memoryCharge,
 			context);
 	}
 
