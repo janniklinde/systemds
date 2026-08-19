@@ -19,7 +19,10 @@
 
 package org.apache.sysds.runtime.ooc.store;
 
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
@@ -31,15 +34,20 @@ import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
+import org.apache.sysds.runtime.ooc.cache.BlockEntry;
+import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 public final class MaterializedStoreStreamable implements OOCStreamable<IndexedMatrixValue> {
 	private static final int REPLAY_PREFETCH = 8;
 	private static final long REPLAY_MEMORY_LIMIT = 100L * 1024 * 1024;
+	private static final int LIVE_PREFETCH = 4;
+	private static final long LIVE_MEMORY_LIMIT = 32L * 1024 * 1024;
 
 	private final MaterializeOOCPrimitive _primitive;
 	private final OOCFuture<DataCharacteristics> _dimensions;
@@ -105,6 +113,10 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			_activeReaders++;
 		}
 		return stream;
+	}
+
+	private synchronized MaterializedStore<IndexedMatrixValue> storeIfPresent() {
+		return _store;
 	}
 
 	private void startMaterialization() {
@@ -353,13 +365,20 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		private final MaterializedStoreStreamable _owner;
 		private final AtomicBoolean _activated;
 		private final AtomicBoolean _finished;
+		private final Queue<Integer> _liveIndices;
+		private final AtomicInteger _liveInFlight;
+		private final AtomicBoolean _livePumping;
 		private volatile boolean _live;
-		private SyncMemoryAllowance _allowance;
+		private volatile boolean _liveSourceDone;
+		private volatile SyncMemoryAllowance _allowance;
 
 		private DeferredReader(MaterializedStoreStreamable owner) {
 			_owner = owner;
 			_activated = new AtomicBoolean();
 			_finished = new AtomicBoolean();
+			_liveIndices = new ConcurrentLinkedQueue<>();
+			_liveInFlight = new AtomicInteger();
+			_livePumping = new AtomicBoolean();
 		}
 
 		@Override
@@ -415,22 +434,133 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			}
 			if(callback.isEos()) {
 				callback.close();
+				_liveSourceDone = true;
+				pumpLive();
+				return;
+			}
+			MaterializedCallback<?> published = callback instanceof MaterializedCallback<?> mc ? mc : null;
+			int index = published != null ? published.publishedIndex() : -1;
+			MaterializedStore<IndexedMatrixValue> store = _owner.storeIfPresent();
+			BlockEntry entry = published != null ? published.pinnedEntry() : null;
+			if(index < 0 || store == null || entry == null) {
+				QueueCallback<IndexedMatrixValue> retained = callback.keepOpen();
 				try {
-					closeInput();
+					enqueue(retained);
+					retained = null;
 				}
 				finally {
-					_owner.finishReader(this);
+					if(retained != null)
+						retained.close();
 				}
 				return;
 			}
-			QueueCallback<IndexedMatrixValue> retained = callback.keepOpen();
+			store.cache().reference(entry);
+			_liveIndices.add(index);
+			pumpLive();
+		}
+
+		private void pumpLive() {
+			do {
+				if(!_livePumping.compareAndSet(false, true))
+					return;
+				try {
+					drainLive();
+				}
+				finally {
+					_livePumping.set(false);
+				}
+			}
+			while(hasLiveWork());
+		}
+
+		private boolean hasLiveWork() {
+			return (!_liveIndices.isEmpty() && _liveInFlight.get() < LIVE_PREFETCH) || liveFinished();
+		}
+
+		private boolean liveFinished() {
+			return _liveSourceDone && _liveIndices.isEmpty() && _liveInFlight.get() == 0 && !_finished.get();
+		}
+
+		private void drainLive() {
+			while(_liveInFlight.get() < LIVE_PREFETCH) {
+				Integer index = _liveIndices.poll();
+				if(index == null)
+					break;
+				_liveInFlight.incrementAndGet();
+				issueLive(index);
+			}
+			if(liveFinished())
+				closeLive();
+		}
+
+		private void issueLive(int index) {
+			MaterializedStore<IndexedMatrixValue> store = _owner.storeIfPresent();
 			try {
-				enqueue(retained);
-				retained = null;
+				if(store == null)
+					throw new DMLRuntimeException("Live reader activated before its store was published.");
+				ensureAllowance(store);
+				store.requestPublished(index, _allowance).whenComplete((lease, error) -> {
+					try {
+						if(error != null)
+							failLive(error);
+						else if(lease != null)
+							enqueueLive(lease, index);
+						else
+							failLive(new DMLRuntimeException("Live block " + index + " vanished before it was read."));
+					}
+					finally {
+						store.cache().dereference(new BlockKey(store.streamId(), index));
+						_liveInFlight.decrementAndGet();
+						pumpLive();
+					}
+				});
+			}
+			catch(Throwable failure) {
+				if(store != null)
+					store.cache().dereference(new BlockKey(store.streamId(), index));
+				_liveInFlight.decrementAndGet();
+				failLive(failure);
+			}
+		}
+
+		private void enqueueLive(StoreLease<IndexedMatrixValue> lease, int index) {
+			QueueCallback<IndexedMatrixValue> callback = new MaterializedCallback<>(lease, index);
+			try {
+				enqueue(callback);
+				callback = null;
 			}
 			finally {
-				if(retained != null)
-					retained.close();
+				if(callback != null)
+					callback.close();
+			}
+		}
+
+		private synchronized void ensureAllowance(MaterializedStore<IndexedMatrixValue> store) {
+			if(_allowance == null)
+				_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), liveMemoryLimit(store));
+		}
+
+		private long liveMemoryLimit(MaterializedStore<IndexedMatrixValue> store) {
+			DataCharacteristics dc = store.characteristics();
+			long tile = dc != null ? OOCUtils.estimateOutputTileBytes(dc) : 0;
+			return Math.max(LIVE_MEMORY_LIMIT, 2L * LIVE_PREFETCH * Math.max(0, tile));
+		}
+
+		private void closeLive() {
+			try {
+				closeInput();
+			}
+			finally {
+				_owner.finishReader(this);
+			}
+		}
+
+		private void failLive(Throwable error) {
+			try {
+				propagateFailure(DMLRuntimeException.of(error));
+			}
+			finally {
+				_owner.finishReader(this);
 			}
 		}
 

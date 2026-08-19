@@ -237,7 +237,8 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 		}
 		try(lease) {
 			for(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> liveConsumer : _liveConsumers) {
-				try(OOCStream.QueueCallback<IndexedMatrixValue> alias = new MaterializedCallback<>(lease.retain())) {
+				try(OOCStream.QueueCallback<IndexedMatrixValue> alias = new MaterializedCallback<>(lease.retain(),
+					index)) {
 					liveConsumer.accept(alias);
 				}
 			}
