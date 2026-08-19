@@ -29,15 +29,25 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class MaterializedCallback<T extends SpillableObject> implements OOCStream.QueueCallback<T> {
 	private final StoreLease<T> _lease;
 	private final AtomicReference<DMLRuntimeException> _failure;
+	private final int _index;
 	private boolean _closed;
 
 	public MaterializedCallback(StoreLease<T> lease) {
-		this(lease, new AtomicReference<>());
+		this(lease, new AtomicReference<>(), -1);
 	}
 
-	private MaterializedCallback(StoreLease<T> lease, AtomicReference<DMLRuntimeException> failure) {
+	public MaterializedCallback(StoreLease<T> lease, int index) {
+		this(lease, new AtomicReference<>(), index);
+	}
+
+	private MaterializedCallback(StoreLease<T> lease, AtomicReference<DMLRuntimeException> failure, int index) {
 		_lease = lease;
 		_failure = failure;
+		_index = index;
+	}
+
+	public int publishedIndex() {
+		return _index;
 	}
 
 	public BlockEntry pinnedEntry() {
@@ -56,7 +66,7 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 	public synchronized OOCStream.QueueCallback<T> keepOpen() {
 		if(_closed)
 			throw new IllegalStateException("Cannot keep open a closed callback");
-		return new MaterializedCallback<>(_lease.retain(), _failure);
+		return new MaterializedCallback<>(_lease.retain(), _failure, _index);
 	}
 
 	@Override
