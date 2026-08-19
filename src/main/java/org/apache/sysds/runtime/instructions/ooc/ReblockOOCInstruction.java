@@ -78,6 +78,7 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 		if(!knownGeometry || blen <= 0 || mc.getBlocksize() == blen) {
 			mout.setStreamHandle(materialized);
 			TeeOOCInstruction.incrRef(materialized, 1);
+			TeeOOCInstruction.registerOwner(materialized, mout);
 			return;
 		}
 

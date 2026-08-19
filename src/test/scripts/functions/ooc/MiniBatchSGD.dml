@@ -1,0 +1,50 @@
+#-------------------------------------------------------------
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+#-------------------------------------------------------------
+
+# Mini-batch SGD logistic regression. Unlike the batch solvers, this touches X
+# through sequential row ranges rather than full scans, which is the access
+# pattern of the neural-network training loops (nn/ffTrain, autoencoder).
+# Batches are deterministic row ranges so OOC and CP results are comparable.
+
+X = read($1);
+y = read($2);
+epochs = as.integer($3);
+batch = as.integer($4);
+lr = as.double($5);
+
+n = nrow(X);
+d = ncol(X);
+w = matrix(0, rows=d, cols=1);
+iters = ceil(n / batch);
+
+for(e in 1:epochs) {
+  for(i in 1:iters) {
+    beg = (i-1) * batch + 1;
+    end = min(n, beg + batch - 1);
+    Xb = X[beg:end,];
+    yb = y[beg:end,];
+    p = 1 / (1 + exp(-(Xb %*% w)));
+    g = t(Xb) %*% (p - yb) / (end - beg + 1);
+    w = w - lr * g;
+  }
+}
+
+write(w, $6, format="binary");
