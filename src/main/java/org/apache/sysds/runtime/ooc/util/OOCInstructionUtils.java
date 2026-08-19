@@ -72,6 +72,7 @@ import org.apache.sysds.runtime.ooc.primitives.OrderedMappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.PlannableDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.ReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.SliceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.SourceReadOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TSMMOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TransposeOOCPrimitive;
@@ -172,6 +173,12 @@ public final class OOCInstructionUtils {
 		ToIntFunction<MatrixIndexes> expectedFragments,
 		BiConsumer<IndexedMatrixValue, RepartitionOOCPrimitive.FragmentEmitter> router, StreamContext context) {
 		output.assignPrimitive(new RepartitionOOCPrimitive(input, output, expectedFragments, router, context));
+	}
+
+	public static void slice(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
+		long firstRowBlock, long lastRowBlock, long firstColBlock, long lastColBlock, StreamContext context) {
+		output.assignPrimitive(new SliceOOCPrimitive(input, output, firstRowBlock, lastRowBlock, firstColBlock,
+			lastColBlock, context));
 	}
 
 	public static void repartition(List<? extends OOCStreamable<IndexedMatrixValue>> inputs,

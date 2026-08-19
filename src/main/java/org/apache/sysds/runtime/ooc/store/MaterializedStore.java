@@ -39,6 +39,10 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class MaterializedStore<T extends SpillableObject> {
+	private static final byte FORGOTTEN = 0;
+	private static final byte ALREADY_FORGOTTEN = 1;
+	private static final byte RETRY = 2;
+
 	private final OOCCache _cache;
 	private final long _streamId;
 	private final ArrayList<StoreReader> _registeredReaders;
@@ -57,6 +61,7 @@ public final class MaterializedStore<T extends SpillableObject> {
 	private volatile boolean _complete;
 	private volatile boolean _readersSealed;
 	private volatile boolean _closed;
+	private volatile int _readerVersion;
 	private int _pendingReaders;
 	private int _consumers;
 
@@ -177,7 +182,8 @@ public final class MaterializedStore<T extends SpillableObject> {
 	}
 
 	public synchronized void registerConsumer(int expectedReaders) {
-		if(_readersSealed || _closed)
+		//sealing no longer bars new readers (see registerReader), so it must not bar new consumers either
+		if(_closed)
 			throw new IllegalStateException("Store no longer accepts consumers");
 		_pendingReaders += expectedReaders;
 		_consumers++;
@@ -217,12 +223,9 @@ public final class MaterializedStore<T extends SpillableObject> {
 		synchronized(this) {
 			if(!_complete || _closed)
 				throw new IllegalStateException("Readers require a completed store");
-			if(_readersSealed)
-				throw new IllegalStateException("Store no longer accepts new readers");
 			reader = new OrderedMaterializedStoreReader<>(_cache, _streamId, pattern, allowance,
 				Math.max(1, maxPrefetch), softOrdering, this::forgetAfterReaderClose, this::tryForget);
-			_registeredReaders.add(reader);
-			seal = readerRegistered();
+			seal = registerReader(reader, pattern);
 		}
 		if(seal)
 			sealReaders();
@@ -235,12 +238,9 @@ public final class MaterializedStore<T extends SpillableObject> {
 		synchronized(this) {
 			if(!_complete || _closed)
 				throw new IllegalStateException("Readers require a completed store");
-			if(_readersSealed)
-				throw new IllegalStateException("Store no longer accepts new readers");
 			reader = new IndexedMaterializedStoreReader<>(_cache, _streamId, () -> _completedSize, liveness, _layout,
 				_characteristics, this::forgetAfterReaderClose, this::tryForget);
-			_registeredReaders.add(reader);
-			seal = readerRegistered();
+			seal = registerReader(reader, liveness);
 		}
 		if(seal)
 			sealReaders();
@@ -253,12 +253,9 @@ public final class MaterializedStore<T extends SpillableObject> {
 		synchronized(this) {
 			if(_closed)
 				throw new IllegalStateException("Store is closed");
-			if(_readersSealed)
-				throw new IllegalStateException("Store no longer accepts new readers");
 			reader = new IndexedMaterializedStoreReader<>(_cache, _streamId, this::size, liveness, _layout,
 				_characteristics, this::forgetAfterReaderClose, this::tryForget);
-			_registeredReaders.add(reader);
-			seal = readerRegistered();
+			seal = registerReader(reader, liveness);
 		}
 		if(seal)
 			sealReaders();
@@ -310,12 +307,40 @@ public final class MaterializedStore<T extends SpillableObject> {
 		_readersSealedFuture.complete(null);
 	}
 
+	private boolean registerReader(StoreReader reader, Liveness liveness) {
+		if(_readersSealed) {
+			int published = size();
+			for(int i = 0; i < published; i++)
+				if(_forgotten.get(i) && liveness.needs(i))
+					throw new IllegalStateException("Store cannot serve a late reader: block " + i +
+						" of stream " + _streamId + " was already reclaimed.");
+		}
+		_registeredReaders.add(reader);
+		if(_readersSealed) {
+			_readers = new ArrayList<>(_registeredReaders);
+			_readerVersion++;
+		}
+		return readerRegistered();
+	}
+
 	private boolean readerRegistered() {
-		if(!_autoSealReaders)
+		if(!_autoSealReaders || _readersSealed || _pendingReaders <= 0)
 			return false;
-		if(_pendingReaders <= 0)
-			throw new IllegalStateException("More materialized readers opened than declared.");
 		return --_pendingReaders == 0 && _complete;
+	}
+
+	public OOCStoreLayout layout() {
+		return _layout;
+	}
+
+	public DataCharacteristics characteristics() {
+		return _characteristics;
+	}
+
+	public int linearize(long row, long col) {
+		if(_layout == null)
+			throw new IllegalStateException("Materialized store has no logical matrix-index layout.");
+		return _layout.linearize(row, col, _characteristics);
 	}
 
 	public int size() {
@@ -340,14 +365,31 @@ public final class MaterializedStore<T extends SpillableObject> {
 	}
 
 	private void tryForget(int index) {
-		if(!_readersSealed)
+		while(_readersSealed) {
+			int version = _readerVersion;
+			if(isNeeded(index))
+				return;
+			byte result = markForgotten(index, version);
+			if(result == RETRY)
+				continue;
+			if(result == FORGOTTEN)
+				_cache.dereference(new BlockKey(_streamId, index));
 			return;
+		}
+	}
+
+	private boolean isNeeded(int index) {
 		List<StoreReader> localReaders = _readers;
 		for(StoreReader reader : localReaders)
 			if(!reader.isClosed() && reader.liveness().needs(index))
-				return;
-		if(markForgotten(index))
-			_cache.dereference(new BlockKey(_streamId, index));
+				return true;
+		return false;
+	}
+
+	private synchronized byte markForgotten(int index, int expectedVersion) {
+		if(_readerVersion != expectedVersion)
+			return RETRY;
+		return markForgotten(index) ? FORGOTTEN : ALREADY_FORGOTTEN;
 	}
 
 	private synchronized boolean markForgotten(int index) {

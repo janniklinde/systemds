@@ -140,6 +140,18 @@ public class OOCCacheManager {
 		return _scheduler.get();
 	}
 
+	public static OOCCache getGlobalCacheIfInitialized() {
+		return _globalCache.get();
+	}
+
+	public static long getHardLimit() {
+		return _hardLimit;
+	}
+
+	public static long getEvictionLimit() {
+		return _evictionLimit;
+	}
+
 	public static OOCCache getGlobalCache() {
 		while(true) {
 			OOCCache cache = _globalCache.get();

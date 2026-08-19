@@ -122,7 +122,27 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 			addOutStream(qOut);
 			mOut.setStreamHandle(qOut);
 
-			OOCInstructionUtils.repartition(mo.getStreamable(), qOut, outputIndex -> {
+			long firstRowBlock = ix.rowStart / blocksize + 1;
+			long lastRowBlock = ix.rowEnd / blocksize + 1;
+			long firstColBlock = ix.colStart / blocksize + 1;
+			long lastColBlock = ix.colEnd / blocksize + 1;
+			boolean aligned = ix.rowStart % blocksize == 0 && ix.colStart % blocksize == 0 &&
+				((ix.rowEnd + 1) % blocksize == 0 || ix.rowEnd + 1 == mo.getNumRows()) &&
+				((ix.colEnd + 1) % blocksize == 0 || ix.colEnd + 1 == mo.getNumColumns());
+			if(aligned) {
+				OOCInstructionUtils.slice(mo.getStreamable(), qOut, firstRowBlock, lastRowBlock, firstColBlock,
+					lastColBlock, getContext());
+				return;
+			}
+			final long sliceRowOffset = (firstRowBlock - 1) * blocksize;
+			final long sliceColOffset = (firstColBlock - 1) * blocksize;
+			OOCStream<IndexedMatrixValue> qSelected = createWritableStream(
+				Math.min(mo.getNumRows(), lastRowBlock * blocksize) - sliceRowOffset,
+				Math.min(mo.getNumColumns(), lastColBlock * blocksize) - sliceColOffset, blocksize);
+			OOCInstructionUtils.slice(mo.getStreamable(), qSelected, firstRowBlock, lastRowBlock, firstColBlock,
+				lastColBlock, getContext());
+
+			OOCInstructionUtils.repartition(qSelected, qOut, outputIndex -> {
 				long sourceRowStart = ix.rowStart + (outputIndex.getRowIndex() - 1) * blocksize;
 				long sourceColStart = ix.colStart + (outputIndex.getColumnIndex() - 1) * blocksize;
 				long sourceRowEnd = Math.min(ix.rowEnd, sourceRowStart + blocksize - 1);
@@ -132,8 +152,8 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 				return rowFragments * colFragments;
 			}, (tile, emit) -> {
 				MatrixBlock block = (MatrixBlock) tile.getValue();
-				long inputRowStart = (tile.getIndexes().getRowIndex() - 1) * blocksize;
-				long inputColStart = (tile.getIndexes().getColumnIndex() - 1) * blocksize;
+				long inputRowStart = sliceRowOffset + (tile.getIndexes().getRowIndex() - 1) * blocksize;
+				long inputColStart = sliceColOffset + (tile.getIndexes().getColumnIndex() - 1) * blocksize;
 				long rowStart = Math.max(ix.rowStart, inputRowStart);
 				long colStart = Math.max(ix.colStart, inputColStart);
 				long rowEnd = Math.min(ix.rowEnd + 1, inputRowStart + block.getNumRows());
