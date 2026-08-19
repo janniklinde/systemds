@@ -315,8 +315,8 @@ public class OOCLRUCacheSchedulerTest {
 		}
 
 		@Override
-		public CompletableFuture<Void> scheduleEviction(BlockEntry block) {
-			return CompletableFuture.completedFuture(null);
+		public OOCFuture<Void> scheduleEviction(BlockEntry block) {
+			return OOCFuture.completed(null);
 		}
 
 		@Override
@@ -327,9 +327,6 @@ public class OOCLRUCacheSchedulerTest {
 			_readCounts.computeIfAbsent(block.getKey(), k -> new AtomicInteger(0)).incrementAndGet();
 			return future;
 		}
-
-		@Override
-		public void prioritizeRead(BlockKey key, double priority) {}
 
 		@Override
 		public CompletableFuture<Boolean> scheduleDeletion(BlockEntry block) {

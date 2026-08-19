@@ -255,7 +255,6 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 				state.priority += priority;
 			}
 		}
-		_ioHandler.prioritizeRead(key, priority);
 	}
 
 	private void scheduleDeferredRead(DeferredReadRequest deferredReadRequest) {
@@ -922,7 +921,7 @@ public class OOCLRUCacheScheduler implements OOCCacheScheduler {
 			onEvicted(entry);
 			return;
 		}
-		CompletableFuture<Void> future = _ioHandler.scheduleEviction(entry);
+		OOCFuture<Void> future = _ioHandler.scheduleEviction(entry);
 		future.whenComplete((r, e) -> onEvicted(entry));
 	}
 
