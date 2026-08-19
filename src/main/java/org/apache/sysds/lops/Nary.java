@@ -43,8 +43,8 @@ public class Nary extends Lop {
 			addInput(inputLop);
 			inputLop.addOutput(this);
 		}
-		
-		if( et == ExecType.CP || et == ExecType.SPARK ) {
+
+		if(et == ExecType.CP || et == ExecType.SPARK || et == ExecType.OOC) {
 			lps.setProperties(inputs, et);
 		}
 		else {

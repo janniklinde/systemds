@@ -142,10 +142,12 @@ public class NaryOp extends Hop {
 		checkAndSetForcedPlatform();
 		
 		ExecType REMOTE = ExecType.SPARK;
-		
-		//forced / memory-based / threshold-based decision
-		if( _etypeForced != null ) {
+
+		// forced / memory-based / threshold-based decision
+		if(_etypeForced != null) {
 			_etype = _etypeForced;
+			if(_etype == ExecType.OOC && (_op == OpOpN.MIN || _op == OpOpN.MAX))
+				_etype = ExecType.CP;
 		}
 		else
 		{

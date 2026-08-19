@@ -66,10 +66,13 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 		MatrixObject m2 = ec.getMatrixObject(input2);
 
 		OOCStream<IndexedMatrixValue> qOut = new SubscribableTaskQueue<>();
-		ec.getMatrixObject(output).setStreamHandle(qOut);
 
-		final boolean known1 = m1.getNumRows() >= 0 && m1.getNumColumns() >= 0 && m1.getBlocksize() > 0;
-		final boolean known2 = m2.getNumRows() >= 0 && m2.getNumColumns() >= 0 && m2.getBlocksize() > 0;
+		final boolean known1 = OOCInstructionUtils.known(m1);
+		final boolean known2 = OOCInstructionUtils.known(m2);
+		if(known1 && known2)
+			OOCInstructionUtils.propagateDims(ec, output, Math.max(m1.getNumRows(), m2.getNumRows()),
+				Math.max(m1.getNumColumns(), m2.getNumColumns()), m1.getBlocksize(), -1);
+		ec.getMatrixObject(output).setStreamHandle(qOut);
 
 		// Unknown dimensions cannot distinguish a broadcast from a strict key-wise operation. Preserve the existing
 		// key-wise semantics without entering the legacy cache pipeline.
@@ -126,6 +129,7 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 		//create thread and process binary operation
 		MatrixObject min = ec.getMatrixObject(input1.isMatrix() ? input1 : input2);
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
+		OOCInstructionUtils.propagateDims(ec, output, min.getNumRows(), min.getNumColumns(), min.getBlocksize(), -1);
 		ec.getMatrixObject(output).setStreamHandle(qOut);
 		OOCInstructionUtils.equiMapBlock(min.getStreamable(), qOut,
 			block -> block.scalarOperations(sc_op, new MatrixBlock()), getContext());
