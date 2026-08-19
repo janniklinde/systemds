@@ -69,6 +69,8 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 		if(min != vin && mdc.getRows() > 0 && mdc.getCols() > 0 && vdc.getCols() > 0 &&
 			mdc.getCols() == vdc.getRows() && mdc.getBlocksize() == vdc.getBlocksize()) {
 			OOCStream<IndexedMatrixValue> out = createWritableStream();
+			OOCInstructionUtils.propagateDims(ec, output, min.getNumRows(), vin.getNumColumns(), min.getBlocksize(),
+				-1);
 			ec.getMatrixObject(output).setStreamHandle(out);
 			BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
 			if(vin.getDataCharacteristics().getNumColBlocks() == 1) {
