@@ -95,6 +95,7 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 		HashMap<Long, MatrixBlock> corrs = new HashMap<>();
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 		OOCStream<IndexedMatrixValue> qLocal = createWritableStream();
+		propagateOutputDims(ec, min, aggun, blen);
 		ec.getMatrixObject(output).setStreamHandle(qOut);
 
 		mapOOC(qIn, qLocal, tmp -> {
@@ -137,9 +138,17 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 		}).thenRun(qOut::closeInput);
 	}
 
+	private void propagateOutputDims(ExecutionContext ec, MatrixObject input, AggregateUnaryOperator operator,
+		int blocksize) {
+		long rows = operator.isRowAggregate() ? input.getNumRows() : 1;
+		long cols = operator.isRowAggregate() ? 1 : input.getNumColumns();
+		OOCInstructionUtils.propagateDims(ec, output, rows, cols, blocksize, -1);
+	}
+
 	private void processPlannerMatrixAggregate(ExecutionContext ec, MatrixObject input, AggregateUnaryOperator operator,
 		int blocksize) {
 		OOCStream<IndexedMatrixValue> outputStream = createWritableStream();
+		propagateOutputDims(ec, input, operator, blocksize);
 		ec.getMatrixObject(output).setStreamHandle(outputStream);
 		GroupedReduceOOCPrimitive.Grouping grouping = operator
 			.isRowAggregate() ? GroupedReduceOOCPrimitive.Grouping.ROW_BLOCKS : GroupedReduceOOCPrimitive.Grouping.COL_BLOCKS;

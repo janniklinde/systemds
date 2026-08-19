@@ -114,6 +114,7 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 		MatrixBlock s3 = input3.isMatrix() ? null : getScalarInputBlock(ec, input3);
 
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
+		OOCInstructionUtils.propagateDims(ec, output, mo.getNumRows(), mo.getNumColumns(), mo.getBlocksize(), -1);
 		ec.getMatrixObject(output).setStreamHandle(qOut);
 
 		OOCInstructionUtils.equiMapBlock(mo.getStreamable(), qOut, block -> {
@@ -132,6 +133,8 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 		MatrixBlock s3 = input3.isMatrix() ? null : getScalarInputBlock(ec, input3);
 
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
+		OOCInstructionUtils.propagateDims(ec, output, Math.max(left.getNumRows(), right.getNumRows()),
+			Math.max(left.getNumColumns(), right.getNumColumns()), left.getBlocksize(), -1);
 		ec.getMatrixObject(output).setStreamHandle(qOut);
 
 		OOCInstructionUtils.equiJoin(left.getStreamable(), right.getStreamable(), qOut, (l, r) -> {
@@ -148,6 +151,9 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 		MatrixObject m3 = ec.getMatrixObject(input3);
 
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
+		OOCInstructionUtils.propagateDims(ec, output, Math.max(m1.getNumRows(), Math.max(m2.getNumRows(),
+			m3.getNumRows())), Math.max(m1.getNumColumns(), Math.max(m2.getNumColumns(), m3.getNumColumns())),
+			m1.getBlocksize(), -1);
 		ec.getMatrixObject(output).setStreamHandle(qOut);
 
 		if(m1.getDataCharacteristics().dimsKnown() && m2.getDataCharacteristics().dimsKnown() &&

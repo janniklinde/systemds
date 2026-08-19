@@ -107,6 +107,8 @@ public class ReorgOOCInstruction extends ComputationOOCInstruction {
 		} else if(r_op.fn instanceof SwapIndex) {
 			OOCStreamable<IndexedMatrixValue> qIn = min.getStreamable();
 			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
+			OOCInstructionUtils.propagateDims(ec, output, min.getNumColumns(), min.getNumRows(), min.getBlocksize(),
+				min.getDataCharacteristics().getNonZeros());
 			ec.getMatrixObject(output).setStreamHandle(qOut);
 
 			OOCInstructionUtils.transposedMap(qIn, qOut,
