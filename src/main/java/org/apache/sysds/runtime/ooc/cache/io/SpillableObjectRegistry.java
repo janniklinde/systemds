@@ -19,7 +19,9 @@
 
 package org.apache.sysds.runtime.ooc.cache.io;
 
+import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
 
 import java.io.DataInput;
@@ -41,13 +43,22 @@ public final class SpillableObjectRegistry {
 
 	public static SpillableObject read(DataInput in) throws IOException {
 		byte type = in.readByte();
-		SpillableObject obj = switch(type) {
-			case INDEXED_MATRIX_VALUE -> new IndexedMatrixValue();
-			case PACKED_BLOCK -> new PackedBlock();
+		return switch(type) {
+			case INDEXED_MATRIX_VALUE -> {
+				IndexedMatrixValue matrix = new IndexedMatrixValue();
+				MatrixBlock value = new MatrixBlock();
+				matrix.getIndexes().readFields(in);
+				value.readFields(in, SparseBlock.Type.COO);
+				matrix.setValue(value);
+				yield matrix;
+			}
+			case PACKED_BLOCK -> {
+				PackedBlock packed = new PackedBlock();
+				packed.read(in);
+				yield packed;
+			}
 			default -> throw new IOException("Unknown spillable object type: " + type);
 		};
-		obj.read(in);
-		return obj;
 	}
 
 	private static byte typeOf(SpillableObject obj) throws IOException {

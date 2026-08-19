@@ -20,9 +20,11 @@
 package org.apache.sysds.test.component.ooc.cache;
 
 import org.apache.sysds.common.Types;
+import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.io.MatrixWriter;
 import org.apache.sysds.runtime.io.MatrixWriterFactory;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
@@ -61,12 +63,40 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 
 	@Test
 	public void testSourceBackedScheduleRead() throws Exception {
-		getAndLoadTestConfiguration(TEST_NAME);
-		final int rows = 4;
-		final int cols = 4;
-		final int blen = 2;
+		testSourceBackedScheduleRead(false);
+	}
 
-		MatrixBlock src = MatrixBlock.randOperations(rows, cols, 1.0, -1, 1, "uniform", 17);
+	@Test
+	public void testUltraSparseSourceUsesCOO() throws Exception {
+		testSourceBackedScheduleRead(true);
+	}
+
+	@Test
+	public void testUltraSparseSpillReadUsesCOO() throws Exception {
+		MatrixBlock block = new MatrixBlock(1000, 1000, true);
+		block.set(3, 7, 2);
+		IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(1, 1), block);
+		BlockEntry entry = BlockEntryTestAccess.newBlockEntry(new BlockKey(7, 0), value.size(), value);
+
+		handler.scheduleEviction(entry).get();
+		BlockEntryTestAccess.setDataUnsafe(entry, null);
+		handler.scheduleRead(entry).get();
+
+		MatrixBlock readBlock = (MatrixBlock) ((IndexedMatrixValue) BlockEntryTestAccess.getDataUnsafe(entry)).getValue();
+		Assert.assertEquals(2, readBlock.get(3, 7), 0);
+		Assert.assertEquals(SparseBlock.Type.COO, readBlock.getSparseBlock().getSparseBlockType());
+	}
+
+	private void testSourceBackedScheduleRead(boolean ultraSparse) throws Exception {
+		getAndLoadTestConfiguration(TEST_NAME);
+		final int rows = ultraSparse ? 1000 : 4;
+		final int cols = ultraSparse ? 1000 : 4;
+		final int blen = ultraSparse ? 1000 : 2;
+
+		MatrixBlock src = ultraSparse ? new MatrixBlock(rows, cols, true) :
+			MatrixBlock.randOperations(rows, cols, 1.0, -1, 1, "uniform", 17);
+		if(ultraSparse)
+			src.set(3, 7, 2);
 		String fname = input("binary_src");
 		writeBinaryMatrix(src, fname, blen);
 
@@ -76,6 +106,11 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 
 		OOCIOHandler.SourceReadResult res = handler.scheduleSourceRead(req).get();
 		Assert.assertFalse(res.blocks.isEmpty());
+		if(ultraSparse) {
+			IndexedMatrixValue scanned = target.dequeue();
+			Assert.assertEquals(SparseBlock.Type.COO,
+				((MatrixBlock) scanned.getValue()).getSparseBlock().getSparseBlockType());
+		}
 
 		OOCIOHandler.SourceBlockDescriptor desc = res.blocks.get(0);
 		BlockKey key = new BlockKey(7, 0);
@@ -89,6 +124,8 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 		MatrixBlock readBlock = (MatrixBlock) imv.getValue();
 		MatrixBlock expected = expectedBlock(src, desc.indexes, blen);
 		TestUtils.compareMatrices(expected, readBlock, 1e-12);
+		if(ultraSparse)
+			Assert.assertEquals(SparseBlock.Type.COO, readBlock.getSparseBlock().getSparseBlockType());
 	}
 
 	private void writeBinaryMatrix(MatrixBlock mb, String fname, int blen) throws Exception {
@@ -96,7 +133,7 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 		writer.writeMatrixToHDFS(mb, fname, mb.getNumRows(), mb.getNumColumns(), blen, mb.getNonZeros());
 	}
 
-	private MatrixBlock expectedBlock(MatrixBlock src, org.apache.sysds.runtime.matrix.data.MatrixIndexes idx, int blen) {
+	private MatrixBlock expectedBlock(MatrixBlock src, MatrixIndexes idx, int blen) {
 		int rowStart = (int) ((idx.getRowIndex() - 1) * blen);
 		int colStart = (int) ((idx.getColumnIndex() - 1) * blen);
 		int rowEnd = Math.min(rowStart + blen - 1, src.getNumRows() - 1);

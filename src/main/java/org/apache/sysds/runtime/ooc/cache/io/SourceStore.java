@@ -27,6 +27,9 @@ import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.common.Types;
 import org.apache.sysds.conf.ConfigurationManager;
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.data.SparseBlock;
+import org.apache.sysds.runtime.data.SparseBlockCSR;
+import org.apache.sysds.runtime.data.SparseBlockFactory;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.io.IOUtilFunctions;
@@ -123,6 +126,9 @@ final class SourceStore {
 			if(!reader.next(ix, mb))
 				throw new DMLRuntimeException(
 					"Failed to read source block at offset " + src.offset + " in " + src.path);
+			if(mb.getSparseBlock() instanceof SparseBlockCSR csr && SparseBlockFactory.estimateSizeSparseInMemory(
+				SparseBlock.Type.COO, mb.getNumRows(), mb.getNumColumns(), mb.getSparsity()) < csr.getExactSizeInMemory())
+				mb = new MatrixBlock(mb, SparseBlock.Type.COO, false);
 			if(readAheadBudget > 0)
 				readAhead(src, reader, readAheadBudget, cache);
 		}
@@ -154,6 +160,10 @@ final class SourceStore {
 			long ioStart = DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
 			if(!reader.next(indexes, matrix))
 				return;
+			if(matrix.getSparseBlock() instanceof SparseBlockCSR csr && SparseBlockFactory.estimateSizeSparseInMemory(
+				SparseBlock.Type.COO, matrix.getNumRows(), matrix.getNumColumns(), matrix.getSparsity()) < csr
+					.getExactSizeInMemory())
+				matrix = new MatrixBlock(matrix, SparseBlock.Type.COO, false);
 			bytes += index.endAt(next) - start;
 			if(DMLScript.OOC_LOG_EVENTS)
 				OOCEventLog.onDiskReadEvent(_scanCallerId, ioStart, System.nanoTime(), index.endAt(next) - start);
@@ -322,6 +332,10 @@ final class SourceStore {
 				if(!reader.next(key, value))
 					break;
 				long recordEnd = reader.getPosition();
+				if(value.getSparseBlock() instanceof SparseBlockCSR csr && SparseBlockFactory.estimateSizeSparseInMemory(
+					SparseBlock.Type.COO, value.getNumRows(), value.getNumColumns(), value.getSparsity()) < csr
+						.getExactSizeInMemory())
+					value = new MatrixBlock(value, SparseBlock.Type.COO, false);
 				long blockSize = value.getExactSerializedSize();
 				boolean shouldBreak = false;
 
