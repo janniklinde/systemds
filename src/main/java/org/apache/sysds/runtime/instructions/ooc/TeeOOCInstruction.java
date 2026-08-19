@@ -23,18 +23,32 @@ import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
+import org.apache.sysds.runtime.instructions.cp.Data;
+import org.apache.sysds.runtime.instructions.cp.ListObject;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 
+import java.util.Collections;
+import java.util.Map;
+import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 public class TeeOOCInstruction extends ComputationOOCInstruction {
 
 	private static final ConcurrentHashMap<OOCStreamable<IndexedMatrixValue>, Integer> refCtr = new ConcurrentHashMap<>();
 
+	private static final ConcurrentHashMap<OOCStreamable<IndexedMatrixValue>, Set<MatrixObject>> refOwners =
+		new ConcurrentHashMap<>();
+
 	public static void reset() {
+		refOwners.clear();
 		if (!refCtr.isEmpty()) {
-			System.err.println("There are some dangling streams still in the cache: " + refCtr);
+			Map<OOCStreamable<IndexedMatrixValue>, Integer> dangling = refCtr.entrySet().stream()
+				.filter(e -> e.getValue() > 0).collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+			if(!dangling.isEmpty())
+				System.err.println("There are some dangling streams still in the cache: " + dangling);
 			for(OOCStreamable<IndexedMatrixValue> stream : refCtr.keySet()) {
 				try {
 					scheduleDeletion(stream);
@@ -52,19 +66,72 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 	 * Increments the reference counter of a stream by the set amount.
 	 */
 	public static void incrRef(OOCStreamable<IndexedMatrixValue> stream, int incr) {
-		if(!stream.hasStreamCache() && !stream.hasMaterializedStore())
+		changeRef(stream, incr, null, null);
+	}
+
+	public static void registerOwner(OOCStreamable<IndexedMatrixValue> stream, MatrixObject owner) {
+		OOCStreamable<IndexedMatrixValue> handle = resolveHandle(stream);
+		if(handle == null || owner == null)
 			return;
-		OOCStreamable<IndexedMatrixValue> handle = stream.hasStreamCache() ? stream.getStreamCache() : stream;
+		refOwners.computeIfAbsent(handle,
+			k -> Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()))).add(owner);
+	}
+
+	public static void releaseRef(ExecutionContext ec, Data data) {
+		if(data instanceof ListObject) {
+			for(Data element : ((ListObject) data).getData())
+				releaseRef(ec, element);
+			return;
+		}
+		if(!(data instanceof MatrixObject))
+			return;
+		MatrixObject mo = (MatrixObject) data;
+		changeRef(mo.getStreamable(), -1, mo, ec);
+	}
+
+	private static void changeRef(OOCStreamable<IndexedMatrixValue> stream, int incr, MatrixObject owner,
+		ExecutionContext ec) {
+		OOCStreamable<IndexedMatrixValue> handle = resolveHandle(stream);
+		if(handle == null)
+			return;
+		if(owner != null)
+			registerOwner(handle, owner);
 
 		Integer ref = refCtr.compute(handle, (k, v) -> {
-			if (v == null)
-				v = 0;
-			v += incr;
-			return v <= 0 ? null : v;
+			int count = (v == null ? 0 : v) + incr;
+			if(count > 0)
+				return count;
+			return isReleasable(handle, owner, ec) ? null : 0;
 		});
 
 		if(ref == null)
 			scheduleDeletion(handle);
+	}
+
+	private static boolean isReleasable(OOCStreamable<IndexedMatrixValue> handle, MatrixObject owner,
+		ExecutionContext ec) {
+		if(owner == null || ec == null)
+			return true;
+		Set<MatrixObject> registered = refOwners.get(handle);
+		if(registered == null)
+			return isDead(owner, ec);
+		synchronized(registered) {
+			for(MatrixObject candidate : registered)
+				if(!isDead(candidate, ec))
+					return false;
+		}
+		refOwners.remove(handle);
+		return true;
+	}
+
+	private static boolean isDead(MatrixObject mo, ExecutionContext ec) {
+		return mo.isCleanupEnabled() && !ec.getVariables().hasReferences(mo);
+	}
+
+	private static OOCStreamable<IndexedMatrixValue> resolveHandle(OOCStreamable<IndexedMatrixValue> stream) {
+		if(stream == null || (!stream.hasStreamCache() && !stream.hasMaterializedStore()))
+			return null;
+		return stream.hasStreamCache() ? stream.getStreamCache() : stream;
 	}
 
 	private static void scheduleDeletion(OOCStreamable<IndexedMatrixValue> stream) {
@@ -108,5 +175,8 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 		MatrixObject mo = ec.getMatrixObject(output);
 		mo.setStreamHandle(handle);
 		mo.setMetaData(min.getMetaData());
+
+		registerOwner(handle, min);
+		registerOwner(handle, mo);
 	}
 }

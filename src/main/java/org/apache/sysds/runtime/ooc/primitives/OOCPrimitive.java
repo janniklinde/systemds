@@ -54,6 +54,7 @@ public abstract class OOCPrimitive {
 	private final List<InputSlot> _inputs;
 	private final AtomicBoolean _started;
 	private final AtomicBoolean _executionStarted;
+	private boolean _subtreeStarted;
 	private final AtomicBoolean _failed;
 	private volatile Throwable _failure;
 	protected OOCAccessPattern _pattern;
@@ -111,6 +112,14 @@ public abstract class OOCPrimitive {
 
 	public final boolean hasStartedExecution() {
 		return _executionStarted.get();
+	}
+
+	public final boolean isSubtreeStarted() {
+		return _subtreeStarted;
+	}
+
+	public final void markSubtreeStarted() {
+		_subtreeStarted = true;
 	}
 
 	public List<OOCMaterializedInputRequest> requiredMaterializedInputs() {
@@ -172,8 +181,12 @@ public abstract class OOCPrimitive {
 	}
 
 	public final void start() {
-		if(_started.compareAndSet(false, true))
+		if(claimCompilation())
 			OOCPlanner.compile(this);
+	}
+
+	public final boolean claimCompilation() {
+		return _started.compareAndSet(false, true);
 	}
 
 	public final void tryStartExecution() {

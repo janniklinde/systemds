@@ -796,8 +796,8 @@ public class VariableCPInstruction extends CPInstruction implements LineageTrace
 			if( srcData.getDataType().isMatrix() || srcData.getDataType().isFrame() ) {
 				Data tgtData = ec.removeVariable(getInput2().getName());
 
-				if (DMLScript.USE_OOC && tgtData instanceof MatrixObject)
-					TeeOOCInstruction.incrRef(((MatrixObject) tgtData).getStreamable(), -1);
+				if (DMLScript.USE_OOC && srcData != tgtData)
+					TeeOOCInstruction.releaseRef(ec, tgtData);
 
 				if( tgtData != null && srcData != tgtData )
 					ec.cleanupDataObject(tgtData);
@@ -1037,8 +1037,8 @@ public class VariableCPInstruction extends CPInstruction implements LineageTrace
 
 		// remove existing variable bound to target name
 		Data input2_data = ec.removeVariable(getInput2().getName());
-		if (DMLScript.USE_OOC && input2_data instanceof MatrixObject)
-			TeeOOCInstruction.incrRef(((MatrixObject) input2_data).getStreamable(), -1);
+		if (DMLScript.USE_OOC)
+			TeeOOCInstruction.releaseRef(ec, input2_data);
 
 		//cleanup matrix data on fs/hdfs (if necessary)
 		if( input2_data != null )
@@ -1128,8 +1128,8 @@ public class VariableCPInstruction extends CPInstruction implements LineageTrace
 	public static void processRmvarInstruction( ExecutionContext ec, String varname ) {
 		// remove variable from symbol table
 		Data dat = ec.removeVariable(varname);
-		if (DMLScript.USE_OOC && dat instanceof MatrixObject)
-			TeeOOCInstruction.incrRef(((MatrixObject) dat).getStreamable(), -1);
+		if (DMLScript.USE_OOC)
+			TeeOOCInstruction.releaseRef(ec, dat);
 		//cleanup matrix data on fs/hdfs (if necessary)
 		if( dat != null )
 			ec.cleanupDataObject(dat);
