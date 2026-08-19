@@ -25,7 +25,6 @@ import org.apache.sysds.runtime.instructions.ooc.OOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
-import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerImpl;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCCacheScheduler;
@@ -43,6 +42,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 public class OOCCacheManager {
 	private static final double OOC_BUFFER_PERCENTAGE = 0.2;
@@ -161,7 +161,7 @@ public class OOCCacheManager {
 	 */
 	public static void put(long streamId, int blockId, IndexedMatrixValue value) {
 		BlockKey key = new BlockKey(streamId, blockId);
-		getCache().put(key, value, ((MatrixBlock)value.getValue()).getExactSerializedSize());
+		getCache().put(key, value, OOCUtils.memoryCharge(value));
 	}
 
 	/**
@@ -170,7 +170,7 @@ public class OOCCacheManager {
 	public static void putSourceBacked(long streamId, int blockId, IndexedMatrixValue value,
 		OOCIOHandler.SourceBlockDescriptor descriptor) {
 		BlockKey key = new BlockKey(streamId, blockId);
-		getCache().putSourceBacked(key, value, ((MatrixBlock) value.getValue()).getExactSerializedSize(), descriptor);
+		getCache().putSourceBacked(key, value, OOCUtils.memoryCharge(value), descriptor);
 	}
 
 	public static void putRawSourceBacked(BlockKey key, Object data, long size, OOCIOHandler.SourceBlockDescriptor descriptor) {
@@ -179,7 +179,7 @@ public class OOCCacheManager {
 
 	public static OOCStream.QueueCallback<IndexedMatrixValue> putAndPin(long streamId, int blockId, IndexedMatrixValue value) {
 		BlockKey key = new BlockKey(streamId, blockId);
-		return new CachedQueueCallback<>(getCache().putAndPin(key, value, ((MatrixBlock)value.getValue()).getExactSerializedSize()), null);
+		return new CachedQueueCallback<>(getCache().putAndPin(key, value, OOCUtils.memoryCharge(value)), null);
 	}
 
 	public static void putRaw(BlockKey key, Object data, long size) {
@@ -197,7 +197,7 @@ public class OOCCacheManager {
 		IndexedMatrixValue value, OOCIOHandler.SourceBlockDescriptor descriptor) {
 		BlockKey key = new BlockKey(streamId, blockId);
 		return new CachedQueueCallback<>(
-			getCache().putAndPinSourceBacked(key, value, ((MatrixBlock) value.getValue()).getExactSerializedSize(),
+			getCache().putAndPinSourceBacked(key, value, OOCUtils.memoryCharge(value),
 				descriptor), null);
 	}
 
@@ -448,7 +448,7 @@ public class OOCCacheManager {
 
 		@Override
 		public T get() {
-			throw new UnsupportedOperationException();
+			throw new UnsupportedOperationException("A cached bulk callback holds several values; use get(idx)");
 		}
 
 		@Override

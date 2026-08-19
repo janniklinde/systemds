@@ -101,6 +101,22 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	protected long getMaxTaskReservationBytes() {
+		DataCharacteristics inputDc = _input.getDataCharacteristics();
+		DataCharacteristics outputDc = _output.getDataCharacteristics();
+		if(inputDc == null || !inputDc.dimsKnown() || outputDc == null || !outputDc.dimsKnown())
+			return 0;
+		return taskBytes(inputDc, outputDc);
+	}
+
+	private static long taskBytes(DataCharacteristics inputDc, DataCharacteristics outputDc) {
+		long inputBytes = OOCUtils.estimateFullTileBytes(inputDc);
+		long outputBytes = OOCUtils.estimateFullTileBytes(outputDc);
+		return 2 * OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) +
+			OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(outputBytes) + 5 * outputBytes;
+	}
+
+	@Override
 	protected void startExecution() {
 		DataCharacteristics inputDc = _input.getDataCharacteristics();
 		if(inputDc == null || !inputDc.dimsKnown() || inputDc.getBlocksize() <= 0)
@@ -115,10 +131,7 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 		_outputStream = _output.getWriteStream();
 		_ready = new SubscribableTaskQueue<>();
 
-		long inputBytes = OOCUtils.estimateFullTileBytes(inputDc);
-		long outputBytes = OOCUtils.estimateFullTileBytes(_output.getDataCharacteristics());
-		_taskBytes = 2 * OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) +
-			OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(outputBytes) + 5 * outputBytes;
+		_taskBytes = taskBytes(inputDc, _output.getDataCharacteristics());
 
 		getContext().addOutStream(_outputStream, _ready);
 		OOCInstructionUtils.submitCloseableOOCTasks(_ready, this::process, getContext())
@@ -375,7 +388,7 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 
 	private static ManagedPayload<IndexedMatrixValue> payload(int slot, int count, MatrixBlock block,
 		ReservationBudget budget) {
-		long bytes = block.getExactSerializedSize();
+		long bytes = OOCUtils.memoryCharge(block);
 		budget.reserveBlocking(bytes);
 		return new ManagedPayload<>(new IndexedMatrixValue(new MatrixIndexes(slot + 1L, count), block), bytes, budget);
 	}
