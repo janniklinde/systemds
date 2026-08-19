@@ -25,9 +25,12 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 public class MappingOOCPrimitive extends OOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _output;
@@ -60,9 +63,33 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 	protected void startExecution() {
 		OOCStream<IndexedMatrixValue> input = getInputReadStream(0);
 		OOCStream<IndexedMatrixValue> output = _output.getWriteStream();
-		OOCInstructionUtils
-			.submitAdmittedOOCTasks(input, output,
-				value -> new IndexedMatrixValue(value.getIndexes(), _operation.apply(value)), _allowance, getContext())
-			.thenRun(this::onComplete);
+		long outputBytes = OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics());
+		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(input, _allowance,
+			ignored -> outputBytes);
+		getContext().addOutStream(output);
+		OOCInstructionUtils.submitOOCTasks(admitted, callback -> {
+			ReservationBudget budget = AllocatedOOCStream.detachBudget(callback);
+			try {
+				if(budget == null)
+					throw new IllegalStateException("Missing admitted mapping output budget");
+				IndexedMatrixValue value = callback.get();
+				prepareOutput(output, callback, new IndexedMatrixValue(value.getIndexes(), _operation.apply(value)),
+					budget);
+				budget = null;
+			}
+			finally {
+				if(budget != null)
+					budget.close();
+			}
+		}, getContext()).whenComplete((ignored, error) -> {
+			try {
+				if(error != null)
+					fail(error);
+				output.closeInput();
+			}
+			finally {
+				onComplete();
+			}
+		});
 	}
 }
