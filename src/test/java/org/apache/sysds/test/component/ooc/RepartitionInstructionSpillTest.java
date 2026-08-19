@@ -42,6 +42,8 @@ import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.UncoordinatedDataGenOOCPrimitive;
 import org.apache.sysds.utils.Statistics;
 import org.junit.Assert;
@@ -123,6 +125,107 @@ public class RepartitionInstructionSpillTest {
 						Assert.assertEquals(21, block.get(199, 0), 0);
 						Assert.assertEquals(22, block.get(199, 199), 0);
 					}
+					blocks++;
+				}
+			Assert.assertEquals(4, blocks);
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
+	@Test
+	public void testScalarLeftIndexing() {
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
+			MatrixObject in = matrixObject(400, 400, 200);
+			MatrixObject out = matrixObject(400, 400, 200);
+			in.setStreamHandle(input);
+			ec.setVariable("A", in);
+			ec.setVariable("C", out);
+			input.enqueue(tile(1, 1, 200, 200, 1));
+			input.enqueue(tile(1, 2, 200, 200, 1));
+			input.enqueue(tile(2, 1, 200, 200, 1));
+			input.enqueue(tile(2, 2, 200, 200, 1));
+			input.closeInput();
+
+			IndexingOOCInstruction.parseInstruction("CP°leftIndex°A·MATRIX·FP64°7·SCALAR·FP64·true°"
+				+ "251·SCALAR·INT64·true°251·SCALAR·INT64·true°251·SCALAR·INT64·true°"
+				+ "251·SCALAR·INT64·true°C·MATRIX·FP64").processInstruction(ec);
+			Assert.assertTrue(out.getStreamable().getPrimitive() instanceof MappingOOCPrimitive);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			result.start();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue value = current.get();
+					MatrixBlock block = (MatrixBlock) value.getValue();
+					if(value.getIndexes().equals(new MatrixIndexes(2, 2))) {
+						Assert.assertEquals(7, block.get(50, 50), 0);
+						Assert.assertEquals(1, block.get(50, 51), 0);
+					}
+					blocks++;
+				}
+			Assert.assertEquals(4, blocks);
+		}
+		finally {
+			OOCCacheManager.reset();
+		}
+	}
+
+	@Test
+	public void testLeftIndexingSpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			SubscribableTaskQueue<IndexedMatrixValue> leftInput = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> rightInput = new SubscribableTaskQueue<>();
+			MatrixObject left = matrixObject(400, 400, 200);
+			MatrixObject right = matrixObject(300, 300, 150);
+			MatrixObject out = matrixObject(400, 400, 200);
+			left.setStreamHandle(leftInput);
+			right.setStreamHandle(rightInput);
+			ec.setVariable("A", left);
+			ec.setVariable("B", right);
+			ec.setVariable("C", out);
+			leftInput.enqueue(tile(1, 1, 200, 200, 1));
+
+			IndexingOOCInstruction.parseInstruction("CP°leftIndex°A·MATRIX·FP64°B·MATRIX·FP64°"
+				+ "51·SCALAR·INT64·true°350·SCALAR·INT64·true°51·SCALAR·INT64·true°"
+				+ "350·SCALAR·INT64·true°C·MATRIX·FP64").processInstruction(ec);
+			Assert.assertTrue(out.getStreamable().getPrimitive() instanceof RepartitionOOCPrimitive);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			result.start();
+			waitForSpill();
+
+			leftInput.enqueue(tile(1, 2, 200, 200, 1));
+			leftInput.enqueue(tile(2, 1, 200, 200, 1));
+			leftInput.enqueue(tile(2, 2, 200, 200, 1));
+			leftInput.closeInput();
+			rightInput.enqueue(tile(1, 1, 150, 150, 9));
+			rightInput.enqueue(tile(1, 2, 150, 150, 9));
+			rightInput.enqueue(tile(2, 1, 150, 150, 9));
+			rightInput.enqueue(tile(2, 2, 150, 150, 9));
+			rightInput.closeInput();
+
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue value = current.get();
+					MatrixBlock block = (MatrixBlock) value.getValue();
+					long rowOffset = (value.getIndexes().getRowIndex() - 1) * 200;
+					long colOffset = (value.getIndexes().getColumnIndex() - 1) * 200;
+					for(int row = 0; row < block.getNumRows(); row += 49)
+						for(int col = 0; col < block.getNumColumns(); col += 49) {
+							long globalRow = rowOffset + row;
+							long globalCol = colOffset + col;
+							double expected = globalRow >= 50 && globalRow < 350 && globalCol >= 50 &&
+								globalCol < 350 ? 9 : 1;
+							Assert.assertEquals(expected, block.get(row, col), 0);
+						}
 					blocks++;
 				}
 			Assert.assertEquals(4, blocks);
