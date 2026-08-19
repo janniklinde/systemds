@@ -96,9 +96,9 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 			return;
 		}
 
-		throw new DMLRuntimeException("Planner-backed OOC matrix multiplication requires known positive dimensions, "
-			+ "matching inner dimensions, and equal positive block sizes: " + min.getNumRows() + "x"
-			+ min.getNumColumns() + " (blocksize " + min.getBlocksize() + ") %*% " + vin.getNumRows() + "x"
-			+ vin.getNumColumns() + " (blocksize " + vin.getBlocksize() + ")");
+		throw new DMLRuntimeException("Planner-backed OOC matrix multiplication requires non-empty operands with "
+			+ "matching inner dimensions and equal block sizes: " + min.getNumRows() + "x" + min.getNumColumns()
+			+ " (blocksize " + min.getBlocksize() + ") %*% " + vin.getNumRows() + "x" + vin.getNumColumns()
+			+ " (blocksize " + vin.getBlocksize() + ")");
 	}
 }
