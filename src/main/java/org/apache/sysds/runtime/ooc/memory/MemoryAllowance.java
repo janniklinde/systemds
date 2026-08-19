@@ -24,13 +24,35 @@ import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 public interface MemoryAllowance {
 	boolean tryReserve(long bytes);
 
+	default boolean tryReserveTask(long bytes) {
+		return tryReserve(bytes);
+	}
+
 	void reserveBlocking(long bytes);
 
 	OOCFuture<Void> reserveAsync(long bytes);
 
+	default OOCFuture<Void> reserveTaskAsync(long bytes) {
+		return reserveAsync(bytes);
+	}
+
 	void release(long bytes);
 
 	long getUsedMemory();
+
+	default void addPassiveMemory(long bytes) {
+	}
+
+	default void removePassiveMemory(long bytes) {
+	}
+
+	default long getPassiveMemory() {
+		return 0;
+	}
+
+	default long getActiveMemory() {
+		return Math.max(0, getUsedMemory() - getPassiveMemory());
+	}
 
 	long getGrantedMemory();
 

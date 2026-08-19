@@ -21,10 +21,12 @@ package org.apache.sysds.runtime.ooc.memory;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
+import org.apache.sysds.utils.stats.InfrastructureAnalyzer;
 
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.LongAdder;
 
 public class SyncMemoryAllowance implements MemoryAllowance {
 	private static final long RELEASE_TRIM_BUFFER_BYTES = 20_000_000L;
@@ -37,7 +39,9 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	protected volatile long _targetBytes;
 	protected volatile boolean _shutdown;
 	protected volatile boolean _destroyed;
+	private final LongAdder _passiveBytes;
 	private final Queue<ReservationWaiter> _reservationWaiters;
+	private final Queue<ReservationWaiter> _taskWaiters;
 	private boolean _drainingReservationWaiters;
 	private boolean _reservationDrainRequested;
 
@@ -63,7 +67,9 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		_targetBytes = 0;
 		_shutdown = false;
 		_destroyed = false;
+		_passiveBytes = new LongAdder();
 		_reservationWaiters = new ConcurrentLinkedQueue<>();
+		_taskWaiters = new ConcurrentLinkedQueue<>();
 		_drainingReservationWaiters = false;
 		_reservationDrainRequested = false;
 		broker.attachAllowance(this);
@@ -74,7 +80,8 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		if(bytes < 0)
 			throw new IllegalArgumentException("Cannot reserve negative bytes: " + bytes);
 		if(bytes > _consumptionLimit)
-			throw new IllegalArgumentException("Cannot reserve more memory than the consumption limit");
+			throw new IllegalArgumentException(
+				"Cannot reserve " + bytes + " bytes with a consumption limit of " + _consumptionLimit);
 		long minRequest;
 		long maxRequest;
 		synchronized(this) {
@@ -103,7 +110,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 					_usedBytes += bytes;
 					success = true;
 				}
-				drainWaiters = success && !_reservationWaiters.isEmpty();
+				drainWaiters = success && hasReservationWaiters();
 				notifyAll();
 			}
 		}
@@ -112,6 +119,13 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		if(drainWaiters)
 			requestReservationDrain();
 		return success;
+	}
+
+	@Override
+	public boolean tryReserveTask(long bytes) {
+		if(bytes < 0)
+			throw new IllegalArgumentException("Cannot reserve negative bytes: " + bytes);
+		return bytes == 0 || canAdmitTask(bytes) && tryReserve(bytes);
 	}
 
 	@Override
@@ -135,8 +149,8 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		if(bytes == 0)
 			return OOCFuture.completed(null);
 		if(bytes > _consumptionLimit)
-			return OOCFuture
-				.failed(new IllegalArgumentException("Cannot reserve more memory than the consumption limit"));
+			return OOCFuture.failed(new IllegalArgumentException(
+				"Cannot reserve " + bytes + " bytes with a consumption limit of " + _consumptionLimit));
 		if(_shutdown || _destroyed)
 			return OOCFuture.failed(new IllegalStateException("Cannot reserve memory on closed allowance."));
 		if(_reservationWaiters.isEmpty() && tryReserve(bytes))
@@ -150,6 +164,32 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		}
 		requestReservationDrain();
 		if(!future.isDone())
+			_broker.reservationBlocked(this, bytes);
+		return future;
+	}
+
+	@Override
+	public OOCFuture<Void> reserveTaskAsync(long bytes) {
+		if(bytes < 0)
+			throw new IllegalArgumentException("Cannot reserve negative bytes: " + bytes);
+		if(bytes == 0)
+			return OOCFuture.completed(null);
+		if(bytes > _consumptionLimit)
+			return OOCFuture.failed(new IllegalArgumentException(
+				"Cannot reserve " + bytes + " bytes with a consumption limit of " + _consumptionLimit));
+		if(_shutdown || _destroyed)
+			return OOCFuture.failed(new IllegalStateException("Cannot reserve memory on closed allowance."));
+		if(_reservationWaiters.isEmpty() && _taskWaiters.isEmpty() && tryReserveTask(bytes))
+			return OOCFuture.completed(null);
+		OOCFuture<Void> future = new OOCFuture<>();
+		ReservationWaiter waiter = new ReservationWaiter(bytes, future);
+		_taskWaiters.add(waiter);
+		if((_shutdown || _destroyed) && _taskWaiters.remove(waiter)) {
+			future.completeExceptionally(new IllegalStateException("Cannot reserve memory on closed allowance."));
+			return future;
+		}
+		requestReservationDrain();
+		if(!future.isDone() && canAdmitTask(bytes))
 			_broker.reservationBlocked(this, bytes);
 		return future;
 	}
@@ -195,7 +235,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				_grantedBytes = Math.max(_usedBytes, Math.min(_grantedBytes, _usedBytes + RELEASE_TRIM_BUFFER_BYTES));
 				freedMemory = oldGrantedBytes - _grantedBytes;
 			}
-			drainWaiters = !_reservationWaiters.isEmpty() && !_shutdown && !_destroyed;
+			drainWaiters = hasReservationWaiters() && !_shutdown && !_destroyed;
 			notifyAll();
 		}
 		if(destroy)
@@ -209,6 +249,25 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	@Override
 	public long getUsedMemory() {
 		return _usedBytes;
+	}
+
+	@Override
+	public void addPassiveMemory(long bytes) {
+		if(bytes < 0)
+			throw new IllegalArgumentException("Cannot add negative passive memory: " + bytes);
+		_passiveBytes.add(bytes);
+	}
+
+	@Override
+	public void removePassiveMemory(long bytes) {
+		if(bytes < 0)
+			throw new IllegalArgumentException("Cannot remove negative passive memory: " + bytes);
+		_passiveBytes.add(-bytes);
+	}
+
+	@Override
+	public long getPassiveMemory() {
+		return Math.max(0, _passiveBytes.sum());
 	}
 
 	@Override
@@ -236,7 +295,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				_grantedBytes = Math.max(_usedBytes, _targetBytes);
 				freedMemory = oldGrantedBytes - _grantedBytes;
 			}
-			drainWaiters = !_reservationWaiters.isEmpty();
+			drainWaiters = hasReservationWaiters();
 			notifyAll();
 		}
 		if(freedMemory > 0)
@@ -286,13 +345,16 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		ReservationWaiter waiter;
 		while((waiter = _reservationWaiters.poll()) != null)
 			waiter.future.completeExceptionally(ex);
+		while((waiter = _taskWaiters.poll()) != null)
+			waiter.future.completeExceptionally(ex);
 	}
 
 	@Override
 	public String debugState() {
 		synchronized(this) {
-			return "used=" + _usedBytes + " granted=" + _grantedBytes + " target=" + _targetBytes + " limit="
-				+ _consumptionLimit + " waiters=" + _reservationWaiters.size() + (_shutdown ? " shutdown" : "");
+			return "used=" + _usedBytes + " passive=" + getPassiveMemory() + " granted=" + _grantedBytes + " target="
+				+ _targetBytes + " limit=" + _consumptionLimit + " waiters=" + _reservationWaiters.size()
+				+ " taskWaiters=" + _taskWaiters.size() + (_shutdown ? " shutdown" : "");
 		}
 	}
 
@@ -304,7 +366,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	void onBrokerMemoryAvailable() {
 		boolean drainWaiters;
 		synchronized(this) {
-			drainWaiters = !_reservationWaiters.isEmpty() && !_shutdown && !_destroyed;
+			drainWaiters = hasReservationWaiters() && !_shutdown && !_destroyed;
 			notifyAll();
 		}
 		if(drainWaiters)
@@ -312,7 +374,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	}
 
 	boolean hasReservationWaiters() {
-		return !_reservationWaiters.isEmpty();
+		return !_reservationWaiters.isEmpty() || !_taskWaiters.isEmpty();
 	}
 
 	private void requestReservationDrain() {
@@ -328,6 +390,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 					_reservationDrainRequested = false;
 				}
 				drainReservationWaitersOnce();
+				drainTaskWaitersOnce();
 				synchronized(this) {
 					if(!_reservationDrainRequested) {
 						_drainingReservationWaiters = false;
@@ -367,6 +430,44 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			else
 				release(waiter.bytes);
 		}
+	}
+
+	private void drainTaskWaitersOnce() {
+		while(true) {
+			if(_shutdown || _destroyed || !_reservationWaiters.isEmpty())
+				return;
+			ReservationWaiter waiter = _taskWaiters.peek();
+			if(waiter == null || !canAdmitTask(waiter.bytes))
+				return;
+			boolean admitted;
+			try {
+				admitted = tryReserve(waiter.bytes);
+			}
+			catch(Throwable t) {
+				_taskWaiters.remove(waiter);
+				waiter.future.completeExceptionally(t);
+				continue;
+			}
+			if(!admitted)
+				return;
+			if(_taskWaiters.remove(waiter))
+				waiter.future.complete(null);
+			else
+				release(waiter.bytes);
+		}
+	}
+
+	private boolean canAdmitTask(long bytes) {
+		long parallelism = InfrastructureAnalyzer.getLocalParallelism();
+		long active = getActiveMemory();
+		long passive = getPassiveMemory();
+		long activeLimit = saturatedMultiply(2 * parallelism, bytes);
+		long passiveLimit = saturatedMultiply(2, Math.max(active, bytes));
+		return active <= activeLimit - bytes && passive < passiveLimit;
+	}
+
+	private static long saturatedMultiply(long left, long right) {
+		return left == 0 || right <= Long.MAX_VALUE / left ? left * right : Long.MAX_VALUE;
 	}
 
 	private boolean removeReservationWaiter(ReservationWaiter waiter) {

@@ -40,6 +40,7 @@ import org.apache.sysds.runtime.ooc.memory.MemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
+import org.apache.sysds.utils.stats.InfrastructureAnalyzer;
 import org.junit.Assert;
 import org.junit.Test;
 import scala.Tuple3;
@@ -112,6 +113,77 @@ public class OOCMemoryAllowanceTest {
 			allowance.release(allowance.getUsedMemory());
 			allowance.destroy();
 			broker.destroy();
+		}
+	}
+
+	@Test
+	public void testPassiveBudgetAccounting() {
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
+		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);
+		try {
+			allowance.reserveBlocking(100);
+			ReservationBudget budget = new ReservationBudget(allowance, 100);
+			budget.reserveBlocking(60);
+			Assert.assertEquals(100, allowance.getActiveMemory());
+			Assert.assertEquals(0, allowance.getPassiveMemory());
+
+			budget.close();
+			Assert.assertEquals(0, allowance.getActiveMemory());
+			Assert.assertEquals(60, allowance.getPassiveMemory());
+			budget.release(20);
+			Assert.assertEquals(40, allowance.getPassiveMemory());
+			budget.release(40);
+			Assert.assertEquals(0, allowance.getPassiveMemory());
+			Assert.assertEquals(0, allowance.getUsedMemory());
+
+			allowance.reserveBlocking(100);
+			ReservationBudget root = new ReservationBudget(allowance, 100);
+			root.reserveBlocking(60);
+			ReservationBudget child = new ReservationBudget(root, 60);
+			child.reserveBlocking(40);
+			child.close();
+			Assert.assertEquals(0, allowance.getPassiveMemory());
+			root.close();
+			Assert.assertEquals(40, allowance.getPassiveMemory());
+			child.release(40);
+			Assert.assertEquals(0, allowance.getPassiveMemory());
+			Assert.assertEquals(0, allowance.getUsedMemory());
+		}
+		finally {
+			if(allowance.getUsedMemory() > 0)
+				allowance.release(allowance.getUsedMemory());
+			allowance.destroy();
+		}
+	}
+
+	@Test
+	public void testPassiveTaskAdmission() {
+		int parallelism = InfrastructureAnalyzer.getLocalParallelism();
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(Math.max(1000, 4L * parallelism));
+		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);
+		List<ReservationBudget> budgets = new ArrayList<>();
+		try {
+			while(allowance.tryReserveTask(1)) {
+				ReservationBudget budget = new ReservationBudget(allowance, 1);
+				budget.reserveBlocking(1);
+				budgets.add(budget);
+			}
+			Assert.assertEquals(2 * parallelism, budgets.size());
+			for(ReservationBudget budget : budgets)
+				budget.close();
+			Assert.assertEquals(0, allowance.getActiveMemory());
+			Assert.assertEquals(2L * parallelism, allowance.getPassiveMemory());
+			Assert.assertFalse(allowance.tryReserveTask(1));
+			for(ReservationBudget budget : budgets)
+				budget.release(1);
+			Assert.assertEquals(0, allowance.getPassiveMemory());
+			Assert.assertTrue(allowance.tryReserveTask(1));
+			allowance.release(1);
+		}
+		finally {
+			if(allowance.getUsedMemory() > 0)
+				allowance.release(allowance.getUsedMemory());
+			allowance.destroy();
 		}
 	}
 
