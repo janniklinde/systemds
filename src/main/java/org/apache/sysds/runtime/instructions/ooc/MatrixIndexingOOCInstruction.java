@@ -36,6 +36,7 @@ import org.apache.sysds.runtime.matrix.data.OperationsOnMatrixValues;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.ooc.stream.FilteredOOCStream;
 import org.apache.sysds.runtime.ooc.stream.SubOOCStream;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.util.IndexRange;
 import org.apache.sysds.runtime.util.UtilFunctions;
 
@@ -123,6 +124,46 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 			OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 			addOutStream(qOut);
 			mOut.setStreamHandle(qOut);
+
+			if(mo.getDataCharacteristics().dimsKnown()) {
+				OOCInstructionUtils.repartition(qIn, qOut, outputIndex -> {
+					long sourceRowStart = ix.rowStart + (outputIndex.getRowIndex() - 1) * blocksize;
+					long sourceColStart = ix.colStart + (outputIndex.getColumnIndex() - 1) * blocksize;
+					long sourceRowEnd = Math.min(ix.rowEnd, sourceRowStart + blocksize - 1);
+					long sourceColEnd = Math.min(ix.colEnd, sourceColStart + blocksize - 1);
+					int rowFragments = (int) (sourceRowEnd / blocksize - sourceRowStart / blocksize + 1);
+					int colFragments = (int) (sourceColEnd / blocksize - sourceColStart / blocksize + 1);
+					return rowFragments * colFragments;
+				}, (tile, emit) -> {
+					MatrixBlock block = (MatrixBlock) tile.getValue();
+					long inputRowStart = (tile.getIndexes().getRowIndex() - 1) * blocksize;
+					long inputColStart = (tile.getIndexes().getColumnIndex() - 1) * blocksize;
+					long rowStart = Math.max(ix.rowStart, inputRowStart);
+					long colStart = Math.max(ix.colStart, inputColStart);
+					long rowEnd = Math.min(ix.rowEnd + 1, inputRowStart + block.getNumRows());
+					long colEnd = Math.min(ix.colEnd + 1, inputColStart + block.getNumColumns());
+					if(rowStart >= rowEnd || colStart >= colEnd)
+						return;
+
+					long outputRowStart = (rowStart - ix.rowStart) / blocksize;
+					long outputRowEnd = (rowEnd - ix.rowStart - 1) / blocksize;
+					long outputColStart = (colStart - ix.colStart) / blocksize;
+					long outputColEnd = (colEnd - ix.colStart - 1) / blocksize;
+					for(long outputRow = outputRowStart; outputRow <= outputRowEnd; outputRow++)
+						for(long outputCol = outputColStart; outputCol <= outputColEnd; outputCol++) {
+							long targetRowStart = ix.rowStart + outputRow * blocksize;
+							long targetColStart = ix.colStart + outputCol * blocksize;
+							long copyRowStart = Math.max(rowStart, targetRowStart);
+							long copyColStart = Math.max(colStart, targetColStart);
+							int rows = (int) (Math.min(rowEnd, targetRowStart + blocksize) - copyRowStart);
+							int cols = (int) (Math.min(colEnd, targetColStart + blocksize) - copyColStart);
+							emit.copy(new MatrixIndexes(outputRow + 1, outputCol + 1),
+								(int) (copyRowStart - inputRowStart), (int) (copyColStart - inputColStart), rows, cols,
+								(int) (copyRowStart - targetRowStart), (int) (copyColStart - targetColStart));
+						}
+				}, getContext());
+				return;
+			}
 
 			if(firstBlockRow == lastBlockRow && firstBlockCol == lastBlockCol) {
 				MatrixIndexes srcBlock = new MatrixIndexes(firstBlockRow + 1, firstBlockCol + 1);
