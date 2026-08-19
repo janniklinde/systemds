@@ -27,7 +27,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.StringReader;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -83,6 +86,10 @@ import io.airlift.compress.lzo.LzoCodec;
 import io.airlift.compress.lzo.LzopCodec;
 
 public class IOUtilFunctions {
+	private static final VarHandle SHORT_BE = MethodHandles.byteArrayViewVarHandle(short[].class, ByteOrder.BIG_ENDIAN);
+	private static final VarHandle INT_BE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN);
+	private static final VarHandle LONG_BE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.BIG_ENDIAN);
+
 	private static final Log LOG = LogFactory.getLog(IOUtilFunctions.class.getName());
 
 	public static final PathFilter hiddenFileFilter = new PathFilter(){
@@ -798,57 +805,33 @@ public class IOUtilFunctions {
 	}
 	
 	public static int baToShort( byte[] ba, final int off ) {
-		//shift and add 2 bytes into single int
-		return ((ba[off+0] & 0xFF) << 8)
-			+  ((ba[off+1] & 0xFF) << 0);
+		return (short) SHORT_BE.get(ba, off) & 0xFFFF;
 	}
 
 	public static int baToInt( byte[] ba, final int off ) {
-		//shift and add 4 bytes into single int
-		return ((ba[off+0] & 0xFF) << 24)
-			+  ((ba[off+1] & 0xFF) << 16)
-			+  ((ba[off+2] & 0xFF) <<  8)
-			+  ((ba[off+3] & 0xFF) <<  0);
+		return (int) INT_BE.get(ba, off);
 	}
 
 	public static long baToLong( byte[] ba, final int off ) {
-		//shift and add 8 bytes into single long
-		return ((long)(ba[off+0] & 0xFF) << 56)
-			+  ((long)(ba[off+1] & 0xFF) << 48)
-			+  ((long)(ba[off+2] & 0xFF) << 40)
-			+  ((long)(ba[off+3] & 0xFF) << 32)
-			+  ((long)(ba[off+4] & 0xFF) << 24)
-			+  ((long)(ba[off+5] & 0xFF) << 16)
-			+  ((long)(ba[off+6] & 0xFF) <<  8)
-			+  ((long)(ba[off+7] & 0xFF) <<  0);
+		return (long) LONG_BE.get(ba, off);
 	}
-	
+
+	public static double baToDouble( byte[] ba, final int off ) {
+		return Double.longBitsToDouble((long) LONG_BE.get(ba, off));
+	}
+
 	public static void shortToBa( final int val, byte[] ba, final int off ) {
-		//shift and mask out 2 bytes
-		ba[ off+0 ] = (byte)((val >>>  8) & 0xFF);
-		ba[ off+1 ] = (byte)((val >>>  0) & 0xFF);
+		SHORT_BE.set(ba, off, (short) val);
 	}
 
 	public static void intToBa( final int val, byte[] ba, final int off ) {
-		//shift and mask out 4 bytes
-		ba[ off+0 ] = (byte)((val >>> 24) & 0xFF);
-		ba[ off+1 ] = (byte)((val >>> 16) & 0xFF);
-		ba[ off+2 ] = (byte)((val >>>  8) & 0xFF);
-		ba[ off+3 ] = (byte)((val >>>  0) & 0xFF);
+		INT_BE.set(ba, off, val);
 	}
 
 	public static void longToBa( final long val, byte[] ba, final int off ) {
-		//shift and mask out 8 bytes
-		ba[ off+0 ] = (byte)((val >>> 56) & 0xFF);
-		ba[ off+1 ] = (byte)((val >>> 48) & 0xFF);
-		ba[ off+2 ] = (byte)((val >>> 40) & 0xFF);
-		ba[ off+3 ] = (byte)((val >>> 32) & 0xFF);
-		ba[ off+4 ] = (byte)((val >>> 24) & 0xFF);
-		ba[ off+5 ] = (byte)((val >>> 16) & 0xFF);
-		ba[ off+6 ] = (byte)((val >>>  8) & 0xFF);
-		ba[ off+7 ] = (byte)((val >>>  0) & 0xFF);
+		LONG_BE.set(ba, off, val);
 	}
-	
+
 	public static byte[] getBytes(ByteBuffer buff) {
 		int len = buff.limit();
 		if( buff.hasArray() )
