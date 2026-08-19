@@ -45,8 +45,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 public class OOCCacheManager {
-	private static final double OOC_BUFFER_PERCENTAGE = 0.2;
-	private static final double OOC_BUFFER_PERCENTAGE_HARD = 0.3;
+	private static final double OOC_BUFFER_PERCENTAGE = 0.5;
+	private static final double OOC_BUFFER_PERCENTAGE_HARD = 0.6;
 	private static final long _evictionLimit;
 	private static final long _hardLimit;
 
