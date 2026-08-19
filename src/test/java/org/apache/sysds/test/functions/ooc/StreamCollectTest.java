@@ -28,12 +28,14 @@ import org.apache.sysds.runtime.instructions.cp.VariableCPInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.ReblockOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.ReorgOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.io.MatrixWriter;
 import org.apache.sysds.runtime.io.MatrixWriterFactory;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixValue;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.util.DataConverter;
 import org.apache.sysds.runtime.util.HDFSTool;
 import org.apache.sysds.test.AutomatedTestBase;
@@ -137,6 +139,72 @@ public class StreamCollectTest extends AutomatedTestBase {
 		Assert.assertEquals(2, blocks);
 		actual.recomputeNonZeros();
 		TestUtils.compareMatrices(expected, actual, eps);
+	}
+
+	@Test
+	public void runPackedSourceMaterializationTest() throws Exception {
+		getAndLoadTestConfiguration(TEST_NAME1);
+		OOCCacheManager.reset();
+		Statistics.resetOOCEvictionStats();
+		try {
+			int sourceRows = 4;
+			int sourceCols = 4;
+			int blocksize = 2;
+			MatrixBlock expected = MatrixBlock.randOperations(sourceRows, sourceCols, 1, -1, 1, "uniform", 17);
+			MatrixWriter writer = MatrixWriterFactory.createMatrixWriter(Types.FileFormat.BINARY);
+			writer.writeMatrixToHDFS(expected, input("packed_source"), sourceRows, sourceCols, blocksize,
+				expected.getNonZeros());
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			VariableCPInstruction
+				.parseInstruction("CP°createvar°X°" + input("packed_source") + "°false°MATRIX°binary°4°4°2°16°copy")
+				.processInstruction(ec);
+			VariableCPInstruction
+				.parseInstruction("CP°createvar°Y°" + input("packed_output") + "°true°MATRIX°binary°4°4°2°16°copy")
+				.processInstruction(ec);
+			ReblockOOCInstruction.parseInstruction("OOC°rblk°X·MATRIX·FP64°Y·MATRIX·FP64°2°true")
+				.processInstruction(ec);
+
+			MatrixBlock actual = new MatrixBlock(sourceRows, sourceCols, false);
+			OOCStream<IndexedMatrixValue> stream = ec.getMatrixObject("Y").getStreamHandle();
+			stream.start();
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = stream.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue tile = current.get();
+					int row = (int) ((tile.getIndexes().getRowIndex() - 1) * blocksize);
+					int col = (int) ((tile.getIndexes().getColumnIndex() - 1) * blocksize);
+					MatrixBlock block = (MatrixBlock) tile.getValue();
+					actual.copy(row, row + block.getNumRows() - 1, col, col + block.getNumColumns() - 1, block, false);
+				}
+			actual.recomputeNonZeros();
+			TestUtils.compareMatrices(expected, actual, eps);
+			Assert.assertTrue(OOCCacheManager.getGlobalCache().getPackGroupCount() > 0);
+
+			OOCCacheManager.getGlobalCache().updateLimits(1, 1);
+			for(int attempt = 0; attempt < 100 && OOCCacheManager.getGlobalCache().getOwnedCacheSize() > 0; attempt++)
+				Thread.sleep(10);
+			Assert.assertEquals(0, OOCCacheManager.getGlobalCache().getOwnedCacheSize());
+			MatrixBlock replayed = new MatrixBlock(sourceRows, sourceCols, false);
+			stream = ec.getMatrixObject("Y").getStreamHandle();
+			stream.start();
+			while((callback = stream.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue tile = current.get();
+					int row = (int) ((tile.getIndexes().getRowIndex() - 1) * blocksize);
+					int col = (int) ((tile.getIndexes().getColumnIndex() - 1) * blocksize);
+					MatrixBlock block = (MatrixBlock) tile.getValue();
+					replayed.copy(row, row + block.getNumRows() - 1, col, col + block.getNumColumns() - 1, block,
+						false);
+				}
+			replayed.recomputeNonZeros();
+			TestUtils.compareMatrices(expected, replayed, eps);
+			Assert.assertEquals("Source-backed cache entries must not be written to spill.", 0,
+				Statistics.getOOCEvictionWriteCount());
+			TeeOOCInstruction.incrRef(ec.getMatrixObject("Y").getStreamable(), -1);
+		}
+		finally {
+			OOCCacheManager.reset();
+		}
 	}
 
 	@Test
