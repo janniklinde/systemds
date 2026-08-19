@@ -22,6 +22,7 @@ package org.apache.sysds.runtime.ooc.primitives;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 
 import org.apache.sysds.lops.MMTSJ.MMTSJType;
 import org.apache.sysds.runtime.DMLRuntimeException;
@@ -59,10 +60,15 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 	private final AggregateBinaryOperator _multiply;
 	private final BinaryOperator _plus;
 	private final AtomicBoolean _inputComplete = new AtomicBoolean();
+	private final AtomicBoolean _liveInputEnded = new AtomicBoolean();
+	private final AtomicBoolean _liveSchedulingReady = new AtomicBoolean();
 	private final AtomicInteger _active = new AtomicInteger(1);
+	private boolean _liveInput;
 	private MaterializedStore<IndexedMatrixValue> _inputStore;
-	private IndexedMaterializedStoreReader<IndexedMatrixValue> _inputReader;
+	private volatile IndexedMaterializedStoreReader<IndexedMatrixValue> _inputReader;
 	private StateTable<IndexedMatrixValue> _accumulators;
+	private AtomicIntegerArray _tilesSeen;
+	private AtomicIntegerArray _groupsScheduled;
 	private OOCStream<ComputeWork> _ready;
 	private OOCStream<IndexedMatrixValue> _outputStream;
 	private int _groups;
@@ -82,7 +88,7 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 	@Override
 	public List<OOCMaterializedInputRequest> requiredMaterializedInputs() {
 		OOCStoreLayout layout = _type.isLeft() ? OOCStoreLayout.ROW_MAJOR : OOCStoreLayout.COL_MAJOR;
-		return List.of(new OOCMaterializedInputRequest(0, layout, 1));
+		return List.of(new OOCMaterializedInputRequest(0, layout, 1, this::accept, live -> _liveInput = live));
 	}
 
 	@Override
@@ -112,8 +118,9 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 	private static long taskBytes(DataCharacteristics inputDc, DataCharacteristics outputDc) {
 		long inputBytes = OOCUtils.estimateFullTileBytes(inputDc);
 		long outputBytes = OOCUtils.estimateFullTileBytes(outputDc);
-		return 2 * OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) +
-			OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(outputBytes) + 5 * outputBytes;
+		long multiplyBytes = 2 * OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + 2 * outputBytes;
+		long mergeBytes = OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(outputBytes) + 2 * outputBytes;
+		return Math.max(multiplyBytes, mergeBytes);
 	}
 
 	@Override
@@ -125,6 +132,8 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 		_width = Math.toIntExact(_type.isLeft() ? inputDc.getNumColBlocks() : inputDc.getNumRowBlocks());
 		if(_groups <= 0 || _width <= 0)
 			throw new DMLRuntimeException("TSMM OOC requires non-empty input block geometry.");
+		_tilesSeen = new AtomicIntegerArray(_groups);
+		_groupsScheduled = new AtomicIntegerArray(_groups);
 		_accumulators = new StateTable<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
 		long accumulatorPriorityOffset = (long) _width * _width;
 		_accumulators.addEvictionPolicy(slot -> slot - accumulatorPriorityOffset);
@@ -156,17 +165,58 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 				return;
 			}
 			_inputStore = store;
-			store.completion().whenComplete((ignored, completionError) -> {
-				if(completionError != null) {
-					fail(completionError);
-					finishInput();
-					return;
-				}
-				_inputReader = store.openIndexedReader(new CountingLiveness(store.size(), _width + 1));
-				OOCInstructionUtils.submitOOCTask(this::drain,
-					new StreamContext().addOutStream(_outputStream));
-			});
+			CountingLiveness liveness = new CountingLiveness(_groups * _width, _width + 1);
+			if(_liveInput) {
+				_inputReader = store.openLiveIndexedReader(liveness);
+				for(int group = 0; group < _groups; group++)
+					tryScheduleGroup(group);
+				_liveSchedulingReady.set(true);
+				finishLiveInput();
+			}
+			else
+				store.completion().whenComplete((ignored, completionError) -> {
+					if(completionError != null) {
+						fail(completionError);
+						finishInput();
+						return;
+					}
+					_inputReader = store.openIndexedReader(liveness);
+					OOCInstructionUtils.submitOOCTask(this::drain,
+						new StreamContext().addOutStream(_outputStream));
+				});
 		});
+	}
+
+	private void accept(OOCStream.QueueCallback<IndexedMatrixValue> callback) {
+		if(callback.isEos() || callback.isFailure()) {
+			try(callback) {
+				if(callback.isFailure())
+					callback.get();
+			}
+			catch(Throwable failure) {
+				fail(failure);
+			}
+			_liveInputEnded.set(true);
+			finishLiveInput();
+			return;
+		}
+
+		try(callback) {
+			IndexedMatrixValue tile = callback.get();
+			int group = Math.toIntExact(
+				(_type.isLeft() ? tile.getIndexes().getRowIndex() : tile.getIndexes().getColumnIndex()) - 1);
+			_tilesSeen.incrementAndGet(group);
+			tryScheduleGroup(group);
+		}
+		catch(Throwable failure) {
+			fail(failure);
+			finishInput();
+		}
+	}
+
+	private void finishLiveInput() {
+		if(_liveInputEnded.get() && _liveSchedulingReady.get())
+			finishInput();
 	}
 
 	private void drain() {
@@ -182,6 +232,11 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 		}
 	}
 
+	private void tryScheduleGroup(int group) {
+		if(_inputReader != null && _tilesSeen.get(group) == _width && _groupsScheduled.compareAndSet(group, 0, 1))
+			scheduleGroup(group);
+	}
+
 	private void scheduleGroup(int group) {
 		for(int left = 0; left < _width; left++)
 			for(int right = left; right < _width; right++)
@@ -189,34 +244,41 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 	}
 
 	private void schedulePair(int group, int left, int right) {
-		ReservationBudget budget = OOCUtils.reserveBudget(_allowance, _taskBytes).enableReuse();
 		_active.incrementAndGet();
-		long groupIndex = group + 1L;
-		long leftIndex = left + 1L;
-		long rightIndex = right + 1L;
-		OOCFuture.allOf(List.of(
-			_inputReader.request(_type.isLeft() ? groupIndex : leftIndex,
-				_type.isLeft() ? leftIndex : groupIndex, budget),
-			_inputReader.request(_type.isLeft() ? groupIndex : rightIndex,
-				_type.isLeft() ? rightIndex : groupIndex, budget)), TSMMOOCPrimitive::closeLease)
-			.whenComplete((inputs, inputError) -> {
-			if(inputError != null) {
-				budget.close();
-				fail(inputError);
+		_allowance.reserveAsync(_taskBytes).whenComplete((ignored, admissionError) -> {
+			if(admissionError != null) {
+				fail(admissionError);
 				finishPair(group);
 				return;
 			}
-			try {
-				if(inputs.get(0) == null || inputs.get(1) == null)
-					throw new DMLRuntimeException("Missing buffered TSMM tiles for group " + (group + 1));
-				_ready.enqueue(new MultiplyWork(group, left, right, inputs.get(0), inputs.get(1), budget));
-			}
-			catch(Throwable failure) {
-				inputs.forEach(TSMMOOCPrimitive::closeLease);
-				budget.close();
-				fail(failure);
-				finishPair(group);
-			}
+			ReservationBudget budget = new ReservationBudget(_allowance, _taskBytes).enableReuse();
+			long groupIndex = group + 1L;
+			long leftIndex = left + 1L;
+			long rightIndex = right + 1L;
+			OOCFuture.allOf(List.of(
+				_inputReader.request(_type.isLeft() ? groupIndex : leftIndex,
+					_type.isLeft() ? leftIndex : groupIndex, budget),
+				_inputReader.request(_type.isLeft() ? groupIndex : rightIndex,
+					_type.isLeft() ? rightIndex : groupIndex, budget)), TSMMOOCPrimitive::closeLease)
+				.whenComplete((inputs, inputError) -> {
+				if(inputError != null) {
+					budget.close();
+					fail(inputError);
+					finishPair(group);
+					return;
+				}
+				try {
+					if(inputs.get(0) == null || inputs.get(1) == null)
+						throw new DMLRuntimeException("Missing buffered TSMM tiles for group " + (group + 1));
+					_ready.enqueue(new MultiplyWork(group, left, right, inputs.get(0), inputs.get(1), budget));
+				}
+				catch(Throwable failure) {
+					inputs.forEach(TSMMOOCPrimitive::closeLease);
+					budget.close();
+					fail(failure);
+					finishPair(group);
+				}
+			});
 		});
 	}
 
