@@ -22,11 +22,16 @@ package org.apache.sysds.runtime.instructions.ooc;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCCacheScheduler;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -38,7 +43,8 @@ import java.util.concurrent.TimeUnit;
  * Watchdog to help debug OOC streams/tasks that never close.
  */
 public final class OOCWatchdog {
-	public static final boolean WATCH = false;
+	public static final boolean WATCH = Boolean.getBoolean("sysds.ooc.watchdog");
+	public static final boolean WATCH_PRIMITIVES = WATCH || Boolean.getBoolean("sysds.ooc.watchdog.primitives");
 	private static final double PINNED_NEAR_LIMIT_RATIO = 0.9;
 	private static final int TOP_PINNED_STREAMS = 5;
 	private static final ConcurrentHashMap<String, Entry> OPEN = new ConcurrentHashMap<>();
@@ -52,16 +58,51 @@ public final class OOCWatchdog {
 	private static final long SCAN_INTERVAL_MS = TimeUnit.SECONDS.toMillis(10);
 	private static final long CACHE_SCAN_INTERVAL_MS = TimeUnit.SECONDS.toMillis(1);
 
+	private static final long PRIMITIVE_SCAN_INTERVAL_MS = TimeUnit.SECONDS.toMillis(30);
+	private static final Map<OOCPrimitive, Long> PRIMITIVES = Collections.synchronizedMap(new IdentityHashMap<>());
+
 	static {
 		if(WATCH) {
 			EXEC.scheduleAtFixedRate(OOCWatchdog::scan, SCAN_INTERVAL_MS, SCAN_INTERVAL_MS, TimeUnit.MILLISECONDS);
 			EXEC.scheduleAtFixedRate(OOCWatchdog::scanCachePressure, CACHE_SCAN_INTERVAL_MS, CACHE_SCAN_INTERVAL_MS,
 				TimeUnit.MILLISECONDS);
 		}
+		if(WATCH_PRIMITIVES)
+			EXEC.scheduleAtFixedRate(OOCWatchdog::scanPrimitives, PRIMITIVE_SCAN_INTERVAL_MS, PRIMITIVE_SCAN_INTERVAL_MS,
+				TimeUnit.MILLISECONDS);
 	}
 
 	private OOCWatchdog() {
 		// no-op
+	}
+
+	public static void registerPrimitive(OOCPrimitive primitive) {
+		PRIMITIVES.put(primitive, System.currentTimeMillis());
+	}
+
+	public static void unregisterPrimitive(OOCPrimitive primitive) {
+		PRIMITIVES.remove(primitive);
+	}
+
+	private static void scanPrimitives() {
+		List<Map.Entry<OOCPrimitive, Long>> pending;
+		synchronized(PRIMITIVES) {
+			pending = new ArrayList<>(PRIMITIVES.entrySet());
+		}
+		if(pending.isEmpty())
+			return;
+		long now = System.currentTimeMillis();
+		StringBuilder sb = new StringBuilder("[OOCWatchdog] ").append(pending.size())
+			.append(" incomplete primitive(s); ").append(describeMemory()).append(':');
+		for(Map.Entry<OOCPrimitive, Long> entry : pending) {
+			OOCPrimitive primitive = entry.getKey();
+			sb.append("\n   age=").append(now - entry.getValue()).append("ms ").append(primitive.debugState());
+			Throwable failure = primitive.getFailure();
+			if(failure != null)
+				for(StackTraceElement element : failure.getStackTrace())
+					sb.append("\n\tat ").append(element);
+		}
+		System.err.println(sb);
 	}
 
 	public static void registerOpen(String id, String desc, String context, OOCStreamable<?> stream) {
@@ -142,6 +183,18 @@ public final class OOCWatchdog {
 		}
 		sb.append("]");
 		System.err.println(sb);
+	}
+
+	private static String describeMemory() {
+		GlobalMemoryBroker broker = GlobalMemoryBroker.get();
+		StringBuilder sb = new StringBuilder("broker used=").append(toMiB(broker.getUsedMemory())).append("MiB/")
+			.append(toMiB(broker.getAllowedMemory())).append("MiB");
+		OOCCacheScheduler cache = OOCCacheManager.getCacheIfInitialized();
+		if(cache != null)
+			sb.append(", cache=").append(toMiB(cache.getCacheSize())).append("MiB (pinned ")
+				.append(toMiB(cache.getPinnedBytes())).append("MiB, hard ").append(toMiB(cache.getHardLimit()))
+				.append("MiB)");
+		return sb.toString();
 	}
 
 	private static long toMiB(long bytes) {

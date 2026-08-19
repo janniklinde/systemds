@@ -64,4 +64,8 @@ public interface OOCStreamable<T> {
 
 	default void discardHandle() {
 	}
+
+	default String debugState() {
+		return getClass().getSimpleName() + "@" + System.identityHashCode(this);
+	}
 }
