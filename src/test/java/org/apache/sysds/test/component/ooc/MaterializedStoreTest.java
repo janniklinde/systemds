@@ -386,6 +386,53 @@ public class MaterializedStoreTest {
 		Assert.assertEquals(0, _producer.getUsedMemory());
 	}
 
+	@Test
+	public void testLateReaderAdmittedWhileNothingForgotten() throws Exception {
+		materializeThreeTiles();
+		IndexedMaterializedStoreReader<IndexedMatrixValue> first = _store
+			.openIndexedReader(new CountingLiveness(3, 1));
+		_store.sealReaders();
+
+		IndexedMaterializedStoreReader<IndexedMatrixValue> late = _store.openIndexedReader(new CountingLiveness(3, 1));
+		try(StoreLease<IndexedMatrixValue> lease = late.request(1, _readerAllowance).get(WAIT_SECONDS,
+			TimeUnit.SECONDS)) {
+			Assert.assertEquals(2L, lease.value().getIndexes().getRowIndex());
+		}
+		late.close();
+		first.close();
+	}
+
+	@Test
+	public void testLateReaderRejectedAfterReclaim() throws Exception {
+		materializeThreeTiles();
+		IndexedMaterializedStoreReader<IndexedMatrixValue> first = _store
+			.openIndexedReader(new CountingLiveness(3, 1));
+		_store.sealReaders();
+		for(int index = 0; index < 3; index++)
+			first.request(index, _readerAllowance).get(WAIT_SECONDS, TimeUnit.SECONDS).close();
+		OOCCacheTestUtils.await(() -> _cache.getOwnedCacheSize() == 0, WAIT_SECONDS);
+
+		try {
+			_store.openIndexedReader(new CountingLiveness(3, 1));
+			Assert.fail("A reader needing reclaimed blocks must be rejected");
+		}
+		catch(IllegalStateException expected) {
+			Assert.assertTrue(expected.getMessage(), expected.getMessage().contains("already reclaimed"));
+		}
+		first.close();
+	}
+
+	private void materializeThreeTiles() throws Exception {
+		OOCStreamMaterializer materializer = new OOCStreamMaterializer(_store,
+			indexes -> (int) indexes.getRowIndex() - 1, _materializerAllowance);
+		for(int index = 0; index < 3; index++) {
+			_producer.reserveBlocking(TILE_BYTES);
+			materializer.accept(new InMemoryQueueCallback<>(tile(index, index + 1.0), null, _producer, TILE_BYTES));
+		}
+		materializer.accept(OOCStream.eos(null));
+		materializer.completion().get(WAIT_SECONDS, TimeUnit.SECONDS);
+	}
+
 	private static IndexedMatrixValue tile(int index, double value) {
 		return new IndexedMatrixValue(new MatrixIndexes(index + 1L, 1), new MatrixBlock(4, 4, value));
 	}
