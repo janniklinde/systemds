@@ -71,23 +71,11 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 		final boolean known1 = m1.getNumRows() >= 0 && m1.getNumColumns() >= 0 && m1.getBlocksize() > 0;
 		final boolean known2 = m2.getNumRows() >= 0 && m2.getNumColumns() >= 0 && m2.getBlocksize() > 0;
 
-		// If dimensions are unknown, we cannot safely detect broadcasting.
-		// Fall back to strict key-based join and let downstream operators validate as needed.
+		// Unknown dimensions cannot distinguish a broadcast from a strict key-wise operation. Preserve the existing
+		// key-wise semantics without entering the legacy cache pipeline.
 		if(!known1 || !known2) {
-			OOCStream<IndexedMatrixValue> qIn1 = m1.getStreamHandle();
-			OOCStream<IndexedMatrixValue> qIn2 = m2.getStreamHandle();
-			if(LOG.isWarnEnabled()) {
-				LOG.warn("Falling back to key-wise OOC binary join for opcode '" + getOpcode()
-					+ "' due to unknown matrix dimensions: " + input1.getName() + "=" + m1.getNumRows() + "x"
-					+ m1.getNumColumns() + ", " + input2.getName() + "=" + m2.getNumRows() + "x"
-					+ m2.getNumColumns());
-			}
-			joinOOC(qIn1, qIn2, qOut, (tmp1, tmp2) -> {
-				IndexedMatrixValue tmpOut = new IndexedMatrixValue();
-				tmpOut.set(tmp1.getIndexes(),
-					tmp1.getValue().binaryOperations((BinaryOperator)_optr, tmp2.getValue(), tmpOut.getValue()));
-				return tmpOut;
-			}, IndexedMatrixValue::getIndexes);
+			OOCInstructionUtils.equiJoin(m1.getStreamable(), m2.getStreamable(), qOut,
+				(left, right) -> left.binaryOperations((BinaryOperator) _optr, right, new MatrixBlock()), getContext());
 			return;
 		}
 
