@@ -24,6 +24,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCCacheScheduler;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.stats.StreamTrace;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -104,6 +105,7 @@ public final class OOCWatchdog {
 					sb.append("\n\tat ").append(element);
 		}
 		System.err.println(sb);
+		StreamTrace.dump();
 	}
 
 	public static void registerOpen(String id, String desc, String context, OOCStreamable<?> stream) {

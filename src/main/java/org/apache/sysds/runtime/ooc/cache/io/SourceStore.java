@@ -40,6 +40,7 @@ import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
+import org.apache.sysds.runtime.ooc.stats.StreamTrace;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
 import org.apache.sysds.utils.Statistics;
 
@@ -105,6 +106,7 @@ final class SourceStore {
 		if(src.format != Types.FileFormat.BINARY)
 			throw new DMLRuntimeException("Unsupported format for source read: " + src.format);
 
+		StreamTrace.sourceRead(block.getKey().getStreamId(), block.getSize());
 		long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 		Object data = readSingle(src, readAheadBudget, cache);
 		if(DMLScript.OOC_STATISTICS) {
