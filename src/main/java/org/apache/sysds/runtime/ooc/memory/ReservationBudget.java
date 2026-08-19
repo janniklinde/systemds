@@ -95,7 +95,47 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 
 	@Override
 	public OOCFuture<Void> reserveAsync(long bytes) {
-		return tryReserve(bytes) ? OOCFuture.completed(null) : OOCFuture.failed(insufficientBudget(bytes));
+		checkNonNegative(bytes);
+		if(bytes == 0)
+			return OOCFuture.completed(null);
+		long shortfall;
+		synchronized(this) {
+			if(_closed)
+				return OOCFuture.failed(insufficientBudget(bytes));
+			if(_available >= bytes) {
+				_available -= bytes;
+				return OOCFuture.completed(null);
+			}
+			shortfall = bytes - _available;
+		}
+
+		OOCFuture<Void> result = new OOCFuture<>();
+		_parent.reserveAsync(shortfall).whenComplete((ignored, error) -> {
+			if(error != null) {
+				result.completeExceptionally(error);
+				return;
+			}
+			boolean revoked;
+			synchronized(this) {
+				revoked = _closed;
+				if(!revoked) {
+					_outstanding += shortfall;
+					_available += shortfall;
+				}
+			}
+			if(revoked) {
+				_parent.release(shortfall);
+				result.completeExceptionally(insufficientBudget(bytes));
+				return;
+			}
+			reserveAsync(bytes).whenComplete((retried, retryError) -> {
+				if(retryError != null)
+					result.completeExceptionally(retryError);
+				else
+					result.complete(null);
+			});
+		});
+		return result;
 	}
 
 	@Override
@@ -169,7 +209,8 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 
 	private synchronized IllegalStateException insufficientBudget(long bytes) {
 		return new IllegalStateException(
-			"Cannot reserve " + bytes + " bytes from a budget with " + _available + " bytes available");
+			"Cannot reserve " + bytes + " bytes from a budget with " + _available + " bytes available"
+				+ " [closed=" + _closed + ", granted=" + _outstanding + "]");
 	}
 
 	private static void checkNonNegative(long bytes) {

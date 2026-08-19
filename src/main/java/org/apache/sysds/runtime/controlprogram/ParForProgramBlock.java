@@ -800,7 +800,7 @@ public class ParForProgramBlock extends ForProgramBlock {
 							if(current != null && current != workerBaselines[i].get(var))
 								VariableCPInstruction.processRmvarInstruction(workers[i].getExecutionContext(), var);
 							else if(current instanceof MatrixObject matrix)
-								TeeOOCInstruction.incrRef(matrix.getStreamable(), -1);
+								TeeOOCInstruction.releaseRef(ec, matrix);
 						}
 					}
 				}

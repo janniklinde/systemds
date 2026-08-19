@@ -35,11 +35,20 @@ import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 public final class OOCPlanner {
 	public static synchronized void compile(OOCPrimitive root) {
+		compile(root, false);
+	}
+
+	public static synchronized void compileAndStart(OOCPrimitive root) {
+		if(root.claimCompilation())
+			compile(root, true);
+		else
+			root.tryStartExecution();
+	}
+
+	private static void compile(OOCPrimitive root, boolean startRoot) {
 		injectMaterializations(root, Collections.newSetFromMap(new IdentityHashMap<>()), new IdentityHashMap<>());
 		List<OOCPrimitive> primitives = new ArrayList<>();
 		collect(root, Collections.newSetFromMap(new IdentityHashMap<>()), primitives);
-		if(primitives.isEmpty())
-			return;
 
 		for(int i = primitives.size() - 1; i >= 0; i--)
 			if(primitives.get(i).getAccessPattern().isUnset())
@@ -48,11 +57,13 @@ public final class OOCPlanner {
 			root.requestPattern(OOCAccessPattern.ROW_MAJOR);
 
 		for(OOCPrimitive primitive : primitives) {
-			if(primitive instanceof MaterializeOOCPrimitive)
+			if(primitive instanceof MaterializeOOCPrimitive && primitive != root)
 				continue;
 			if(!deferUntilDimensionsResolved(primitive))
 				primitive.tryStartExecution();
 		}
+		if(startRoot)
+			root.tryStartExecution();
 	}
 
 	/**
@@ -124,8 +135,13 @@ public final class OOCPlanner {
 	@SuppressWarnings("unchecked")
 	private static void injectMaterializations(OOCPrimitive primitive, Set<OOCPrimitive> visited,
 		IdentityHashMap<OOCStreamable<IndexedMatrixValue>, MaterializeOOCPrimitive> boundaries) {
-		if(primitive.hasStartedExecution() || !visited.add(primitive))
+		if(primitive.isSubtreeStarted() || !visited.add(primitive))
 			return;
+		if(primitive.hasStartedExecution()) {
+			for(OOCPrimitive started : primitive.getChildren())
+				injectMaterializations(started, visited, boundaries);
+			return;
+		}
 		for(OOCPrimitive.OOCMaterializedInputRequest request : primitive.requiredMaterializedInputs()) {
 			OOCStreamable<IndexedMatrixValue> input = (OOCStreamable<IndexedMatrixValue>) primitive
 				.getInput(request.inputIndex());
@@ -151,11 +167,18 @@ public final class OOCPlanner {
 			injectMaterializations(child, visited, boundaries);
 	}
 
-	private static void collect(OOCPrimitive primitive, Set<OOCPrimitive> visited, List<OOCPrimitive> result) {
-		if(primitive.hasStartedExecution() || !visited.add(primitive))
-			return;
-		result.add(primitive);
+	private static boolean collect(OOCPrimitive primitive, Set<OOCPrimitive> visited, List<OOCPrimitive> result) {
+		if(primitive.isSubtreeStarted())
+			return true;
+		if(!visited.add(primitive))
+			return false;
+		boolean started = primitive.hasStartedExecution();
+		if(!started)
+			result.add(primitive);
 		for(OOCPrimitive child : primitive.getChildren())
-			collect(child, visited, result);
+			started &= collect(child, visited, result);
+		if(started)
+			primitive.markSubtreeStarted();
+		return started;
 	}
 }

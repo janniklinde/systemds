@@ -263,8 +263,8 @@ public class FunctionCallCPInstruction extends CPInstruction {
 
 			// remove existing data bound to output variable name
 			Data exdata = ec.removeVariable(boundVarName);
-			if (DMLScript.USE_OOC && exdata instanceof MatrixObject && exdata != boundValue)
-				TeeOOCInstruction.incrRef(((MatrixObject) exdata).getStreamable(), -1);
+			if (DMLScript.USE_OOC && exdata != boundValue)
+				TeeOOCInstruction.releaseRef(ec, exdata);
 			// save old data for cleanup later
 			if (exdata != boundValue && !retVars.hasReferences(exdata))
 				toBeCleanedUp.add(exdata);

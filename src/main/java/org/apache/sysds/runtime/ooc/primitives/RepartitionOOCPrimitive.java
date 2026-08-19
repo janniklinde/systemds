@@ -211,9 +211,12 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 				outputDC.getRows() - (long) row * outputDC.getBlocksize());
 			int outputCols = (int) Math.min(outputDC.getBlocksize(),
 				outputDC.getCols() - (long) col * outputDC.getBlocksize());
-			MatrixBlock block = new MatrixBlock(outputRows, outputCols, source.isInSparseFormat());
+			boolean sparse = source.isInSparseFormat() &&
+				MatrixBlock.evalSparseFormatInMemory(outputRows, outputCols, slice.getNonZeros());
+			MatrixBlock block = new MatrixBlock(outputRows, outputCols, sparse);
 			block.copy(work._dstRow, work._dstRow + fragmentRows - 1, work._dstCol, work._dstCol + fragmentCols - 1,
 				slice, false);
+			block.recomputeNonZeros();
 			block.examSparsity();
 			work.releaseInput();
 			ManagedPayload<IndexedMatrixValue> result = payload(work._slot, work._count, block, budget);
