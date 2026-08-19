@@ -56,6 +56,7 @@ import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.NaryJoinOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.PlannableDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.ReduceOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TSMMOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TransposeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
@@ -95,6 +96,12 @@ public final class OOCInstructionUtils {
 	public static void transpose(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
 		StreamContext context) {
 		transposedMap(input, output, MatrixBlock::transpose, context);
+	}
+
+	public static void repartition(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
+		ToIntFunction<MatrixIndexes> expectedFragments,
+		BiConsumer<IndexedMatrixValue, RepartitionOOCPrimitive.FragmentEmitter> router, StreamContext context) {
+		output.assignPrimitive(new RepartitionOOCPrimitive(input, output, expectedFragments, router, context));
 	}
 
 	public static void equiJoin(OOCStreamable<IndexedMatrixValue> left, OOCStreamable<IndexedMatrixValue> right,
