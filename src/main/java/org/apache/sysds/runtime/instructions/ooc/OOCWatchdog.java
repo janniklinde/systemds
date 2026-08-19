@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
+import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCCacheScheduler;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
@@ -197,6 +198,14 @@ public final class OOCWatchdog {
 			sb.append(", cache=").append(toMiB(cache.getCacheSize())).append("MiB (pinned ")
 				.append(toMiB(cache.getPinnedBytes())).append("MiB, hard ").append(toMiB(cache.getHardLimit()))
 				.append("MiB)");
+		OOCCache global = OOCCacheManager.getGlobalCacheIfInitialized();
+		if(global != null)
+			sb.append(", globalCache owned=").append(toMiB(global.getOwnedCacheSize())).append("MiB (hard ")
+				.append(toMiB(OOCCacheManager.getHardLimit())).append("MiB, evict ")
+				.append(toMiB(OOCCacheManager.getEvictionLimit())).append("MiB)");
+		Runtime rt = Runtime.getRuntime();
+		sb.append(", heap=").append(toMiB(rt.totalMemory() - rt.freeMemory())).append("MiB/")
+			.append(toMiB(rt.maxMemory())).append("MiB");
 		return sb.toString();
 	}
 

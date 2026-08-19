@@ -20,19 +20,25 @@
 package org.apache.sysds.runtime.ooc.store;
 
 import java.util.concurrent.atomic.AtomicIntegerArray;
+import java.util.function.IntPredicate;
 
 public final class CountingLiveness implements MaterializedStore.Liveness {
 	private final AtomicIntegerArray _remaining;
 	private final AtomicIntegerArray _reservable;
 
 	public CountingLiveness(int size, int count) {
+		this(size, count, null);
+	}
+
+	public CountingLiveness(int size, int count, IntPredicate selected) {
 		if(size < 0 || count < 0)
 			throw new IllegalArgumentException("Invalid args: size=" + size + ", count=" + count);
 		_remaining = new AtomicIntegerArray(size);
 		_reservable = new AtomicIntegerArray(size);
 		for(int i = 0; i < size; i++) {
-			_remaining.set(i, count);
-			_reservable.set(i, count);
+			int granted = selected == null || selected.test(i) ? count : 0;
+			_remaining.set(i, granted);
+			_reservable.set(i, granted);
 		}
 	}
 
