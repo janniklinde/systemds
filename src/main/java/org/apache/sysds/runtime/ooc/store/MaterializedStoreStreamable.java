@@ -42,7 +42,7 @@ import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 public final class MaterializedStoreStreamable implements OOCStreamable<IndexedMatrixValue> {
-	private static final int REPLAY_PREFETCH = 8;
+	private static final int REPLAY_PREFETCH = 16;
 	private static final int LIVE_PREFETCH = REPLAY_PREFETCH;
 	private static final long REPLAY_MEMORY_LIMIT = 100L * 1024 * 1024;
 
