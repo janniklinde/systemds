@@ -71,8 +71,7 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 		long numBlocks = knownGeometry ? OOCUtils.getNumBlocks(mc) : Long.MAX_VALUE;
 		long totalBytes = numBlocks > Long.MAX_VALUE / tileBytes ? Long.MAX_VALUE : numBlocks * tileBytes;
 		long productionLimit = Math.min(SOURCE_BULK_BYTES, totalBytes);
-		long batchBytes = productionLimit > Long.MAX_VALUE - tileBytes ? Long.MAX_VALUE : productionLimit + tileBytes;
-		long bulkBytes = Math.min(totalBytes, batchBytes);
+		long bulkBytes = productionLimit;
 		MaterializedStoreStreamable materialized = OOCInstructionUtils.sourceRead(source, min, min.getFileName(),
 			mc.getRows(), mc.getCols(), mc.getBlocksize(), mc.getNonZeros(), bulkBytes, productionLimit, getContext());
 
