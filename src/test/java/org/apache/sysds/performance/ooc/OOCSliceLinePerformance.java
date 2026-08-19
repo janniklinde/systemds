@@ -36,6 +36,7 @@ public class OOCSliceLinePerformance {
 	private static final int DOMAIN = 4;
 	private static final int MAX_LEVEL = 1;
 	private static final long MIN_SUPPORT = 4;
+	private static final boolean SEL_FEAT = true;
 	private static final int WARMUP_RUNS = 1;
 	private static final boolean FORCE_EVICTION = false;
 	private static final boolean COMPARE_WITH_CP = false;
@@ -84,7 +85,8 @@ public class OOCSliceLinePerformance {
 	private static void run(Path output, boolean ooc, boolean log) throws Exception {
 		String script = "X = round(rand(rows=" + ROWS + ", cols=" + COLUMNS + ", min=1, max=" + DOMAIN
 			+ ", seed=7)); e = X[,1] == " + DOMAIN + "; [TK, TKC, D] = sliceLine(X=X, e=e, k=4, maxL=" + MAX_LEVEL
-			+ ", minSup=" + MIN_SUPPORT + ", alpha=0.95, tpEval=FALSE, selFeat=FALSE, verbose=FALSE);"
+			+ ", minSup=" + MIN_SUPPORT + ", alpha=0.95, tpEval=FALSE, selFeat=" + (SEL_FEAT ? "TRUE" : "FALSE")
+			+ ", verbose=FALSE);"
 			+ " out = toString(TKC); write(out, \"" + output.toString().replace("\\", "\\\\") + "\");";
 		Path file = Files.createTempFile("sliceline", ".dml");
 		try {

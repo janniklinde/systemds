@@ -22,6 +22,7 @@ package org.apache.sysds.test.component.ooc;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.function.IntPredicate;
 
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.common.Types.FileFormat;
@@ -34,6 +35,7 @@ import org.apache.sysds.runtime.instructions.cp.ScalarObject;
 import org.apache.sysds.runtime.instructions.ooc.AggregateTernaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.AppendOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.BinaryOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.BuiltinNaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CSVReblockOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CentralMomentOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CovarianceOOCInstruction;
@@ -41,6 +43,7 @@ import org.apache.sysds.runtime.instructions.ooc.IndexingOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.MMultOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.MapMMChainOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
+import org.apache.sysds.runtime.instructions.ooc.ParameterizedBuiltinOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.QuaternaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.ooc.TSMMOOCInstruction;
@@ -638,6 +641,169 @@ public class RepartitionInstructionSpillTest {
 		finally {
 			reset(statistics);
 		}
+	}
+
+	@Test
+	public void testRemoveEmptyRowsSpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			boolean[] select = mask(800, index -> index % 3 != 0);
+			indexedInput(ec, "A", 800, 800, 200);
+			selectInput(ec, "S", select, 200);
+			MatrixObject output = matrixObject(533, 800, 200);
+			ec.setVariable("R", output);
+			ParameterizedBuiltinOOCInstruction
+				.parseInstruction("OOC°rmempty°target=A°margin=rows°select=S°empty.return=true°R·MATRIX·FP64")
+				.processInstruction(ec);
+			Assert.assertEquals(533, output.getNumRows());
+			Assert.assertEquals(800, output.getNumColumns());
+			assertCompacted(output, select, 800, 800, 200, true);
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
+	@Test
+	public void testRemoveEmptyColsSpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			boolean[] select = mask(800, index -> index % 3 != 0);
+			indexedInput(ec, "A", 800, 800, 200);
+			selectInput(ec, "S", select, 200);
+			MatrixObject output = matrixObject(800, 533, 200);
+			ec.setVariable("R", output);
+			ParameterizedBuiltinOOCInstruction
+				.parseInstruction("OOC°rmempty°target=A°margin=cols°select=S°empty.return=true°R·MATRIX·FP64")
+				.processInstruction(ec);
+			Assert.assertEquals(800, output.getNumRows());
+			Assert.assertEquals(533, output.getNumColumns());
+			assertCompacted(output, select, 800, 800, 200, false);
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
+	@Test
+	public void testNaryMinSpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			input(ec, "A", 800, 800, 200, 4, 4, false, 3);
+			input(ec, "B", 800, 800, 200, 4, 4, true, 1);
+			input(ec, "C", 800, 800, 200, 4, 4, false, 2);
+			MatrixObject output = matrixObject(800, 800, 200);
+			ec.setVariable("R", output);
+			BuiltinNaryOOCInstruction
+				.parseInstruction("OOC°nmin°A·MATRIX·FP64°B·MATRIX·FP64°C·MATRIX·FP64°R·MATRIX·FP64")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = output.getStreamHandle();
+			result.start();
+			waitForSpill();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					MatrixBlock block = (MatrixBlock) current.get().getValue();
+					Assert.assertEquals(1, block.get(0, 0), 0);
+					Assert.assertEquals(1, block.get(199, 199), 0);
+					blocks++;
+				}
+			Assert.assertEquals(16, blocks);
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
+	/**
+	 * Drains a compacted output and compares it against the same filter applied directly to the indexed input, so the
+	 * expectation is independent of the position map used by the instruction.
+	 */
+	private static void assertCompacted(MatrixObject output, boolean[] select, int rows, int cols, int blocksize,
+		boolean marginRows) throws InterruptedException {
+		OOCStream<IndexedMatrixValue> result = output.getStreamHandle();
+		result.start();
+		waitForSpill();
+		long[] positions = new long[select.length];
+		long kept = 0;
+		for(int index = 0; index < select.length; index++)
+			positions[index] = select[index] ? kept++ : -1;
+		double[][] expected = new double[marginRows ? (int) kept : rows][marginRows ? cols : (int) kept];
+		for(int row = 0; row < rows; row++)
+			for(int col = 0; col < cols; col++) {
+				long target = marginRows ? positions[row] : positions[col];
+				if(target >= 0)
+					expected[marginRows ? (int) target : row][marginRows ? col : (int) target] = indexedValue(row, col);
+			}
+
+		int seen = 0;
+		OOCStream.QueueCallback<IndexedMatrixValue> callback;
+		while((callback = result.dequeueCB()) != null)
+			try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+				IndexedMatrixValue value = current.get();
+				MatrixBlock block = (MatrixBlock) value.getValue();
+				int rowOffset = (int) (value.getIndexes().getRowIndex() - 1) * blocksize;
+				int colOffset = (int) (value.getIndexes().getColumnIndex() - 1) * blocksize;
+				for(int row = 0; row < block.getNumRows(); row++)
+					for(int col = 0; col < block.getNumColumns(); col++)
+						Assert.assertEquals("block " + value.getIndexes() + " cell [" + row + "," + col + "]",
+							expected[rowOffset + row][colOffset + col], block.get(row, col), 0);
+				seen += block.getNumRows() * block.getNumColumns();
+			}
+		Assert.assertEquals(expected.length * expected[0].length, seen);
+	}
+
+	private static boolean[] mask(int length, IntPredicate selected) {
+		boolean[] select = new boolean[length];
+		for(int index = 0; index < length; index++)
+			select[index] = selected.test(index);
+		return select;
+	}
+
+	/** Emits a select vector as a column vector stream, one block per {@code blocksize} entries. */
+	private static void selectInput(ExecutionContext ec, String name, boolean[] select, int blocksize) {
+		SubscribableTaskQueue<IndexedMatrixValue> stream = new SubscribableTaskQueue<>();
+		MatrixObject matrix = matrixObject(select.length, 1, blocksize);
+		matrix.setStreamHandle(stream);
+		ec.setVariable(name, matrix);
+		for(int offset = 0; offset < select.length; offset += blocksize) {
+			int length = Math.min(blocksize, select.length - offset);
+			MatrixBlock block = new MatrixBlock(length, 1, false);
+			for(int index = 0; index < length; index++)
+				if(select[offset + index])
+					block.set(index, 0, 1);
+			stream.enqueue(new IndexedMatrixValue(new MatrixIndexes(offset / blocksize + 1, 1), block));
+		}
+		stream.closeInput();
+	}
+
+	/** Input whose cells carry their global position, so a compaction can be verified cell by cell. */
+	private static void indexedInput(ExecutionContext ec, String name, int rows, int cols, int blocksize) {
+		SubscribableTaskQueue<IndexedMatrixValue> stream = new SubscribableTaskQueue<>();
+		MatrixObject matrix = matrixObject(rows, cols, blocksize);
+		matrix.setStreamHandle(stream);
+		ec.setVariable(name, matrix);
+		for(int rowOffset = 0; rowOffset < rows; rowOffset += blocksize)
+			for(int colOffset = 0; colOffset < cols; colOffset += blocksize) {
+				int blockRows = Math.min(blocksize, rows - rowOffset);
+				int blockCols = Math.min(blocksize, cols - colOffset);
+				MatrixBlock block = new MatrixBlock(blockRows, blockCols, false);
+				block.allocateDenseBlock();
+				for(int row = 0; row < blockRows; row++)
+					for(int col = 0; col < blockCols; col++)
+						block.set(row, col, indexedValue(rowOffset + row, colOffset + col));
+				stream.enqueue(new IndexedMatrixValue(
+					new MatrixIndexes(rowOffset / blocksize + 1, colOffset / blocksize + 1), block));
+			}
+		stream.closeInput();
+	}
+
+	private static double indexedValue(int row, int col) {
+		return row * 1000d + col + 1;
 	}
 
 	private static MatrixObject input(ExecutionContext ec, String name, int rows, int cols, int blocksize,
