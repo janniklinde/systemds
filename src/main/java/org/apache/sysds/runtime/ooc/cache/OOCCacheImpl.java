@@ -431,7 +431,6 @@ public class OOCCacheImpl implements OOCCache {
 					return;
 				}
 				BlockEntry pinned;
-				boolean reread = false;
 				synchronized(OOCCacheImpl.this) {
 					if(getMeta(meta.entry) != meta) {
 						release = true;
@@ -439,25 +438,13 @@ public class OOCCacheImpl implements OOCCache {
 					}
 					else {
 						finishRead(meta);
-						reread = meta.entry.getDataUnsafe() == null;
-						if(reread)
-							pinned = null;
-						else {
-							completion = pinResident(meta);
-							Statistics.incrementOOCEvictionGet();
-							pinned = meta.entry;
-						}
+						if(meta.entry.getDataUnsafe() == null)
+							throw new IllegalStateException(
+								"Backing read left no data for entry: " + meta.entry.getKey());
+						completion = pinResident(meta);
+						Statistics.incrementOOCEvictionGet();
+						pinned = meta.entry;
 					}
-				}
-				if(reread) {
-					pinFromBackingReserved(meta, allowance, reservedBytes)
-						.whenComplete((retried, retryEx) -> {
-							if(retryEx != null)
-								result.completeExceptionally(retryEx);
-							else
-								result.complete(retried);
-						});
-					return;
 				}
 				if(release)
 					allowance.release(reservedBytes);
@@ -610,6 +597,8 @@ public class OOCCacheImpl implements OOCCache {
 							break;
 						EntryMeta meta = getMeta(candidate.obj());
 						if(meta == null || candidate.obj().getPinCount() > 0 || meta.deferredUnpin != null)
+							continue;
+						if(meta.readWaiters > 0)
 							continue;
 						BlockEntry entry = meta.entry;
 						if(entry.getState() == BlockState.WARM) {
