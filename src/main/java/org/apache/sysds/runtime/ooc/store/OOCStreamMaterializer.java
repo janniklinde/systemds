@@ -33,6 +33,8 @@ import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -47,20 +49,36 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 	private final List<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> _liveConsumers;
 	private final OOCFuture<Void> _completion;
 	private final AtomicBoolean _done;
+	private final int _blocksize;
+
+	private long _maxRowIndex;
+	private long _maxColIndex;
+	private int _rowsAtMaxRowIndex;
+	private int _colsAtMaxColIndex;
+	private int _widestBlockRows;
+	private int _widestBlockCols;
+	private long _nonZeros;
 
 	public OOCStreamMaterializer(MaterializedStore<IndexedMatrixValue> store, ToIntFunction<MatrixIndexes> linearize,
 		MemoryAllowance allowance) {
-		this(store, linearize, allowance, List.of());
+		this(store, linearize, allowance, List.of(), 0);
 	}
 
 	public OOCStreamMaterializer(MaterializedStore<IndexedMatrixValue> store, ToIntFunction<MatrixIndexes> linearize,
 		MemoryAllowance allowance, List<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> liveConsumers) {
+		this(store, linearize, allowance, liveConsumers, 0);
+	}
+
+	public OOCStreamMaterializer(MaterializedStore<IndexedMatrixValue> store, ToIntFunction<MatrixIndexes> linearize,
+		MemoryAllowance allowance, List<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> liveConsumers,
+		int blocksize) {
 		_store = store;
 		_linearize = linearize;
 		_allowance = allowance;
 		_liveConsumers = List.copyOf(liveConsumers);
 		_completion = new OOCFuture<>();
 		_done = new AtomicBoolean(false);
+		_blocksize = blocksize;
 	}
 
 	public static OOCStream.QueueCallback<IndexedMatrixValue> sourceBackedCallback(List<IndexedMatrixValue> values,
@@ -146,6 +164,7 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 		long totalBytes = 0;
 		for(int i = 0; i < values.size(); i++) {
 			IndexedMatrixValue value = values.get(i);
+			observe(value);
 			tileIds[i] = _linearize.applyAsInt(value.getIndexes());
 			packedValues[i] = value;
 			sizes[i] = serializedSize(value);
@@ -201,6 +220,7 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 
 	private void publish(OOCStream.QueueCallback<IndexedMatrixValue> callback) {
 		IndexedMatrixValue value = callback.get();
+		observe(value);
 		int index = _linearize.applyAsInt(value.getIndexes());
 		StoreLease<IndexedMatrixValue> lease;
 		if(callback instanceof InMemoryQueueCallback<IndexedMatrixValue> managed && managed.getManagedBytes() > 0) {
@@ -227,7 +247,7 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 		if(!_done.compareAndSet(false, true))
 			return;
 		try {
-			_store.complete();
+			_store.complete(observedCharacteristics());
 		}
 		catch(RuntimeException ex) {
 			_store.failMaterialization(ex);
@@ -255,6 +275,39 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 			catch(RuntimeException ignored) {
 			}
 		}
+	}
+
+	private synchronized void observe(IndexedMatrixValue value) {
+		MatrixIndexes indexes = value.getIndexes();
+		MatrixBlock block = (MatrixBlock) value.getValue();
+		if(indexes.getRowIndex() > _maxRowIndex) {
+			_maxRowIndex = indexes.getRowIndex();
+			_rowsAtMaxRowIndex = block.getNumRows();
+		}
+		if(indexes.getColumnIndex() > _maxColIndex) {
+			_maxColIndex = indexes.getColumnIndex();
+			_colsAtMaxColIndex = block.getNumColumns();
+		}
+		_widestBlockRows = Math.max(_widestBlockRows, block.getNumRows());
+		_widestBlockCols = Math.max(_widestBlockCols, block.getNumColumns());
+		_nonZeros += block.getNonZeros();
+	}
+
+	/**
+	 * Derives the dimensions of the materialized stream from the blocks it carried. Only valid once the stream is
+	 * closed, because blocks arrive in an arbitrary order and the boundary blocks are not known before that.
+	 *
+	 * @return observed dimensions, or null if the block size could not be established
+	 */
+	private synchronized DataCharacteristics observedCharacteristics() {
+		if(_maxRowIndex == 0 || _maxColIndex == 0)
+			return new MatrixCharacteristics(0, 0, Math.max(_blocksize, 1), 0);
+		int blocksize = _blocksize > 0 ? _blocksize : Math.max(_widestBlockRows, _widestBlockCols);
+		if(blocksize <= 0)
+			return null;
+		long rows = (_maxRowIndex - 1) * blocksize + _rowsAtMaxRowIndex;
+		long cols = (_maxColIndex - 1) * blocksize + _colsAtMaxColIndex;
+		return new MatrixCharacteristics(rows, cols, blocksize, _nonZeros);
 	}
 
 	private static long serializedSize(IndexedMatrixValue value) {
