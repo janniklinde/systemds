@@ -58,11 +58,20 @@ import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 import org.apache.sysds.runtime.ooc.stream.FilteredOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.utils.Statistics;
 import org.junit.Assert;
 import org.junit.Test;
 
 public class OOCPrimitiveTest {
+	@Test
+	public void testOutputTileEstimateUsesDenseUpperBound() {
+		MatrixCharacteristics dc = new MatrixCharacteristics(67_108_864, 1, 1_200_000, -1);
+		long dense = MatrixBlock.estimateSizeDenseInMemory(1_200_000, 1);
+		Assert.assertEquals(dense, OOCUtils.estimateOutputTileBytes(dc));
+		Assert.assertTrue(MatrixBlock.estimateSizeSparseInMemory(1_200_000, 1, 1.0) > dense);
+	}
+
 	@Test
 	public void testRetainForgottenCacheCallback() {
 		OOCCacheManager.reset();

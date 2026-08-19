@@ -109,8 +109,11 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 			if(bytes > used)
 				throw new IllegalStateException("Cannot release " + bytes + " bytes from a budget using " + used);
 			releaseParent = _closed || !_reusable;
-			if(releaseParent)
+			if(releaseParent) {
 				_outstanding -= bytes;
+				if(_closed)
+					_parent.removePassiveMemory(bytes);
+			}
 			else
 				_available += bytes;
 		}
@@ -158,6 +161,7 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 			released = _available;
 			_available = 0;
 			_outstanding -= released;
+			_parent.addPassiveMemory(_outstanding);
 		}
 		if(released > 0)
 			_parent.release(released);
