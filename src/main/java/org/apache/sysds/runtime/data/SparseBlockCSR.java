@@ -220,22 +220,21 @@ public class SparseBlockCSR extends SparseBlock
 		if( _values.length < nnz )
 			resize(newCapacity(nnz));
 		
-		//read ijv triples in chunks, append and update pointers
+		//read ijv triples in chunks, append and count row nnz
+		final int rlen = numRows();
+		Arrays.fill(_ptr, 0, rlen+1, 0);
 		byte[] buff = new byte[Math.min(BUFFER_TRIPLES, Math.max(nnz,1))*16];
-		int rlast = 0;
 		for( int i=0; i<nnz; ) {
 			int len = Math.min(buff.length/16, nnz-i);
 			in.readFully(buff, 0, len*16);
 			for( int j=0, off=0; j<len; j++, i++, off+=16 ) {
-				int r = IOUtilFunctions.baToInt(buff, off);
-				if( rlast < r )
-					Arrays.fill(_ptr, rlast+1, r+1, i);
-				rlast = r;
+				_ptr[IOUtilFunctions.baToInt(buff, off)+1]++;
 				_indexes[i] = IOUtilFunctions.baToInt(buff, off+4);
 				_values[i] = IOUtilFunctions.baToDouble(buff, off+8);
 			}
 		}
-		Arrays.fill(_ptr, rlast+1, numRows()+1, nnz);
+		for( int i=1; i<=rlen; i++ )
+			_ptr[i] += _ptr[i-1];
 		
 		//update meta data
 		_size = nnz;
