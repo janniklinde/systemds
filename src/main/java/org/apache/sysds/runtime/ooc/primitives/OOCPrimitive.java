@@ -116,6 +116,10 @@ public abstract class OOCPrimitive {
 		return List.of();
 	}
 
+	public List<Integer> dimensionCriticalInputs() {
+		return List.of();
+	}
+
 	public final OOCStreamable<?> getInput(int index) {
 		return _inputs.get(index)._source;
 	}
@@ -158,8 +162,9 @@ public abstract class OOCPrimitive {
 	}
 
 	protected final OOCFuture<MaterializedStore<IndexedMatrixValue>> getMaterializedInput(int index) {
-		OOCFuture<MaterializedStore<IndexedMatrixValue>> materialized = ((MaterializeOOCPrimitive) _inputs
-			.get(index)._dependency).store();
+		MaterializeOOCPrimitive boundary = (MaterializeOOCPrimitive) _inputs.get(index)._dependency;
+		boundary.startOnDemand();
+		OOCFuture<MaterializedStore<IndexedMatrixValue>> materialized = boundary.store();
 		if(materialized == null)
 			throw new IllegalStateException("Input " + index + " was not materialized by the planner.");
 		return materialized;
@@ -182,7 +187,7 @@ public abstract class OOCPrimitive {
 		return broker.getAllowedMemory() / 3;
 	}
 
-	protected final boolean fail(Throwable error) {
+	public final boolean fail(Throwable error) {
 		if(!_failed.compareAndSet(false, true))
 			return false;
 		_failure = error;

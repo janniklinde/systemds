@@ -96,6 +96,11 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 		return _store;
 	}
 
+	public void startOnDemand() {
+		start();
+		tryStartExecution();
+	}
+
 	@Override
 	protected void inferPatternsInternal() {
 		_pattern = OOCAccessPattern.ROW_MAJOR;
