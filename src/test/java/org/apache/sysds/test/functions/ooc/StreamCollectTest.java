@@ -25,8 +25,10 @@ import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.Instruction;
 import org.apache.sysds.runtime.instructions.cp.ReorgCPInstruction;
 import org.apache.sysds.runtime.instructions.cp.VariableCPInstruction;
+import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.ReblockOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.ReorgOOCInstruction;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.io.MatrixWriter;
 import org.apache.sysds.runtime.io.MatrixWriterFactory;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
@@ -69,30 +71,26 @@ public class StreamCollectTest extends AutomatedTestBase {
 			getAndLoadTestConfiguration(TEST_NAME1);
 			MatrixBlock mb = MatrixBlock.randOperations(rows, cols, 1.0, -1, 1, "uniform", 7);
 			MatrixWriter writer = MatrixWriterFactory.createMatrixWriter(Types.FileFormat.BINARY);
-			writer.writeMatrixToHDFS(mb, input(INPUT_NAME), rows, cols, 1000, rows * cols);
+			writer.writeMatrixToHDFS(mb, input(INPUT_NAME), rows, cols, 700, rows * cols);
 			HDFSTool.writeMetaDataFile(input(INPUT_NAME + ".mtd"), Types.ValueType.FP64,
-				new MatrixCharacteristics(rows, cols, 1000, rows * cols), Types.FileFormat.BINARY);
+				new MatrixCharacteristics(rows, cols, 700, rows * cols), Types.FileFormat.BINARY);
 
 			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
 
-			VariableCPInstruction createIn = VariableCPInstruction.parseInstruction(
-				"CP°createvar°pREADX°" + input(INPUT_NAME) + "°false°MATRIX°binary°" + rows + "°" + cols +
-					"°1000°700147°copy");
-			VariableCPInstruction createInRblk = VariableCPInstruction.parseInstruction(
-				"CP°createvar°_mVar0°" + input("tmp0") + "°true°MATRIX°binary°" + rows + "°" + cols +
-					"°1000°700147°copy");
-			ReblockOOCInstruction rblkIn = ReblockOOCInstruction.parseInstruction(
-				"OOC°rblk°pREADX·MATRIX·FP64°_mVar0·MATRIX·FP64°1000°true");
-			VariableCPInstruction createOut = VariableCPInstruction.parseInstruction(
-				"CP°createvar°_mVar1°" + input("tmp1") + "°true°MATRIX°binary°" + rows + "°" + cols +
-					"°1000°700147°copy");
-			ReorgOOCInstruction oocTranspose = ReorgOOCInstruction.parseInstruction(
-				"OOC°r'°_mVar0·MATRIX·FP64°_mVar1·MATRIX·FP64");
-			VariableCPInstruction createOut2 = VariableCPInstruction.parseInstruction(
-				"CP°createvar°_mVar2°" + input("tmp2") + "°true°MATRIX°binary°" + rows + "°" + cols +
-					"°1000°700147°copy");
-			ReorgCPInstruction cpTranspose = ReorgCPInstruction.parseInstruction(
-				"CP°r'°_mVar1·MATRIX·FP64°_mVar2·MATRIX·FP64°1");
+			VariableCPInstruction createIn = VariableCPInstruction.parseInstruction("CP°createvar°pREADX°"
+				+ input(INPUT_NAME) + "°false°MATRIX°binary°" + rows + "°" + cols + "°700°700147°copy");
+			VariableCPInstruction createInRblk = VariableCPInstruction.parseInstruction("CP°createvar°_mVar0°"
+				+ input("tmp0") + "°true°MATRIX°binary°" + rows + "°" + cols + "°1000°700147°copy");
+			ReblockOOCInstruction rblkIn = ReblockOOCInstruction
+				.parseInstruction("OOC°rblk°pREADX·MATRIX·FP64°_mVar0·MATRIX·FP64°1000°true");
+			VariableCPInstruction createOut = VariableCPInstruction.parseInstruction("CP°createvar°_mVar1°"
+				+ input("tmp1") + "°true°MATRIX°binary°" + rows + "°" + cols + "°1000°700147°copy");
+			ReorgOOCInstruction oocTranspose = ReorgOOCInstruction
+				.parseInstruction("OOC°r'°_mVar0·MATRIX·FP64°_mVar1·MATRIX·FP64");
+			VariableCPInstruction createOut2 = VariableCPInstruction.parseInstruction("CP°createvar°_mVar2°"
+				+ input("tmp2") + "°true°MATRIX°binary°" + rows + "°" + cols + "°1000°700147°copy");
+			ReorgCPInstruction cpTranspose = ReorgCPInstruction
+				.parseInstruction("CP°r'°_mVar1·MATRIX·FP64°_mVar2·MATRIX·FP64°1");
 
 			createIn.processInstruction(ec);
 			createInRblk.processInstruction(ec);
@@ -105,6 +103,40 @@ public class StreamCollectTest extends AutomatedTestBase {
 		catch(Exception ex) {
 			Assert.fail(ex.getMessage());
 		}
+	}
+
+	@Test
+	public void runReblockInstructionTest() throws IOException {
+		getAndLoadTestConfiguration(TEST_NAME1);
+		MatrixBlock expected = MatrixBlock.randOperations(rows, cols, 0.1, -1, 1, "uniform", 7);
+		MatrixWriter writer = MatrixWriterFactory.createMatrixWriter(Types.FileFormat.BINARY);
+		writer.writeMatrixToHDFS(expected, input(INPUT_NAME), rows, cols, 700, rows * cols);
+		ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+		VariableCPInstruction.parseInstruction("CP°createvar°pREADX°" + input(INPUT_NAME) + "°false°MATRIX°binary°"
+			+ rows + "°" + cols + "°700°" + rows * cols + "°copy").processInstruction(ec);
+		VariableCPInstruction.parseInstruction("CP°createvar°_mVar0°" + input("tmp0") + "°true°MATRIX°binary°" + rows
+			+ "°" + cols + "°1000°" + rows * cols + "°copy").processInstruction(ec);
+		ReblockOOCInstruction.parseInstruction("OOC°rblk°pREADX·MATRIX·FP64°_mVar0·MATRIX·FP64°1000°true")
+			.processInstruction(ec);
+
+		MatrixBlock actual = new MatrixBlock(rows, cols, false);
+		actual.allocateBlock();
+		OOCStream<IndexedMatrixValue> stream = ec.getMatrixObject("_mVar0").getStreamHandle();
+		stream.start();
+		OOCStream.QueueCallback<IndexedMatrixValue> callback;
+		int blocks = 0;
+		while((callback = stream.dequeueCB()) != null)
+			try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+				IndexedMatrixValue tile = current.get();
+				blocks++;
+				MatrixBlock block = (MatrixBlock) tile.getValue();
+				int row = (int) ((tile.getIndexes().getRowIndex() - 1) * 1000);
+				int col = (int) ((tile.getIndexes().getColumnIndex() - 1) * 1000);
+				actual.copy(row, row + block.getNumRows() - 1, col, col + block.getNumColumns() - 1, block, false);
+			}
+		Assert.assertEquals(2, blocks);
+		actual.recomputeNonZeros();
+		TestUtils.compareMatrices(expected, actual, eps);
 	}
 
 	@Test
