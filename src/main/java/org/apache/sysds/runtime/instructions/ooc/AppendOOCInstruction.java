@@ -31,6 +31,8 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.ReorgOperator;
+import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -76,6 +78,34 @@ public class AppendOOCInstruction extends BinaryOOCInstruction {
 		validateInput(in1, in2);
 		if(handleZeroDims(in1, in2, ec))
 			return;
+
+		if(in1.getDataCharacteristics().dimsKnown() && in2.getDataCharacteristics().dimsKnown() &&
+			in1.getBlocksize() > 0 && in1.getBlocksize() == in2.getBlocksize()) {
+			int blocksize = in1.getBlocksize();
+			long cols1 = in1.getNumColumns();
+			long cols2 = in2.getNumColumns();
+			long nonZeros = in1.getNnz() >= 0 && in2.getNnz() >= 0 ? in1.getNnz() + in2.getNnz() : -1;
+			ec.getDataCharacteristics(output.getName()).set(in1.getNumRows(), cols1 + cols2, blocksize, nonZeros);
+			OOCStream<IndexedMatrixValue> result = createWritableStream();
+			ec.getMatrixObject(output).setStreamHandle(result);
+			OOCInstructionUtils.repartition(List.of(in1.getStreamable(), in2.getStreamable()), result, outputIndex -> {
+				long outputColStart = (outputIndex.getColumnIndex() - 1) * blocksize;
+				long outputColEnd = Math.min(cols1 + cols2, outputColStart + blocksize);
+				int fragments = 0;
+				if(outputColStart < cols1) {
+					long end = Math.min(cols1, outputColEnd);
+					fragments += (int) ((end - 1) / blocksize - outputColStart / blocksize + 1);
+				}
+				if(outputColEnd > cols1) {
+					long start = Math.max(cols1, outputColStart) - cols1;
+					long end = outputColEnd - cols1;
+					fragments += (int) ((end - 1) / blocksize - start / blocksize + 1);
+				}
+				return fragments;
+			}, List.of((tile, emit) -> route(tile, 0, blocksize, emit),
+				(tile, emit) -> route(tile, cols1, blocksize, emit)), getContext());
+			return;
+		}
 
 		OOCStream<IndexedMatrixValue> qIn1 = in1.getStreamHandle();
 		OOCStream<IndexedMatrixValue> qIn2 = in2.getStreamHandle();
@@ -162,10 +192,6 @@ public class AppendOOCInstruction extends BinaryOOCInstruction {
 		ec.getMatrixObject(output).setStreamHandle(mergeOOCStreams(outStreams));
 	}
 
-	public AppendType getAppendType() {
-		return _type;
-	}
-
 	private void validateInput(MatrixObject m1, MatrixObject m2) {
 		if(_type == AppendType.CBIND && m1.getNumRows() != m2.getNumRows()) {
 			throw new DMLRuntimeException(
@@ -192,6 +218,20 @@ public class AppendOOCInstruction extends BinaryOOCInstruction {
 		else return false;
 
 		return true;
+	}
+
+	private static void route(IndexedMatrixValue tile, long columnOffset, int blocksize,
+		RepartitionOOCPrimitive.FragmentEmitter emit) {
+		MatrixBlock block = (MatrixBlock) tile.getValue();
+		long inputColStart = columnOffset + (tile.getIndexes().getColumnIndex() - 1) * blocksize;
+		long inputColEnd = inputColStart + block.getNumColumns();
+		for(long outputCol = inputColStart / blocksize; outputCol <= (inputColEnd - 1) / blocksize; outputCol++) {
+			long outputColStart = outputCol * blocksize;
+			long colStart = Math.max(inputColStart, outputColStart);
+			int cols = (int) (Math.min(inputColEnd, outputColStart + blocksize) - colStart);
+			emit.copy(new MatrixIndexes(tile.getIndexes().getRowIndex(), outputCol + 1), 0,
+				(int) (colStart - inputColStart), block.getNumRows(), cols, 0, (int) (colStart - outputColStart));
+		}
 	}
 
 	private static MatrixBlock sliceCols(MatrixBlock in, int colStart, int colEndExclusive) {
