@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 
@@ -167,7 +168,7 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 			observe(value);
 			tileIds[i] = _linearize.applyAsInt(value.getIndexes());
 			packedValues[i] = value;
-			sizes[i] = serializedSize(value);
+			sizes[i] = OOCUtils.memoryCharge(value);
 			totalBytes = Math.addExact(totalBytes, sizes[i]);
 		}
 
@@ -230,7 +231,7 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 			// Non-managed callbacks may retain another store, so materialization must establish independent ownership.
 			MatrixBlock block = new MatrixBlock((MatrixBlock) value.getValue());
 			IndexedMatrixValue copy = new IndexedMatrixValue(new MatrixIndexes(value.getIndexes()), block);
-			long bytes = serializedSize(copy);
+			long bytes = OOCUtils.memoryCharge(copy);
 			_allowance.reserveBlocking(bytes);
 			lease = _store.publishPinnedLive(index, copy, bytes, _allowance);
 		}
@@ -308,9 +309,5 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 		long rows = (_maxRowIndex - 1) * blocksize + _rowsAtMaxRowIndex;
 		long cols = (_maxColIndex - 1) * blocksize + _colsAtMaxColIndex;
 		return new MatrixCharacteristics(rows, cols, blocksize, _nonZeros);
-	}
-
-	private static long serializedSize(IndexedMatrixValue value) {
-		return ((MatrixBlock) value.getValue()).getExactSerializedSize();
 	}
 }
