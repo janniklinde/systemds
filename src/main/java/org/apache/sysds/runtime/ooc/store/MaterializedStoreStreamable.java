@@ -102,6 +102,10 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		return stream;
 	}
 
+	private void startMaterialization() {
+		_primitive.startOnDemand();
+	}
+
 	private void openReader(DeferredReader output) {
 		_primitive.store().whenComplete((store, storeError) -> {
 			if(storeError != null) {
@@ -405,8 +409,11 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		}
 
 		private void activate() {
-			if(_activated.compareAndSet(false, true) && !_live)
+			if(!_activated.compareAndSet(false, true))
+				return;
+			if(!_live)
 				_owner.openReader(this);
+			_owner.startMaterialization();
 		}
 
 		private boolean finish() {
