@@ -91,11 +91,6 @@ public final class OOCInstructionUtils {
 	private static final AtomicInteger COMPUTE_IN_FLIGHT = new AtomicInteger();
 	private static final int COMPUTE_BACKPRESSURE_THRESHOLD = 100;
 
-	public static boolean known(MatrixObject matrix) {
-		DataCharacteristics dc = matrix.getDataCharacteristics();
-		return dc.dimsKnown() && dc.getBlocksize() > 0;
-	}
-
 	public static void propagateDims(ExecutionContext ec, CPOperand output, long rows, long cols, int blocksize,
 		long nonZeros) {
 		if(rows >= 0 && cols >= 0 && blocksize > 0)
