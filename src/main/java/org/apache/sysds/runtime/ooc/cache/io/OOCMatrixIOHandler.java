@@ -385,15 +385,19 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 				boolean shouldBreak = false;
 
 				synchronized(budgetLock) {
-					if (stop.get())
+					long currentBytes = bytesRead.get();
+					if(stop.get())
 						shouldBreak = true;
-					else if (bytesRead.get() + blockSize > byteLimit) {
+					else if(currentBytes > 0 && blockSize > byteLimit - currentBytes) {
 						stop.set(true);
 						budgetHit.set(true);
 						shouldBreak = true;
 					}
-					bytesRead.addAndGet(blockSize);
+					else
+						bytesRead.addAndGet(blockSize);
 				}
+				if(shouldBreak)
+					break;
 
 				MatrixIndexes outIdx = new MatrixIndexes(key);
 				IndexedMatrixValue imv = new IndexedMatrixValue(outIdx, value);
@@ -413,8 +417,6 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 					ioStart = currTime;
 				}
 
-				if (shouldBreak)
-					break; // Note that we knowingly go over limit, which could result in READER_SIZE*8MB overshoot
 			}
 
 			if (!stop.get())

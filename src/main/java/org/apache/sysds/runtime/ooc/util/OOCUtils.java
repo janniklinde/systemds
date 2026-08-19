@@ -23,10 +23,10 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
-import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
+import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
@@ -175,10 +175,9 @@ public class OOCUtils {
 			MatrixBlock.estimateSizeSparseInMemory(rows, cols, 1.0));
 	}
 
-	public static void enqueueExact(OOCStream<IndexedMatrixValue> out, IndexedMatrixValue value,
-		ReservationBudget budget) {
-		long bytes = ((MatrixBlock) value.getValue()).getExactSerializedSize();
-		OOCStream.QueueCallback<IndexedMatrixValue> callback = null;
+	public static <T extends SpillableObject> void enqueueExact(OOCStream<T> out, T value, ReservationBudget budget) {
+		long bytes = value.size();
+		OOCStream.QueueCallback<T> callback = null;
 		try {
 			budget.reserveBlocking(bytes);
 			callback = new InMemoryQueueCallback<>(value, null, budget, bytes);
