@@ -23,7 +23,6 @@ import org.apache.commons.lang3.NotImplementedException;
 import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.common.Types;
 import org.apache.sysds.lops.Lop;
-import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.functionobjects.ParameterizedBuiltin;
@@ -45,8 +44,6 @@ import org.apache.sysds.runtime.util.UtilFunctions;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 
 public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstruction {
 
@@ -106,61 +103,54 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 		}
 		else if(instOpcode.equalsIgnoreCase(Opcodes.CONTAINS.toString())) {
 			MatrixObject targetObj = ec.getMatrixObject(params.get("target"));
-			OOCStream<IndexedMatrixValue> qIn = targetObj.getStreamHandle();
 			Data pattern = ec.getVariable(params.get("pattern"));
-
-			if( pattern == null ) //literal
+			if(pattern == null)
 				pattern = ScalarObjectFactory.createScalarObject(Types.ValueType.FP64, params.get("pattern"));
-
-			if (!pattern.getDataType().isScalar())
+			if(!pattern.getDataType().isScalar())
 				throw new NotImplementedException();
 
-			Data finalPattern = pattern;
-
-			addInStream(qIn);
-			addOutStream(); // This instruction has no output stream
-
-			CompletableFuture<Boolean> future = new CompletableFuture<>();
-
-			filterOOC(qIn, tmp -> {
-					boolean contains = ((MatrixBlock)tmp.getValue()).containsValue(((ScalarObject)finalPattern).getDoubleValue());
-
-					if (contains)
-						future.complete(true);
-				}, tmp -> !future.isDone()) // Don't start a separate worker if result already known
-				.whenComplete((v, err) -> future.complete(false)); // Then the pattern was not found
-
-			boolean ret;
-			try {
-				ret = future.get();
-			} catch (InterruptedException | ExecutionException e) {
-				throw new DMLRuntimeException(e);
+			double value = ((ScalarObject) pattern).getDoubleValue();
+			OOCStream<Boolean> result = createWritableStream(4, 4, 4);
+			OOCInstructionUtils.reduce(targetObj.getStreamable(), result,
+				block -> ((MatrixBlock) block.getValue()).containsValue(value), (left, right) -> left || right,
+				ignored -> 1, getContext());
+			result.start();
+			try(OOCStream.QueueCallback<Boolean> callback = result.dequeueCB()) {
+				if(callback == null)
+					throw new IllegalStateException("Contains cannot reduce an empty OOC stream");
+				ec.setScalarOutput(output.getName(), new BooleanObject(callback.get()));
 			}
-
-			ec.setScalarOutput(output.getName(), new BooleanObject(ret));
+			try(OOCStream.QueueCallback<Boolean> callback = result.dequeueCB()) {
+				if(callback != null)
+					throw new IllegalStateException("Contains produced multiple results");
 			}
-			else if(instOpcode.equalsIgnoreCase(Opcodes.REXPAND.toString())) {
-				MatrixObject targetObj = ec.getMatrixObject(params.get("target"));
-				OOCStream<IndexedMatrixValue> qIn = targetObj.getStreamHandle();
-				OOCStream<IndexedMatrixValue> qOut = createWritableStream();
-				ec.getMatrixObject(output).setStreamHandle(qOut);
-
-				String maxValName = params.get("max");
-				long lmaxVal = maxValName.startsWith(Lop.SCALAR_VAR_NAME_PREFIX) ?
-					ec.getScalarInput(maxValName, Types.ValueType.FP64, false).getLongValue() :
-					UtilFunctions.toLong(Double.parseDouble(maxValName));
-				boolean dirRows = params.get("dir").equals("rows");
-				boolean cast = Boolean.parseBoolean(params.get("cast"));
-				boolean ignore = Boolean.parseBoolean(params.get("ignore"));
-				long blen = targetObj.getBlocksize();
-
-				expandOOC(qIn, qOut, tmp -> {
-					ArrayList<IndexedMatrixValue> out = new ArrayList<>();
-					LibMatrixReorg.rexpand(tmp, lmaxVal, dirRows, cast, ignore, blen, out);
-					return out;
-				});
-			}
-			else
-				throw new NotImplementedException();
 		}
+		else if(instOpcode.equalsIgnoreCase(Opcodes.REXPAND.toString())) {
+			MatrixObject targetObj = ec.getMatrixObject(params.get("target"));
+			String maxValName = params.get("max");
+			long lmaxVal = maxValName.startsWith(Lop.SCALAR_VAR_NAME_PREFIX) ? ec
+				.getScalarInput(maxValName, Types.ValueType.FP64, false)
+				.getLongValue() : UtilFunctions.toLong(Double.parseDouble(maxValName));
+			boolean dirRows = params.get("dir").equals("rows");
+			boolean cast = Boolean.parseBoolean(params.get("cast"));
+			boolean ignore = Boolean.parseBoolean(params.get("ignore"));
+			long blen = targetObj.getBlocksize();
+			MatrixObject outputObj = ec.getMatrixObject(output);
+			outputObj.getDataCharacteristics().set(dirRows ? lmaxVal : targetObj.getNumRows(),
+				dirRows ? targetObj.getNumRows() : lmaxVal, targetObj.getBlocksize(), -1);
+			OOCStream<IndexedMatrixValue> result = createWritableStream(outputObj);
+			outputObj.setStreamHandle(result);
+
+			long tileLength = Math.min(blen, targetObj.getNumRows());
+			long expandedBytes = MatrixBlock.estimateSizeInMemory(dirRows ? lmaxVal : tileLength,
+				dirRows ? tileLength : lmaxVal, tileLength);
+			OOCInstructionUtils.flatMap(targetObj.getStreamable(), result, value -> {
+				ArrayList<IndexedMatrixValue> blocks = new ArrayList<>();
+				LibMatrixReorg.rexpand(value, lmaxVal, dirRows, cast, ignore, blen, blocks);
+				return blocks;
+			}, value -> ((MatrixBlock) value.getValue()).getExactSerializedSize(), 3 * expandedBytes, getContext());
+		}
+		else
+			throw new NotImplementedException();
 	}
+}
