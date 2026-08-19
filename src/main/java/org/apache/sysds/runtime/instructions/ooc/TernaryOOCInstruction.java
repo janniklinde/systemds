@@ -41,6 +41,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.TernaryOperator;
+import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class TernaryOOCInstruction extends ComputationOOCInstruction {
@@ -156,8 +157,7 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 			m1.getBlocksize(), -1);
 		ec.getMatrixObject(output).setStreamHandle(qOut);
 
-		if(m1.getDataCharacteristics().dimsKnown() && m2.getDataCharacteristics().dimsKnown() &&
-			m3.getDataCharacteristics().dimsKnown()) {
+		if(OOCDimensions.known(m1, m2, m3)) {
 			TernaryOperator operator = (TernaryOperator) _optr;
 			if(operator.fn instanceof PlusMultiply || operator.fn instanceof MinusMultiply) {
 				OOCStream<IndexedMatrixValue> product = createWritableStream();

@@ -40,6 +40,7 @@ import org.apache.sysds.runtime.matrix.operators.AggregateTernaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
+import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class AggregateTernaryOOCInstruction extends ComputationOOCInstruction {
@@ -144,8 +145,7 @@ public class AggregateTernaryOOCInstruction extends ComputationOOCInstruction {
 		DataCharacteristics firstDc = first.getDataCharacteristics();
 		DataCharacteristics secondDc = second.getDataCharacteristics();
 		DataCharacteristics thirdDc = third == null ? null : third.getDataCharacteristics();
-		if(!firstDc.dimsKnown() || firstDc.getBlocksize() <= 0)
-			throw new DMLRuntimeException("Unknown dimensions for first aggregate ternary input.");
+		OOCDimensions.require("aggregate ternary", first);
 		boolean invalidSecond = secondDc.dimsKnown() &&
 			(firstDc.getRows() != secondDc.getRows() || firstDc.getCols() != secondDc.getCols());
 		boolean invalidThird = thirdDc != null && thirdDc.dimsKnown() &&

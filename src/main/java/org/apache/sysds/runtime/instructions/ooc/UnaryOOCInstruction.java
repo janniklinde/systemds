@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.UnaryOperator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
+import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class UnaryOOCInstruction extends ComputationOOCInstruction {
@@ -86,10 +87,8 @@ public class UnaryOOCInstruction extends ComputationOOCInstruction {
 
 	private OOCStream<IndexedMatrixValue> processCumulativeUnaryInstruction(ExecutionContext ec, UnaryOperator uop,
 		MatrixObject input) {
+		OOCDimensions.require(getOpcode(), input);
 		DataCharacteristics dc = input.getDataCharacteristics();
-		if(!dc.dimsKnown())
-			throw new DMLRuntimeException(
-				"OOC cumulative unary operations require known dimensions for deterministic block ordering.");
 
 		BuiltinCode bcode = ((Builtin) uop.fn).getBuiltinCode();
 		boolean rowCum = bcode == BuiltinCode.ROWCUMSUM;

@@ -40,6 +40,7 @@ import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.RightScalarOperator;
 import org.apache.sysds.runtime.ooc.store.CountingLiveness;
 import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
+import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class MapMMChainOOCInstruction extends ComputationOOCInstruction {
@@ -79,9 +80,9 @@ public class MapMMChainOOCInstruction extends ComputationOOCInstruction {
 		boolean hasV = !v.getDataCharacteristics().rowsKnown() || v.getNumRows() > 0;
 		if(!hasV && _type != ChainType.XtXvy)
 			throw new DMLRuntimeException("MMChain requires non-empty v for chain type " + _type);
-		if(!x.getDataCharacteristics().dimsKnown() || x.getNumRows() <= 0 || x.getNumColumns() <= 0 ||
-			x.getBlocksize() <= 0)
-			throw new DMLRuntimeException("Planner-backed MMChain requires known, positive matrix dimensions.");
+		OOCDimensions.require(getOpcode(), x);
+		if(x.getNumRows() <= 0 || x.getNumColumns() <= 0)
+			throw new DMLRuntimeException("Planner-backed MMChain requires a non-empty matrix.");
 		if(hasV)
 			v.getDataCharacteristics().set(x.getNumColumns(), 1, x.getBlocksize(), v.getNnz());
 		if(w != null)

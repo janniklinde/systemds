@@ -31,6 +31,7 @@ import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.ScalarOperator;
 import org.apache.sysds.runtime.ooc.store.CountingLiveness;
+import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class BinaryOOCInstruction extends ComputationOOCInstruction {
@@ -67,8 +68,8 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 
 		OOCStream<IndexedMatrixValue> qOut = new SubscribableTaskQueue<>();
 
-		final boolean known1 = OOCInstructionUtils.known(m1);
-		final boolean known2 = OOCInstructionUtils.known(m2);
+		final boolean known1 = OOCDimensions.known(m1);
+		final boolean known2 = OOCDimensions.known(m2);
 		if(known1 && known2)
 			OOCInstructionUtils.propagateDims(ec, output, Math.max(m1.getNumRows(), m2.getNumRows()),
 				Math.max(m1.getNumColumns(), m2.getNumColumns()), m1.getBlocksize(), -1);

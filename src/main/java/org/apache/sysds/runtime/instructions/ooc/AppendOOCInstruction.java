@@ -34,6 +34,7 @@ import org.apache.sysds.runtime.matrix.operators.ReorgOperator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
+import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 import java.util.ArrayList;
@@ -88,10 +89,8 @@ public class AppendOOCInstruction extends BinaryOOCInstruction {
 		long crossDimension = -1;
 		long nonZeros = 0;
 		for(MatrixObject input : inputs) {
+			OOCDimensions.require("bind", input);
 			DataCharacteristics dc = input.getDataCharacteristics();
-			if(!dc.dimsKnown() || dc.getBlocksize() <= 0)
-				throw new DMLRuntimeException(
-					"Planner-backed OOC bind requires known dimensions and positive block sizes.");
 			if((cbind ? dc.getCols() : dc.getRows()) == 0)
 				continue;
 			long own = cbind ? dc.getRows() : dc.getCols();
