@@ -68,18 +68,21 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 	}
 
 	public static MaterializeOOCPrimitive reusable(OOCStreamable<IndexedMatrixValue> source) {
-		return new MaterializeOOCPrimitive(source, OOCStoreLayout.ROW_MAJOR, null, true);
+		return reusable(source, OOCStoreLayout.ROW_MAJOR);
+	}
+
+	public static MaterializeOOCPrimitive reusable(OOCStreamable<IndexedMatrixValue> source, OOCStoreLayout layout) {
+		return new MaterializeOOCPrimitive(source, layout, null, true);
 	}
 
 	public synchronized boolean registerRequest(int expectedReaders,
 		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> liveConsumer) {
-		if(_reusable)
-			throw new IllegalStateException("Reusable materialization registers readers dynamically.");
 		if(expectedReaders <= 0)
 			throw new IllegalArgumentException("Materialization request requires at least one reader.");
 		boolean live = !hasStartedExecution();
 		if(_materializedStore == null) {
-			_expectedReaders = Math.addExact(_expectedReaders, expectedReaders);
+			if(!_reusable)
+				_expectedReaders = Math.addExact(_expectedReaders, expectedReaders);
 			_consumers = Math.addExact(_consumers, 1);
 		}
 		else
@@ -112,22 +115,23 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 	protected void startExecution() {
 		try {
 			OOCStream<IndexedMatrixValue> source = getInputReadStream(0);
+			DataCharacteristics characteristics = _source.getDataCharacteristics();
+			boolean logicalLayout = characteristics != null && characteristics.dimsKnown() &&
+				characteristics.getBlocksize() > 0;
+			ToIntFunction<MatrixIndexes> linearize = logicalLayout ? indexes -> _layout.linearize(indexes,
+				characteristics) : null;
 			MaterializedStore<IndexedMatrixValue> store;
 			synchronized(this) {
-				store = _reusable ? new MaterializedStore<>(OOCCacheManager.getGlobalCache(),
-					CachingStream._streamSeq.getNextID()) : new MaterializedStore<>(OOCCacheManager.getGlobalCache(),
-						CachingStream._streamSeq.getNextID(), _expectedReaders, _consumers);
+				int consumers = _reusable ? 1 + _consumers : _consumers;
+				store = new MaterializedStore<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID(),
+					_reusable ? -1 : _expectedReaders, consumers, logicalLayout ? _layout : null,
+					logicalLayout ? characteristics : null);
 				_materializedStore = store;
 			}
-			DataCharacteristics characteristics = _source.getDataCharacteristics();
 			AtomicInteger nextIndex = new AtomicInteger();
-			ToIntFunction<MatrixIndexes> linearize;
-			if(_reusable &&
-				(characteristics == null || !characteristics.dimsKnown() || characteristics.getBlocksize() <= 0))
-				linearize = ignored -> nextIndex.getAndIncrement();
-			else
-				linearize = indexes -> _layout.linearize(indexes, characteristics);
-			OOCStreamMaterializer materializer = new OOCStreamMaterializer(store, linearize, _allowance,
+			ToIntFunction<MatrixIndexes> publicationIndex = linearize != null ? linearize : ignored -> nextIndex
+				.getAndIncrement();
+			OOCStreamMaterializer materializer = new OOCStreamMaterializer(store, publicationIndex, _allowance,
 				_liveConsumers);
 			materializer.completion().whenComplete((ignored, error) -> {
 				if(error != null)

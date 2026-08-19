@@ -202,10 +202,11 @@ public final class OOCInstructionUtils {
 
 	public static void indexedBroadcastMap(OOCStreamable<IndexedMatrixValue> streamed,
 		OOCStreamable<IndexedMatrixValue> broadcast, OOCStream<IndexedMatrixValue> output,
-		ToIntFunction<IndexedMatrixValue> lookup, Supplier<MaterializedStore.Liveness> liveness,
+		ToLongFunction<IndexedMatrixValue> lookupRow, ToLongFunction<IndexedMatrixValue> lookupCol,
+		Supplier<MaterializedStore.Liveness> liveness,
 		BiFunction<IndexedMatrixValue, IndexedMatrixValue, IndexedMatrixValue> operation, StreamContext context) {
 		output.assignPrimitive(
-			new BroadcastOOCPrimitive(streamed, broadcast, output, lookup, liveness, operation, context));
+			new BroadcastOOCPrimitive(streamed, broadcast, output, lookupRow, lookupCol, liveness, operation, context));
 	}
 
 	public static void rowGroupedReduce(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
