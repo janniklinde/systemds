@@ -34,7 +34,9 @@ import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.ooc.AppendOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.BinaryOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.CtableOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.DataGenOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.ParameterizedBuiltinOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.cp.IntObject;
@@ -43,6 +45,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.store.MaterializedCallback;
 import org.apache.sysds.runtime.ooc.store.StoreLease;
@@ -105,6 +108,58 @@ public class OOCInstructionUtilsTest {
 		Assert.assertEquals(7, ec.getMatrixObject("E").getNumRows());
 		Assert.assertEquals(3, ec.getMatrixObject("E").getNumColumns());
 		Assert.assertEquals(2, ec.getMatrixObject("E").getBlocksize());
+	}
+
+	@Test
+	public void testSliceLineCtable() {
+		OOCCacheManager.reset();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			SubscribableTaskQueue<IndexedMatrixValue> rows = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> cols = new SubscribableTaskQueue<>();
+			MatrixObject rowInput = matrixObject(4, 1, 2);
+			MatrixObject colInput = matrixObject(4, 1, 2);
+			MatrixObject output = matrixObject(4, 4, 2);
+			rowInput.setStreamHandle(rows);
+			colInput.setStreamHandle(cols);
+			ec.setVariable("A", rowInput);
+			ec.setVariable("B", colInput);
+			ec.setVariable("R", output);
+			for(int blockIndex = 1; blockIndex <= 2; blockIndex++) {
+				MatrixBlock categories = new MatrixBlock(2, 1, false);
+				categories.set(0, 0, 2 * blockIndex - 1);
+				categories.set(1, 0, 2 * blockIndex);
+				rows.enqueue(new IndexedMatrixValue(new MatrixIndexes(blockIndex, 1), categories));
+				cols.enqueue(new IndexedMatrixValue(new MatrixIndexes(blockIndex, 1), new MatrixBlock(categories)));
+			}
+			rows.closeInput();
+			cols.closeInput();
+
+			CtableOOCInstruction.parseInstruction(
+				"OOC°ctable°A·MATRIX·FP64°B·MATRIX·FP64°1·SCALAR·FP64·true" + "°4·true°4·true°R·MATRIX·FP64°false°22")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = output.getStreamHandle();
+			result.start();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue value = current.get();
+					MatrixBlock block = (MatrixBlock) value.getValue();
+					if(value.getIndexes().getRowIndex() == value.getIndexes().getColumnIndex()) {
+						Assert.assertEquals(1, block.get(0, 0), 0);
+						Assert.assertEquals(1, block.get(1, 1), 0);
+					}
+					else
+						Assert.assertEquals(0, block.getNonZeros());
+					blocks++;
+				}
+			Assert.assertEquals(4, blocks);
+			Assert.assertNull(OOCCacheManager.getCacheIfInitialized());
+		}
+		finally {
+			OOCCacheManager.reset();
+		}
 	}
 
 	@Test

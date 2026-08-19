@@ -30,6 +30,8 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
+import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 import java.util.ArrayList;
 import java.util.concurrent.CompletableFuture;
@@ -71,20 +73,35 @@ public class ReshapeOOCInstruction extends ComputationOOCInstruction {
 		long rows = ec.getScalarInput(_opRows).getLongValue();
 		long cols = ec.getScalarInput(_opCols).getLongValue();
 		boolean byRow = ec.getScalarInput(_opByRow).getBooleanValue();
+		MatrixObject in = ec.getMatrixObject(input1);
+		ec.getDataCharacteristics(output.getName()).set(rows, cols, in.getBlocksize(), in.getNnz());
 
 		OOCStream<IndexedMatrixValue> qOut = createWritableStream();
 		ec.getMatrixObject(output).setStreamHandle(qOut);
 
-		MatrixObject in = ec.getMatrixObject(input1);
-		OOCStream<IndexedMatrixValue> qIn = in.getStreamHandle();
 		int blen = in.getBlocksize();
 		long rlen = in.getNumRows();
 		long clen = in.getNumColumns();
+		if(byRow && cols == 1 && (rlen < 0 || clen < 0)) {
+			long squareDimension = Math.round(Math.sqrt(rows));
+			if(squareDimension * squareDimension == rows)
+				rlen = clen = squareDimension;
+		}
 
 		if(rlen * clen != rows * cols)
 			throw new DMLRuntimeException("Reshape matrix requires consistent numbers of input/output cells (" + rlen
 				+ ":" + clen + ", " + rows + ":" + cols + ").");
 
+		if(byRow && cols == 1) {
+			int outputBlocksize = ec.getMatrixObject(output).getBlocksize();
+			long inputColumns = clen;
+			OOCInstructionUtils.repartition(in.getStreamable(), qOut,
+				index -> countRowToColumnFragments(index, rows, inputColumns, blen, outputBlocksize),
+				(tile, emit) -> routeRowsToColumn(tile, inputColumns, blen, outputBlocksize, emit), getContext());
+			return;
+		}
+
+		OOCStream<IndexedMatrixValue> qIn = in.getStreamHandle();
 		if(rlen == rows) {
 			mapOOC(qIn, qOut, tmp -> tmp);
 			return;
@@ -411,7 +428,52 @@ public class ReshapeOOCInstruction extends ComputationOOCInstruction {
 		qOut.closeInput();
 	}
 
-	private MatrixBlock[] allocateSliceBlocks(int idx, long rows, long cols, int blen, int numBlocksPerRow, int numBlocksPerCol, boolean isBlockRowSlice) {
+	private static int countRowToColumnFragments(MatrixIndexes outputIndex, long outputRows, long inputCols,
+		int inputBlocksize, int outputBlocksize) {
+		long position = (outputIndex.getRowIndex() - 1) * outputBlocksize;
+		long end = Math.min(outputRows, position + outputBlocksize);
+		int fragments = 0;
+		while(position < end) {
+			long inputCol = position % inputCols;
+			long length = Math.min(end - position,
+				Math.min(inputCols - inputCol, inputBlocksize - inputCol % inputBlocksize));
+			position += length;
+			fragments++;
+		}
+		return fragments;
+	}
+
+	private static void routeRowsToColumn(IndexedMatrixValue tile, long inputCols, int inputBlocksize,
+		int outputBlocksize, RepartitionOOCPrimitive.FragmentEmitter emit) {
+		MatrixBlock block = (MatrixBlock) tile.getValue();
+		long inputRowStart = (tile.getIndexes().getRowIndex() - 1) * inputBlocksize;
+		long inputColStart = (tile.getIndexes().getColumnIndex() - 1) * inputBlocksize;
+		for(int row = 0; row < block.getNumRows();) {
+			long position = (inputRowStart + row) * inputCols + inputColStart;
+			int destinationRow = (int) (position % outputBlocksize);
+			int rows = inputColStart == 0 && block.getNumColumns() == inputCols ? Math.min(block.getNumRows() - row,
+				(outputBlocksize - destinationRow) / block.getNumColumns()) : 0;
+			if(rows > 0) {
+				emit.copyToColumn(new MatrixIndexes(position / outputBlocksize + 1, 1), row, 0, rows,
+					block.getNumColumns(), destinationRow);
+				row += rows;
+				continue;
+			}
+			int col = 0;
+			while(col < block.getNumColumns()) {
+				position = (inputRowStart + row) * inputCols + inputColStart + col;
+				destinationRow = (int) (position % outputBlocksize);
+				int length = Math.min(block.getNumColumns() - col, outputBlocksize - destinationRow);
+				emit.copyRowToColumn(new MatrixIndexes(position / outputBlocksize + 1, 1), row, col, length,
+					destinationRow);
+				col += length;
+			}
+			row++;
+		}
+	}
+
+	private MatrixBlock[] allocateSliceBlocks(int idx, long rows, long cols, int blen, int numBlocksPerRow,
+		int numBlocksPerCol, boolean isBlockRowSlice) {
 		int num = isBlockRowSlice ? numBlocksPerRow : numBlocksPerCol;
 		MatrixBlock[] res = new MatrixBlock[num];
 
