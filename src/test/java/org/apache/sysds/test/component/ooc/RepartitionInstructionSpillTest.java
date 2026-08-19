@@ -41,6 +41,7 @@ import org.apache.sysds.runtime.instructions.ooc.MapMMChainOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.QuaternaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
+import org.apache.sysds.runtime.instructions.ooc.TSMMOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.UnaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
@@ -212,14 +213,14 @@ public class RepartitionInstructionSpillTest {
 		try {
 			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
 			input(ec, "X", 400, 400, 200, 2, 2);
-			input(ec, "U", 400, 100, 200, 2, 1);
-			MatrixObject v = input(ec, "V", 400, 100, 200, 2, 1);
+			input(ec, "U", 400, 400, 200, 2, 2);
+			MatrixObject v = input(ec, "V", 400, 400, 200, 2, 2);
 			v.getDataCharacteristics().set(-1, -1, -1, -1);
-			MatrixObject out = matrixObject(400, 100, 200);
+			MatrixObject out = matrixObject(400, 400, 200);
 			ec.setVariable("R", out);
 
 			QuaternaryOOCInstruction.parseInstruction("OOC°mapwdivmm°X·MATRIX·FP64°U·MATRIX·FP64°"
-				+ "V·MATRIX·FP64°-1·SCALAR·INT64·true°R·MATRIX·FP64°MULT_RIGHT").processInstruction(ec);
+				+ "V·MATRIX·FP64°-1·SCALAR·INT64·true°R·MATRIX·FP64°MULT_LEFT").processInstruction(ec);
 			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
 			result.start();
 			waitForSpill();
@@ -227,10 +228,10 @@ public class RepartitionInstructionSpillTest {
 			OOCStream.QueueCallback<IndexedMatrixValue> callback;
 			while((callback = result.dequeueCB()) != null)
 				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
-					Assert.assertEquals(40_000, current.get().getValue().get(0, 0), 0);
+					Assert.assertEquals(160_000, current.get().getValue().get(0, 0), 0);
 					blocks++;
 				}
-			Assert.assertEquals(2, blocks);
+			Assert.assertEquals(4, blocks);
 			Assert.assertNull("WDivMM initialized the legacy LRU cache", OOCCacheManager.getCacheIfInitialized());
 		}
 		finally {
@@ -501,6 +502,34 @@ public class RepartitionInstructionSpillTest {
 				Assert.assertEquals(2, block.get(0, 199), 0);
 			}
 			Assert.assertNull(result.dequeueCB());
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
+	@Test
+	public void testTsmmSpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			input(ec, "X", 400, 400, 200, 2, 2);
+			MatrixObject out = matrixObject(400, 400, 200);
+			ec.setVariable("R", out);
+
+			TSMMOOCInstruction.parseInstruction("OOC°tsmm°X·MATRIX·FP64°R·MATRIX·FP64°LEFT").processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			result.start();
+			waitForSpill();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					Assert.assertEquals(400, current.get().getValue().get(0, 0), 0);
+					blocks++;
+				}
+			Assert.assertEquals(4, blocks);
+			Assert.assertNull("TSMM initialized the legacy LRU cache", OOCCacheManager.getCacheIfInitialized());
 		}
 		finally {
 			reset(statistics);
