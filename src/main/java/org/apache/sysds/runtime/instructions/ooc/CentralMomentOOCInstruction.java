@@ -22,16 +22,14 @@ package org.apache.sysds.runtime.instructions.ooc;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
-import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.instructions.cp.CmCovObject;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.cp.CentralMomentCPInstruction;
 import org.apache.sysds.runtime.instructions.cp.DoubleObject;
 import org.apache.sysds.runtime.instructions.cp.ScalarObject;
-import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.operators.CMOperator;
-import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class CentralMomentOOCInstruction extends AggregateUnaryOOCInstruction {
 
@@ -52,7 +50,7 @@ public class CentralMomentOOCInstruction extends AggregateUnaryOOCInstruction {
 
 	@Override
 	public void processInstruction(ExecutionContext ec) {
-		String output_name = output.getName();
+		String outputName = output.getName();
 
 		/*
 		 * The "order" of the central moment in the instruction can
@@ -62,7 +60,6 @@ public class CentralMomentOOCInstruction extends AggregateUnaryOOCInstruction {
 		 */
 
 		MatrixObject matObj = ec.getMatrixObject(input1.getName());
-		OOCStream<IndexedMatrixValue> qIn = matObj.getStreamHandle();
 
 		CPOperand scalarInput = (input3 == null ? input2 : input3);
 		ScalarObject order = ec.getScalarInput(scalarInput);
@@ -71,42 +68,34 @@ public class CentralMomentOOCInstruction extends AggregateUnaryOOCInstruction {
 		if(cm_op.getAggOpType() == CMOperator.AggregateOperationTypes.INVALID)
 			cm_op = cm_op.setCMAggOp((int) order.getLongValue());
 
-		CMOperator finalCm_op = cm_op;
-
-		OOCStream<CmCovObject> cmObjs = createWritableStream();
-
-		if(input3 == null) {
-			mapOOC(qIn, cmObjs, tmp -> ((MatrixBlock) tmp.getValue()).cmOperations(new CMOperator(finalCm_op))); // Need to copy CMOperator as its ValueFunction is stateful
-		}
+		CMOperator finalCmOp = cm_op;
+		OOCStream<CmCovObject> result = createWritableStream(4, 4, 4);
+		if(input3 == null)
+			OOCInstructionUtils.reduce(matObj.getStreamable(), result,
+				value -> ((MatrixBlock) value.getValue()).cmOperations(new CMOperator(finalCmOp)),
+				(left, right) -> (CmCovObject) finalCmOp.fn.execute(left, right), ignored -> 256, getContext());
 		else {
-			// Here we use a hash join approach
-			// Note that this may keep blocks in the cache for a while, depending on when a matching block arrives in the stream
-			MatrixObject wtObj = ec.getMatrixObject(input2.getName());
-
-			DataCharacteristics dc = ec.getDataCharacteristics(input1.getName());
-			DataCharacteristics dcW = ec.getDataCharacteristics(input2.getName());
-
-			if (dc.getBlocksize() != dcW.getBlocksize())
-				throw new DMLRuntimeException("Different block sizes are not yet supported");
-
-			OOCStream<IndexedMatrixValue> wIn = wtObj.getStreamHandle();
-
-			joinOOC(qIn, wIn, cmObjs,
-				(tmp, weights) ->
-					((MatrixBlock) tmp.getValue()).cmOperations(new CMOperator(finalCm_op), (MatrixBlock) weights.getValue()),
-				IndexedMatrixValue::getIndexes);
+			MatrixObject weights = ec.getMatrixObject(input2.getName());
+			weights.getDataCharacteristics().set(matObj.getNumRows(), matObj.getNumColumns(), matObj.getBlocksize(),
+				weights.getNnz());
+			OOCStream<CmCovObject> partials = createWritableStream(matObj);
+			OOCInstructionUtils.equiJoinIndexed(matObj.getStreamable(), weights.getStreamable(), partials,
+				(value, weight) -> ((MatrixBlock) value.getValue()).cmOperations(new CMOperator(finalCmOp),
+					(MatrixBlock) weight.getValue()),
+				ignored -> 256, getContext());
+			OOCInstructionUtils.reduce(partials, result, value -> value,
+				(left, right) -> (CmCovObject) finalCmOp.fn.execute(left, right), ignored -> 256, getContext());
 		}
 
-		try {
-			CmCovObject agg = cmObjs.dequeue();
-			CmCovObject next;
-
-			while ((next = cmObjs.dequeue()) != LocalTaskQueue.NO_MORE_TASKS)
-				agg = (CmCovObject) finalCm_op.fn.execute(agg, next);
-
-			ec.setScalarOutput(output_name, new DoubleObject(agg.getRequiredResult(finalCm_op)));
-		} catch (Exception ex) {
-			throw new DMLRuntimeException(ex);
+		result.start();
+		try(OOCStream.QueueCallback<CmCovObject> callback = result.dequeueCB()) {
+			if(callback == null)
+				throw new DMLRuntimeException("Central moment cannot reduce an empty OOC stream");
+			ec.setScalarOutput(outputName, new DoubleObject(callback.get().getRequiredResult(finalCmOp)));
+		}
+		try(OOCStream.QueueCallback<CmCovObject> callback = result.dequeueCB()) {
+			if(callback != null)
+				throw new DMLRuntimeException("Central moment produced multiple aggregate results");
 		}
 	}
 }

@@ -43,23 +43,22 @@ import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.runtime.ooc.util.StateTableUtils;
 
-public final class NaryJoinOOCPrimitive extends OOCPrimitive {
+public final class NaryJoinOOCPrimitive<O> extends OOCPrimitive {
 	private final List<OOCStreamable<IndexedMatrixValue>> _inputs;
-	private final OOCStreamable<IndexedMatrixValue> _output;
+	private final OOCStreamable<O> _output;
 	private final ToIntFunction<IndexedMatrixValue> _key;
-	private final ToLongFunction<IndexedMatrixValue> _size;
-	private final Function<List<IndexedMatrixValue>, IndexedMatrixValue> _operation;
+	private final ToLongFunction<O> _size;
+	private final Function<List<IndexedMatrixValue>, O> _operation;
 	private final long _storeTaskBytes;
 	private final long _joinTaskBytes;
 	private final AtomicInteger _active = new AtomicInteger(1);
 	private final CompletableFuture<Void> _activeCompletion = new CompletableFuture<>();
 	private StateTable<IndexedMatrixValue> _table;
 	private OOCStream<JoinWork> _ready;
-	private OOCStream<IndexedMatrixValue> _outputStream;
+	private OOCStream<O> _outputStream;
 
-	public NaryJoinOOCPrimitive(List<OOCStreamable<IndexedMatrixValue>> inputs,
-		OOCStreamable<IndexedMatrixValue> output, ToIntFunction<IndexedMatrixValue> key,
-		ToLongFunction<IndexedMatrixValue> size, Function<List<IndexedMatrixValue>, IndexedMatrixValue> operation,
+	public NaryJoinOOCPrimitive(List<OOCStreamable<IndexedMatrixValue>> inputs, OOCStreamable<O> output,
+		ToIntFunction<IndexedMatrixValue> key, ToLongFunction<O> size, Function<List<IndexedMatrixValue>, O> operation,
 		long storeTaskBytes, long joinTaskBytes, StreamContext context) {
 		super(context, inputs.toArray(OOCStreamable[]::new));
 		if(inputs.size() < 2)
@@ -251,11 +250,10 @@ public final class NaryJoinOOCPrimitive extends OOCPrimitive {
 		int lease = 0;
 		for(int i = 0; i <= work._leases.size(); i++)
 			values.add(i == work._anchorIndex ? work._anchor.get() : work._leases.get(lease++).value());
-		IndexedMatrixValue output = _operation.apply(values);
+		O output = _operation.apply(values);
 		long bytes = _size.applyAsLong(output);
 		work._budget.reserveBlocking(bytes);
-		OOCStream.QueueCallback<IndexedMatrixValue> callback = new InMemoryQueueCallback<>(output, null, work._budget,
-			bytes);
+		OOCStream.QueueCallback<O> callback = new InMemoryQueueCallback<>(output, null, work._budget, bytes);
 		try {
 			_outputStream.enqueue(callback);
 			callback = null;
