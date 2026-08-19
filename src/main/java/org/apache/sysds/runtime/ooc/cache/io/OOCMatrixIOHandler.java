@@ -35,6 +35,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
+import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
 import org.apache.sysds.runtime.util.LocalFileUtils;
@@ -70,6 +71,7 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 	private static final int READER_SIZE = 16;
 	private static final long OVERFLOW = 8192 * 1024;
 	private static final long MAX_PARTITION_SIZE = 8192 * 8192;
+	private static final int SOURCE_PACK_MAX_COUNT = 64;
 	private static final long IDLE_FLUSH_MS = 1;
 
 	private final String _spillDir;
@@ -368,6 +370,14 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 		AtomicLong bytesRead, long byteLimit, Object budgetLock, ConcurrentLinkedDeque<SourceBlockDescriptor> descriptors)
 		throws IOException {
 		MatrixIndexes key = new MatrixIndexes();
+		List<IndexedMatrixValue> groupValues = new ArrayList<>();
+		List<SourceBlockDescriptor> groupDescriptors = new ArrayList<>();
+		long groupLogicalBytes = 0;
+		long groupRecordBytes = 0;
+		long groupStart = -1;
+		long groupEnd = -1;
+		long packTarget = request.packTargetBytes;
+		long maxRecordBytes = packTarget > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : 2 * packTarget;
 
 		try(SequenceFile.Reader reader = new SequenceFile.Reader(job, SequenceFile.Reader.file(path))) {
 			long pos = filePositions.get(fileIdx);
@@ -404,10 +414,43 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 				SourceBlockDescriptor descriptor = new SourceBlockDescriptor(path.toString(), request.format, outIdx,
 					recordStart, (int)(recordEnd - recordStart), blockSize);
 
-				if(request.target instanceof SourceOOCStream src)
-					src.enqueue(imv, descriptor);
+				boolean small = request.packThresholdBytes > 0 && blockSize < request.packThresholdBytes;
+				long recordBytes = recordEnd - recordStart;
+				boolean contiguous = groupValues.isEmpty() || recordStart == groupEnd;
+				boolean canAdd = small && contiguous && groupValues.size() < SOURCE_PACK_MAX_COUNT &&
+					groupLogicalBytes <= packTarget - blockSize && groupRecordBytes <= maxRecordBytes - recordBytes;
+				if(!canAdd && !groupValues.isEmpty()) {
+					flushSourceGroup(request, groupValues, groupDescriptors, groupStart, groupEnd, groupLogicalBytes);
+					groupValues.clear();
+					groupDescriptors.clear();
+					groupLogicalBytes = 0;
+					groupRecordBytes = 0;
+					groupStart = -1;
+					groupEnd = -1;
+				}
+
+				if(small) {
+					if(groupValues.isEmpty())
+						groupStart = recordStart;
+					groupEnd = recordEnd;
+					groupValues.add(imv);
+					groupDescriptors.add(descriptor);
+					groupLogicalBytes += blockSize;
+					groupRecordBytes += recordBytes;
+					if(groupLogicalBytes >= packTarget || groupRecordBytes >= maxRecordBytes ||
+						groupValues.size() >= SOURCE_PACK_MAX_COUNT) {
+						flushSourceGroup(request, groupValues, groupDescriptors, groupStart, groupEnd,
+							groupLogicalBytes);
+						groupValues.clear();
+						groupDescriptors.clear();
+						groupLogicalBytes = 0;
+						groupRecordBytes = 0;
+						groupStart = -1;
+						groupEnd = -1;
+					}
+				}
 				else
-					request.target.enqueue(imv);
+					emitSourceValue(request, imv, descriptor);
 				descriptors.add(descriptor);
 				filePositions.set(fileIdx, reader.getPosition());
 
@@ -419,9 +462,35 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 
 			}
 
-			if (!stop.get())
+			if(!groupValues.isEmpty())
+				flushSourceGroup(request, groupValues, groupDescriptors, groupStart, groupEnd, groupLogicalBytes);
+			if(!stop.get())
 				completed.set(fileIdx, 1);
 		}
+	}
+
+	private static void emitSourceValue(SourceReadRequest request, IndexedMatrixValue value,
+		SourceBlockDescriptor descriptor) {
+		if(request.target instanceof SourceOOCStream source)
+			source.enqueue(value, descriptor);
+		else
+			request.target.enqueue(value);
+	}
+
+	private static void flushSourceGroup(SourceReadRequest request, List<IndexedMatrixValue> values,
+		List<SourceBlockDescriptor> blockDescriptors, long start, long end, long logicalBytes) {
+		if(values.size() == 1) {
+			emitSourceValue(request, values.get(0), blockDescriptors.get(0));
+			return;
+		}
+		SourceBlockDescriptor first = blockDescriptors.get(0);
+		GroupSourceBlockDescriptor group = new GroupSourceBlockDescriptor(first.path, first.format, first.indexes,
+			start, Math.toIntExact(end - start), logicalBytes, blockDescriptors, true);
+		if(request.target instanceof SourceOOCStream source)
+			source.enqueueGroup(new ArrayList<>(values), group);
+		else
+			for(IndexedMatrixValue value : values)
+				request.target.enqueue(value);
 	}
 
 	private void closeTarget(org.apache.sysds.runtime.instructions.ooc.OOCStream<IndexedMatrixValue> target, boolean close) {
@@ -498,19 +567,29 @@ public class OOCMatrixIOHandler implements OOCIOHandler {
 			List<IndexedMatrixValue> values = new ArrayList<>(gsrc.count);
 			try(SequenceFile.Reader reader = new SequenceFile.Reader(job, SequenceFile.Reader.file(path))) {
 				reader.seek(gsrc.offset);
-				for (int i = 0; i < gsrc.blocks.size(); i++) {
-					SourceBlockDescriptor d = gsrc.blocks.get(i);
-					MatrixIndexes ix = new MatrixIndexes();
-					MatrixBlock mb = new MatrixBlock();
-					if (!reader.next(ix, mb))
-						throw new DMLRuntimeException("Failed to read source block at offset " + d.offset + " in " + d.path);
-					values.add(new IndexedMatrixValue(ix, mb));
+				for(int i = 0; i < gsrc.blocks.size(); i++) {
+					SourceBlockDescriptor descriptor = gsrc.blocks.get(i);
+					if(reader.getPosition() != descriptor.offset)
+						throw new DMLRuntimeException(
+							"Non-contiguous source pack at offset " + descriptor.offset + " in " + descriptor.path);
+					MatrixIndexes indexes = new MatrixIndexes();
+					MatrixBlock matrix = new MatrixBlock();
+					if(!reader.next(indexes, matrix) || !indexes.equals(descriptor.indexes))
+						throw new DMLRuntimeException(
+							"Failed to read source block at offset " + descriptor.offset + " in " + descriptor.path);
+					values.add(new IndexedMatrixValue(indexes, matrix));
 				}
 			}
 			catch(IOException e) {
 				throw new DMLRuntimeException(e);
 			}
-			block.setDataUnsafe(values);
+			if(gsrc.packed) {
+				Object[] packedValues = values.toArray();
+				long[] sizes = gsrc.blocks.stream().mapToLong(descriptor -> descriptor.serializedSize).toArray();
+				block.setDataUnsafe(PackedBlock.fromValues(packedValues, sizes));
+			}
+			else
+				block.setDataUnsafe(values);
 		}
 		else {
 			MatrixIndexes ix = new MatrixIndexes();

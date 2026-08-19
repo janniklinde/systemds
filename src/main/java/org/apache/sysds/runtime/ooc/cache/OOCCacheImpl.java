@@ -91,6 +91,19 @@ public class OOCCacheImpl implements OOCCache {
 	}
 
 	@Override
+	public OOCIOHandler getIOHandler() {
+		return _ioHandler;
+	}
+
+	@Override
+	public synchronized void markBacked(BlockEntry entry) {
+		EntryMeta meta = getMeta(entry);
+		if(meta == null)
+			throw new IllegalArgumentException("Cannot mark an unknown cache entry as backed: " + entry.getKey());
+		meta.backed = true;
+	}
+
+	@Override
 	public OOCFuture<BlockEntry> pin(long sId, long tId, MemoryAllowance allowance) {
 		return pinInternal(new BlockKey(sId, tId), allowance, false, false);
 	}
