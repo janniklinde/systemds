@@ -26,6 +26,7 @@ import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
+import org.apache.sysds.runtime.ooc.stats.StreamTrace;
 import org.apache.sysds.runtime.util.LocalFileUtils;
 import org.apache.sysds.utils.Statistics;
 import scala.Tuple2;
@@ -122,6 +123,7 @@ final class SpillStore {
 		try(RandomAccessFile raf = new RandomAccessFile(partitionPath(partitionId), "r")) {
 			raf.seek(offset);
 			OOCBufferedDataInputStream in = new OOCBufferedDataInputStream(raf);
+			StreamTrace.spillRead(block.getKey().getStreamId(), block.getSize());
 			long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 			SpillableObject obj = SpillableObjectRegistry.read(in);
 			if(DMLScript.OOC_STATISTICS) {
@@ -252,6 +254,8 @@ final class SpillStore {
 					long ioStart = DMLScript.OOC_STATISTICS || DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
 					long wrote = writeOut(partition, partitionId, tpl._1(), tpl._2(), dos, waitingForFlush);
 
+					if(wrote > 0)
+						StreamTrace.evictWrite(tpl._1().getKey().getStreamId(), wrote);
 					if(DMLScript.OOC_STATISTICS && wrote > 0) {
 						Statistics.incrementOOCEvictionWrite();
 						Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
@@ -275,6 +279,8 @@ final class SpillStore {
 						long wrote = writeOut(partition, partitionId, tpl._1(), tpl._2(), dos, waitingForFlush);
 						byteCtr += wrote;
 
+						if(wrote > 0)
+							StreamTrace.evictWrite(tpl._1().getKey().getStreamId(), wrote);
 						if(DMLScript.OOC_STATISTICS && wrote > 0) {
 							Statistics.incrementOOCEvictionWrite();
 							Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
