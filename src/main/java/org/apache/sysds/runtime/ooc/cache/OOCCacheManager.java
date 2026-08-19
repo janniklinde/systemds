@@ -29,6 +29,7 @@ import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerImpl;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCCacheScheduler;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCLRUCacheScheduler;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.utils.Statistics;
@@ -43,10 +44,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
+import scala.Tuple2;
 
 public class OOCCacheManager {
 	private static final double OOC_BUFFER_PERCENTAGE = 0.5;
 	private static final double OOC_BUFFER_PERCENTAGE_HARD = 0.6;
+	private static final long MIN_NON_OOC_HEAP_BYTES = 512L << 20; // 512 MB
 	private static final long _evictionLimit;
 	private static final long _hardLimit;
 
@@ -55,11 +58,25 @@ public class OOCCacheManager {
 	private static final AtomicReference<OOCCache> _globalCache;
 
 	static {
-		_evictionLimit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE);
-		_hardLimit = (long)(Runtime.getRuntime().maxMemory() * OOC_BUFFER_PERCENTAGE_HARD);
+		Tuple2<Long, Long> limits = cacheLimits(Runtime.getRuntime().maxMemory(),
+			GlobalMemoryBroker.get().getAllowedMemory());
+		_evictionLimit = limits._1;
+		_hardLimit = limits._2;
 		_ioHandler = new AtomicReference<>();
 		_scheduler = new AtomicReference<>();
 		_globalCache = new AtomicReference<>();
+	}
+
+	static Tuple2<Long, Long> cacheLimits(long maxHeap, long brokerAllowedMemory) {
+		long evictionLimit = (long)(maxHeap * OOC_BUFFER_PERCENTAGE);
+		long configuredHardLimit = (long)(maxHeap * OOC_BUFFER_PERCENTAGE_HARD);
+		long hardLimit = Math.min(configuredHardLimit,
+			Math.max(0, maxHeap - brokerAllowedMemory - MIN_NON_OOC_HEAP_BYTES));
+		if(evictionLimit >= hardLimit && hardLimit < configuredHardLimit)
+			evictionLimit = Math.max(0, hardLimit - configuredHardLimit + evictionLimit);
+		else
+			evictionLimit = Math.min(evictionLimit, hardLimit);
+		return new Tuple2<>(evictionLimit, hardLimit);
 	}
 
 	public static void reset() {

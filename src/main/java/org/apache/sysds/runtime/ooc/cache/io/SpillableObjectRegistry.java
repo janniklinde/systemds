@@ -19,7 +19,6 @@
 
 package org.apache.sysds.runtime.ooc.cache.io;
 
-import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
@@ -48,7 +47,7 @@ public final class SpillableObjectRegistry {
 				IndexedMatrixValue matrix = new IndexedMatrixValue();
 				MatrixBlock value = new MatrixBlock();
 				matrix.getIndexes().readFields(in);
-				value.readFields(in, SparseBlock.Type.COO);
+				value.readFields(in);
 				matrix.setValue(value);
 				yield matrix;
 			}

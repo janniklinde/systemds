@@ -95,6 +95,7 @@ public final class RepartitionOOCPrimitive extends OOCPrimitive {
 		long outputBytes = OOCUtils.estimateOutputTileBytes(outputDC);
 		_taskBytes = OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(outputBytes) + 4 * outputBytes;
 		_accumulators = new StateTable<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
+		_accumulators.addEvictionPolicy(slot -> slot - outputDC.getNumBlocks());
 		_outputStream = _output.getWriteStream();
 		_ready = new SubscribableTaskQueue<>();
 		getContext().addOutStream(_outputStream, _ready);

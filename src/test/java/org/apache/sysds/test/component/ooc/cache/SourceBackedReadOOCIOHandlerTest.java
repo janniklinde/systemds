@@ -67,12 +67,12 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 	}
 
 	@Test
-	public void testUltraSparseSourceUsesCOO() throws Exception {
+	public void testUltraSparseSourceUsesCSR() throws Exception {
 		testSourceBackedScheduleRead(true);
 	}
 
 	@Test
-	public void testUltraSparseSpillReadUsesCOO() throws Exception {
+	public void testUltraSparseSpillReadUsesCSR() throws Exception {
 		MatrixBlock block = new MatrixBlock(1000, 1000, true);
 		block.set(3, 7, 2);
 		IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(1, 1), block);
@@ -84,7 +84,7 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 
 		MatrixBlock readBlock = (MatrixBlock) ((IndexedMatrixValue) BlockEntryTestAccess.getDataUnsafe(entry)).getValue();
 		Assert.assertEquals(2, readBlock.get(3, 7), 0);
-		Assert.assertEquals(SparseBlock.Type.COO, readBlock.getSparseBlock().getSparseBlockType());
+		Assert.assertEquals(SparseBlock.Type.CSR, readBlock.getSparseBlock().getSparseBlockType());
 	}
 
 	private void testSourceBackedScheduleRead(boolean ultraSparse) throws Exception {
@@ -108,7 +108,7 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 		Assert.assertFalse(res.blocks.isEmpty());
 		if(ultraSparse) {
 			IndexedMatrixValue scanned = target.dequeue();
-			Assert.assertEquals(SparseBlock.Type.COO,
+			Assert.assertEquals(SparseBlock.Type.CSR,
 				((MatrixBlock) scanned.getValue()).getSparseBlock().getSparseBlockType());
 		}
 
@@ -125,7 +125,7 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 		MatrixBlock expected = expectedBlock(src, desc.indexes, blen);
 		TestUtils.compareMatrices(expected, readBlock, 1e-12);
 		if(ultraSparse)
-			Assert.assertEquals(SparseBlock.Type.COO, readBlock.getSparseBlock().getSparseBlockType());
+			Assert.assertEquals(SparseBlock.Type.CSR, readBlock.getSparseBlock().getSparseBlockType());
 	}
 
 	private void writeBinaryMatrix(MatrixBlock mb, String fname, int blen) throws Exception {
