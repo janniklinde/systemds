@@ -33,6 +33,7 @@ public interface OOCCache {
 		return logicalBytes;
 	}
 
+
 	/**
 	 * Pins an item backed by an allowance. A successful pin transfers memory ownership from the cache to the owner of
 	 * the allowance and guarantees data availability. While pinned, the bytes of the entry are not counted as
@@ -87,6 +88,18 @@ public interface OOCCache {
 	void markBacked(BlockEntry entry);
 
 	OOCIOHandler getIOHandler();
+
+	/**
+	 * Bytes the cache allows for opportunistic read-ahead.
+	 */
+	long readAheadBudget();
+
+	/**
+	 * Offers a block that was decoded during an opportunistic read-ahead.
+	 *
+	 * @return true if the cache took ownership of {@code data}
+	 */
+	boolean activate(BlockKey key, Object data);
 
 	/**
 	 * Pins an item backed by an allowance. A successful pin transfers memory ownership from the cache to the owner of
