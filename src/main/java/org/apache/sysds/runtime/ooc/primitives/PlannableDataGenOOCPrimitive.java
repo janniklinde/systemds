@@ -27,12 +27,14 @@ import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
+import org.apache.sysds.utils.stats.InfrastructureAnalyzer;
 
 public class PlannableDataGenOOCPrimitive extends OOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _output;
@@ -43,6 +45,12 @@ public class PlannableDataGenOOCPrimitive extends OOCPrimitive {
 		super(context);
 		_output = output;
 		_operation = operation;
+	}
+
+	@Override
+	protected long getAllowanceLimit(GlobalMemoryBroker broker) {
+		long taskBytes = OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics());
+		return Math.min(super.getAllowanceLimit(broker), taskBytes * InfrastructureAnalyzer.getLocalParallelism());
 	}
 
 	@Override

@@ -30,6 +30,7 @@ import java.util.function.Consumer;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
+import org.apache.sysds.runtime.instructions.ooc.OOCWatchdog;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
@@ -53,6 +54,7 @@ public abstract class OOCPrimitive {
 	private final AtomicBoolean _started;
 	private final AtomicBoolean _executionStarted;
 	private final AtomicBoolean _failed;
+	private volatile Throwable _failure;
 	protected OOCAccessPattern _pattern;
 	protected MemoryAllowance _allowance;
 
@@ -80,6 +82,8 @@ public abstract class OOCPrimitive {
 		_executionStarted = new AtomicBoolean();
 		_failed = new AtomicBoolean();
 		_pattern = OOCAccessPattern.UNSET;
+		if(OOCWatchdog.WATCH_PRIMITIVES)
+			OOCWatchdog.registerPrimitive(this);
 	}
 
 	public final StreamContext getContext() {
@@ -168,17 +172,27 @@ public abstract class OOCPrimitive {
 
 	public final void tryStartExecution() {
 		if(_executionStarted.compareAndSet(false, true)) {
-			_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get());
+			GlobalMemoryBroker broker = GlobalMemoryBroker.get();
+			_allowance = new SyncMemoryAllowance(broker, getAllowanceLimit(broker));
 			startExecution();
 		}
+	}
+
+	protected long getAllowanceLimit(GlobalMemoryBroker broker) {
+		return broker.getAllowedMemory() / 3;
 	}
 
 	protected final boolean fail(Throwable error) {
 		if(!_failed.compareAndSet(false, true))
 			return false;
+		_failure = error;
 		if(_context != null)
 			_context.failAll(DMLRuntimeException.of(error));
 		return true;
+	}
+
+	public final Throwable getFailure() {
+		return _failure;
 	}
 
 	protected final boolean hasFailed() {
@@ -223,6 +237,33 @@ public abstract class OOCPrimitive {
 		for(int i = 0; i < _inputs.size(); i++)
 			discardInputHandle(i);
 		_allowance.shutdown();
+		if(OOCWatchdog.WATCH_PRIMITIVES)
+			OOCWatchdog.unregisterPrimitive(this);
+	}
+
+	public final String debugState() {
+		StringBuilder sb = new StringBuilder();
+		sb.append(getClass().getSimpleName()).append('@').append(System.identityHashCode(this)).append(" started=")
+			.append(_executionStarted.get()).append(" compiled=").append(_started.get()).append(" failed=")
+			.append(_failed.get()).append(" pattern=").append(_pattern);
+		if(_allowance != null)
+			sb.append(" allowance[").append(_allowance.debugState()).append(']');
+		if(_failure != null)
+			sb.append(" failure=").append(_failure);
+		for(int i = 0; i < _inputs.size(); i++) {
+			InputSlot input = _inputs.get(i);
+			sb.append("\n      in[").append(i).append("] ").append(input._source.debugState())
+				.append(" handleReserved=").append(input._handleReserved).append(" producer=")
+				.append(describeProducer(input._dependency));
+		}
+		return sb.toString();
+	}
+
+	private static String describeProducer(OOCPrimitive producer) {
+		if(producer == null)
+			return "none";
+		return producer.getClass().getSimpleName() + "@" + System.identityHashCode(producer) + "(started="
+			+ producer._executionStarted.get() + ")";
 	}
 
 	public final void inferPatterns() {
