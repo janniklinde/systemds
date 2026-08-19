@@ -34,6 +34,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.data.OperationsOnMatrixValues;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
+import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stream.FilteredOOCStream;
 import org.apache.sysds.runtime.ooc.stream.SubOOCStream;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
@@ -369,6 +370,22 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 				final int targetLocalRow = (int) (ix.rowStart % blocksize);
 				final int targetLocalCol = (int) (ix.colStart % blocksize);
 
+				if(mo.getDataCharacteristics().dimsKnown() && blocksize > 0) {
+					OOCStream<IndexedMatrixValue> result = createWritableStream();
+					mOut.setStreamHandle(result);
+					OOCInstructionUtils.equiMap(mo.getStreamable(), result, value -> {
+						MatrixBlock source = (MatrixBlock) value.getValue();
+						MatrixIndexes index = value.getIndexes();
+						if(index.getRowIndex() != targetBlockRow || index.getColumnIndex() != targetBlockCol)
+							return source;
+						MatrixBlock updated = new MatrixBlock(source);
+						updated.set(targetLocalRow, targetLocalCol, scalarValue);
+						updated.examSparsity();
+						return updated;
+					}, getContext());
+					return;
+				}
+
 				OOCStream<IndexedMatrixValue> qLhs = mo.getStreamHandle();
 				OOCStream<IndexedMatrixValue> qOutRaw = createWritableStream();
 				SubOOCStream<IndexedMatrixValue> qOut = new SubOOCStream<>(qOutRaw);
@@ -420,6 +437,20 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 					"Invalid values for matrix indexing: [" + (ix.rowStart + 1) + ":" + (ix.rowEnd + 1) + "," +
 						(ix.colStart + 1) + ":" + (ix.colEnd + 1) + "] must be within matrix dimensions [" + lhsRows +
 						"x" + lhsCols + "].");
+			}
+
+			if(mo.getDataCharacteristics().dimsKnown() && rhsMo.getDataCharacteristics().dimsKnown() && blocksize > 0 &&
+				rhsMo.getBlocksize() > 0) {
+				int rhsBlocksize = rhsMo.getBlocksize();
+				OOCStream<IndexedMatrixValue> result = createWritableStream();
+				mOut.setStreamHandle(result);
+				OOCInstructionUtils.repartition(List.of(mo.getStreamable(), rhsMo.getStreamable()), result,
+					outputIndex -> expectedLeftIndexFragments(outputIndex, ix, blocksize, rhsBlocksize, lhsRows,
+						lhsCols),
+					List.of((tile, emit) -> routeLeftIndexLhs(tile, ix, blocksize, emit),
+						(tile, emit) -> routeLeftIndexRhs(tile, ix, blocksize, rhsBlocksize, emit)),
+					getContext());
+				return;
 			}
 
 			final IndexRange shiftRange = new IndexRange(ix.rowStart + 1, ix.rowEnd + 1, ix.colStart + 1,
@@ -502,6 +533,102 @@ public class MatrixIndexingOOCInstruction extends IndexingOOCInstruction {
 		else
 			throw new DMLRuntimeException(
 				"Invalid opcode (" + opcode + ") encountered in MatrixIndexingOOCInstruction.");
+	}
+
+	private static int expectedLeftIndexFragments(MatrixIndexes outputIndex, IndexRange overwrite, int blocksize,
+		int rhsBlocksize, long rows, long cols) {
+		long rowStart = (outputIndex.getRowIndex() - 1) * blocksize;
+		long rowEnd = Math.min(rows, rowStart + blocksize);
+		long colStart = (outputIndex.getColumnIndex() - 1) * blocksize;
+		long colEnd = Math.min(cols, colStart + blocksize);
+		long overwriteRowStart = Math.max(rowStart, overwrite.rowStart);
+		long overwriteRowEnd = Math.min(rowEnd, overwrite.rowEnd + 1);
+		long overwriteColStart = Math.max(colStart, overwrite.colStart);
+		long overwriteColEnd = Math.min(colEnd, overwrite.colEnd + 1);
+		if(overwriteRowStart >= overwriteRowEnd || overwriteColStart >= overwriteColEnd)
+			return 1;
+
+		int fragments = 0;
+		if(rowStart < overwriteRowStart)
+			fragments++;
+		if(overwriteRowEnd < rowEnd)
+			fragments++;
+		if(colStart < overwriteColStart)
+			fragments++;
+		if(overwriteColEnd < colEnd)
+			fragments++;
+
+		long rhsRowStart = overwriteRowStart - overwrite.rowStart;
+		long rhsRowEnd = overwriteRowEnd - overwrite.rowStart;
+		long rhsColStart = overwriteColStart - overwrite.colStart;
+		long rhsColEnd = overwriteColEnd - overwrite.colStart;
+		long rhsRowBlocks = (rhsRowEnd - 1) / rhsBlocksize - rhsRowStart / rhsBlocksize + 1;
+		long rhsColBlocks = (rhsColEnd - 1) / rhsBlocksize - rhsColStart / rhsBlocksize + 1;
+		return Math.toIntExact(fragments + rhsRowBlocks * rhsColBlocks);
+	}
+
+	private static void routeLeftIndexLhs(IndexedMatrixValue tile, IndexRange overwrite, int blocksize,
+		RepartitionOOCPrimitive.FragmentEmitter emit) {
+		MatrixBlock block = (MatrixBlock) tile.getValue();
+		long rowStart = (tile.getIndexes().getRowIndex() - 1) * blocksize;
+		long rowEnd = rowStart + block.getNumRows();
+		long colStart = (tile.getIndexes().getColumnIndex() - 1) * blocksize;
+		long colEnd = colStart + block.getNumColumns();
+		long overwriteRowStart = Math.max(rowStart, overwrite.rowStart);
+		long overwriteRowEnd = Math.min(rowEnd, overwrite.rowEnd + 1);
+		long overwriteColStart = Math.max(colStart, overwrite.colStart);
+		long overwriteColEnd = Math.min(colEnd, overwrite.colEnd + 1);
+		MatrixIndexes outputIndex = new MatrixIndexes(tile.getIndexes());
+		if(overwriteRowStart >= overwriteRowEnd || overwriteColStart >= overwriteColEnd) {
+			emit.copy(outputIndex, 0, 0, block.getNumRows(), block.getNumColumns(), 0, 0);
+			return;
+		}
+
+		if(rowStart < overwriteRowStart)
+			emit.copy(outputIndex, 0, 0, (int) (overwriteRowStart - rowStart), block.getNumColumns(), 0, 0);
+		if(overwriteRowEnd < rowEnd) {
+			int localRow = (int) (overwriteRowEnd - rowStart);
+			emit.copy(outputIndex, localRow, 0, (int) (rowEnd - overwriteRowEnd), block.getNumColumns(), localRow, 0);
+		}
+		int middleRow = (int) (overwriteRowStart - rowStart);
+		int middleRows = (int) (overwriteRowEnd - overwriteRowStart);
+		if(colStart < overwriteColStart)
+			emit.copy(outputIndex, middleRow, 0, middleRows, (int) (overwriteColStart - colStart), middleRow, 0);
+		if(overwriteColEnd < colEnd) {
+			int localCol = (int) (overwriteColEnd - colStart);
+			emit.copy(outputIndex, middleRow, localCol, middleRows, (int) (colEnd - overwriteColEnd), middleRow,
+				localCol);
+		}
+	}
+
+	private static void routeLeftIndexRhs(IndexedMatrixValue tile, IndexRange overwrite, int blocksize,
+		int rhsBlocksize, RepartitionOOCPrimitive.FragmentEmitter emit) {
+		MatrixBlock block = (MatrixBlock) tile.getValue();
+		long sourceRowStart = (tile.getIndexes().getRowIndex() - 1) * rhsBlocksize;
+		long sourceRowEnd = sourceRowStart + block.getNumRows();
+		long sourceColStart = (tile.getIndexes().getColumnIndex() - 1) * rhsBlocksize;
+		long sourceColEnd = sourceColStart + block.getNumColumns();
+		long targetRowStart = overwrite.rowStart + sourceRowStart;
+		long targetRowEnd = overwrite.rowStart + sourceRowEnd;
+		long targetColStart = overwrite.colStart + sourceColStart;
+		long targetColEnd = overwrite.colStart + sourceColEnd;
+		long outputRowStart = targetRowStart / blocksize;
+		long outputRowEnd = (targetRowEnd - 1) / blocksize;
+		long outputColStart = targetColStart / blocksize;
+		long outputColEnd = (targetColEnd - 1) / blocksize;
+		for(long outputRow = outputRowStart; outputRow <= outputRowEnd; outputRow++)
+			for(long outputCol = outputColStart; outputCol <= outputColEnd; outputCol++) {
+				long outputGlobalRow = outputRow * blocksize;
+				long outputGlobalCol = outputCol * blocksize;
+				long copyRowStart = Math.max(targetRowStart, outputGlobalRow);
+				long copyRowEnd = Math.min(targetRowEnd, outputGlobalRow + blocksize);
+				long copyColStart = Math.max(targetColStart, outputGlobalCol);
+				long copyColEnd = Math.min(targetColEnd, outputGlobalCol + blocksize);
+				emit.copy(new MatrixIndexes(outputRow + 1, outputCol + 1), (int) (copyRowStart - targetRowStart),
+					(int) (copyColStart - targetColStart), (int) (copyRowEnd - copyRowStart),
+					(int) (copyColEnd - copyColStart), (int) (copyRowStart - outputGlobalRow),
+					(int) (copyColStart - outputGlobalCol));
+			}
 	}
 
 	private static String debugScalarOperand(CPOperand op, ExecutionContext ec) {
