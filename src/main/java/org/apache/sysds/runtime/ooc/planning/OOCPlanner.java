@@ -25,13 +25,16 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
 
+import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 public final class OOCPlanner {
-	public static void compile(OOCPrimitive root) {
+	public static synchronized void compile(OOCPrimitive root) {
 		injectMaterializations(root, Collections.newSetFromMap(new IdentityHashMap<>()), new IdentityHashMap<>());
 		List<OOCPrimitive> primitives = new ArrayList<>();
 		collect(root, Collections.newSetFromMap(new IdentityHashMap<>()), primitives);
@@ -44,8 +47,78 @@ public final class OOCPlanner {
 		if(root.getAccessPattern() == OOCAccessPattern.ANY || root.getAccessPattern().isUnset())
 			root.requestPattern(OOCAccessPattern.ROW_MAJOR);
 
-		for(OOCPrimitive primitive : primitives)
-			primitive.tryStartExecution();
+		for(OOCPrimitive primitive : primitives) {
+			if(primitive instanceof MaterializeOOCPrimitive)
+				continue;
+			if(!deferUntilDimensionsResolved(primitive))
+				primitive.tryStartExecution();
+		}
+	}
+
+	/**
+	 * Holds back a primitive that declared dimension-critical inputs which are not resolved yet. The rest of the plan
+	 * starts regardless: the deferred primitive's own inputs are among them, so the producers that resolve the
+	 * dimensions are running, and its consumers simply block on its output stream.
+	 *
+	 * @param primitive candidate
+	 * @return true if the start was deferred to a completion callback
+	 */
+	private static boolean deferUntilDimensionsResolved(OOCPrimitive primitive) {
+		List<Integer> critical = primitive.dimensionCriticalInputs();
+		if(critical.isEmpty() || primitive.hasStartedExecution())
+			return false;
+		List<OOCFuture<DataCharacteristics>> pending = new ArrayList<>(critical.size());
+		for(int index : critical) {
+			OOCFuture<DataCharacteristics> dimensions = primitive.getInput(index).dimensions();
+			//a streamable that cannot signal late resolution leaves the primitive to its own guard, which keeps this
+			//a no-op for every plan that does not opt in
+			if(dimensions == null)
+				continue;
+			if(dimensions.isDone())
+				continue;
+			checkResolvable(primitive, index);
+			pending.add(dimensions);
+		}
+		if(pending.isEmpty())
+			return false;
+		for(int index : critical) {
+			OOCFuture<DataCharacteristics> dimensions = primitive.getInput(index).dimensions();
+			OOCPrimitive producer = primitive.getInputDependency(index);
+			if(dimensions != null && !dimensions.isDone() && producer instanceof MaterializeOOCPrimitive materializer)
+				materializer.startOnDemand();
+		}
+		OOCFuture.allOf(pending, ignored -> {
+		}).whenComplete((ignored, error) -> {
+			if(error != null)
+				primitive.fail(error);
+			else
+				primitive.tryStartExecution();
+		});
+		return true;
+	}
+
+	/**
+	 * Rejects a deferral that could never complete, namely one whose dimensions are produced by a sub-DAG that
+	 * transitively depends on the primitive being deferred.
+	 */
+	private static void checkResolvable(OOCPrimitive primitive, int index) {
+		OOCPrimitive producer = primitive.getInputDependency(index);
+		if(producer == null)
+			return;
+		if(producer == primitive || dependsOn(producer, primitive, Collections.newSetFromMap(new IdentityHashMap<>())))
+			throw new DMLRuntimeException("Dimension dependency on input " + index + " of "
+				+ primitive.getClass().getSimpleName() + " would deadlock: its producer depends on that primitive.");
+	}
+
+	private static boolean dependsOn(OOCPrimitive from, OOCPrimitive target, Set<OOCPrimitive> visited) {
+		if(from == target)
+			return true;
+		if(!visited.add(from))
+			return false;
+		for(OOCPrimitive child : from.getChildren())
+			if(dependsOn(child, target, visited))
+				return true;
+		return false;
 	}
 
 	@SuppressWarnings("unchecked")
