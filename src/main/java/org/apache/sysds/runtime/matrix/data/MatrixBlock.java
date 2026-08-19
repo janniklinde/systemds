@@ -2108,8 +2108,14 @@ public class MatrixBlock extends MatrixValue implements CacheBlock<MatrixBlock>,
 	// Input/Output functions
 	
 	@Override
-	public void readFields(DataInput in) 
-		throws IOException 
+	public void readFields(DataInput in)
+		throws IOException
+	{
+		readFields(in, SparseBlock.Type.CSR);
+	}
+
+	public void readFields(DataInput in, SparseBlock.Type ultraSparseType)
+		throws IOException
 	{
 		//read basic header (int rlen, int clen, byte type)
 		rlen = in.readInt();
@@ -2130,7 +2136,7 @@ public class MatrixBlock extends MatrixValue implements CacheBlock<MatrixBlock>,
 					sparse = evalSparseFormatInMemory(rlen, clen, nonZeros);
 					cleanupBlock(true, !(sparse && sparseBlock instanceof SparseBlockCSR));
 					if( sparse )
-						readUltraSparseBlock(in);
+						readUltraSparseBlock(in, ultraSparseType);
 					else
 						readUltraSparseToDense(in);
 					break;
@@ -2282,28 +2288,40 @@ public class MatrixBlock extends MatrixValue implements CacheBlock<MatrixBlock>,
 		}
 	}
 
-	private void readUltraSparseBlock(DataInput in)
-		throws IOException 
+	private void readUltraSparseBlock(DataInput in, SparseBlock.Type ultraSparseType)
+		throws IOException
 	{
-		//allocate ultra-sparse block in CSR to avoid unnecessary size overhead 
-		//and to allow efficient reset without repeated sparse row allocation
-		
-		//adjust size and ensure reuse block is in CSR format
-		allocateAndResetSparseBlock(false, SparseBlock.Type.CSR);
-		
-		if( clen > 1 ) { //ULTRA-SPARSE BLOCK
-			//block: read ijv-triples (ordered by row and column) via custom 
-			//init to avoid repeated updates of row pointers per append
-			SparseBlockCSR sblockCSR = (SparseBlockCSR) sparseBlock;
-			sblockCSR.initUltraSparse((int)nonZeros, in);
-		}
-		else { //ULTRA-SPARSE COL
-			//col: read iv-pairs (should never happen since always dense)
-			for(long i=0; i<nonZeros; i++) {
+		if( ultraSparseType == SparseBlock.Type.COO && SparseBlockFactory.estimateSizeSparseInMemory(
+			SparseBlock.Type.COO, rlen, clen, getSparsity()) < SparseBlockFactory.estimateSizeSparseInMemory(
+				SparseBlock.Type.CSR, rlen, clen, getSparsity()) ) {
+			sparseBlock = new SparseBlockCOO(rlen, (int)nonZeros);
+			for(long i = 0; i < nonZeros; i++) {
 				int r = in.readInt();
-				double val = in.readDouble();
-				sparseBlock.allocate(r, 1, 1);
-				sparseBlock.append(r, 0, val);
+				if( clen > 1 )
+					sparseBlock.append(r, in.readInt(), in.readDouble());
+				else
+					sparseBlock.append(r, 0, in.readDouble());
+			}
+		}
+		else {
+			//allocate ultra-sparse block in CSR to avoid unnecessary size overhead
+			//and to allow efficient reset without repeated sparse row allocation
+			allocateAndResetSparseBlock(false, SparseBlock.Type.CSR);
+
+			if( clen > 1 ) { //ULTRA-SPARSE BLOCK
+				//block: read ijv-triples (ordered by row and column) via custom
+				//init to avoid repeated updates of row pointers per append
+				SparseBlockCSR sblockCSR = (SparseBlockCSR) sparseBlock;
+				sblockCSR.initUltraSparse((int)nonZeros, in);
+			}
+			else { //ULTRA-SPARSE COL
+				//col: read iv-pairs (should never happen since always dense)
+				for(long i = 0; i < nonZeros; i++) {
+					int r = in.readInt();
+					double val = in.readDouble();
+					sparseBlock.allocate(r, 1, 1);
+					sparseBlock.append(r, 0, val);
+				}
 			}
 		}
 	}
