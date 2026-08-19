@@ -23,7 +23,6 @@ import org.apache.sysds.common.Types.CorrectionLocationType;
 import org.apache.sysds.conf.ConfigurationManager;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
-import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.cp.DoubleObject;
@@ -151,17 +150,20 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 
 	private void processScalarAggregate(ExecutionContext ec, MatrixObject input, AggregateUnaryOperator operator,
 		int blocksize) {
-		OOCStream<MatrixBlock> partials = createWritableStream();
-		mapOOC(input.getStreamHandle(), partials, value -> aggregatePartial(value, operator, blocksize));
-
-		int extra = _aop.correction.getNumRemovedRowsColumns();
-		MatrixBlock result = new MatrixBlock(1, 1 + extra, _aop.initialValue);
-		MatrixBlock correction = new MatrixBlock(1, 1 + extra, false);
-		MatrixBlock partial;
-		while((partial = partials.dequeue()) != LocalTaskQueue.NO_MORE_TASKS)
-			OperationsOnMatrixValues.incrementalAggregation(result, _aop.existsCorrection() ? correction : null,
-				partial, _aop, true);
-		ec.setScalarOutput(output.getName(), new DoubleObject(result.get(0, 0)));
+		OOCStream<MatrixBlock> result = createWritableStream(4, 4, 4);
+		OOCInstructionUtils.reduce(input.getStreamable(), result, value -> aggregatePartial(value, operator, blocksize),
+			this::mergeAggregate, MatrixBlock::getExactSerializedSize, getContext());
+		result.start();
+		try(OOCStream.QueueCallback<MatrixBlock> callback = result.dequeueCB()) {
+			if(callback == null)
+				throw new IllegalStateException("Scalar aggregate cannot reduce an empty OOC stream");
+			MatrixBlock aggregate = finalizeAggregate(callback.get());
+			ec.setScalarOutput(output.getName(), new DoubleObject(aggregate.get(0, 0)));
+		}
+		try(OOCStream.QueueCallback<MatrixBlock> callback = result.dequeueCB()) {
+			if(callback != null)
+				throw new IllegalStateException("Scalar aggregate produced multiple results");
+		}
 	}
 
 	private static MatrixBlock aggregatePartial(IndexedMatrixValue value, AggregateUnaryOperator operator,
