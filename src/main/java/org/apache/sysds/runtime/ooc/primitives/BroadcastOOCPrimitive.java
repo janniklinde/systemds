@@ -142,13 +142,11 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 	}
 
 	private void startBroadcast() {
-		long broadcastLogical = OOCUtils.estimateFullTileBytes(_broadcast.getDataCharacteristics());
-		long outputLogical = OOCUtils.estimateFullTileBytes(_output.getDataCharacteristics());
+		long broadcastLogical = OOCUtils.estimateOutputTileBytes(_broadcast.getDataCharacteristics());
 		long broadcastPin = OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(broadcastLogical);
-		long taskBytes = broadcastPin * 2 + outputLogical * 2;
 		OOCStream<IndexedMatrixValue> streamed = getInputReadStream(0);
-		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(streamed, _allowance,
-			ignored -> taskBytes);
+		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(streamed, _allowance, value ->
+			broadcastPin * 2 + OOCUtils.memoryCharge(value) * 2);
 		getContext().addInStream(streamed, admitted);
 		admitted.setSubscriber(this::accept);
 	}
