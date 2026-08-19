@@ -104,6 +104,12 @@ public final class OOCInstructionUtils {
 		output.assignPrimitive(new RepartitionOOCPrimitive(input, output, expectedFragments, router, context));
 	}
 
+	public static void repartition(List<? extends OOCStreamable<IndexedMatrixValue>> inputs,
+		OOCStream<IndexedMatrixValue> output, ToIntFunction<MatrixIndexes> expectedFragments,
+		List<BiConsumer<IndexedMatrixValue, RepartitionOOCPrimitive.FragmentEmitter>> routers, StreamContext context) {
+		output.assignPrimitive(new RepartitionOOCPrimitive(inputs, output, expectedFragments, routers, context));
+	}
+
 	public static void equiJoin(OOCStreamable<IndexedMatrixValue> left, OOCStreamable<IndexedMatrixValue> right,
 		OOCStream<IndexedMatrixValue> output, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> operation,
 		StreamContext context) {
