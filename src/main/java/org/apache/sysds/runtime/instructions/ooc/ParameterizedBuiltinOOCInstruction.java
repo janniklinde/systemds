@@ -98,6 +98,8 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 				OOCInstructionUtils.equiMapBlock(targetObj.getStreamable(), qOut,
 					block -> block.replaceOperations(new MatrixBlock(), pattern, replacement), getContext());
 
+				OOCInstructionUtils.propagateDims(ec, output, targetObj.getNumRows(), targetObj.getNumColumns(),
+					targetObj.getBlocksize(), -1);
 				ec.getMatrixObject(output).setStreamHandle(qOut);
 			}
 		}
