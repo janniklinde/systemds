@@ -86,6 +86,11 @@ public final class SourceReadOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	protected long getMaxTaskReservationBytes() {
+		return _bulkBytes;
+	}
+
+	@Override
 	protected void startExecution() {
 		_outputStream = _output.getWriteStream();
 		getContext().addOutStream(_outputStream);
