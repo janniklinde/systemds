@@ -19,9 +19,6 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
-import java.util.ArrayList;
-import java.util.List;
-
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
@@ -35,6 +32,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.UnaryOperator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class UnaryOOCInstruction extends ComputationOOCInstruction {
@@ -74,7 +72,7 @@ public class UnaryOOCInstruction extends ComputationOOCInstruction {
 		boolean cumulative = isCumulativeUnary(uop);
 
 		if(cumulative) {
-			qOut = processCumulativeUnaryInstruction(ec, uop, min.getStreamHandle());
+			qOut = processCumulativeUnaryInstruction(ec, uop, min);
 		}
 		else {
 			qOut = createWritableStream();
@@ -87,59 +85,37 @@ public class UnaryOOCInstruction extends ComputationOOCInstruction {
 	}
 
 	private OOCStream<IndexedMatrixValue> processCumulativeUnaryInstruction(ExecutionContext ec, UnaryOperator uop,
-		OOCStream<IndexedMatrixValue> qIn) {
-		DataCharacteristics dc = ec.getDataCharacteristics(input1.getName());
+		MatrixObject input) {
+		DataCharacteristics dc = input.getDataCharacteristics();
 		if(!dc.dimsKnown())
 			throw new DMLRuntimeException(
 				"OOC cumulative unary operations require known dimensions for deterministic block ordering.");
 
-		BuiltinCode bcode = ((Builtin)uop.fn).getBuiltinCode();
-		long rowBlocks = dc.getNumRowBlocks();
-		long colBlocks = dc.getNumColBlocks();
-		boolean rowCum = (bcode == BuiltinCode.ROWCUMSUM);
-		boolean sumProd = (bcode == BuiltinCode.CUMSUMPROD);
-		if(sumProd && colBlocks != 1)
+		BuiltinCode bcode = ((Builtin) uop.fn).getBuiltinCode();
+		boolean rowCum = bcode == BuiltinCode.ROWCUMSUM;
+		boolean sumProd = bcode == BuiltinCode.CUMSUMPROD;
+		if(sumProd && dc.getNumColBlocks() != 1)
 			throw new DMLRuntimeException(
-				"Unsupported OOC cumulative sum-product with more than one column block: " + colBlocks);
+				"Unsupported OOC cumulative sum-product with more than one column block: " + dc.getNumColBlocks());
 
-		long outerSize = rowCum ? rowBlocks : colBlocks;
-		long innerSize = rowCum ? colBlocks : rowBlocks;
-		if(outerSize > Integer.MAX_VALUE)
-			throw new DMLRuntimeException(
-				"Unsupported number of cumulative partitions: " + outerSize + " (max " + Integer.MAX_VALUE + ").");
-
-		int partitions = Math.toIntExact(outerSize);
-		List<OOCStream<IndexedMatrixValue>> splitInputs = splitOOCStream(qIn, imv -> {
-			long outerIx = rowCum ? imv.getIndexes().getRowIndex() : imv.getIndexes().getColumnIndex();
-			return (int) (outerIx - 1);
-		}, partitions);
-
-		List<OOCStream<IndexedMatrixValue>> splitOutputs = new ArrayList<>(partitions);
-
-		for(int i = 0; i < partitions; i++) {
-			OOCStream<IndexedMatrixValue> partOut = createWritableStream();
-			splitOutputs.add(partOut);
-
-			this.<IndexedMatrixValue, double[]>scanOOC(splitInputs.get(i), partOut,
-				imv -> rowCum ? imv.getIndexes().getColumnIndex() : imv.getIndexes().getRowIndex(), (imv, agg) -> {
-					MatrixBlock inBlk = (MatrixBlock) imv.getValue();
-					int outRows = inBlk.getNumRows();
-					int outCols = sumProd ? 1 : inBlk.getNumColumns();
-					MatrixBlock outBlk = LibMatrixAgg.cumaggregateUnaryMatrix(inBlk,
-						new MatrixBlock(outRows, outCols, false), uop, agg);
-					MatrixIndexes idx = imv.getIndexes();
-					IndexedMatrixValue out = new IndexedMatrixValue(new MatrixIndexes(idx.getRowIndex(), idx.getColumnIndex()),
-						outBlk);
-					double[] nextCarry = rowCum ? extractLastColumn(outBlk) : extractLastRow(outBlk);
-					return new ScanStep<>(out, nextCarry);
-				}, innerSize).exceptionally(t -> {
-				partOut.propagateFailure(DMLRuntimeException.of(t));
-				return null;
-			});
-		}
-
-		qIn.start();
-		return mergeOOCStreams(splitOutputs);
+		OOCStream<IndexedMatrixValue> result = createWritableStream(ec.getMatrixObject(output));
+		long[] currentOuter = {-1};
+		double[][] carry = {null};
+		OOCInstructionUtils.orderedMap(input.getStreamable(), result,
+			rowCum ? OOCStoreLayout.ROW_MAJOR : OOCStoreLayout.COL_MAJOR, value -> {
+				MatrixIndexes indexes = value.getIndexes();
+				long outer = rowCum ? indexes.getRowIndex() : indexes.getColumnIndex();
+				if(outer != currentOuter[0]) {
+					currentOuter[0] = outer;
+					carry[0] = null;
+				}
+				MatrixBlock block = (MatrixBlock) value.getValue();
+				MatrixBlock outputBlock = LibMatrixAgg.cumaggregateUnaryMatrix(block,
+					new MatrixBlock(block.getNumRows(), sumProd ? 1 : block.getNumColumns(), false), uop, carry[0]);
+				carry[0] = rowCum ? extractLastColumn(outputBlock) : extractLastRow(outputBlock);
+				return new IndexedMatrixValue(new MatrixIndexes(indexes), outputBlock);
+			}, getContext());
+		return result;
 	}
 
 	private static double[] extractLastRow(MatrixBlock blk) {
