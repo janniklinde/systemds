@@ -174,9 +174,10 @@ public class OOCUtils {
 
 	public static long estimateOutputTileBytes(DataCharacteristics dc) {
 		if(dc == null || dc.getBlocksize() <= 0 || !dc.dimsKnown()) {
-			return estimateFullTileBytes(dc);
+			int blocksize = dc != null && dc.getBlocksize() > 0 ? dc.getBlocksize() : 1000;
+			return MatrixBlock.estimateSizeDenseInMemory(blocksize, blocksize);
 		}
-		return estimateMatrixBlockBytes(Math.min(dc.getBlocksize(), dc.getRows()),
+		return MatrixBlock.estimateSizeDenseInMemory(Math.min(dc.getBlocksize(), dc.getRows()),
 			Math.min(dc.getBlocksize(), dc.getCols()));
 	}
 
