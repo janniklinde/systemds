@@ -71,6 +71,7 @@ import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 public abstract class OOCInstruction extends Instruction {
 	public static final boolean ALLOW_PIPELINING = OOCInstructionUtils.ALLOW_PIPELINING;
@@ -742,7 +743,7 @@ public abstract class OOCInstruction extends Instruction {
 		addOutStream(qOut);
 
 		if(qIn.hasStreamCache())
-			throw new UnsupportedOperationException();
+			throw new UnsupportedOperationException("groupedReduceOOC cannot consume a cached input stream");
 		Map<MatrixIndexes, Aggregator> aggregators = new ConcurrentHashMap<>();
 		AtomicInteger busyCtr = new AtomicInteger(1);
 		CompletableFuture<Void> outFuture = new CompletableFuture<>();
@@ -815,7 +816,7 @@ public abstract class OOCInstruction extends Instruction {
 						if(entries == null) {
 							BlockEntry entry = OOCCacheManager.getCache()
 								.putAndPin(new BlockKey(_streamId, _blockId++), imv,
-									((MatrixBlock) imv.getValue()).getExactSerializedSize());
+									OOCUtils.memoryCharge(imv));
 							entry.addRetainHint(10);
 							future = OOCCacheManager.getCache()
 								.request(List.of(entry.getKey(), _availableIntermediates.removeFirst()));
@@ -832,7 +833,7 @@ public abstract class OOCInstruction extends Instruction {
 					else {
 						BlockEntry entry = OOCCacheManager.getCache()
 							.putAndPin(new BlockKey(_streamId, _blockId++), imv,
-								((MatrixBlock) imv.getValue()).getExactSerializedSize());
+								OOCUtils.memoryCharge(imv));
 						entry.addRetainHint(10);
 						OOCCacheManager.getCache().unpin(entry);
 						_availableIntermediates.add(entry.getKey());

@@ -56,10 +56,41 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 		return true;
 	}
 
+	/**
+	 * Reserves from the budget, topping it up from the parent allowance when the pre-reservation falls short. The
+	 * up-front amount is an estimate from the block geometry, while the charge for the value actually produced is the
+	 * truth. Failing here would abort the plan over an underestimate, so the shortfall is granted separately instead.
+	 */
 	@Override
 	public void reserveBlocking(long bytes) {
-		if(!tryReserve(bytes))
-			throw insufficientBudget(bytes);
+		checkNonNegative(bytes);
+		if(bytes == 0)
+			return;
+		while(true) {
+			long shortfall;
+			synchronized(this) {
+				if(_closed)
+					throw insufficientBudget(bytes);
+				if(_available >= bytes) {
+					_available -= bytes;
+					return;
+				}
+				shortfall = bytes - _available;
+			}
+			_parent.reserveBlocking(shortfall);
+			boolean revoked;
+			synchronized(this) {
+				revoked = _closed;
+				if(!revoked) {
+					_outstanding += shortfall;
+					_available += shortfall;
+				}
+			}
+			if(revoked) {
+				_parent.release(shortfall);
+				throw insufficientBudget(bytes);
+			}
+		}
 	}
 
 	@Override

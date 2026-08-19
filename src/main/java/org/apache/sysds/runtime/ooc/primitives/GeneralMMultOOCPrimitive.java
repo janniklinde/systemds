@@ -378,7 +378,7 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 
 	private static ManagedPayload<IndexedMatrixValue> payload(int slot, int count, MatrixBlock block,
 		ReservationBudget budget) {
-		long bytes = block.getExactSerializedSize();
+		long bytes = OOCUtils.memoryCharge(block);
 		budget.reserveBlocking(bytes);
 		return new ManagedPayload<>(new IndexedMatrixValue(new MatrixIndexes(slot + 1L, count), block), bytes, budget);
 	}

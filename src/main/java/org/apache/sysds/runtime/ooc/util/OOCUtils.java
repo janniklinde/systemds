@@ -23,6 +23,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
@@ -41,6 +42,20 @@ import java.util.List;
 import java.util.function.BooleanSupplier;
 
 public class OOCUtils {
+	/**
+	 * Memory charge for a block held resident by the OOC memory system, be it in a reservation, a queue callback, a
+	 * state table or the cache. The serialized size alone is what the block costs on disk, not while it is live: a
+	 * dense-allocated block with few non-zeros serializes as sparse and would be charged a fraction of its real
+	 * footprint, so the budgets would admit far more than fits.
+	 */
+	public static long memoryCharge(MatrixBlock block) {
+		return Math.max(block.getExactSerializedSize(), block.getInMemorySize());
+	}
+
+	public static long memoryCharge(IndexedMatrixValue value) {
+		return memoryCharge((MatrixBlock) value.getValue());
+	}
+
 	public static OOCFuture<BlockEntry> pinAdmitted(OOCCache cache, long streamId, long sequenceNumber,
 		MemoryAllowance allowance, BooleanSupplier cancelled) {
 		if(cancelled.getAsBoolean())

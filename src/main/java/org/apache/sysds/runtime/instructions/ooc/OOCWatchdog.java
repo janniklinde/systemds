@@ -93,7 +93,8 @@ public final class OOCWatchdog {
 			return;
 		long now = System.currentTimeMillis();
 		StringBuilder sb = new StringBuilder("[OOCWatchdog] ").append(pending.size())
-			.append(" incomplete primitive(s); ").append(describeMemory()).append(':');
+			.append(" incomplete primitive(s); ").append(describeMemory()).append('\n')
+			.append("   broker grants: ").append(GlobalMemoryBroker.get().describeAllowances()).append(':');
 		for(Map.Entry<OOCPrimitive, Long> entry : pending) {
 			OOCPrimitive primitive = entry.getKey();
 			sb.append("\n   age=").append(now - entry.getValue()).append("ms ").append(primitive.debugState());

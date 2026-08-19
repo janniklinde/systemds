@@ -47,6 +47,7 @@ import org.apache.sysds.runtime.util.UtilFunctions;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstruction {
 	/** Guard for the removeEmpty position map, which holds one bit per margin entry. 64M entries are 8 MiB. */
@@ -158,7 +159,7 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 				ArrayList<IndexedMatrixValue> blocks = new ArrayList<>();
 				LibMatrixReorg.rexpand(value, lmaxVal, dirRows, cast, ignore, blen, blocks);
 				return blocks;
-			}, value -> ((MatrixBlock) value.getValue()).getExactSerializedSize(), 3 * expandedBytes, getContext());
+			}, OOCUtils::memoryCharge, 3 * expandedBytes, getContext());
 		}
 		else if(instOpcode.equalsIgnoreCase(Opcodes.RMEMPTY.toString())) {
 			processRemoveEmpty(ec);

@@ -45,6 +45,7 @@ import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
+import org.apache.sysds.utils.stats.InfrastructureAnalyzer;
 
 public abstract class OOCPrimitive {
 	private final StreamContext _context;
@@ -184,7 +185,22 @@ public abstract class OOCPrimitive {
 	}
 
 	protected long getAllowanceLimit(GlobalMemoryBroker broker) {
-		return broker.getAllowedMemory() / 3;
+		long fairShare = broker.getAllowedMemory() / 3;
+		long taskBytes = getMaxTaskReservationBytes();
+		if(taskBytes <= 0)
+			return fairShare;
+		// A primitive never needs more than its workers can hold at once, but it must always be able to admit a single
+		// task: a limit below one reservation starves the primitive for as long as the broker is contended.
+		long concurrent = 2L * InfrastructureAnalyzer.getLocalParallelism() * taskBytes;
+		return Math.max(Math.min(fairShare, concurrent), taskBytes);
+	}
+
+	/**
+	 * Returns the largest single reservation a task of this primitive makes against its allowance, or 0 when the
+	 * geometry is not yet known and the plain fair share applies.
+	 */
+	protected long getMaxTaskReservationBytes() {
+		return 0;
 	}
 
 	public final boolean fail(Throwable error) {
