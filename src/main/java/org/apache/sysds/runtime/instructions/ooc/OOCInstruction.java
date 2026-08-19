@@ -23,7 +23,10 @@ import org.apache.commons.lang3.NotImplementedException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.sysds.api.DMLScript;
+import org.apache.sysds.common.Types.FileFormat;
+import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.Instruction;
 import org.apache.sysds.runtime.instructions.OOCInstructionParser;
@@ -32,6 +35,9 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.meta.MatrixCharacteristics;
+import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
@@ -182,6 +188,22 @@ public abstract class OOCInstruction extends Instruction {
 
 	protected <T> OOCStream<T> createWritableStream() {
 		return new SubscribableTaskQueue<>();
+	}
+
+	protected <T> OOCStream<T> createWritableStream(MatrixObject matrix) {
+		OOCStream<T> stream = createWritableStream();
+		stream.setData(matrix);
+		return stream;
+	}
+
+	protected <T> OOCStream<T> createWritableStream(DataCharacteristics characteristics) {
+		MatrixObject matrix = new MatrixObject(ValueType.FP64, null,
+			new MetaDataFormat(new MatrixCharacteristics(characteristics), FileFormat.BINARY));
+		return createWritableStream(matrix);
+	}
+
+	protected <T> OOCStream<T> createWritableStream(long rows, long cols, int blocksize) {
+		return createWritableStream(new MatrixCharacteristics(rows, cols, blocksize, -1));
 	}
 
 	protected <T> CompletableFuture<Void> filterOOC(OOCStream<T> qIn, Consumer<T> processor, Function<T, Boolean> predicate) {
