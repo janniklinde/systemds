@@ -307,7 +307,7 @@ public final class MaterializedStore<T extends SpillableObject> {
 		_readersSealedFuture.complete(null);
 	}
 
-	private boolean registerReader(StoreReader reader, Liveness liveness) {
+	private synchronized boolean registerReader(StoreReader reader, Liveness liveness) {
 		if(_readersSealed) {
 			int published = size();
 			for(int i = 0; i < published; i++)
