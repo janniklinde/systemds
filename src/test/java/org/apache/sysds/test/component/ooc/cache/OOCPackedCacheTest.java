@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
 import org.apache.sysds.runtime.ooc.cache.io.OOCMatrixIOHandler;
 import org.apache.sysds.runtime.ooc.cache.packed.OOCPackedCache;
+import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.test.component.ooc.cache.OOCCacheTestUtils.RecordingOOCIOHandler;
@@ -117,6 +118,50 @@ public class OOCPackedCacheTest {
 
 			await(cache.unpin(packed, reader), WAIT_TIMEOUT_SEC);
 			await(cache.unpin(large, reader), WAIT_TIMEOUT_SEC);
+			awaitUsedMemory(reader, 0, WAIT_TIMEOUT_SEC);
+		}
+		finally {
+			cache.shutdown();
+			producer.destroy();
+			reader.destroy();
+		}
+	}
+
+	@Test
+	public void testPrepackedHandoverPreservesStandaloneBoundaries() throws Exception {
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(1L << 32);
+		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker);
+		producer.setTargetMemory(1L << 30);
+		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker);
+		reader.setTargetMemory(1L << 30);
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCMatrixIOHandler(), 1L << 30, 1L << 30),
+			2 * BYTES, 10 * BYTES, -1, 0);
+		try {
+			producer.reserveBlocking(4 * BYTES);
+			BlockEntry first = cache.putUnpackedPinned(STREAM_ID, 0, value(1), BYTES, producer);
+			OOCPackedCache.PrepackedEntries packed = cache.putPrepackedPinned(STREAM_ID, new long[] {1, 2},
+				PackedBlock.fromValues(new Object[] {value(2), value(3)}, new long[] {BYTES, BYTES}), producer);
+			BlockEntry last = cache.putUnpackedPinned(STREAM_ID, 3, value(4), BYTES, producer);
+
+			await(cache.unpin(first, producer), WAIT_TIMEOUT_SEC);
+			for(BlockEntry logical : packed.logicalEntries())
+				await(cache.unpin(logical, producer), WAIT_TIMEOUT_SEC);
+			await(cache.unpin(last, producer), WAIT_TIMEOUT_SEC);
+			awaitUsedMemory(producer, 0, WAIT_TIMEOUT_SEC);
+
+			Assert.assertNull(cache.getPackGroup(STREAM_ID, 0));
+			Assert.assertNull(cache.getPackGroup(STREAM_ID, 3));
+			OOCPackedCache.PackGroup group = cache.getPackGroup(STREAM_ID, 1);
+			Assert.assertNotNull(group);
+			Assert.assertEquals(2, group.size());
+			Assert.assertEquals(1, group.index(0));
+			Assert.assertEquals(2, group.index(1));
+
+			for(int i = 0; i < 4; i++) {
+				BlockEntry entry = cache.pin(STREAM_ID, i, reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+				Assert.assertEquals(i + 1, scalar(entry), 0);
+				await(cache.unpin(entry, reader), WAIT_TIMEOUT_SEC);
+			}
 			awaitUsedMemory(reader, 0, WAIT_TIMEOUT_SEC);
 		}
 		finally {

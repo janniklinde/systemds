@@ -43,6 +43,15 @@ public final class PackedBlock implements SpillableObject {
 		this.totalSize = totalSize;
 	}
 
+	public static PackedBlock fromValues(Object[] values, long[] sizes) {
+		if(values.length != sizes.length || values.length == 0)
+			throw new IllegalArgumentException("Packed values and sizes must have the same positive length.");
+		long totalSize = 0;
+		for(long size : sizes)
+			totalSize = Math.addExact(totalSize, size);
+		return new PackedBlock(values.clone(), sizes.clone(), totalSize);
+	}
+
 	@Override
 	public boolean tryWrite(DataOutput out) throws IOException {
 		out.writeInt(values.length);

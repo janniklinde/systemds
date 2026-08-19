@@ -19,11 +19,7 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
-
 import org.apache.sysds.common.Opcodes;
-import org.apache.sysds.common.Types;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
@@ -34,10 +30,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
-import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
-import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
-import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
-import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
+import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
@@ -71,76 +64,28 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 		mcOut.set(mc.getRows(), mc.getCols(), blen, mc.getNonZeros());
 
 		MatrixObject mout = ec.getMatrixObject(output);
-		if(!mc.dimsKnown() || mc.getRows() <= 0 || mc.getCols() <= 0 || mc.getBlocksize() <= 0 || blen <= 0) {
-			SourceOOCStream source = new SourceOOCStream();
-			source.setData(min);
-			OOCIOHandler.SourceReadRequest request = new OOCIOHandler.SourceReadRequest(min.getFileName(),
-				Types.FileFormat.BINARY, mc.getRows(), mc.getCols(), mc.getBlocksize(), mc.getNonZeros(),
-				Long.MAX_VALUE, true, source);
-			OOCCacheManager.getIOHandler().scheduleSourceRead(request).whenComplete((res, error) -> {
-				if(error != null)
-					source.propagateFailure(DMLRuntimeException.of(error));
-			});
-			mout.setStreamHandle(source);
-			return;
-		}
-
 		OOCStream<IndexedMatrixValue> source = createWritableStream();
 		source.setData(min);
-		OOCStream<IndexedMatrixValue> untracked = createWritableStream();
-		AtomicReference<Consumer<IndexedMatrixValue>> emitter = new AtomicReference<>();
-		AtomicReference<OOCIOHandler.SourceReadContinuation> continuation = new AtomicReference<>();
-		untracked.setSubscriber(callback -> {
-			if(callback.isEos()) {
-				callback.close();
-				return;
-			}
-			try(callback) {
-				emitter.get().accept(callback.get());
-			}
-		});
-		long tileBytes = OOCUtils.estimateFullTileBytes(mc);
-		long numBlocks = OOCUtils.getNumBlocks(mc);
+		boolean knownGeometry = mc.dimsKnown() && mc.getRows() > 0 && mc.getCols() > 0 && mc.getBlocksize() > 0;
+		long tileBytes = knownGeometry ? OOCUtils.estimateFullTileBytes(mc) : SOURCE_BULK_BYTES;
+		long numBlocks = knownGeometry ? OOCUtils.getNumBlocks(mc) : Long.MAX_VALUE;
 		long totalBytes = numBlocks > Long.MAX_VALUE / tileBytes ? Long.MAX_VALUE : numBlocks * tileBytes;
 		long productionLimit = Math.min(SOURCE_BULK_BYTES, totalBytes);
 		long batchBytes = productionLimit > Long.MAX_VALUE - tileBytes ? Long.MAX_VALUE : productionLimit + tileBytes;
 		long bulkBytes = Math.min(totalBytes, batchBytes);
-		OOCIOHandler io = OOCCacheManager.getIOHandler();
-		OOCInstructionUtils.uncoordinatedDataGen(source, bulkBytes, productionLimit, OOCAccessPattern.UNKNOWN,
-			(byteLimit, active) -> {
-				emitter.set(active);
-				try {
-					OOCIOHandler.SourceReadContinuation current = continuation.get();
-					OOCIOHandler.SourceReadResult result;
-					if(current == null) {
-						OOCIOHandler.SourceReadRequest request = new OOCIOHandler.SourceReadRequest(min.getFileName(),
-							Types.FileFormat.BINARY, mc.getRows(), mc.getCols(), mc.getBlocksize(), mc.getNonZeros(),
-							byteLimit, true, untracked);
-						result = io.scheduleSourceRead(request).get();
-					}
-					else
-						result = io.continueSourceRead(current, byteLimit).get();
-					continuation.set(result.continuation);
-					return result.eof;
-				}
-				catch(Exception error) {
-					throw DMLRuntimeException.of(error);
-				}
-				finally {
-					emitter.set(null);
-				}
-			}, () -> {
-			}, getContext());
+		MaterializedStoreStreamable materialized = OOCInstructionUtils.sourceRead(source, min, min.getFileName(),
+			mc.getRows(), mc.getCols(), mc.getBlocksize(), mc.getNonZeros(), bulkBytes, productionLimit, getContext());
 
-		if(mc.getBlocksize() == blen) {
-			mout.setStreamHandle(source);
+		if(!knownGeometry || blen <= 0 || mc.getBlocksize() == blen) {
+			mout.setStreamHandle(materialized);
+			TeeOOCInstruction.incrRef(materialized, 1);
 			return;
 		}
 
 		OOCStream<IndexedMatrixValue> result = createWritableStream();
 		mout.setStreamHandle(result);
 		int inputBlen = mc.getBlocksize();
-		OOCInstructionUtils.repartition(source, result, outputIndex -> {
+		OOCInstructionUtils.repartition(materialized, result, outputIndex -> {
 			long outputRowStart = (outputIndex.getRowIndex() - 1) * blen;
 			long outputColStart = (outputIndex.getColumnIndex() - 1) * blen;
 			long outputRowEnd = Math.min(mc.getRows(), outputRowStart + blen) - 1;
@@ -167,5 +112,6 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 						(int) (colStart - outputColStart));
 				}
 		}, getContext());
+		materialized.scheduleMaterializedStoreDeletion();
 	}
 }
