@@ -162,7 +162,7 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 		OOCStream<MatrixBlock> result = createWritableStream(4, 4, 4);
 		DataCharacteristics dc = input.getDataCharacteristics();
 		OOCInstructionUtils.reduce(input.getStreamable(), result, value -> aggregatePartial(value, operator, blocksize),
-			this::mergeAggregate, MatrixBlock::getExactSerializedSize, () -> emptyAggregate(dc, operator, blocksize),
+			this::mergeAggregate, OOCUtils::memoryCharge, () -> emptyAggregate(dc, operator, blocksize),
 			getContext());
 		result.start();
 		try(OOCStream.QueueCallback<MatrixBlock> callback = result.dequeueCB()) {

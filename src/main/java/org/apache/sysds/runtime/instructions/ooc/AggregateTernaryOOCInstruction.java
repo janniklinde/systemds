@@ -42,6 +42,7 @@ import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 public class AggregateTernaryOOCInstruction extends ComputationOOCInstruction {
 	private static final Log LOG = LogFactory.getLog(AggregateTernaryOOCInstruction.class.getName());
@@ -105,7 +106,7 @@ public class AggregateTernaryOOCInstruction extends ComputationOOCInstruction {
 		OOCStream<IndexedMatrixValue> partials) {
 		OOCStream<MatrixBlock> result = createWritableStream(4, 4, 4);
 		OOCInstructionUtils.reduce(partials, result, value -> new MatrixBlock((MatrixBlock) value.getValue()),
-			(left, right) -> merge(left, right, operator), MatrixBlock::getExactSerializedSize, getContext());
+			(left, right) -> merge(left, right, operator), OOCUtils::memoryCharge, getContext());
 		result.start();
 		try(OOCStream.QueueCallback<MatrixBlock> callback = result.dequeueCB()) {
 			if(callback == null)
