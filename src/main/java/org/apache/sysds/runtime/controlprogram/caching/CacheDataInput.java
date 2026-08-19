@@ -39,12 +39,15 @@ public class CacheDataInput implements DataInput, MatrixBlockDataInput
 
 	@Override
 	public void readFully(byte[] b) throws IOException {
-		throw new IOException("Not supported.");
+		readFully(b, 0, b.length);
 	}
 
 	@Override
 	public void readFully(byte[] b, int off, int len) throws IOException {
-		throw new IOException("Not supported.");
+		if( len < 0 || _count + len > _buff.length )
+			throw new IOException("Invalid read of "+len+" bytes at position "+_count);
+		System.arraycopy(_buff, _count, b, off, len);
+		_count += len;
 	}
 
 	@Override

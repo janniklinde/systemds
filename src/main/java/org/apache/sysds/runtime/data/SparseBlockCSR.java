@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.Iterator;
 
+import org.apache.sysds.runtime.io.IOUtilFunctions;
 import org.apache.sysds.runtime.util.SortUtils;
 import org.apache.sysds.runtime.util.UtilFunctions;
 import org.apache.sysds.utils.MemoryEstimates;
@@ -47,6 +48,9 @@ import org.apache.sysds.utils.MemoryEstimates;
 public class SparseBlockCSR extends SparseBlock 
 {
 	private static final long serialVersionUID = 1922673868466164244L;
+
+	private static final int BUFFER_TRIPLES = 512;  //8192B chunks of ijv triples (4+4+8B)
+	private static final int BUFFER_PAIRS = 682;    //8184B chunks of jv pairs (4+8B)
 
 	private int[] _ptr = null;       //row pointer array (size: rlen+1)
 	private int[] _indexes = null;   //column index array (size: >=nnz)
@@ -216,15 +220,20 @@ public class SparseBlockCSR extends SparseBlock
 		if( _values.length < nnz )
 			resize(newCapacity(nnz));
 		
-		//read ijv triples, append and update pointers
+		//read ijv triples in chunks, append and update pointers
+		byte[] buff = new byte[Math.min(BUFFER_TRIPLES, Math.max(nnz,1))*16];
 		int rlast = 0;
-		for(int i=0; i<nnz; i++) {
-			int r = in.readInt();
-			if( rlast < r )
-				Arrays.fill(_ptr, rlast+1, r+1, i);
-			rlast = r;
-			_indexes[i] = in.readInt();
-			_values[i] = in.readDouble();
+		for( int i=0; i<nnz; ) {
+			int len = Math.min(buff.length/16, nnz-i);
+			in.readFully(buff, 0, len*16);
+			for( int j=0, off=0; j<len; j++, i++, off+=16 ) {
+				int r = IOUtilFunctions.baToInt(buff, off);
+				if( rlast < r )
+					Arrays.fill(_ptr, rlast+1, r+1, i);
+				rlast = r;
+				_indexes[i] = IOUtilFunctions.baToInt(buff, off+4);
+				_values[i] = IOUtilFunctions.baToDouble(buff, off+8);
+			}
 		}
 		Arrays.fill(_ptr, rlast+1, numRows()+1, nnz);
 		
@@ -248,13 +257,18 @@ public class SparseBlockCSR extends SparseBlock
 		if( _values.length < nnz )
 			resize(newCapacity(nnz));
 		
-		//read sparse rows, append and update pointers
+		//read sparse rows in chunks, append and update pointers
+		byte[] buff = new byte[Math.min(BUFFER_PAIRS, Math.max(nnz,1))*12];
 		_ptr[0] = 0;
 		for( int r=0, pos=0; r<rlen; r++ ) {
 			int lnnz = in.readInt();
-			for( int j=0; j<lnnz; j++, pos++ ) {
-				_indexes[pos] = in.readInt();
-				_values[pos] = in.readDouble();
+			for( int i=0; i<lnnz; ) {
+				int len = Math.min(BUFFER_PAIRS, lnnz-i);
+				in.readFully(buff, 0, len*12);
+				for( int j=0, off=0; j<len; j++, i++, pos++, off+=12 ) {
+					_indexes[pos] = IOUtilFunctions.baToInt(buff, off);
+					_values[pos] = IOUtilFunctions.baToDouble(buff, off+4);
+				}
 			}
 			_ptr[r+1] = pos;
 		}
