@@ -68,6 +68,7 @@ final class SourceStore {
 	private final ConcurrentHashMap<BlockKey, OOCIOHandler.SourceBlockDescriptor> _locations = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<String, BlockLayoutIndex> _layouts = new ConcurrentHashMap<>();
 	private final int _scanCallerId = OOCEventLog.registerCaller("read_src");
+	private volatile JobConf _readConf;
 
 	SourceStore() {
 		_scanExec = new ThreadPoolExecutor(READER_SIZE, READER_SIZE, 0L, TimeUnit.MILLISECONDS,
@@ -114,8 +115,20 @@ final class SourceStore {
 		return data;
 	}
 
+	private JobConf readConf() {
+		JobConf conf = _readConf;
+		if(conf == null) {
+			synchronized(this) {
+				if(_readConf == null)
+					_readConf = new JobConf(ConfigurationManager.getCachedJobConf());
+				conf = _readConf;
+			}
+		}
+		return conf;
+	}
+
 	private Object readSingle(OOCIOHandler.SourceBlockDescriptor src, long readAheadBudget, OOCCache cache) {
-		JobConf job = new JobConf(ConfigurationManager.getCachedJobConf());
+		JobConf job = readConf();
 		Path path = new Path(src.path);
 		MatrixIndexes ix = new MatrixIndexes();
 		MatrixBlock mb = new MatrixBlock();
