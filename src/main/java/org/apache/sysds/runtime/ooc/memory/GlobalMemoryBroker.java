@@ -22,6 +22,7 @@ package org.apache.sysds.runtime.ooc.memory;
 import org.apache.sysds.utils.Statistics;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -49,6 +50,26 @@ public class GlobalMemoryBroker implements MemoryBroker {
 
 	public synchronized long getUsedMemory() {
 		return _usedBytes;
+	}
+
+	/**
+	 * Snapshot of every allowance holding memory, largest grant first. Answers the question the per-primitive dump
+	 * cannot: which allowances the broker granted its memory to, including those of primitives no longer live.
+	 */
+	public String describeAllowances() {
+		List<MemoryAllowance> holders = new ArrayList<>();
+		for(MemoryAllowance allowance : _allowances)
+			if(allowance.getGrantedMemory() > 0)
+				holders.add(allowance);
+		holders.sort(Comparator.comparingLong(MemoryAllowance::getGrantedMemory).reversed());
+		StringBuilder sb = new StringBuilder(holders.size() + " allowance(s) holding, of " + _allowances.size()
+			+ " attached; reclaimerArmed=" + _reclaimRunning.get() + ':');
+		for(MemoryAllowance allowance : holders)
+			sb.append("\n   ").append(allowance.getClass().getSimpleName()).append('@')
+				.append(System.identityHashCode(allowance)).append(" used=").append(allowance.getUsedMemory())
+				.append(" granted=").append(allowance.getGrantedMemory()).append(" target=")
+				.append(allowance.getTargetMemory()).append(" shutdown=").append(allowance.isShutdown());
+		return sb.toString();
 	}
 
 	private final long _allowedBytes;
@@ -85,7 +106,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 				throw new IllegalArgumentException();
 			long free = _allowedBytes - _usedBytes;
 			if(free >= minSize) {
-				allow = Math.min(free, maxSize);
+				allow = Math.min(Math.min(free, maxSize), grantHeadroom(allowance, minSize));
 				_usedBytes += allow;
 				updates = rebalance(false);
 			}
@@ -93,6 +114,17 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		if(updates != null)
 			applyTargetUpdates(updates);
 		return allow;
+	}
+
+	/**
+	 * How much more this allowance may be granted: never beyond the target the rebalance already computed for it, but
+	 * always enough to cover the request in hand. Without the ceiling the broker hands out speculative slack it has
+	 * just decided the holder should not have, reclaimUnused takes it straight back, and the holder re-acquires it,
+	 * which livelocks the reclaimer instead of freeing anything.
+	 */
+	private long grantHeadroom(MemoryAllowance allowance, long minSize) {
+		long ceiling = Math.max(allowance.getTargetMemory(), allowance.getUsedMemory() + minSize);
+		return Math.max(0, ceiling - allowance.getGrantedMemory());
 	}
 
 	@Override

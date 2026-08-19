@@ -292,7 +292,7 @@ public final class CtableOOCPrimitive extends OOCPrimitive {
 			return;
 		}
 		Map.Entry<Integer, MatrixBlock> entry = batch._partials.next();
-		long bytes = entry.getValue().getExactSerializedSize();
+		long bytes = OOCUtils.memoryCharge(entry.getValue());
 		try {
 			batch._budget.reserveBlocking(bytes);
 			reduce(entry.getKey(), new ManagedPayload<>(
@@ -339,7 +339,7 @@ public final class CtableOOCPrimitive extends OOCPrimitive {
 			MatrixBlock left = (MatrixBlock) incoming.value().getValue();
 			MatrixBlock right = (MatrixBlock) existing.value().getValue();
 			MatrixBlock block = left.binaryOperations(PLUS, right, new MatrixBlock());
-			long bytes = block.getExactSerializedSize();
+			long bytes = OOCUtils.memoryCharge(block);
 			work._batch._budget.reserveBlocking(bytes);
 			merged = new ManagedPayload<>(new IndexedMatrixValue(outputIndex(work._slot), block), bytes,
 				work._batch._budget);
