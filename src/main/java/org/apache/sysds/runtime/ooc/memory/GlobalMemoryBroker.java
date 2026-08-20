@@ -39,9 +39,15 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	}
 
 	private static final GlobalMemoryBroker BROKER = new GlobalMemoryBroker(Runtime.getRuntime().maxMemory() / 3);
+	private static final GlobalMemoryBroker SOURCE_BROKER = new GlobalMemoryBroker(
+		Math.min(100L*1024*1024, Runtime.getRuntime().maxMemory() / 10));
 
 	public static GlobalMemoryBroker get() {
 		return BROKER;
+	}
+
+	public static GlobalMemoryBroker getSource() {
+		return SOURCE_BROKER;
 	}
 
 	public long getAllowedMemory() {
@@ -78,8 +84,6 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	private long _usedBytes;
 	private BrokerMode _brokerMode;
 
-	private record TargetUpdate(MemoryAllowance _allowance, long _target) {}
-
 	private static ScheduledThreadPoolExecutor createReclaimExecutor() {
 		ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1, runnable -> {
 			Thread thread = new Thread(runnable, "ooc-memory-broker-reclaimer");
@@ -99,70 +103,52 @@ public class GlobalMemoryBroker implements MemoryBroker {
 
 	@Override
 	public long requestMemory(MemoryAllowance allowance, long minSize, long maxSize) {
-		List<TargetUpdate> updates = null;
 		long allow = 0;
+		boolean modeChanged;
 		synchronized(this) {
 			if(minSize < 0 || maxSize < minSize)
 				throw new IllegalArgumentException();
 			long free = _allowedBytes - _usedBytes;
-			if(free >= minSize) {
-				allow = Math.min(Math.min(free, maxSize), grantHeadroom(allowance, minSize));
+			if(free >= minSize && (_brokerMode != BrokerMode.STRICT || allowance.getUsedMemory() < getEqualShare())) {
+				long ceiling = Math.max(allowance.getTargetMemory(), allowance.getUsedMemory() + minSize);
+				long grantHeadroom = Math.max(0, ceiling - allowance.getGrantedMemory());
+				allow = Math.min(Math.min(free, maxSize), grantHeadroom);
 				_usedBytes += allow;
-				updates = rebalance(false);
 			}
+			modeChanged = updateMode();
 		}
-		if(updates != null)
-			applyTargetUpdates(updates);
+		if(modeChanged)
+			notifyReservationWaiters();
 		return allow;
-	}
-
-	/**
-	 * How much more this allowance may be granted: never beyond the target the rebalance already computed for it, but
-	 * always enough to cover the request in hand. Without the ceiling the broker hands out speculative slack it has
-	 * just decided the holder should not have, reclaimUnused takes it straight back, and the holder re-acquires it,
-	 * which livelocks the reclaimer instead of freeing anything.
-	 */
-	private long grantHeadroom(MemoryAllowance allowance, long minSize) {
-		long ceiling = Math.max(allowance.getTargetMemory(), allowance.getUsedMemory() + minSize);
-		return Math.max(0, ceiling - allowance.getGrantedMemory());
 	}
 
 	@Override
 	public void freeMemory(MemoryAllowance allowance, long freedMemory) {
-		List<TargetUpdate> updates;
+		boolean modeChanged;
 		synchronized(this) {
 			if(freedMemory < 0)
 				throw new IllegalArgumentException();
 			_usedBytes -= freedMemory;
-			updates = rebalanceAfterFree();
+			modeChanged = updateMode();
 		}
-		if(updates != null)
-			applyTargetUpdates(updates);
-		if(freedMemory > 0)
+		if(freedMemory > 0 || modeChanged)
 			notifyReservationWaiters();
 	}
 
 	@Override
 	public void shutdownAllowance(MemoryAllowance allowance) {
-		List<TargetUpdate> updates;
-		synchronized(this) {
-			updates = rebalance(true);
-		}
-		applyTargetUpdates(updates);
 		notifyReservationWaiters();
 	}
 
 	@Override
 	public void destroyAllowance(MemoryAllowance allowance, long freedMemory) {
-		List<TargetUpdate> updates;
 		synchronized(this) {
 			if(freedMemory < 0)
 				throw new IllegalArgumentException();
 			_allowances.remove(allowance);
 			_usedBytes -= freedMemory;
-			updates = rebalance(true);
+			updateMode();
 		}
-		applyTargetUpdates(updates);
 		notifyReservationWaiters();
 	}
 
@@ -190,13 +176,10 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			if(reclaimed == 0)
 				return;
 
-			List<TargetUpdate> updates;
 			synchronized(this) {
 				_usedBytes = Math.max(0, _usedBytes - reclaimed);
-				updates = rebalanceAfterFree();
+				updateMode();
 			}
-			if(updates != null)
-				applyTargetUpdates(updates);
 			notifyReservationWaiters();
 		}
 		finally {
@@ -225,58 +208,23 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		return _usedBytes >= _allowedBytes * RECLAIM_PRESSURE;
 	}
 
-	private List<TargetUpdate> rebalance(boolean force) {
+	private boolean updateMode() {
 		long free = _allowedBytes - _usedBytes;
-		if(force)
-			_brokerMode = null;
-		if(free > _allowedBytes / 5)
-			return switchBrokerMode(BrokerMode.RELAXED);
-		else
-			return switchBrokerMode(BrokerMode.STRICT);
-	}
-
-	private List<TargetUpdate> rebalanceAfterFree() {
-		long free = _allowedBytes - _usedBytes;
-		if(_brokerMode == BrokerMode.RELAXED && free > _allowedBytes / 5)
-			return rebalanceToRelaxed();
-		return rebalance(false);
-	}
-
-	private List<TargetUpdate> switchBrokerMode(BrokerMode newMode) {
+		BrokerMode newMode = free > _allowedBytes / 5 ? BrokerMode.RELAXED : BrokerMode.STRICT;
 		if(newMode == _brokerMode)
-			return null;
-		List<TargetUpdate> updates = switch(newMode) {
-			case STRICT -> rebalanceToStrict();
-			case RELAXED -> rebalanceToRelaxed();
-			default -> throw new IllegalStateException("Unsupported broker mode " + newMode);
-		};
+			return false;
 		_brokerMode = newMode;
-		return updates;
+		return true;
 	}
 
-	private List<TargetUpdate> rebalanceToStrict() {
-		List<TargetUpdate> updates = new ArrayList<>();
-		long share = getEqualShare();
-		for(MemoryAllowance allowance : _allowances) {
-			if(allowance.isShutdown())
-				continue;
-			if(allowance.getUsedMemory() > share) {
-				updates.add(new TargetUpdate(allowance,
-					Math.min(allowance.getTargetMemory(), share + (long) ((allowance.getUsedMemory() - share) * 0.9))));
-			}
-		}
-		return updates;
+	@Override
+	public synchronized boolean isStrictMode() {
+		return _brokerMode == BrokerMode.STRICT;
 	}
 
-	private List<TargetUpdate> rebalanceToRelaxed() {
-		List<TargetUpdate> updates = new ArrayList<>();
-		long free = _allowedBytes - _usedBytes;
-		for(MemoryAllowance allowance : _allowances) {
-			if(allowance.isShutdown())
-				continue;
-			updates.add(new TargetUpdate(allowance, allowance.getGrantedMemory() + free));
-		}
-		return updates;
+	@Override
+	public synchronized long getFairShare() {
+		return getEqualShare();
 	}
 
 	private long getEqualShare() {
@@ -292,10 +240,5 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			if(allowance instanceof SyncMemoryAllowance sync)
 				sync.onBrokerMemoryAvailable();
 		}
-	}
-
-	private static void applyTargetUpdates(List<TargetUpdate> updates) {
-		for(TargetUpdate update : updates)
-			update._allowance.setTargetMemory(update._target);
 	}
 }
