@@ -37,6 +37,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
+import org.apache.sysds.runtime.ooc.memory.SourceMemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
@@ -135,7 +136,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 					return;
 				}
 				OrderedMaterializedStoreReader<IndexedMatrixValue> reader = null;
-				SyncMemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), REPLAY_MEMORY_LIMIT);
+				SyncMemoryAllowance allowance = new SourceMemoryAllowance(GlobalMemoryBroker.get(), REPLAY_MEMORY_LIMIT);
 				try {
 					reader = store.openReader(new SequentialAccessPattern(store.size()), allowance, REPLAY_PREFETCH);
 					output.setAllowance(allowance);
@@ -537,7 +538,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 
 		private synchronized void ensureAllowance(MaterializedStore<IndexedMatrixValue> store) {
 			if(_allowance == null)
-				_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get(), liveMemoryLimit(store));
+				_allowance = new SourceMemoryAllowance(GlobalMemoryBroker.get(), liveMemoryLimit(store));
 		}
 
 		private long liveMemoryLimit(MaterializedStore<IndexedMatrixValue> store) {

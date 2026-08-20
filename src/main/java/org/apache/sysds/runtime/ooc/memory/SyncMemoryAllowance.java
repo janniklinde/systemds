@@ -352,7 +352,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	@Override
 	public String debugState() {
 		synchronized(this) {
-			return "used=" + _usedBytes + " passive=" + getPassiveMemory() + " granted=" + _grantedBytes + " target="
+			return "id=" + System.identityHashCode(this) + " used=" + _usedBytes + " passive=" + getPassiveMemory() + " granted=" + _grantedBytes + " target="
 				+ _targetBytes + " limit=" + _consumptionLimit + " waiters=" + _reservationWaiters.size()
 				+ " taskWaiters=" + _taskWaiters.size() + (_shutdown ? " shutdown" : "");
 		}
