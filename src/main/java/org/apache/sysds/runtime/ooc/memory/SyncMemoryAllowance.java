@@ -87,11 +87,11 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		synchronized(this) {
 			if(_shutdown || _destroyed)
 				return false;
-			if(_usedBytes + bytes <= _grantedBytes && _usedBytes + bytes <= _targetBytes) {
+			if(_usedBytes + bytes <= _grantedBytes && withinAdmissionPolicy(bytes)) {
 				_usedBytes += bytes;
 				return true;
 			}
-			if(_usedBytes + bytes > _targetBytes)
+			if(!withinAdmissionPolicy(bytes))
 				return false;
 			minRequest = _usedBytes + bytes - _grantedBytes;
 			maxRequest = Math.max(minRequest, Math.max(_grantedBytes, bytes) * 2);
@@ -106,7 +106,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				refund = granted;
 			else {
 				_grantedBytes += granted;
-				if(_usedBytes + bytes <= _targetBytes && _usedBytes + bytes <= _grantedBytes) {
+				if(withinAdmissionPolicy(bytes) && _usedBytes + bytes <= _grantedBytes) {
 					_usedBytes += bytes;
 					success = true;
 				}
@@ -304,6 +304,12 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			requestReservationDrain();
 	}
 
+	private boolean withinAdmissionPolicy(long bytes) {
+		if(_broker.isStrictMode())
+			return _usedBytes < _broker.getFairShare();
+		return _usedBytes + bytes <= _targetBytes;
+	}
+
 	@Override
 	public synchronized long reclaimUnused() {
 		if(_shutdown || _destroyed || _grantedBytes <= _usedBytes)
@@ -352,7 +358,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	@Override
 	public String debugState() {
 		synchronized(this) {
-			return "used=" + _usedBytes + " passive=" + getPassiveMemory() + " granted=" + _grantedBytes + " target="
+			return "id=" + System.identityHashCode(this) + " used=" + _usedBytes + " passive=" + getPassiveMemory() + " granted=" + _grantedBytes + " target="
 				+ _targetBytes + " limit=" + _consumptionLimit + " waiters=" + _reservationWaiters.size()
 				+ " taskWaiters=" + _taskWaiters.size() + (_shutdown ? " shutdown" : "");
 		}
