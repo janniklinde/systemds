@@ -62,7 +62,7 @@ public final class FlatMapOOCPrimitive<I, O> extends OOCPrimitive {
 	protected void startExecution() {
 		OOCStream<I> input = getInputReadStream(0);
 		OOCStream<O> output = _output.getWriteStream();
-		AllocatedOOCStream<I> admitted = new AllocatedOOCStream<>(input, _allowance, ignored -> _taskBytes);
+		AllocatedOOCStream<I> admitted = new AllocatedOOCStream<>(input, _allowance, ignored -> _taskBytes, true);
 		getContext().addOutStream(output);
 		OOCInstructionUtils.submitOOCTasks(admitted, callback -> {
 			ReservationBudget budget = AllocatedOOCStream.detachBudget(callback).enableReuse();
