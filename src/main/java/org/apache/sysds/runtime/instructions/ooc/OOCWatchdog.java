@@ -24,7 +24,6 @@ import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCCacheScheduler;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
-import org.apache.sysds.runtime.ooc.memory.SourceMemoryAllowance;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.stats.StreamTrace;
 
@@ -97,7 +96,6 @@ public final class OOCWatchdog {
 		long now = System.currentTimeMillis();
 		StringBuilder sb = new StringBuilder("[OOCWatchdog] ").append(pending.size())
 			.append(" incomplete primitive(s); ").append(describeMemory()).append('\n')
-			.append("   ").append(SourceMemoryAllowance.describeState())
 			.append('\n')
 			.append("   broker grants: ").append(GlobalMemoryBroker.get().describeAllowances()).append(':');
 		for(Map.Entry<OOCPrimitive, Long> entry : pending) {

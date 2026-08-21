@@ -115,6 +115,25 @@ public class OOCMemoryAllowanceTest {
 	}
 
 	@Test
+	public void testStrictFairShareAllowsOneCrossingRequest() {
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
+		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);
+		SyncMemoryAllowance peer = new SyncMemoryAllowance(broker);
+		try {
+			allowance.reserveBlocking(40);
+			Assert.assertTrue(broker.isStrictMode());
+			Assert.assertTrue(allowance.tryReserve(20));
+			Assert.assertFalse(allowance.tryReserve(1));
+		}
+		finally {
+			allowance.release(allowance.getUsedMemory());
+			peer.release(peer.getUsedMemory());
+			allowance.destroy();
+			peer.destroy();
+		}
+	}
+
+	@Test
 	public void testReservationWaiters() throws Exception {
 		CoordinatedBroker broker = new CoordinatedBroker(new GlobalMemoryBroker(100));
 		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);

@@ -305,9 +305,9 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	}
 
 	private boolean withinAdmissionPolicy(long bytes) {
-		if(_usedBytes + bytes <= _targetBytes)
-			return true;
-		return _broker.isStrictMode() && _usedBytes < _broker.getFairShare();
+		if(_broker.isStrictMode())
+			return _usedBytes < _broker.getFairShare();
+		return _usedBytes + bytes <= _targetBytes;
 	}
 
 	@Override
