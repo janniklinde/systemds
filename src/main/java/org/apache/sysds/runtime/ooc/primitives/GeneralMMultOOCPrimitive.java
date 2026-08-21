@@ -216,12 +216,12 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 			col = task / _innerBlocks % _colBlocks;
 			row = task / (_innerBlocks * _colBlocks);
 		}
-		int leftIndex = row * _innerBlocks + inner;
-		int rightIndex = col * _innerBlocks + inner;
 		int outputSlot = row * _colBlocks + col;
 		try {
-			OOCFuture.allOf(List.of(_leftReader.request(leftIndex, budget), _rightReader.request(rightIndex, budget)),
-				StoreLease::close).whenComplete((inputs, error) -> {
+			OOCFuture
+				.allOf(List.of(_leftReader.request(row + 1L, inner + 1L, budget),
+					_rightReader.request(inner + 1L, col + 1L, budget)), StoreLease::close)
+				.whenComplete((inputs, error) -> {
 					if(error != null) {
 						budget.close();
 						fail(error);
