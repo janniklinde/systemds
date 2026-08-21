@@ -30,7 +30,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class GlobalMemoryBroker implements MemoryBroker {
-	private static final long RECLAIM_RETRY_DELAY_MS = 5;
+	private static final long RECLAIM_RETRY_DELAY_MS = 2;
 	private static final double RECLAIM_PRESSURE = 0.85;
 	private static final ScheduledThreadPoolExecutor RECLAIM_EXECUTOR = createReclaimExecutor();
 
@@ -40,7 +40,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 
 	private static final GlobalMemoryBroker BROKER = new GlobalMemoryBroker(Runtime.getRuntime().maxMemory() / 3);
 	private static final GlobalMemoryBroker SOURCE_BROKER = new GlobalMemoryBroker(
-		Math.min(100L*1024*1024, Runtime.getRuntime().maxMemory() / 10));
+		Math.min(200L*1024*1024, Runtime.getRuntime().maxMemory() / 12));
 
 	public static GlobalMemoryBroker get() {
 		return BROKER;
