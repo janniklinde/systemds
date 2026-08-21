@@ -77,6 +77,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	private final AtomicBoolean _reclaimRunning;
 	private long _usedBytes;
 	private BrokerMode _brokerMode;
+	private boolean _modeChanged;
 
 	private record TargetUpdate(MemoryAllowance _allowance, long _target) {}
 
@@ -113,6 +114,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		}
 		if(updates != null)
 			applyTargetUpdates(updates);
+		notifyOnModeChange();
 		return allow;
 	}
 
@@ -140,6 +142,8 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			applyTargetUpdates(updates);
 		if(freedMemory > 0)
 			notifyReservationWaiters();
+		else
+			notifyOnModeChange();
 	}
 
 	@Override
@@ -251,7 +255,18 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			default -> throw new IllegalStateException("Unsupported broker mode " + newMode);
 		};
 		_brokerMode = newMode;
+		_modeChanged = true;
 		return updates;
+	}
+
+	private void notifyOnModeChange() {
+		boolean changed;
+		synchronized(this) {
+			changed = _modeChanged;
+			_modeChanged = false;
+		}
+		if(changed)
+			notifyReservationWaiters();
 	}
 
 	private List<TargetUpdate> rebalanceToStrict() {
@@ -277,6 +292,16 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			updates.add(new TargetUpdate(allowance, allowance.getGrantedMemory() + free));
 		}
 		return updates;
+	}
+
+	@Override
+	public synchronized boolean isStrictMode() {
+		return _brokerMode == BrokerMode.STRICT;
+	}
+
+	@Override
+	public synchronized long getFairShare() {
+		return getEqualShare();
 	}
 
 	private long getEqualShare() {

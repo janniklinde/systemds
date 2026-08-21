@@ -31,4 +31,12 @@ public interface MemoryBroker {
 	void attachAllowance(MemoryAllowance allowance);
 
 	void reservationBlocked(MemoryAllowance allowance, long bytes);
+
+	default boolean isStrictMode() {
+		return false;
+	}
+
+	default long getFairShare() {
+		return Long.MAX_VALUE;
+	}
 }

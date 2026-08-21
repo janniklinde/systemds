@@ -92,6 +92,29 @@ public class OOCMemoryAllowanceTest {
 	}
 
 	@Test
+	public void testStrictFairShareWakesBlockedReservation() throws Exception {
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
+		SyncMemoryAllowance holder = new SyncMemoryAllowance(broker, 85);
+		SyncMemoryAllowance waiter = new SyncMemoryAllowance(broker);
+		try {
+			waiter.setTargetMemory(0);
+			OOCFuture<Void> reservation = waiter.reserveAsync(15);
+			Assert.assertFalse(reservation.isDone());
+
+			holder.reserveBlocking(85);
+			reservation.get(10, TimeUnit.SECONDS);
+			Assert.assertTrue(broker.isStrictMode());
+			Assert.assertEquals(15, waiter.getUsedMemory());
+		}
+		finally {
+			holder.release(holder.getUsedMemory());
+			waiter.release(waiter.getUsedMemory());
+			holder.destroy();
+			waiter.destroy();
+		}
+	}
+
+	@Test
 	public void testReservationWaiters() throws Exception {
 		CoordinatedBroker broker = new CoordinatedBroker(new GlobalMemoryBroker(100));
 		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);

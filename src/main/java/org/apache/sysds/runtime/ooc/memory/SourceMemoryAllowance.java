@@ -23,7 +23,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class SourceMemoryAllowance extends SyncMemoryAllowance {
-	private static final long DEFAULT_BUDGET_BYTES = 64L * 1024 * 1024;
+	private static final long DEFAULT_BUDGET_BYTES = 128L * 1024 * 1024;
 	private static final Set<SourceMemoryAllowance> LIVE = ConcurrentHashMap.newKeySet();
 	private static final long BUDGET_BYTES = Long.getLong("sysds.ooc.source.budget.bytes",
 		Math.min(DEFAULT_BUDGET_BYTES, GlobalMemoryBroker.get().getAllowedMemory() / 3));
@@ -47,7 +47,7 @@ public class SourceMemoryAllowance extends SyncMemoryAllowance {
 
 	@Override
 	public boolean tryReserve(long bytes) {
-		if(bytes > 0 && getUsedMemory() > 0 && getUsedMemory() + bytes > getSourceShare())
+		if(bytes > 0 && getUsedMemory() > 0 && getUsedMemory() >= getSourceShare())
 			return false;
 		return super.tryReserve(bytes);
 	}

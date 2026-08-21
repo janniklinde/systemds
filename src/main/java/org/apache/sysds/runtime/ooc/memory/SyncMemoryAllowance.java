@@ -87,11 +87,11 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		synchronized(this) {
 			if(_shutdown || _destroyed)
 				return false;
-			if(_usedBytes + bytes <= _grantedBytes && _usedBytes + bytes <= _targetBytes) {
+			if(_usedBytes + bytes <= _grantedBytes && withinAdmissionPolicy(bytes)) {
 				_usedBytes += bytes;
 				return true;
 			}
-			if(_usedBytes + bytes > _targetBytes)
+			if(!withinAdmissionPolicy(bytes))
 				return false;
 			minRequest = _usedBytes + bytes - _grantedBytes;
 			maxRequest = Math.max(minRequest, Math.max(_grantedBytes, bytes) * 2);
@@ -106,7 +106,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				refund = granted;
 			else {
 				_grantedBytes += granted;
-				if(_usedBytes + bytes <= _targetBytes && _usedBytes + bytes <= _grantedBytes) {
+				if(withinAdmissionPolicy(bytes) && _usedBytes + bytes <= _grantedBytes) {
 					_usedBytes += bytes;
 					success = true;
 				}
@@ -302,6 +302,12 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 			_broker.freeMemory(this, freedMemory);
 		if(drainWaiters)
 			requestReservationDrain();
+	}
+
+	private boolean withinAdmissionPolicy(long bytes) {
+		if(_usedBytes + bytes <= _targetBytes)
+			return true;
+		return _broker.isStrictMode() && _usedBytes < _broker.getFairShare();
 	}
 
 	@Override
