@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.ooc.memory;
 
+import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.utils.Statistics;
 
 import java.util.ArrayList;
@@ -32,6 +33,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class GlobalMemoryBroker implements MemoryBroker {
 	private static final long RECLAIM_RETRY_DELAY_MS = 2;
 	private static final double RECLAIM_PRESSURE = 0.85;
+	/**
+	 * Fraction of the broker budget above which buffered callbacks are force-parked into the cache. Matches the
+	 * onset of {@link BrokerMode#STRICT} (see {@link #updateMode()}): strict mode is the engine's own definition of
+	 * "memory is tight", and it is where admission starts refusing, so the valve has to be armed by then.
+	 */
+	private static final double PURGE_PRESSURE = Double
+		.parseDouble(System.getProperty("sysds.ooc.purge.pressure", "0.80"));
 	private static final ScheduledThreadPoolExecutor RECLAIM_EXECUTOR = createReclaimExecutor();
 
 	private enum BrokerMode {
@@ -81,6 +89,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	private final long _allowedBytes;
 	private final CopyOnWriteArrayList<MemoryAllowance> _allowances;
 	private final AtomicBoolean _reclaimRunning;
+	private final AtomicBoolean _purgeRunning;
 	private long _usedBytes;
 	private BrokerMode _brokerMode;
 
@@ -99,17 +108,19 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		_usedBytes = 0;
 		_allowances = new CopyOnWriteArrayList<>();
 		_reclaimRunning = new AtomicBoolean(false);
+		_purgeRunning = new AtomicBoolean(false);
 	}
 
 	@Override
 	public long requestMemory(MemoryAllowance allowance, long minSize, long maxSize) {
 		long allow = 0;
 		boolean modeChanged;
+		boolean purge;
 		synchronized(this) {
 			if(minSize < 0 || maxSize < minSize)
 				throw new IllegalArgumentException();
 			long free = _allowedBytes - _usedBytes;
-			if(free >= minSize && (_brokerMode != BrokerMode.STRICT
+			if(free >= minSize && (_brokerMode != BrokerMode.STRICT || allowance.isAdmissionExempt()
 				|| allowance.getUsedMemory() < getFairShareFloored(minSize))) {
 				long ceiling = Math.max(allowance.getTargetMemory(), allowance.getUsedMemory() + minSize);
 				long grantHeadroom = Math.max(0, ceiling - allowance.getGrantedMemory());
@@ -117,9 +128,12 @@ public class GlobalMemoryBroker implements MemoryBroker {
 				_usedBytes += allow;
 			}
 			modeChanged = updateMode();
+			purge = hasPurgePressure();
 		}
 		if(modeChanged)
 			notifyReservationWaiters();
+		if(purge)
+			schedulePurge();
 		return allow;
 	}
 
@@ -163,6 +177,29 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	public void reservationBlocked(MemoryAllowance allowance, long bytes) {
 		if(_reclaimRunning.compareAndSet(false, true))
 			RECLAIM_EXECUTOR.execute(this::runReclaim);
+		if(hasPurgePressure())
+			schedulePurge();
+	}
+
+	private synchronized boolean hasPurgePressure() {
+		return _usedBytes >= (long) (_allowedBytes * PURGE_PRESSURE);
+	}
+
+	/**
+	 * Last resort against a hard stall: force-park queue-buffered callbacks into the cache so their bytes return to
+	 * the broker. Runs off the caller thread because parking releases memory, which re-enters this broker.
+	 */
+	private void schedulePurge() {
+		if(this != BROKER || !_purgeRunning.compareAndSet(false, true))
+			return;
+		RECLAIM_EXECUTOR.execute(() -> {
+			try {
+				SubscribableTaskQueue.purgeBuffered();
+			}
+			finally {
+				_purgeRunning.set(false);
+			}
+		});
 	}
 
 	private void runReclaim() {

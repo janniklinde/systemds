@@ -23,15 +23,30 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.parfor.LocalTaskQueue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCCache;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
+import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
+import java.lang.ref.WeakReference;
+import java.util.Iterator;
 import java.util.LinkedList;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCallback<T>> implements OOCStream<T> {
+
+	/** Queues that have buffered at least once, i.e. the candidates of a purge run. */
+	private static final ConcurrentLinkedQueue<WeakReference<SubscribableTaskQueue<?>>> BUFFERING =
+		new ConcurrentLinkedQueue<>();
+	private static final int PURGE_REGISTRY_PRUNE_INTERVAL = 4096;
+	private static final AtomicLong REGISTERED = new AtomicLong(0);
+	private static final AtomicLong PARKED_BLOCKS = new AtomicLong(0);
+	private static final AtomicLong PARKED_BYTES = new AtomicLong(0);
 
 	private final AtomicInteger _availableCtr = new AtomicInteger(1);
 	private final AtomicBoolean _closed = new AtomicBoolean(false);
@@ -41,6 +56,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 	private CacheableData<?> _cdata;
 	private volatile OOCPrimitive _primitive;
 	private volatile Consumer<QueueCallback<T>> _subscriber = null;
+	private boolean _registeredForPurge = false;
 	private String _watchdogId;
 
 	public SubscribableTaskQueue() {
@@ -96,6 +112,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 		synchronized(this) {
 			// Re-check that subscriber is really null to avoid race conditions
 			if(_subscriber == null) {
+				registerForPurge();
 				try {
 					super.enqueueTask(cb);
 				}
@@ -236,6 +253,74 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 
 		if(needsEos)
 			onDeliveryFinished();
+	}
+
+	private void registerForPurge() {
+		if(_registeredForPurge)
+			return;
+		_registeredForPurge = true;
+		BUFFERING.add(new WeakReference<>(this));
+		//the registry is only pruned by purge runs, which may never happen; keep it bounded by live queues
+		if(REGISTERED.incrementAndGet() % PURGE_REGISTRY_PRUNE_INTERVAL == 0)
+			pruneRegistry();
+	}
+
+	private static void pruneRegistry() {
+		for(Iterator<WeakReference<SubscribableTaskQueue<?>>> it = BUFFERING.iterator(); it.hasNext();)
+			if(it.next().get() == null)
+				it.remove();
+	}
+
+	/**
+	 * Last resort against a hard stall in the {@code GlobalMemoryBroker}: force-parks the payloads of all buffered
+	 * in-memory callbacks into the cache, handing their bytes back to the broker. A buffered callback has by
+	 * definition not been handed to a consumer yet - the queue monitor held here is what guarantees that, since
+	 * dequeuing is synchronized on the same monitor. Consumers see the payload again through
+	 * {@code QueueCallback.get()}, which revives it from the cache.
+	 *
+	 * @return the number of bytes released back to the broker
+	 */
+	public static long purgeBuffered() {
+		if(BUFFERING.isEmpty())
+			return 0;
+		OOCCache cache = OOCCacheManager.getGlobalCache();
+		long freed = 0;
+		for(Iterator<WeakReference<SubscribableTaskQueue<?>>> it = BUFFERING.iterator(); it.hasNext();) {
+			SubscribableTaskQueue<?> queue = it.next().get();
+			if(queue == null)
+				it.remove();
+			else
+				freed += queue.parkBuffered(cache);
+		}
+		return freed;
+	}
+
+	private long parkBuffered(OOCCache cache) {
+		long freed = 0;
+		long blocks = 0;
+		synchronized(this) {
+			//iterate a snapshot: parking releases memory, which may re-enter this queue on the same thread
+			Object[] buffered = _data.toArray();
+			for(Object cb : buffered) {
+				if(!(cb instanceof InMemoryQueueCallback<?> managed))
+					continue;
+				long bytes = managed.tryPark(cache);
+				if(bytes > 0) {
+					freed += bytes;
+					blocks++;
+				}
+			}
+		}
+		if(blocks > 0) {
+			PARKED_BLOCKS.addAndGet(blocks);
+			PARKED_BYTES.addAndGet(freed);
+		}
+		return freed;
+	}
+
+	public static String describePurgeState() {
+		return "parkValve[blocks=" + PARKED_BLOCKS.get() + " bytes=" + PARKED_BYTES.get() + " queues="
+			+ BUFFERING.size() + "]";
 	}
 
 	private void onDeliveryFinished() {
