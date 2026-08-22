@@ -428,7 +428,7 @@ public class OOCCacheImpl implements OOCCache {
 				resident = meta.entry;
 				readFuture = null;
 			}
-			else if(meta.readFuture == null) {
+			else if(meta.readFuture == null || meta.readFuture.isDone()) {
 				awaitRead(meta);
 				OOCFuture<BlockEntry> scheduled = _ioHandler.scheduleRead(meta.entry);
 				meta.readFuture = scheduled;
