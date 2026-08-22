@@ -87,12 +87,16 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		synchronized(this) {
 			if(_shutdown || _destroyed)
 				return false;
-			if(_usedBytes + bytes <= _grantedBytes && withinAdmissionPolicy(bytes)) {
+			// Evaluate the admission policy exactly once: it reads broker state that this monitor does not guard,
+			// so two evaluations can disagree. If the first said no and the second yes, control used to fall through
+			// with _usedBytes + bytes <= _grantedBytes still true, making minRequest non-positive and tripping the
+			// broker's argument check.
+			if(!withinAdmissionPolicy(bytes))
+				return false;
+			if(_usedBytes + bytes <= _grantedBytes) {
 				_usedBytes += bytes;
 				return true;
 			}
-			if(!withinAdmissionPolicy(bytes))
-				return false;
 			minRequest = _usedBytes + bytes - _grantedBytes;
 			maxRequest = Math.max(minRequest, Math.max(_grantedBytes, bytes) * 2);
 		}
@@ -306,7 +310,7 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 
 	private boolean withinAdmissionPolicy(long bytes) {
 		if(_broker.isStrictMode())
-			return _usedBytes < _broker.getFairShare();
+			return _usedBytes < _broker.getFairShare(bytes);
 		return _usedBytes + bytes <= _targetBytes;
 	}
 
@@ -466,10 +470,15 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 	private boolean canAdmitTask(long bytes) {
 		long parallelism = InfrastructureAnalyzer.getLocalParallelism();
 		long active = getActiveMemory();
-		long passive = getPassiveMemory();
 		long activeLimit = saturatedMultiply(2 * parallelism, bytes);
-		long passiveLimit = saturatedMultiply(2, Math.max(active, bytes));
-		return active <= activeLimit - bytes && passive < passiveLimit;
+		if(active > activeLimit - bytes)
+			return false;
+		// The passive limit caps how far a producer may run ahead of its consumers. It conserves memory, so it has
+		// nothing to conserve while the broker is relaxed - refusing admission there only stops the producer from
+		// making the progress that lets its consumers drain, and the backlog stays bounded by the broker budget.
+		if(!_broker.isStrictMode())
+			return true;
+		return getPassiveMemory() < saturatedMultiply(2, Math.max(active, bytes));
 	}
 
 	private static long saturatedMultiply(long left, long right) {

@@ -231,6 +231,45 @@ public class OOCCacheImpl implements OOCCache {
 		scheduleEvictionIfNeeded();
 	}
 
+	public synchronized String describeCacheState() {
+		long pinned = 0;
+		long pinnedBytes = 0;
+		long entries = 0;
+		for(BlockEntry e : snapshotEntries()) {
+			entries++;
+			if(e.getPinCount() > 0) {
+				pinned++;
+				pinnedBytes += Math.max(0, e.getSize());
+			}
+		}
+		StringBuilder byStream = new StringBuilder();
+		java.util.TreeMap<Long, long[]> agg = new java.util.TreeMap<>();
+		for(BlockEntry e : snapshotEntries()) {
+			if(e.getPinCount() <= 0)
+				continue;
+			long[] a = agg.computeIfAbsent(e.getKey().getStreamId(), k -> new long[3]);
+			a[0]++;
+			a[1] += Math.max(0, e.getSize());
+			a[2] = Math.max(a[2], e.getPinCount());
+		}
+		for(java.util.Map.Entry<Long, long[]> e : agg.entrySet())
+			byStream.append(" s").append(e.getKey()).append("[n=").append(e.getValue()[0]).append(" bytes=")
+				.append(e.getValue()[1]).append(" maxPin=").append(e.getValue()[2]).append(']');
+		return "owned=" + _ownedBytes + " evicting=" + _evictingBytes + " deferredUnpins="
+			+ _deferredUnpins.size() + " entries=" + entries + " pinned=" + pinned + " pinnedBytes=" + pinnedBytes
+			+ " evictionPressure=" + evictionPressure() + " evictLimit=" + _evictionLimit + " hard=" + _hardLimit
+			+ "\n   pinnedByStream:" + byStream;
+	}
+
+	private java.util.List<BlockEntry> snapshotEntries() {
+		java.util.List<BlockEntry> out = new ArrayList<>();
+		_blocks.forEachVisible(e -> {
+			if(e != null)
+				out.add(e);
+		});
+		return out;
+	}
+
 	@Override
 	public synchronized long getOwnedCacheSize() {
 		return _ownedBytes;

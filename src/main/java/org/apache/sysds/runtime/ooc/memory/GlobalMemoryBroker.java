@@ -109,7 +109,8 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			if(minSize < 0 || maxSize < minSize)
 				throw new IllegalArgumentException();
 			long free = _allowedBytes - _usedBytes;
-			if(free >= minSize && (_brokerMode != BrokerMode.STRICT || allowance.getUsedMemory() < getEqualShare())) {
+			if(free >= minSize && (_brokerMode != BrokerMode.STRICT
+				|| allowance.getUsedMemory() < getFairShareFloored(minSize))) {
 				long ceiling = Math.max(allowance.getTargetMemory(), allowance.getUsedMemory() + minSize);
 				long grantHeadroom = Math.max(0, ceiling - allowance.getGrantedMemory());
 				allow = Math.min(Math.min(free, maxSize), grantHeadroom);
@@ -227,12 +228,33 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		return getEqualShare();
 	}
 
+	@Override
+	public synchronized long getFairShare(long taskBytes) {
+		return getFairShareFloored(taskBytes);
+	}
+
+	/**
+	 * The fair share is a cap on how far one allowance may run ahead of the others, and admission lets a request
+	 * cross it (the test is {@code used < share}, not {@code used + bytes <= share}). That grace only means something
+	 * while the share is at least a task: below that, the very first block already puts an allowance over its share
+	 * and freezes it for good. Hold the share at one task in plus one out so every allowance can always work.
+	 */
+	private long getFairShareFloored(long taskBytes) {
+		long floor = taskBytes > 0 && taskBytes <= Long.MAX_VALUE / 2 ? 2 * taskBytes : taskBytes;
+		return Math.max(getEqualShare(), floor);
+	}
+
+	/**
+	 * The strict-mode fair share, computed over the allowances that actually hold memory rather than every attached
+	 * one. Most attached allowances hold nothing - a plan with 1058 allowances of which 212 hold would otherwise put
+	 * the share at ~991KB and refuse every holder of a single block while the broker still has free bytes.
+	 */
 	private long getEqualShare() {
-		int active = 0;
+		int holders = 0;
 		for(MemoryAllowance allowance : _allowances)
-			if(!allowance.isShutdown())
-				active++;
-		return active == 0 ? _allowedBytes : _allowedBytes / active;
+			if(!allowance.isShutdown() && allowance.getGrantedMemory() > 0)
+				holders++;
+		return holders == 0 ? _allowedBytes : _allowedBytes / holders;
 	}
 
 	private void notifyReservationWaiters() {

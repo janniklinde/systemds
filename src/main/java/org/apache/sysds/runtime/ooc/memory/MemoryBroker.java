@@ -39,4 +39,11 @@ public interface MemoryBroker {
 	default long getFairShare() {
 		return Long.MAX_VALUE;
 	}
+
+	/**
+	 * The fair share as it applies to a request of {@code taskBytes}, never below what one task needs.
+	 */
+	default long getFairShare(long taskBytes) {
+		return getFairShare();
+	}
 }
