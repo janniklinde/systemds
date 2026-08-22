@@ -125,6 +125,8 @@ public final class CtableOOCPrimitive extends OOCPrimitive {
 			4 * OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(_outputBytes);
 		_accumulators = new StateTable<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID(),
 			_outputBlocks);
+		long accumulatorPriorityOffset = _outputBlocks;
+		_accumulators.addEvictionPolicy(slot -> slot - accumulatorPriorityOffset);
 		_outputStream = _output.getWriteStream();
 		_ready = new SubscribableTaskQueue<>();
 		getContext().addOutStream(_outputStream, _ready);
