@@ -118,6 +118,8 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 		_outputStream = _output.getWriteStream();
 		_ready = new SubscribableTaskQueue<>();
 		_accumulators = new StateTable<>();
+		long accumulatorPriorityOffset = (long) _rowBlocks * _colBlocks;
+		_accumulators.addEvictionPolicy(slot -> slot - accumulatorPriorityOffset);
 		getContext().addOutStream(_outputStream, _ready);
 		OOCInstructionUtils.submitCloseableOOCTasks(_ready, this::process, getContext())
 			.whenComplete((ignored, error) -> {
