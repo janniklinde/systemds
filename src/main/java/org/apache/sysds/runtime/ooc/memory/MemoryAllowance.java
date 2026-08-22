@@ -64,6 +64,15 @@ public interface MemoryAllowance {
 
 	boolean isShutdown();
 
+	/**
+	 * Allowances that are exempt from the broker admission policy may reserve memory whenever the broker has free
+	 * bytes, regardless of strict-mode fair shares. This is reserved for liveness-critical allowances such as the
+	 * revive allowance used to fetch parked callbacks back into memory.
+	 */
+	default boolean isAdmissionExempt() {
+		return false;
+	}
+
 	default void destroy() {
 		shutdown();
 	}
