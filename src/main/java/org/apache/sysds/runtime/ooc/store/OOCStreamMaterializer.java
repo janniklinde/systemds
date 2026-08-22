@@ -196,11 +196,12 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 				leases.add(_store.publishPinnedEntryLive(Math.toIntExact(tileIds[i]), entries[i], ownership));
 			ownership.close();
 
-			for(StoreLease<IndexedMatrixValue> lease : leases) {
-				try(lease) {
+			for(int i = 0; i < leases.size(); i++) {
+				int index = Math.toIntExact(tileIds[i]);
+				try(StoreLease<IndexedMatrixValue> lease = leases.get(i)) {
 					for(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> liveConsumer : _liveConsumers) {
 						try(OOCStream.QueueCallback<IndexedMatrixValue> alias = new MaterializedCallback<>(
-							lease.retain())) {
+							lease.retain(), index)) {
 							liveConsumer.accept(alias);
 						}
 					}
