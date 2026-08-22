@@ -204,6 +204,8 @@ public final class OOCWatchdog {
 			sb.append(", globalCache owned=").append(toMiB(global.getOwnedCacheSize())).append("MiB (hard ")
 				.append(toMiB(OOCCacheManager.getHardLimit())).append("MiB, evict ")
 				.append(toMiB(OOCCacheManager.getEvictionLimit())).append("MiB)");
+		if(global instanceof org.apache.sysds.runtime.ooc.cache.OOCCacheImpl impl)
+			sb.append("\n   globalCache: ").append(impl.describeCacheState());
 		Runtime rt = Runtime.getRuntime();
 		sb.append(", heap=").append(toMiB(rt.totalMemory() - rt.freeMemory())).append("MiB/")
 			.append(toMiB(rt.maxMemory())).append("MiB");
