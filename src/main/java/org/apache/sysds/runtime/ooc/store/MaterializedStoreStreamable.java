@@ -475,7 +475,8 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		}
 
 		private boolean hasLiveWork() {
-			return (!_liveIndices.isEmpty() && _liveInFlight.get() < LIVE_PREFETCH) || liveFinished();
+			return (_activated.get() && !_liveIndices.isEmpty() && _liveInFlight.get() < LIVE_PREFETCH)
+				|| liveFinished();
 		}
 
 		private boolean liveFinished() {
@@ -483,7 +484,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		}
 
 		private void drainLive() {
-			while(_liveInFlight.get() < LIVE_PREFETCH) {
+			while(_activated.get() && _liveInFlight.get() < LIVE_PREFETCH) {
 				Integer index = _liveIndices.poll();
 				if(index == null)
 					break;
@@ -570,6 +571,8 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 				return;
 			if(!_live)
 				_owner.openReader(this);
+			else
+				pumpLive();
 			_owner.startMaterialization();
 		}
 

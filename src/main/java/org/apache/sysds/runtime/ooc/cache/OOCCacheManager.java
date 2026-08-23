@@ -50,6 +50,7 @@ public class OOCCacheManager {
 	private static final double OOC_BUFFER_PERCENTAGE = 0.5;
 	private static final double OOC_BUFFER_PERCENTAGE_HARD = 0.6;
 	private static final long MIN_NON_OOC_HEAP_BYTES = 512L << 20; // 512 MB
+	private static final double MIN_NON_OOC_HEAP_FRACTION = 0.2;
 	private static final long _evictionLimit;
 	private static final long _hardLimit;
 
@@ -59,7 +60,7 @@ public class OOCCacheManager {
 
 	static {
 		Tuple2<Long, Long> limits = cacheLimits(Runtime.getRuntime().maxMemory(),
-			GlobalMemoryBroker.get().getAllowedMemory());
+			GlobalMemoryBroker.get().getAllowedMemory() + GlobalMemoryBroker.getSource().getAllowedMemory());
 		_evictionLimit = limits._1;
 		_hardLimit = limits._2;
 		_ioHandler = new AtomicReference<>();
@@ -70,8 +71,8 @@ public class OOCCacheManager {
 	static Tuple2<Long, Long> cacheLimits(long maxHeap, long brokerAllowedMemory) {
 		long evictionLimit = (long)(maxHeap * OOC_BUFFER_PERCENTAGE);
 		long configuredHardLimit = (long)(maxHeap * OOC_BUFFER_PERCENTAGE_HARD);
-		long hardLimit = Math.min(configuredHardLimit,
-			Math.max(0, maxHeap - brokerAllowedMemory - MIN_NON_OOC_HEAP_BYTES));
+		long reserved = Math.max(MIN_NON_OOC_HEAP_BYTES, (long)(maxHeap * MIN_NON_OOC_HEAP_FRACTION));
+		long hardLimit = Math.min(configuredHardLimit, Math.max(0, maxHeap - brokerAllowedMemory - reserved));
 		if(evictionLimit >= hardLimit && hardLimit < configuredHardLimit)
 			evictionLimit = Math.max(0, hardLimit - configuredHardLimit + evictionLimit);
 		else

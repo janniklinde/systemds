@@ -126,18 +126,20 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 			ToIntFunction<MatrixIndexes> linearize = logicalLayout ? indexes -> _layout.linearize(indexes,
 				characteristics) : null;
 			MaterializedStore<IndexedMatrixValue> store;
+			List<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> liveConsumers;
 			synchronized(this) {
 				int consumers = _reusable ? 1 + _consumers : _consumers;
 				store = new MaterializedStore<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID(),
 					_reusable ? -1 : _expectedReaders, consumers, logicalLayout ? _layout : null,
 					logicalLayout ? characteristics : null);
 				_materializedStore = store;
+				liveConsumers = List.copyOf(_liveConsumers);
 			}
 			AtomicInteger nextIndex = new AtomicInteger();
 			ToIntFunction<MatrixIndexes> publicationIndex = linearize != null ? linearize : ignored -> nextIndex
 				.getAndIncrement();
 			OOCStreamMaterializer materializer = new OOCStreamMaterializer(store, publicationIndex, _allowance,
-				_liveConsumers, characteristics != null ? characteristics.getBlocksize() : 0);
+				liveConsumers, characteristics != null ? characteristics.getBlocksize() : 0);
 			materializer.completion().whenComplete((ignored, error) -> {
 				if(error != null)
 					fail(error);
