@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.ooc.store;
 
 import java.util.ArrayDeque;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
@@ -42,6 +43,7 @@ import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 public final class MaterializedStoreStreamable implements OOCStreamable<IndexedMatrixValue> {
 	private static final int REPLAY_PREFETCH = 8;
+	private static final int LIVE_PREFETCH = REPLAY_PREFETCH;
 	private static final long REPLAY_MEMORY_LIMIT = 100L * 1024 * 1024;
 
 	private final MaterializeOOCPrimitive _primitive;
@@ -362,7 +364,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		private final AtomicBoolean _activated;
 		private final AtomicBoolean _finished;
 		private final ArrayDeque<Integer> _liveIndices;
-		private final AtomicBoolean _liveDeferred;
+		private final ArrayDeque<LiveRequest> _liveInFlight;
 		private final AtomicBoolean _livePumping;
 		private volatile boolean _live;
 		private volatile boolean _liveSourceDone;
@@ -373,7 +375,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			_activated = new AtomicBoolean();
 			_finished = new AtomicBoolean();
 			_liveIndices = new ArrayDeque<>();
-			_liveDeferred = new AtomicBoolean();
+			_liveInFlight = new ArrayDeque<>();
 			_livePumping = new AtomicBoolean();
 		}
 
@@ -457,15 +459,22 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			pumpLive();
 		}
 
-		private Integer peekLive() {
+		private Integer pollLive() {
 			synchronized(_liveIndices) {
-				return _liveIndices.peekFirst();
+				return _liveIndices.pollFirst();
 			}
 		}
 
-		private void pollLive() {
-			synchronized(_liveIndices) {
-				_liveIndices.pollFirst();
+		private int inFlightSize() {
+			synchronized(_liveInFlight) {
+				return _liveInFlight.size();
+			}
+		}
+
+		private boolean liveHeadReady() {
+			synchronized(_liveInFlight) {
+				LiveRequest head = _liveInFlight.peekFirst();
+				return head != null && head.future.isDone();
 			}
 		}
 
@@ -490,64 +499,112 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		}
 
 		private boolean hasLiveWork() {
-			return (_activated.get() && !_liveDeferred.get() && !liveIndicesEmpty()) || liveFinished();
+			return (_activated.get() && (liveHeadReady()
+				|| (inFlightSize() < LIVE_PREFETCH && !liveIndicesEmpty()))) || liveFinished();
 		}
 
 		private boolean liveFinished() {
-			return _liveSourceDone && liveIndicesEmpty() && !_liveDeferred.get() && !_finished.get();
+			return _liveSourceDone && liveIndicesEmpty() && inFlightSize() == 0 && !_finished.get();
 		}
 
 		private void drainLive() {
 			MaterializedStore<IndexedMatrixValue> store = _owner.storeIfPresent();
 			if(store != null && _activated.get()) {
 				ensureAllowance();
-				while(!_liveDeferred.get()) {
-					Integer index = peekLive();
+				deliverLive(store);
+				while(inFlightSize() < LIVE_PREFETCH) {
+					Integer index = pollLive();
 					if(index == null)
 						break;
-					StoreLease<IndexedMatrixValue> lease = store.requestPublishedIfResident(index, _allowance);
-					if(lease == null) {
-						deferLive(store, index);
-						break;
-					}
-					pollLive();
-					try {
-						enqueueLive(lease, index);
-					}
-					finally {
-						store.cache().dereference(new BlockKey(store.streamId(), index));
-					}
+					if(!issueLive(store, index))
+						return;
 				}
+				deliverLive(store);
 			}
 			if(liveFinished())
 				closeLive();
 		}
 
-		private void deferLive(MaterializedStore<IndexedMatrixValue> store, int index) {
-			if(!_liveDeferred.compareAndSet(false, true))
-				return;
-			pollLive();
+		private boolean issueLive(MaterializedStore<IndexedMatrixValue> store, int index) {
+			OOCFuture<StoreLease<IndexedMatrixValue>> future;
 			try {
-				store.requestPublished(index, _allowance).whenComplete((lease, error) -> {
-					try {
-						if(error != null)
-							failLive(error);
-						else if(lease != null)
-							enqueueLive(lease, index);
-						else
-							failLive(new DMLRuntimeException("Live block " + index + " vanished before it was read."));
-					}
-					finally {
-						store.cache().dereference(new BlockKey(store.streamId(), index));
-						_liveDeferred.set(false);
-						pumpLive();
-					}
-				});
+				StoreLease<IndexedMatrixValue> resident = store.requestPublishedIfResident(index, _allowance);
+				future = resident != null ? OOCFuture.completed(resident)
+					: store.requestPublished(index, _allowance);
 			}
 			catch(Throwable failure) {
 				store.cache().dereference(new BlockKey(store.streamId(), index));
-				_liveDeferred.set(false);
 				failLive(failure);
+				return false;
+			}
+			synchronized(_liveInFlight) {
+				_liveInFlight.addLast(new LiveRequest(index, future));
+			}
+			future.whenComplete((ignored, error) -> pumpLive());
+			return true;
+		}
+
+		private void deliverLive(MaterializedStore<IndexedMatrixValue> store) {
+			while(true) {
+				LiveRequest head;
+				synchronized(_liveInFlight) {
+					head = _liveInFlight.peekFirst();
+					if(head == null || !head.future.isDone())
+						return;
+					_liveInFlight.pollFirst();
+				}
+				try {
+					StoreLease<IndexedMatrixValue> lease = head.future.get();
+					if(lease == null)
+						throw new DMLRuntimeException(
+							"Live block " + head.index + " vanished before it was read.");
+					enqueueLive(lease, head.index);
+				}
+				catch(InterruptedException interrupted) {
+					Thread.currentThread().interrupt();
+					abandonLive(store, interrupted);
+					return;
+				}
+				catch(ExecutionException failure) {
+					abandonLive(store, failure.getCause());
+					return;
+				}
+				catch(Throwable failure) {
+					abandonLive(store, failure);
+					return;
+				}
+				finally {
+					store.cache().dereference(new BlockKey(store.streamId(), head.index));
+				}
+			}
+		}
+
+		/** Releases everything still queued for this reader before failing it, so a failed query drops its pins. */
+		private void abandonLive(MaterializedStore<IndexedMatrixValue> store, Throwable error) {
+			ArrayDeque<LiveRequest> pending = new ArrayDeque<>();
+			synchronized(_liveInFlight) {
+				pending.addAll(_liveInFlight);
+				_liveInFlight.clear();
+			}
+			for(LiveRequest request : pending)
+				request.future.whenComplete((lease, ignored) -> {
+					if(lease != null)
+						lease.close();
+					store.cache().dereference(new BlockKey(store.streamId(), request.index));
+				});
+			Integer index;
+			while((index = pollLive()) != null)
+				store.cache().dereference(new BlockKey(store.streamId(), index));
+			failLive(error);
+		}
+
+		private static final class LiveRequest {
+			private final int index;
+			private final OOCFuture<StoreLease<IndexedMatrixValue>> future;
+
+			private LiveRequest(int index, OOCFuture<StoreLease<IndexedMatrixValue>> future) {
+				this.index = index;
+				this.future = future;
 			}
 		}
 
