@@ -422,6 +422,7 @@ public class OOCCacheImpl implements OOCCache {
 		DeferredCompletion deferredCompletion = null;
 		BlockEntry resident = null;
 		synchronized(this) {
+			boolean readSettled = meta.readFuture == null || meta.readFuture.isDone();
 			if(!_running || getMeta(meta.entry) != meta) {
 				releaseReserved = true;
 				readFuture = null;
@@ -432,7 +433,7 @@ public class OOCCacheImpl implements OOCCache {
 				resident = meta.entry;
 				readFuture = null;
 			}
-			else if(meta.readFuture == null || meta.readFuture.isDone()) {
+			else if(readSettled) {
 				awaitRead(meta);
 				OOCFuture<BlockEntry> scheduled = _ioHandler.scheduleRead(meta.entry);
 				meta.readFuture = scheduled;

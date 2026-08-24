@@ -24,7 +24,7 @@ public final class BlockEntry {
 	private final long _size;
 	private volatile int _pinCount;
 	private volatile BlockState _state;
-	private Object _data;
+	private volatile Object _data;
 	private int _retainHintCount;
 	private int _referenceCount; // The number of references from different managing instances (e.g. CachingStream)
 	// Optional implementation-local cache metadata; null for cache implementations that do not need it.
