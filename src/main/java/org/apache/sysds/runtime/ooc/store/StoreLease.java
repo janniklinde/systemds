@@ -71,6 +71,10 @@ public final class StoreLease<T extends SpillableObject> implements AutoCloseabl
 		return _entry;
 	}
 
+	public synchronized boolean isSole() {
+		return _open && _sharedLease.references.get() == 1;
+	}
+
 	public synchronized StoreLease<T> retain() {
 		if(!_open)
 			throw new IllegalStateException("Lease is closed");

@@ -80,7 +80,7 @@ public class LoopSubtractTest extends AutomatedTestBase {
 			HDFSTool.writeMetaDataFile(input(INPUT_NAME_Y + ".mtd"), Types.ValueType.FP64,
 				new MatrixCharacteristics(rows, cols, 1000, Y_mb.getNonZeros()), Types.FileFormat.BINARY);
 
-			OOCCacheManager.getCache().updateLimits(60000000, 100000000);
+			OOCCacheManager.getCache().updateLimits(100000000, 60000000);
 			runTest(true, false, null, -1);
 
 			programArgs = new String[] {"-explain", "-stats",

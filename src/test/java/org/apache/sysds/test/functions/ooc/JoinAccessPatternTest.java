@@ -113,7 +113,7 @@ public class JoinAccessPatternTest extends AutomatedTestBase {
 			X_mb = null;
 			Y_mb = null;
 
-			OOCCacheManager.getCache().updateLimits(50000000, 100000000);
+			OOCCacheManager.getCache().updateLimits(100000000, 50000000);
 			runTest(true, false, null, -1);
 
 			//check tsmm OOC
