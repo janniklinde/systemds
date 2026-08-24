@@ -272,6 +272,17 @@ public final class MaterializedStore<T extends SpillableObject> {
 		return requestPublished(_layout.linearize(row, col, _characteristics), allowance);
 	}
 
+	public StoreLease<T> requestPublishedIfResident(int index, MemoryAllowance allowance) {
+		if(_closed)
+			return null;
+		if(index < 0 || index >= _published.get())
+			throw new IndexOutOfBoundsException("Invalid requested index: " + index);
+		BlockEntry entry = _cache.pinIfLive(_streamId, index, allowance);
+		if(entry == null)
+			return null;
+		return StoreLease.createAsync(entry, () -> _cache.unpin(entry, allowance).getCompletionFuture());
+	}
+
 	public OOCFuture<StoreLease<T>> requestPublished(int index, MemoryAllowance allowance) {
 		if(_closed)
 			throw new IllegalStateException("Store is closed");

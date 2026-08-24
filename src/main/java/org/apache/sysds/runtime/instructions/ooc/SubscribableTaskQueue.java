@@ -27,6 +27,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.store.MaterializedCallback;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 import java.lang.ref.WeakReference;
@@ -281,30 +282,40 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 	 * @return the number of bytes released back to the broker
 	 */
 	public static long purgeBuffered() {
+		return purgeBuffered(false);
+	}
+
+	public static long purgeBufferedStore() {
+		return purgeBuffered(true);
+	}
+
+	private static long purgeBuffered(boolean storeBacked) {
 		if(BUFFERING.isEmpty())
 			return 0;
-		OOCCache cache = OOCCacheManager.getGlobalCache();
+		OOCCache cache = storeBacked ? null : OOCCacheManager.getGlobalCache();
 		long freed = 0;
 		for(Iterator<WeakReference<SubscribableTaskQueue<?>>> it = BUFFERING.iterator(); it.hasNext();) {
 			SubscribableTaskQueue<?> queue = it.next().get();
 			if(queue == null)
 				it.remove();
 			else
-				freed += queue.parkBuffered(cache);
+				freed += queue.parkBuffered(cache, storeBacked);
 		}
 		return freed;
 	}
 
-	private long parkBuffered(OOCCache cache) {
+	private long parkBuffered(OOCCache cache, boolean storeBacked) {
 		long freed = 0;
 		long blocks = 0;
 		synchronized(this) {
 			//iterate a snapshot: parking releases memory, which may re-enter this queue on the same thread
 			Object[] buffered = _data.toArray();
 			for(Object cb : buffered) {
-				if(!(cb instanceof InMemoryQueueCallback<?> managed))
-					continue;
-				long bytes = managed.tryPark(cache);
+				long bytes = 0;
+				if(cb instanceof MaterializedCallback<?> mat)
+					bytes = mat.tryPark();
+				else if (cb instanceof InMemoryQueueCallback<?> mem)
+					bytes = mem.tryPark(cache);
 				if(bytes > 0) {
 					freed += bytes;
 					blocks++;

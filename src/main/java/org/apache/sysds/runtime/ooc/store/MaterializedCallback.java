@@ -22,43 +22,98 @@ package org.apache.sysds.runtime.ooc.store;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
+import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
+import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class MaterializedCallback<T extends SpillableObject> implements OOCStream.QueueCallback<T> {
-	private final StoreLease<T> _lease;
+	private static final MemoryAllowance REVIVE_ALLOWANCE = new SyncMemoryAllowance(GlobalMemoryBroker.getSource());
+
+	private StoreLease<T> _lease;
 	private final AtomicReference<DMLRuntimeException> _failure;
 	private final int _index;
+	private final MaterializedStore<T> _store;
 	private boolean _closed;
+	private boolean _parked;
 
 	public MaterializedCallback(StoreLease<T> lease) {
-		this(lease, new AtomicReference<>(), -1);
+		this(lease, new AtomicReference<>(), -1, null);
 	}
 
 	public MaterializedCallback(StoreLease<T> lease, int index) {
-		this(lease, new AtomicReference<>(), index);
+		this(lease, new AtomicReference<>(), index, null);
 	}
 
-	private MaterializedCallback(StoreLease<T> lease, AtomicReference<DMLRuntimeException> failure, int index) {
+	public MaterializedCallback(StoreLease<T> lease, int index, MaterializedStore<T> store) {
+		this(lease, new AtomicReference<>(), index, store);
+	}
+
+	private MaterializedCallback(StoreLease<T> lease, AtomicReference<DMLRuntimeException> failure, int index,
+		MaterializedStore<T> store) {
 		_lease = lease;
 		_failure = failure;
 		_index = index;
+		_store = store;
+	}
+
+	public synchronized long tryPark() {
+		if(_closed || _parked || _store == null || _index < 0 || _lease == null)
+			return 0;
+		if(!_lease.isSole() || _failure.get() != null)
+			return 0;
+		BlockEntry entry = _lease.entry();
+		long bytes = entry != null ? entry.getSize() : 0;
+		if(bytes <= 0)
+			return 0;
+		_store.cache().reference(entry);
+		_parked = true;
+		StoreLease<T> lease = _lease;
+		_lease = null;
+		lease.close();
+		return bytes;
+	}
+
+	private synchronized void revive() {
+		if(!_parked)
+			return;
+		BlockEntry entry;
+		try {
+			entry = OOCUtils.pinAdmitted(_store.cache(), _store.streamId(), _index, REVIVE_ALLOWANCE, () -> false).get();
+		}
+		catch(InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new DMLRuntimeException(e);
+		}
+		catch(ExecutionException e) {
+			throw DMLRuntimeException.of(e.getCause());
+		}
+		if(entry == null)
+			throw new DMLRuntimeException("Parked block " + _index + " vanished before it was revived.");
+		_lease = StoreLease.createAsync(entry, () -> _store.cache().unpin(entry, REVIVE_ALLOWANCE).getCompletionFuture());
+		_store.cache().dereference(new BlockKey(_store.streamId(), _index));
+		_parked = false;
 	}
 
 	public int publishedIndex() {
 		return _index;
 	}
 
-	public BlockEntry pinnedEntry() {
+	public synchronized BlockEntry pinnedEntry() {
 		return _lease != null ? _lease.entry() : null;
 	}
 
 	@Override
-	public T get() {
+	public synchronized T get() {
 		DMLRuntimeException failure = _failure.get();
 		if(failure != null)
 			throw failure;
+		revive();
 		return _lease.value();
 	}
 
@@ -66,7 +121,8 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 	public synchronized OOCStream.QueueCallback<T> keepOpen() {
 		if(_closed)
 			throw new IllegalStateException("Cannot keep open a closed callback");
-		return new MaterializedCallback<>(_lease.retain(), _failure, _index);
+		revive();
+		return new MaterializedCallback<>(_lease.retain(), _failure, _index, _store);
 	}
 
 	@Override
@@ -74,7 +130,8 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 		if(_closed)
 			return;
 		_closed = true;
-		_lease.close();
+		if(_lease != null)
+			_lease.close();
 	}
 
 	@Override

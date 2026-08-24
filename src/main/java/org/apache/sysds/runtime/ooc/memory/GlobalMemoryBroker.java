@@ -190,11 +190,15 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	 * the broker. Runs off the caller thread because parking releases memory, which re-enters this broker.
 	 */
 	private void schedulePurge() {
-		if(this != BROKER || !_purgeRunning.compareAndSet(false, true))
+		boolean storeBacked = this == SOURCE_BROKER;
+		if((this != BROKER && !storeBacked) || !_purgeRunning.compareAndSet(false, true))
 			return;
 		RECLAIM_EXECUTOR.execute(() -> {
 			try {
-				SubscribableTaskQueue.purgeBuffered();
+				if(storeBacked)
+					SubscribableTaskQueue.purgeBufferedStore();
+				else
+					SubscribableTaskQueue.purgeBuffered();
 			}
 			finally {
 				_purgeRunning.set(false);

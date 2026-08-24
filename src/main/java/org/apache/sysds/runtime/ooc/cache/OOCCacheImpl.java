@@ -215,6 +215,10 @@ public class OOCCacheImpl implements OOCCache {
 
 	@Override
 	public void updateLimits(long hardLimit, long evictionLimit) {
+		if(evictionLimit > hardLimit)
+			throw new IllegalArgumentException("Eviction limit " + evictionLimit + " exceeds the hard limit "
+				+ hardLimit + ": admission caps owned bytes at the hard limit, so such a watermark is never reached "
+				+ "and eviction would never run.");
 		List<DeferredCompletion> completions;
 		synchronized(this) {
 			_hardLimit = hardLimit;
