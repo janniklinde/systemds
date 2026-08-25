@@ -269,6 +269,30 @@ public final class OOCInstructionUtils {
 			new BroadcastOOCPrimitive(streamed, broadcast, output, lookupRow, lookupCol, liveness, operation, context));
 	}
 
+	/**
+	 * Pairs every tile of the streamed input with one indexed tile from each of several secondary inputs. The
+	 * secondary inputs are read through indexed store readers, so they need not fit in memory; a side that does not
+	 * fit degrades to disk-backed random access driven by its liveness counts.
+	 *
+	 * @param streamed   the driving input
+	 * @param broadcasts the indexed inputs, one lookup and liveness each
+	 * @param output     output stream
+	 * @param lookupRows per-side row index of the tile required by a streamed tile
+	 * @param lookupCols per-side column index of the first tile required by a streamed tile
+	 * @param bandWidths per-side number of consecutive column tiles making up one band
+	 * @param liveness   per-side liveness, i.e. how often each tile is consumed
+	 * @param operation  applied to the streamed tile and the per-side bands of looked-up tiles
+	 * @param context    stream context
+	 */
+	public static void multiIndexedBroadcastMap(OOCStreamable<IndexedMatrixValue> streamed,
+		List<OOCStreamable<IndexedMatrixValue>> broadcasts, OOCStream<IndexedMatrixValue> output,
+		List<ToLongFunction<IndexedMatrixValue>> lookupRows, List<ToLongFunction<IndexedMatrixValue>> lookupCols,
+		List<Integer> bandWidths, List<Supplier<MaterializedStore.Liveness>> liveness,
+		BiFunction<IndexedMatrixValue, IndexedMatrixValue[][], IndexedMatrixValue> operation, StreamContext context) {
+		output.assignPrimitive(new BroadcastOOCPrimitive(streamed, broadcasts, output, lookupRows, lookupCols,
+			bandWidths, liveness, operation, context));
+	}
+
 	public static void rowGroupedReduce(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
 		BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> merge, StreamContext context) {
 		groupedReduceIndexed(input, output, GroupedReduceOOCPrimitive.Grouping.ROW_BLOCKS,

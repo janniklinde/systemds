@@ -1300,7 +1300,7 @@ public abstract class Hop implements ParseInfo {
 		//NOTE: when changing these conditions, remember to update the code for
 		//function recompilation in FunctionProgramBlock accordingly
 		boolean caseRemote = (!dimsKnown(true) && _etype == ExecType.SPARK);
-		boolean caseLocal = (!dimsKnown() && _etypeForced == ExecType.CP);
+		boolean caseLocal = (!dimsKnown() && (_etypeForced == ExecType.CP || _etypeForced == ExecType.OOC));
 		boolean caseCodegen = (!dimsKnown() && ConfigurationManager.isCodegenEnabled());
 		
 		if( ConfigurationManager.isDynamicRecompilation() 
