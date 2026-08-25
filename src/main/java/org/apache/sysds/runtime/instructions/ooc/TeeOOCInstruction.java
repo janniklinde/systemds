@@ -157,19 +157,12 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 	public void processInstruction(ExecutionContext ec) {
 		//get input stream
 		MatrixObject min = ec.getMatrixObject(input1);
-		OOCStreamable<IndexedMatrixValue> streamable = min.getStreamable();
-		OOCStreamable<IndexedMatrixValue> handle;
-
-		if(streamable.hasStreamCache() || streamable.hasMaterializedStore()) {
-			handle = streamable.hasStreamCache() ? streamable.getStreamCache() : streamable;
-			incrRef(handle, 1);
-		}
-		else {
-			// The input and output matrix objects both retain the new reusable handle.
-			handle = new MaterializedStoreStreamable(min.getStreamHandle(), min);
-			min.setStreamHandle(handle);
-			incrRef(handle, 2);
-		}
+		OOCStreamable<IndexedMatrixValue> handle = min.getOrCreateStreamHandle(stream -> {
+			OOCStreamable<IndexedMatrixValue> created = new MaterializedStoreStreamable(stream, min);
+			incrRef(created, 1);
+			return created;
+		});
+		incrRef(handle, 1);
 
 		//get output and create new resettable stream
 		MatrixObject mo = ec.getMatrixObject(output);

@@ -25,6 +25,7 @@ import java.lang.ref.SoftReference;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 import java.util.stream.LongStream;
 
 import org.apache.commons.lang3.mutable.MutableBoolean;
@@ -498,6 +499,20 @@ public abstract class CacheableData<T extends CacheBlock<?>> extends Data
 
 	public OOCStreamable<IndexedMatrixValue> getStreamable() {
 		return _streamHandle == null ? new SourceOOCStreamable(this) : _streamHandle;
+	}
+
+	public synchronized OOCStreamable<IndexedMatrixValue> getOrCreateStreamHandle(
+		Function<OOCStream<IndexedMatrixValue>, OOCStreamable<IndexedMatrixValue>> factory)
+	{
+		OOCStreamable<IndexedMatrixValue> existing = getStreamable();
+		if( existing.hasStreamCache() )
+			return existing.getStreamCache();
+		if( existing.hasMaterializedStore() )
+			return existing;
+
+		OOCStreamable<IndexedMatrixValue> created = factory.apply(getStreamHandle());
+		setStreamHandle(created);
+		return created;
 	}
 	
 	/**

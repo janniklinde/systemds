@@ -20,10 +20,10 @@
 package org.apache.sysds.runtime.ooc.primitives;
 
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
@@ -77,8 +77,8 @@ public abstract class OOCPrimitive {
 
 	protected OOCPrimitive(StreamContext context) {
 		_context = context;
-		_children = new HashSet<>();
-		_parents = new HashSet<>();
+		_children = ConcurrentHashMap.newKeySet();
+		_parents = ConcurrentHashMap.newKeySet();
 		_inputs = new ArrayList<>();
 		_started = new AtomicBoolean();
 		_executionStarted = new AtomicBoolean();
