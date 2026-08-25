@@ -61,6 +61,7 @@ import org.apache.sysds.hops.UnaryOp;
 import org.apache.sysds.hops.codegen.SpoofCompiler;
 import org.apache.sysds.hops.rewrite.HopRewriteUtils;
 import org.apache.sysds.hops.rewrite.ProgramRewriter;
+import org.apache.sysds.hops.rewrite.RewriteInjectOOCTee;
 import org.apache.sysds.lops.Lop;
 import org.apache.sysds.lops.compile.Dag;
 import org.apache.sysds.lops.rewrite.LopRewriter;
@@ -367,6 +368,9 @@ public class Recompiler {
 			// dynamic hop rewrites
 			if( !inplace ) {
 				_rewriter.get().rewriteHopDAG( hops, null );
+				
+				if(DMLScript.USE_OOC)
+					RewriteInjectOOCTee.injectTeesForRecompiledDag( hops );
 				
 				//update stats after rewrites
 				Hop.resetVisitStatus(hops);
