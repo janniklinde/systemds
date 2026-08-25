@@ -46,7 +46,9 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		RELAXED, STRICT
 	}
 
-	private static final GlobalMemoryBroker BROKER = new GlobalMemoryBroker(Runtime.getRuntime().maxMemory() / 3);
+	private static final long MAX_BROKER_BYTES = 3L << 30; // 3 GB
+	private static final GlobalMemoryBroker BROKER = new GlobalMemoryBroker(
+		Math.min(MAX_BROKER_BYTES, Runtime.getRuntime().maxMemory() / 3));
 	private static final GlobalMemoryBroker SOURCE_BROKER = new GlobalMemoryBroker(
 		Math.min(200L*1024*1024, Runtime.getRuntime().maxMemory() / 12));
 
