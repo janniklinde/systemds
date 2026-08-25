@@ -169,6 +169,50 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 		}
 	}
 
+	public static boolean injectTeesForRecompiledDag(ArrayList<Hop> roots) {
+		if(!DMLScript.USE_OOC || roots == null || roots.isEmpty())
+			return false;
+
+		List<Hop> shared = new ArrayList<>();
+		Hop.resetVisitStatus(roots);
+		for(Hop root : roots)
+			collectUnteedSharedHops(root, shared);
+		Hop.resetVisitStatus(roots);
+
+		for(Hop hop : shared)
+			teeSharedHop(hop);
+		return !shared.isEmpty();
+	}
+
+	private static void collectUnteedSharedHops(Hop hop, List<Hop> shared) {
+		if(hop.isVisited())
+			return;
+		hop.setVisited(true);
+
+		for(Hop input : hop.getInput())
+			collectUnteedSharedHops(input, shared);
+
+		if(hop.getDataType().isMatrix() && hop.getParent().size() > 1
+			&& !HopRewriteUtils.isData(hop, OpOpData.TEE))
+			shared.add(hop);
+	}
+
+	private static void teeSharedHop(Hop sharedInput) {
+		ArrayList<Hop> consumers = new ArrayList<>(sharedInput.getParent());
+
+		DataOp teeOp = new DataOp("tee_out_" + sharedInput.getName(), sharedInput.getDataType(),
+			sharedInput.getValueType(), Types.OpOpData.TEE, null, sharedInput.getDim1(),
+			sharedInput.getDim2(), sharedInput.getNnz(), sharedInput.getBlocksize());
+		HopRewriteUtils.addChildReference(teeOp, sharedInput);
+
+		for(Hop consumer : consumers)
+			HopRewriteUtils.replaceChildReference(consumer, sharedInput, teeOp);
+
+		if(LOG.isDebugEnabled())
+			LOG.debug("Injected recompile-time tee " + teeOp.getHopID() + " for shared hop "
+				+ sharedInput.getHopID() + " (" + sharedInput.getName() + "), consumers=" + consumers.size());
+	}
+
 	@SuppressWarnings("unused")
 	private boolean isSelfTranposePattern (Hop hop) {
 		boolean hasTransposeConsumer = false; // t(X)
