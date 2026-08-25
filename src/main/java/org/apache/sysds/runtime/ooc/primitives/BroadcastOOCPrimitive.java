@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -44,18 +45,30 @@ import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
+/**
+ * Streams one input and pairs every streamed tile with a targeted band of indexed tiles from each of one or more
+ * secondary inputs.
+ *
+ * The secondary inputs are not replicated in memory: each is materialized into a store and read through an indexed
+ * reader that pins tiles on demand and evicts them once their liveness count is exhausted. A side therefore degrades
+ * to disk-backed random access rather than failing when it does not fit, which is why there is no size precondition
+ * on the indexed sides. A side's band may span several column tiles, so a secondary input is not restricted to a
+ * single column block the way a replicated broadcast would be.
+ */
 public final class BroadcastOOCPrimitive extends OOCPrimitive {
-	private final OOCStreamable<IndexedMatrixValue> _broadcast;
+	private final OOCStreamable<IndexedMatrixValue>[] _broadcasts;
 	private final OOCStreamable<IndexedMatrixValue> _output;
-	private final ToLongFunction<IndexedMatrixValue> _lookupRow;
-	private final ToLongFunction<IndexedMatrixValue> _lookupCol;
-	private final Supplier<MaterializedStore.Liveness> _liveness;
-	private final BiFunction<IndexedMatrixValue, IndexedMatrixValue, IndexedMatrixValue> _operation;
+	private final ToLongFunction<IndexedMatrixValue>[] _lookupRows;
+	private final ToLongFunction<IndexedMatrixValue>[] _lookupCols;
+	private final int[] _bandWidths;
+	private final Supplier<MaterializedStore.Liveness>[] _liveness;
+	private final BiFunction<IndexedMatrixValue, IndexedMatrixValue[][], IndexedMatrixValue> _operation;
 	private final AtomicBoolean _cleaned;
 	private final AtomicBoolean _sourceComplete;
 	private final AtomicInteger _active;
-	private MaterializedStore<IndexedMatrixValue> _store;
-	private IndexedMaterializedStoreReader<IndexedMatrixValue> _reader;
+	private final AtomicInteger _pendingStores;
+	private final MaterializedStore<IndexedMatrixValue>[] _stores;
+	private final IndexedMaterializedStoreReader<IndexedMatrixValue>[] _readers;
 	private OOCStream<BroadcastWork> _ready;
 	private OOCStream<IndexedMatrixValue> _outputStream;
 
@@ -64,21 +77,58 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 		ToLongFunction<IndexedMatrixValue> lookupRow, ToLongFunction<IndexedMatrixValue> lookupCol,
 		Supplier<MaterializedStore.Liveness> liveness,
 		BiFunction<IndexedMatrixValue, IndexedMatrixValue, IndexedMatrixValue> operation, StreamContext context) {
-		super(context, streamed, broadcast);
-		_broadcast = broadcast;
+		this(streamed, List.of(broadcast), output, List.of(lookupRow), List.of(lookupCol), List.of(1),
+			List.of(liveness), (value, tiles) -> operation.apply(value, tiles[0][0]), context);
+	}
+
+	@SuppressWarnings("unchecked")
+	public BroadcastOOCPrimitive(OOCStreamable<IndexedMatrixValue> streamed,
+		List<OOCStreamable<IndexedMatrixValue>> broadcasts, OOCStreamable<IndexedMatrixValue> output,
+		List<ToLongFunction<IndexedMatrixValue>> lookupRows, List<ToLongFunction<IndexedMatrixValue>> lookupCols,
+		List<Integer> bandWidths, List<Supplier<MaterializedStore.Liveness>> liveness,
+		BiFunction<IndexedMatrixValue, IndexedMatrixValue[][], IndexedMatrixValue> operation, StreamContext context) {
+		super(context, inputs(streamed, broadcasts));
+		if(broadcasts.isEmpty())
+			throw new DMLRuntimeException("Broadcast primitive requires at least one indexed input.");
+		if(lookupRows.size() != broadcasts.size() || lookupCols.size() != broadcasts.size()
+			|| bandWidths.size() != broadcasts.size() || liveness.size() != broadcasts.size())
+			throw new DMLRuntimeException("Broadcast primitive requires one lookup, band width and liveness per "
+				+ "indexed input.");
+		_broadcasts = broadcasts.toArray(new OOCStreamable[0]);
 		_output = output;
-		_lookupRow = lookupRow;
-		_lookupCol = lookupCol;
-		_liveness = liveness;
+		_lookupRows = lookupRows.toArray(new ToLongFunction[0]);
+		_lookupCols = lookupCols.toArray(new ToLongFunction[0]);
+		_bandWidths = new int[broadcasts.size()];
+		for(int i = 0; i < _bandWidths.length; i++) {
+			_bandWidths[i] = bandWidths.get(i);
+			if(_bandWidths[i] < 1)
+				throw new DMLRuntimeException("Indexed input " + (i + 1) + " needs a positive band width.");
+		}
+		_liveness = liveness.toArray(new Supplier[0]);
 		_operation = operation;
 		_cleaned = new AtomicBoolean();
 		_sourceComplete = new AtomicBoolean();
 		_active = new AtomicInteger(1);
+		_pendingStores = new AtomicInteger(_broadcasts.length);
+		_stores = new MaterializedStore[_broadcasts.length];
+		_readers = new IndexedMaterializedStoreReader[_broadcasts.length];
+	}
+
+	private static OOCStreamable<?>[] inputs(OOCStreamable<IndexedMatrixValue> streamed,
+		List<OOCStreamable<IndexedMatrixValue>> broadcasts) {
+		OOCStreamable<?>[] inputs = new OOCStreamable<?>[broadcasts.size() + 1];
+		inputs[0] = streamed;
+		for(int i = 0; i < broadcasts.size(); i++)
+			inputs[i + 1] = broadcasts.get(i);
+		return inputs;
 	}
 
 	@Override
 	public List<OOCMaterializedInputRequest> requiredMaterializedInputs() {
-		return List.of(new OOCMaterializedInputRequest(1, OOCStoreLayout.ROW_MAJOR, 1));
+		List<OOCMaterializedInputRequest> requests = new ArrayList<>(_broadcasts.length);
+		for(int i = 0; i < _broadcasts.length; i++)
+			requests.add(new OOCMaterializedInputRequest(i + 1, OOCStoreLayout.ROW_MAJOR, 1));
+		return requests;
 	}
 
 	@Override
@@ -116,37 +166,46 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 				}
 			});
 
-		getMaterializedInput(1).whenComplete((store, error) -> {
-			if(error != null) {
-				fail(error);
-				finishSource();
-				return;
-			}
-			_store = store;
-			store.completion().whenComplete((ignored, completionError) -> {
-				if(completionError != null) {
-					fail(completionError);
+		for(int i = 0; i < _broadcasts.length; i++) {
+			int side = i;
+			getMaterializedInput(side + 1).whenComplete((store, error) -> {
+				if(error != null) {
+					fail(error);
 					finishSource();
 					return;
 				}
-				try {
-					_reader = store.openIndexedReader(_liveness.get());
-					startBroadcast();
-				}
-				catch(Throwable failure) {
-					fail(failure);
-					finishSource();
-				}
+				_stores[side] = store;
+				store.completion().whenComplete((ignored, completionError) -> {
+					if(completionError != null) {
+						fail(completionError);
+						finishSource();
+						return;
+					}
+					try {
+						_readers[side] = store.openIndexedReader(_liveness[side].get());
+						if(_pendingStores.decrementAndGet() == 0)
+							startBroadcast();
+					}
+					catch(Throwable failure) {
+						fail(failure);
+						finishSource();
+					}
+				});
 			});
-		});
+		}
 	}
 
 	private void startBroadcast() {
-		long broadcastLogical = OOCUtils.estimateOutputTileBytes(_broadcast.getDataCharacteristics());
-		long broadcastPin = OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(broadcastLogical);
+		long broadcastPin = 0;
+		for(int i = 0; i < _broadcasts.length; i++) {
+			long logical = OOCUtils.estimateOutputTileBytes(_broadcasts[i].getDataCharacteristics());
+			//a whole band is pinned at once, so the admission charge has to cover every tile in it
+			broadcastPin += OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(logical) * _bandWidths[i];
+		}
+		long pinCharge = broadcastPin;
 		OOCStream<IndexedMatrixValue> streamed = getInputReadStream(0);
 		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(streamed, _allowance, value ->
-			broadcastPin * 2 + OOCUtils.memoryCharge(value) * 2, true);
+			pinCharge * 2 + OOCUtils.memoryCharge(value) * 2, true);
 		getContext().addInStream(streamed, admitted);
 		admitted.setSubscriber(this::accept);
 	}
@@ -172,16 +231,36 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 			if(budget == null)
 				throw new DMLRuntimeException("Missing admitted broadcast task budget.");
 			IndexedMatrixValue streamed = callback.get();
-			long lookupRow = _lookupRow.applyAsLong(streamed);
-			long lookupCol = _lookupCol.applyAsLong(streamed);
+			long[] lookupRows = new long[_broadcasts.length];
+			long[] lookupCols = new long[_broadcasts.length];
+			List<OOCFuture<StoreLease<IndexedMatrixValue>>> requests = new ArrayList<>(_broadcasts.length);
+			try {
+				for(int i = 0; i < _broadcasts.length; i++) {
+					lookupRows[i] = _lookupRows[i].applyAsLong(streamed);
+					lookupCols[i] = _lookupCols[i].applyAsLong(streamed);
+					//a band spans consecutive column tiles from the looked-up one, so a side is not limited to a
+					//single column block; the flat request list is regrouped per side before the operation runs
+					for(int tile = 0; tile < _bandWidths[i]; tile++)
+						requests.add(_readers[i].request(lookupRows[i], lookupCols[i] + tile, budget));
+				}
+			}
+			catch(Throwable failure) {
+				//a later side failed to issue, so the tiles the earlier sides are still pinning would never be
+				//handed to anyone; release them as they arrive instead of leaking the pins
+				for(OOCFuture<StoreLease<IndexedMatrixValue>> issued : requests)
+					issued.whenComplete((lease, ignored) -> {
+						if(lease != null)
+							lease.close();
+					});
+				throw failure;
+			}
 			retained = callback.keepOpen();
-			OOCFuture<StoreLease<IndexedMatrixValue>> requested = _reader.request(lookupRow, lookupCol, budget);
 			OOCStream.QueueCallback<IndexedMatrixValue> pendingStreamed = retained;
 			ReservationBudget pendingBudget = budget;
 			retained = null;
 			budget = null;
-			requested.whenComplete((broadcast, error) -> broadcastReady(pendingStreamed, broadcast, pendingBudget,
-				lookupRow, lookupCol, error));
+			OOCFuture.allOf(requests, StoreLease::close).whenComplete((leases, error) -> broadcastReady(pendingStreamed,
+				leases, pendingBudget, lookupRows, lookupCols, error));
 		}
 		catch(Throwable failure) {
 			fail(failure);
@@ -196,23 +275,36 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 	}
 
 	private void broadcastReady(OOCStream.QueueCallback<IndexedMatrixValue> streamed,
-		StoreLease<IndexedMatrixValue> broadcast, ReservationBudget budget, long lookupRow, long lookupCol,
+		List<StoreLease<IndexedMatrixValue>> leases, ReservationBudget budget, long[] lookupRows, long[] lookupCols,
 		Throwable error) {
-		if(error != null || broadcast == null) {
+		int missing = -1;
+		if(error == null && leases != null)
+			for(int i = 0; i < leases.size() && missing < 0; i++)
+				if(leases.get(i) == null)
+					missing = i;
+		if(error != null || leases == null || missing >= 0) {
 			try {
 				streamed.close();
-				if(broadcast != null)
-					broadcast.close();
+				if(leases != null)
+					for(StoreLease<IndexedMatrixValue> lease : leases)
+						if(lease != null)
+							lease.close();
 				budget.close();
 			}
 			finally {
-				fail(error != null ? error : new IllegalStateException(
-					"Missing broadcast tile (" + lookupRow + "," + lookupCol + ")"));
+					int side = 0;
+				int within = missing;
+				while(side < _bandWidths.length - 1 && within >= _bandWidths[side]) {
+					within -= _bandWidths[side];
+					side++;
+				}
+				fail(error != null ? error : new IllegalStateException("Missing broadcast tile ("
+					+ lookupRows[side] + "," + (lookupCols[side] + within) + ") on indexed input " + (side + 1)));
 				completeOne();
 			}
 			return;
 		}
-		BroadcastWork work = new BroadcastWork(streamed, broadcast, budget);
+		BroadcastWork work = new BroadcastWork(streamed, leases, budget);
 		try {
 			_ready.enqueue(work);
 		}
@@ -226,7 +318,14 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 	private void process(BroadcastWork work) {
 		ReservationBudget budget = work.takeBudget();
 		try {
-			IndexedMatrixValue output = _operation.apply(work._streamed.get(), work._broadcast.value());
+			IndexedMatrixValue[][] tiles = new IndexedMatrixValue[_broadcasts.length][];
+			int flat = 0;
+			for(int i = 0; i < tiles.length; i++) {
+				tiles[i] = new IndexedMatrixValue[_bandWidths[i]];
+				for(int tile = 0; tile < _bandWidths[i]; tile++)
+					tiles[i][tile] = work._broadcasts.get(flat++).value();
+			}
+			IndexedMatrixValue output = _operation.apply(work._streamed.get(), tiles);
 			OOCUtils.enqueueExact(_outputStream, output, budget);
 			budget = null;
 		}
@@ -260,13 +359,15 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 		if(!_cleaned.compareAndSet(false, true))
 			return;
 		try {
-			if(_reader != null)
-				_reader.close();
+			for(IndexedMaterializedStoreReader<IndexedMatrixValue> reader : _readers)
+				if(reader != null)
+					reader.close();
 		}
 		finally {
 			try {
-				if(_store != null)
-					_store.close();
+				for(MaterializedStore<IndexedMatrixValue> store : _stores)
+					if(store != null)
+						store.close();
 			}
 			finally {
 				onComplete();
@@ -276,13 +377,13 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 
 	private static final class BroadcastWork implements AutoCloseable {
 		private OOCStream.QueueCallback<IndexedMatrixValue> _streamed;
-		private StoreLease<IndexedMatrixValue> _broadcast;
+		private List<StoreLease<IndexedMatrixValue>> _broadcasts;
 		private ReservationBudget _budget;
 
 		private BroadcastWork(OOCStream.QueueCallback<IndexedMatrixValue> streamed,
-			StoreLease<IndexedMatrixValue> broadcast, ReservationBudget budget) {
+			List<StoreLease<IndexedMatrixValue>> broadcasts, ReservationBudget budget) {
 			_streamed = streamed;
-			_broadcast = broadcast;
+			_broadcasts = broadcasts;
 			_budget = budget;
 		}
 
@@ -298,9 +399,11 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 				_streamed.close();
 				_streamed = null;
 			}
-			if(_broadcast != null) {
-				_broadcast.close();
-				_broadcast = null;
+			if(_broadcasts != null) {
+				for(StoreLease<IndexedMatrixValue> lease : _broadcasts)
+					if(lease != null)
+						lease.close();
+				_broadcasts = null;
 			}
 			if(_budget != null) {
 				_budget.close();
