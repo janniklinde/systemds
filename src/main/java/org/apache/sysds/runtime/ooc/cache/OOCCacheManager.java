@@ -47,8 +47,10 @@ import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import scala.Tuple2;
 
 public class OOCCacheManager {
-	private static final double OOC_BUFFER_PERCENTAGE = 0.5;
-	private static final double OOC_BUFFER_PERCENTAGE_HARD = 0.6;
+	private static final double OOC_BUFFER_PERCENTAGE =
+		Double.parseDouble(System.getProperty("sysds.ooc.cache.percentage", "0.5"));
+	private static final double OOC_BUFFER_PERCENTAGE_HARD =
+		Double.parseDouble(System.getProperty("sysds.ooc.cache.percentage.hard", "0.6"));
 	private static final long MIN_NON_OOC_HEAP_BYTES = 512L << 20; // 512 MB
 	private static final double MIN_NON_OOC_HEAP_FRACTION = 0.1;
 	private static final long _evictionLimit;

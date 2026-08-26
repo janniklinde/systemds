@@ -36,6 +36,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.LongUnaryOperator;
 
 public class OOCCacheImpl implements OOCCache {
@@ -43,15 +44,22 @@ public class OOCCacheImpl implements OOCCache {
 	private static final int MAX_EVICTION_CANDIDATES = 65536;
 	private static final long EVICTION_CANDIDATE_BYTE_FACTOR = 250_000;
 	private static final long MAX_READ_AHEAD_BYTES = 512_000;
+	private static final double EVICT_OVERSHOOT_MARGIN = 0.05;
 
 	private final OOCIOHandler _ioHandler;
 	private final SegmentedStreamTableList<BlockEntry> _blocks;
 	private final SegmentedStreamTableList<EvictController> _evictControllers;
 	private final EvictController _defaultEvictController;
 	private final ConcurrentLinkedQueue<BlockKey> _deferredUnpins;
+	private final LongAdder _evPasses = new LongAdder();
+	private final LongAdder _evScanned = new LongAdder();
+	private final LongAdder _evEvicted = new LongAdder();
+	private final LongAdder _evScanNanos = new LongAdder();
+	private final LongAdder _evLockNanos = new LongAdder();
 	private final Executor _collectorExecutor;
 	private final AtomicBoolean _evictionRunning;
 
+	private long _ownedEntries;
 	private long _hardLimit;
 	private long _evictionLimit;
 	private long _ownedBytes;
@@ -63,6 +71,7 @@ public class OOCCacheImpl implements OOCCache {
 		_hardLimit = hardLimit;
 		_evictionLimit = evictionLimit;
 		_ownedBytes = 0;
+		_ownedEntries = 0;
 		_evictingBytes = 0;
 		_running = true;
 		_blocks = new SegmentedStreamTableList<>();
@@ -121,6 +130,7 @@ public class OOCCacheImpl implements OOCCache {
 			entry.setState(meta.backed ? BlockState.WARM : BlockState.HOT);
 			setLive(entry);
 			_ownedBytes += entry.getSize();
+			_ownedEntries++;
 			scheduleEvictionIfNeeded();
 		}
 		Statistics.incrementOOCEvictionPut();
@@ -262,6 +272,9 @@ public class OOCCacheImpl implements OOCCache {
 		return "owned=" + _ownedBytes + " evicting=" + _evictingBytes + " deferredUnpins="
 			+ _deferredUnpins.size() + " entries=" + entries + " pinned=" + pinned + " pinnedBytes=" + pinnedBytes
 			+ " evictionPressure=" + evictionPressure() + " evictLimit=" + _evictionLimit + " hard=" + _hardLimit
+			+ "\n   eviction: passes=" + _evPasses.sum() + " scanned=" + _evScanned.sum() + " evicted="
+			+ _evEvicted.sum() + " scanMs=" + (_evScanNanos.sum() / 1_000_000)
+			+ " lockMs=" + (_evLockNanos.sum() / 1_000_000)
 			+ "\n   pinnedByStream:" + byStream;
 	}
 
@@ -286,6 +299,7 @@ public class OOCCacheImpl implements OOCCache {
 		_blocks.clear();
 		_deferredUnpins.clear();
 		_ownedBytes = 0;
+		_ownedEntries = 0;
 		_evictingBytes = 0;
 		_ioHandler.shutdown();
 	}
@@ -520,6 +534,7 @@ public class OOCCacheImpl implements OOCCache {
 		BlockEntry entry = meta.entry;
 		if(isCacheOwned(entry)) {
 			_ownedBytes -= entry.getSize();
+			_ownedEntries--;
 			if(entry.getState() == BlockState.EVICTING)
 				_evictingBytes -= entry.getSize();
 			clearLive(entry);
@@ -549,6 +564,7 @@ public class OOCCacheImpl implements OOCCache {
 		entry.setState(meta.backed ? BlockState.WARM : BlockState.HOT);
 		setLive(entry);
 		_ownedBytes += entry.getSize();
+		_ownedEntries++;
 		scheduleEvictionIfNeeded();
 		return CacheUnpinHandle.committed(entry, allowance, entry.getSize());
 	}
@@ -583,6 +599,7 @@ public class OOCCacheImpl implements OOCCache {
 				entry.setState(meta.backed ? BlockState.WARM : BlockState.HOT);
 				setLive(entry);
 				_ownedBytes += entry.getSize();
+				_ownedEntries++;
 			}
 			if(completions == null)
 				completions = new ArrayList<>();
@@ -599,6 +616,12 @@ public class OOCCacheImpl implements OOCCache {
 
 	private boolean canAcceptOwnedBytes(long bytes) {
 		return _ownedBytes + bytes <= _hardLimit;
+	}
+
+	private long evictionTarget() {
+		long margin = (long) (_evictionLimit * EVICT_OVERSHOOT_MARGIN);
+		long meanBlock = _ownedEntries > 0 ? _ownedBytes / _ownedEntries : 0;
+		return margin >= 8 * meanBlock ? _evictionLimit - margin : _evictionLimit;
 	}
 
 	private void scheduleEvictionIfNeeded() {
@@ -622,22 +645,26 @@ public class OOCCacheImpl implements OOCCache {
 				synchronized(this) {
 					//drained before the pressure check, since a pass may be started purely to hand these bytes back
 					drained = processDeferredUnpins();
-					bytes = evictionPressure() - _evictionLimit;
+					bytes = evictionPressure() - evictionTarget();
 				}
 				drained.forEach(this::completeDeferred);
 				if(bytes <= 0)
 					return;
 
+				_evPasses.increment();
+				long scanStart = System.nanoTime();
 				List<IndexedObjectPair<BlockEntry>> candidates = collectEvictionCandidates(bytes);
+				_evScanNanos.add(System.nanoTime() - scanStart);
 				if(candidates.isEmpty())
 					return;
 
 				List<BlockEntry> toWrite = new ArrayList<>();
 				List<DeferredCompletion> completions;
 				boolean progress = false;
+				long lockStart = System.nanoTime();
 				synchronized(this) {
 					for(IndexedObjectPair<BlockEntry> candidate : candidates) {
-						if(evictionPressure() <= _evictionLimit)
+						if(evictionPressure() <= evictionTarget())
 							break;
 						EntryMeta meta = getMeta(candidate.obj());
 						if(meta == null || candidate.obj().getPinCount() > 0 || meta.deferredUnpin != null)
@@ -651,6 +678,8 @@ public class OOCCacheImpl implements OOCCache {
 							entry.setState(BlockState.COLD);
 							clearLive(entry);
 							_ownedBytes -= entry.getSize();
+							_ownedEntries--;
+							_evEvicted.increment();
 							progress = true;
 						}
 						else if(entry.getState() == BlockState.HOT) {
@@ -658,11 +687,13 @@ public class OOCCacheImpl implements OOCCache {
 							_evictingBytes += entry.getSize();
 							clearLive(entry);
 							toWrite.add(entry);
+							_evEvicted.increment();
 							progress = true;
 						}
 					}
 					completions = processDeferredUnpins();
 				}
+				_evLockNanos.add(System.nanoTime() - lockStart);
 				completions.forEach(this::completeDeferred);
 				for(BlockEntry entry : toWrite)
 					_ioHandler.scheduleEviction(entry).whenComplete((ignored, ex) -> onEvicted(entry, ex));
@@ -704,6 +735,7 @@ public class OOCCacheImpl implements OOCCache {
 			entry.clear();
 			entry.setState(BlockState.COLD);
 			_ownedBytes -= entry.getSize();
+			_ownedEntries--;
 			_evictingBytes -= entry.getSize();
 			removeIfUnused(meta);
 			completions = processDeferredUnpins();
@@ -715,8 +747,10 @@ public class OOCCacheImpl implements OOCCache {
 	private List<IndexedObjectPair<BlockEntry>> collectEvictionCandidates(long bytes) {
 		int k = evictionCandidateLimit(bytes);
 		PriorityQueue<IndexedObjectPair<BlockEntry>> queue = new PriorityQueue<>();
-		_blocks.forEachStreamTable(
-			(streamId, stream) -> getEvictController(streamId).findEvictionCandidates(stream, queue, k, 0));
+		long[] visited = new long[1];
+		_blocks.forEachStreamTable((streamId, stream) -> visited[0] +=
+			getEvictController(streamId).findEvictionCandidates(stream, queue, k, 0));
+		_evScanned.add(visited[0]);
 
 		List<IndexedObjectPair<BlockEntry>> candidates = new ArrayList<>(queue.size());
 		while(!queue.isEmpty())
@@ -754,8 +788,10 @@ public class OOCCacheImpl implements OOCCache {
 			meta.readWaiters > 0)
 			return;
 		BlockEntry entry = meta.entry;
-		if(isCacheOwned(entry))
+		if(isCacheOwned(entry)) {
 			_ownedBytes -= entry.getSize();
+			_ownedEntries--;
+		}
 		if(entry.getState() == BlockState.EVICTING)
 			_evictingBytes -= entry.getSize();
 		removeEntry(entry.getKey());
