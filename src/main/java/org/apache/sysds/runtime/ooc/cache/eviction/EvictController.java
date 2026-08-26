@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.ooc.cache.eviction;
 
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockState;
+import org.apache.sysds.runtime.ooc.cache.collections.IndexedObjectPredicate;
 import org.apache.sysds.runtime.ooc.cache.collections.MaskedOnceArrayList;
 
 import java.util.PriorityQueue;
@@ -36,40 +37,32 @@ public class EvictController {
 		_op.add(op);
 	}
 
-	public void findEvictionCandidates(MaskedOnceArrayList<BlockEntry> list,
+
+	public long findEvictionCandidates(MaskedOnceArrayList<BlockEntry> list,
 		PriorityQueue<IndexedObjectPair<BlockEntry>> candidates, int k, long estimatedReuseTimestamp) {
-		if(_op.isEmpty()) {
-			list.forEachLive((idx, b) -> {
-				if(!isEvictionCandidate(b))
-					return true;
-				var iop = new IndexedObjectPair<>(estimatedReuseTimestamp + idx, b);
-				if(candidates.size() < k) {
-					candidates.offer(iop);
-				}
-				else if(iop.compareTo(candidates.peek()) > 0) {
-					candidates.poll();
-					candidates.offer(iop);
-				}
-				return true;
-			}, true);
-			return;
-		}
-		list.forEachLive((idx, b) -> {
+		long[] visited = new long[1];
+		IndexedObjectPredicate<BlockEntry> visit = (idx, b) -> {
+			visited[0]++;
+			long score = score(idx, estimatedReuseTimestamp);
+			if(_op.isEmpty() && candidates.size() >= k && score <= candidates.peek().idx())
+				return false;
 			if(!isEvictionCandidate(b))
 				return true;
-			long score = computeScore(idx);
-			if(score == Long.MAX_VALUE)
-				score = idx + estimatedReuseTimestamp;
-			var iop = new IndexedObjectPair<>(score, b);
-			if(candidates.size() < k) {
-				candidates.offer(iop);
-			}
-			else if(iop.compareTo(candidates.peek()) > 0) {
+			candidates.offer(new IndexedObjectPair<>(score, b));
+			if(candidates.size() > k)
 				candidates.poll();
-				candidates.offer(iop);
-			}
 			return true;
-		}, true);
+		};
+
+		list.forEachLive(visit, true);
+		return visited[0];
+	}
+
+	private long score(int idx, long estimatedReuseTimestamp) {
+		if(_op.isEmpty())
+			return estimatedReuseTimestamp + idx;
+		long score = computeScore(idx);
+		return score == Long.MAX_VALUE ? idx + estimatedReuseTimestamp : score;
 	}
 
 	private boolean isEvictionCandidate(BlockEntry entry) {
