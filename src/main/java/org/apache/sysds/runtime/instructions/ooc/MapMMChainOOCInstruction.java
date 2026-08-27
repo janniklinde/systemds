@@ -24,22 +24,16 @@ import org.apache.sysds.lops.MapMultChain.ChainType;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
-import org.apache.sysds.runtime.data.DenseBlock;
-import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.functionobjects.Multiply;
 import org.apache.sysds.runtime.functionobjects.Plus;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
-import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.AggregateBinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
-import org.apache.sysds.runtime.matrix.operators.RightScalarOperator;
-import org.apache.sysds.runtime.ooc.store.CountingLiveness;
-import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
@@ -92,142 +86,21 @@ public class MapMMChainOOCInstruction extends ComputationOOCInstruction {
 
 	private void processPlannerInstruction(ExecutionContext ec, MatrixObject x, MatrixObject v, MatrixObject w,
 		boolean hasV) {
-		int rowBlocks = Math.toIntExact(x.getDataCharacteristics().getNumRowBlocks());
-		int colBlocks = Math.toIntExact(x.getDataCharacteristics().getNumColBlocks());
 		int blocksize = x.getBlocksize();
-		OOCStreamable<IndexedMatrixValue> sharedX = x.getStreamable();
-		MaterializedStoreStreamable createdX = null;
-		if(!sharedX.hasMaterializedStore()) {
-			createdX = new MaterializedStoreStreamable(x.getStreamHandle(), x);
-			sharedX = createdX;
-		}
 		BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
 		AggregateOperator aggregate = new AggregateOperator(0, Plus.getPlusFnObject());
 		AggregateBinaryOperator multiply = new AggregateBinaryOperator(Multiply.getMultiplyFnObject(), aggregate);
-
-		OOCStream<IndexedMatrixValue> u;
-		if(!hasV) {
-			u = createWritableStream(w);
-			RightScalarOperator negate = new RightScalarOperator(Multiply.getMultiplyFnObject(), -1);
-			OOCInstructionUtils.equiMapBlock(w.getStreamable(), u,
-				block -> block.scalarOperations(negate, new MatrixBlock()), getContext());
-		}
-		else {
-			OOCStream<IndexedMatrixValue> xvPartials = createWritableStream(x);
-			OOCInstructionUtils.indexedBroadcastMap(sharedX, v.getStreamable(), xvPartials,
-				value -> value.getIndexes().getColumnIndex(), value -> 1,
-				() -> new CountingLiveness(colBlocks, rowBlocks), (xValue, vValue) -> {
-					MatrixBlock xBlock = (MatrixBlock) xValue.getValue();
-					MatrixBlock vBlock = (MatrixBlock) vValue.getValue();
-					MatrixBlock partial = xBlock.aggregateBinaryOperations(xBlock, vBlock, new MatrixBlock(), multiply);
-					return new IndexedMatrixValue(xValue.getIndexes(), partial);
-				}, getContext());
-
-			OOCStream<IndexedMatrixValue> xv = createWritableStream(x.getNumRows(), 1, blocksize);
-			OOCInstructionUtils.rowGroupedReduce(xvPartials, xv,
-				(left, right) -> left.binaryOperations(plus, right, new MatrixBlock()), getContext());
-			if(_type.isWeighted()) {
-				u = createWritableStream(w);
-				BinaryOperator weight = InstructionUtils
-					.parseBinaryOperator(_type == ChainType.XtwXv ? Opcodes.MULT.toString() : Opcodes.MINUS.toString());
-				OOCInstructionUtils.equiJoin(xv, w.getStreamable(), u,
-					(left, right) -> left.binaryOperations(weight, right, new MatrixBlock()), getContext());
-			}
-			else
-				u = xv;
-		}
+		BinaryOperator weight = _type.isWeighted() ? InstructionUtils
+			.parseBinaryOperator(_type == ChainType.XtwXv ? Opcodes.MULT.toString() : Opcodes.MINUS.toString()) : null;
 
 		OOCStream<IndexedMatrixValue> xtPartials = createWritableStream(x.getNumColumns(), x.getNumRows(), blocksize);
-		OOCInstructionUtils.indexedBroadcastMap(sharedX, u, xtPartials, value -> value.getIndexes().getRowIndex(),
-			value -> 1, () -> new CountingLiveness(rowBlocks, colBlocks), (xValue, uValue) -> {
-				MatrixBlock partial = multTransposeVector((MatrixBlock) xValue.getValue(),
-					(MatrixBlock) uValue.getValue());
-				return new IndexedMatrixValue(
-					new MatrixIndexes(xValue.getIndexes().getColumnIndex(), xValue.getIndexes().getRowIndex()),
-					partial);
-			}, getContext());
+		OOCInstructionUtils.mmChain(x.getStreamable(), hasV ? v.getStreamable() : null,
+			_type.isWeighted() ? w.getStreamable() : null, xtPartials, _type, multiply, plus, weight, getContext());
 
 		ec.getDataCharacteristics(output.getName()).set(x.getNumColumns(), 1, blocksize, -1);
 		OOCStream<IndexedMatrixValue> out = createWritableStream();
 		ec.getMatrixObject(output).setStreamHandle(out);
 		OOCInstructionUtils.rowGroupedReduce(xtPartials, out,
 			(left, right) -> left.binaryOperations(plus, right, new MatrixBlock()), getContext());
-		if(createdX != null)
-			createdX.scheduleMaterializedStoreDeletion();
-	}
-
-	private static MatrixBlock multTransposeVector(MatrixBlock x, MatrixBlock u) {
-		int rows = x.getNumRows();
-		int cols = x.getNumColumns();
-		MatrixBlock out = new MatrixBlock(cols, 1, false);
-		out.allocateDenseBlock();
-		double[] outVals = out.getDenseBlockValues();
-
-		if(x.isInSparseFormat()) {
-			SparseBlock a = x.getSparseBlock();
-			if(a != null) {
-				if(u.isInSparseFormat()) {
-					for(int i = 0; i < rows; i++) {
-						if(a.isEmpty(i))
-							continue;
-						double uval = u.get(i, 0);
-						if(uval == 0)
-							continue;
-						int apos = a.pos(i);
-						int alen = a.size(i);
-						int[] aix = a.indexes(i);
-						double[] avals = a.values(i);
-						for(int k = apos; k < apos + alen; k++)
-							outVals[aix[k]] += uval * avals[k];
-					}
-				}
-				else {
-					double[] uvals = u.getDenseBlockValues();
-					for(int i = 0; i < rows; i++) {
-						if(a.isEmpty(i))
-							continue;
-						double uval = uvals[i];
-						if(uval == 0)
-							continue;
-						int apos = a.pos(i);
-						int alen = a.size(i);
-						int[] aix = a.indexes(i);
-						double[] avals = a.values(i);
-						for(int k = apos; k < apos + alen; k++)
-							outVals[aix[k]] += uval * avals[k];
-					}
-				}
-			}
-		}
-		else {
-			DenseBlock a = x.getDenseBlock();
-			if(u.isInSparseFormat()) {
-				for(int i = 0; i < rows; i++) {
-					double uval = u.get(i, 0);
-					if(uval == 0)
-						continue;
-					double[] avals = a.values(i);
-					int apos = a.pos(i);
-					for(int j = 0; j < cols; j++)
-						outVals[j] += uval * avals[apos + j];
-				}
-			}
-			else {
-				double[] uvals = u.getDenseBlockValues();
-				for(int i = 0; i < rows; i++) {
-					double uval = uvals[i];
-					if(uval == 0)
-						continue;
-					double[] avals = a.values(i);
-					int apos = a.pos(i);
-					for(int j = 0; j < cols; j++)
-						outVals[j] += uval * avals[apos + j];
-				}
-			}
-		}
-
-		out.recomputeNonZeros();
-		out.examSparsity();
-		return out;
 	}
 }

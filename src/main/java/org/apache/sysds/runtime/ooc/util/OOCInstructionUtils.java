@@ -40,6 +40,7 @@ import java.util.function.ToLongFunction;
 
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.lops.MMTSJ.MMTSJType;
+import org.apache.sysds.lops.MapMultChain.ChainType;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
@@ -66,6 +67,7 @@ import org.apache.sysds.runtime.ooc.primitives.FlatMapOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GeneralMMultOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.MMChainOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.NaryJoinOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OrderedMappingOOCPrimitive;
@@ -291,6 +293,25 @@ public final class OOCInstructionUtils {
 		BiFunction<IndexedMatrixValue, IndexedMatrixValue[][], IndexedMatrixValue> operation, StreamContext context) {
 		output.assignPrimitive(new BroadcastOOCPrimitive(streamed, broadcasts, output, lookupRows, lookupCols,
 			bandWidths, liveness, operation, context));
+	}
+
+	/**
+	 * Computes a matrix-multiplication chain in one traversal of the streamed matrix; see {@link MMChainOOCPrimitive}.
+	 *
+	 * @param x        the streamed matrix
+	 * @param v        the vector of {@code X %*% v}, or null for a chain that has none
+	 * @param w        the weight, or null for an unweighted chain
+	 * @param output   one partial per column tile per block row, indexed by (column tile, block row)
+	 * @param type     chain variant
+	 * @param multiply operator forming {@code X_ij %*% v_j}
+	 * @param plus     operator summing those partials across the column tiles of a block row
+	 * @param weight   operator combining {@code X %*% v} with the weight, or null when there is none
+	 * @param context  stream context
+	 */
+	public static void mmChain(OOCStreamable<IndexedMatrixValue> x, OOCStreamable<IndexedMatrixValue> v,
+		OOCStreamable<IndexedMatrixValue> w, OOCStream<IndexedMatrixValue> output, ChainType type,
+		AggregateBinaryOperator multiply, BinaryOperator plus, BinaryOperator weight, StreamContext context) {
+		output.assignPrimitive(new MMChainOOCPrimitive(x, v, w, output, type, multiply, plus, weight, context));
 	}
 
 	public static void rowGroupedReduce(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
