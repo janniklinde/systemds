@@ -83,7 +83,7 @@ public final class StoreBackedStream<T extends SpillableObject> implements OOCSt
 				_reader.close();
 				return null;
 			}
-			_lastDequeue = new MaterializedCallback<>(_reader.next());
+			_lastDequeue = _reader.nextCallback();
 			return _lastDequeue;
 		}
 		catch(InterruptedException e) {
@@ -115,7 +115,7 @@ public final class StoreBackedStream<T extends SpillableObject> implements OOCSt
 		}
 		try {
 			while(_reader.hasNext()) {
-				try(QueueCallback<T> callback = new MaterializedCallback<>(_reader.next())) {
+				try(QueueCallback<T> callback = _reader.nextCallback()) {
 					subscriber.accept(callback);
 				}
 			}

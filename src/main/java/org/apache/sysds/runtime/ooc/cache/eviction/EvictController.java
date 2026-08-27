@@ -66,6 +66,8 @@ public class EvictController {
 	}
 
 	private boolean isEvictionCandidate(BlockEntry entry) {
+		if(entry.getPinCount() > 0)
+			return false;
 		BlockState state = entry.getState();
 		return state == BlockState.HOT || state == BlockState.WARM;
 	}
