@@ -236,6 +236,8 @@ public class Statistics
 	private static final LongAdder oocMemoryReclaimRuns = new LongAdder();
 	private static final LongAdder oocMemoryReclaimTime = new LongAdder();
 	private static final LongAdder oocMemoryReclaimBytes = new LongAdder();
+	private static final LongAdder oocSourceBrokerPurges = new LongAdder();
+	private static final LongAdder oocGlobalBrokerPurges = new LongAdder();
 	private static final AtomicLong oocStatsStartTime = new AtomicLong(System.nanoTime());
 
 	public static long getNoOfExecutedSPInst() {
@@ -368,6 +370,8 @@ public class Statistics
 		oocMemoryReclaimRuns.reset();
 		oocMemoryReclaimTime.reset();
 		oocMemoryReclaimBytes.reset();
+		oocSourceBrokerPurges.reset();
+		oocGlobalBrokerPurges.reset();
 		oocStatsStartTime.set(System.nanoTime());
 	}
 
@@ -503,6 +507,14 @@ public class Statistics
 		oocMemoryReclaimBytes.add(bytes);
 	}
 
+	public static void incrementOOCSourceBrokerPurge() {
+		oocSourceBrokerPurges.increment();
+	}
+
+	public static void incrementOOCGlobalBrokerPurge() {
+		oocGlobalBrokerPurges.increment();
+	}
+
 	public static String displayOOCEvictionStats() {
 		long elapsedNanos = Math.max(1, System.nanoTime() - oocStatsStartTime.get());
 		double elapsedSeconds = elapsedNanos / 1e9;
@@ -524,6 +536,8 @@ public class Statistics
 		sb.append(String.format(Locale.US, "  reclaim runs:\t\t%d (time %.3f sec, %.3f GB)\n",
 			oocMemoryReclaimRuns.longValue(), oocMemoryReclaimTime.longValue() / 1e9,
 			oocMemoryReclaimBytes.longValue() / 1e9));
+		sb.append(String.format(Locale.US, "  broker purges (source/global):\t%d/%d\n",
+			oocSourceBrokerPurges.longValue(), oocGlobalBrokerPurges.longValue()));
 		return sb.toString();
 	}
 	

@@ -195,6 +195,10 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		boolean storeBacked = this == SOURCE_BROKER;
 		if((this != BROKER && !storeBacked) || !_purgeRunning.compareAndSet(false, true))
 			return;
+		if(storeBacked)
+			Statistics.incrementOOCSourceBrokerPurge();
+		else
+			Statistics.incrementOOCGlobalBrokerPurge();
 		RECLAIM_EXECUTOR.execute(() -> {
 			try {
 				if(storeBacked)
