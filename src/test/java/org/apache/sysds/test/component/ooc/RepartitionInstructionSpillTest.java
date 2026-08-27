@@ -214,6 +214,66 @@ public class RepartitionInstructionSpillTest {
 	}
 
 	@Test
+	public void testMapMMChainWeightedSpill() throws InterruptedException {
+		// X %*% v is 400 per row, so weighting by two gives 800 and subtracting two gives 398, each summed over the
+		// 400 rows of a column
+		assertWeightedChain("XtwXv", 2, 320_000);
+		assertWeightedChain("XtXvy", 2, 159_200);
+	}
+
+	private static void assertWeightedChain(String type, double weight, double expected) throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			SubscribableTaskQueue<IndexedMatrixValue> xInput = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> vInput = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> wInput = new SubscribableTaskQueue<>();
+			MatrixObject x = matrixObject(400, 400, 200);
+			MatrixObject v = matrixObject(400, 1, 200);
+			MatrixObject w = matrixObject(400, 1, 200);
+			MatrixObject out = matrixObject(400, 1, 200);
+			x.setStreamHandle(xInput);
+			v.setStreamHandle(vInput);
+			w.setStreamHandle(wInput);
+			ec.setVariable("X", x);
+			ec.setVariable("v", v);
+			ec.setVariable("w", w);
+			ec.setVariable("R", out);
+			for(int row = 1; row <= 2; row++)
+				for(int col = 1; col <= 2; col++)
+					xInput.enqueue(tile(row, col, 200, 200, 1));
+			xInput.closeInput();
+			for(int row = 1; row <= 2; row++) {
+				vInput.enqueue(tile(row, 1, 200, 1, 1));
+				wInput.enqueue(tile(row, 1, 200, 1, weight));
+			}
+			vInput.closeInput();
+			wInput.closeInput();
+			v.getDataCharacteristics().set(-1, -1, -1, -1);
+			w.getDataCharacteristics().set(-1, -1, -1, -1);
+
+			MapMMChainOOCInstruction
+				.parseInstruction("OOC\u00b0mapmmchain\u00b0X\u00b7MATRIX\u00b7FP64\u00b0"
+					+ "v\u00b7MATRIX\u00b7FP64\u00b0w\u00b7MATRIX\u00b7FP64\u00b0R\u00b7MATRIX\u00b7FP64\u00b0" + type)
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			result.start();
+			waitForSpill();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					Assert.assertEquals(expected, current.get().getValue().get(0, 0), 0);
+					blocks++;
+				}
+			Assert.assertEquals(2, blocks);
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
+	@Test
 	public void testAliasedMMultSpill() throws InterruptedException {
 		boolean statistics = prepareSpillCache();
 		try {
