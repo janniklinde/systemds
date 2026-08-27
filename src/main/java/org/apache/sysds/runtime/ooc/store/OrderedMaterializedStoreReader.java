@@ -37,6 +37,7 @@ import java.util.function.IntConsumer;
 public final class OrderedMaterializedStoreReader<T extends SpillableObject> implements MaterializedStore.StoreReader {
 	private static final Request CLOSED = new Request(-1, OOCFuture.completed(null));
 
+	private final MaterializedStore<T> _store;
 	private final OOCCache _cache;
 	private final long _streamId;
 	private final MaterializedStore.AccessPattern _pattern;
@@ -49,9 +50,11 @@ public final class OrderedMaterializedStoreReader<T extends SpillableObject> imp
 	private final AtomicInteger _inFlightRequests;
 	private volatile boolean _closed;
 
-	OrderedMaterializedStoreReader(OOCCache cache, long streamId, MaterializedStore.AccessPattern pattern,
+	OrderedMaterializedStoreReader(MaterializedStore<T> store, OOCCache cache, long streamId,
+		MaterializedStore.AccessPattern pattern,
 		MemoryAllowance allowance, int maxPrefetch, boolean softOrdering, Runnable afterClose,
 		IntConsumer afterRelease) {
+		_store = store;
 		_cache = cache;
 		_streamId = streamId;
 		_pattern = pattern;
@@ -107,6 +110,15 @@ public final class OrderedMaterializedStoreReader<T extends SpillableObject> imp
 	}
 
 	public StoreLease<T> next() throws InterruptedException {
+		return nextIndexed()._lease;
+	}
+
+	MaterializedCallback<T> nextCallback() throws InterruptedException {
+		IndexedLease<T> indexed = nextIndexed();
+		return new MaterializedCallback<>(indexed._lease, indexed._index, _store);
+	}
+
+	private IndexedLease<T> nextIndexed() throws InterruptedException {
 		if(_softOrdering) {
 			checkReady();
 			return nextSoft();
@@ -140,7 +152,7 @@ public final class OrderedMaterializedStoreReader<T extends SpillableObject> imp
 				throw ex;
 			}
 		}
-		return StoreLease.createAsync(entry, () -> release(request._index, entry));
+		return new IndexedLease<>(request._index, StoreLease.createAsync(entry, () -> release(request._index, entry)));
 	}
 
 	public OOCFuture<Boolean> release(int index, BlockEntry entry) {
@@ -155,7 +167,7 @@ public final class OrderedMaterializedStoreReader<T extends SpillableObject> imp
 			throw new IllegalStateException("Reader is closed");
 	}
 
-	private StoreLease<T> nextSoft() throws InterruptedException {
+	private IndexedLease<T> nextSoft() throws InterruptedException {
 		fillSoft();
 		if(_inFlightRequests.get() <= 0)
 			throw new IllegalStateException("No remaining item");
@@ -173,7 +185,7 @@ public final class OrderedMaterializedStoreReader<T extends SpillableObject> imp
 		if(entry == null)
 			throw new IllegalStateException("Reader is closed");
 		fillSoft();
-		return StoreLease.createAsync(entry, () -> release(request._index, entry));
+		return new IndexedLease<>(request._index, StoreLease.createAsync(entry, () -> release(request._index, entry)));
 	}
 
 	private void fillStrict() {
@@ -249,6 +261,16 @@ public final class OrderedMaterializedStoreReader<T extends SpillableObject> imp
 		private Request(int index, OOCFuture<BlockEntry> future) {
 			_index = index;
 			_future = future;
+		}
+	}
+
+	private static final class IndexedLease<T extends SpillableObject> {
+		private final int _index;
+		private final StoreLease<T> _lease;
+
+		private IndexedLease(int index, StoreLease<T> lease) {
+			_index = index;
+			_lease = lease;
 		}
 	}
 }

@@ -223,7 +223,7 @@ public final class MaterializedStore<T extends SpillableObject> {
 		synchronized(this) {
 			if(!_complete || _closed)
 				throw new IllegalStateException("Readers require a completed store");
-			reader = new OrderedMaterializedStoreReader<>(_cache, _streamId, pattern, allowance,
+			reader = new OrderedMaterializedStoreReader<>(this, _cache, _streamId, pattern, allowance,
 				Math.max(1, maxPrefetch), softOrdering, this::forgetAfterReaderClose, this::tryForget);
 			seal = registerReader(reader, pattern);
 		}

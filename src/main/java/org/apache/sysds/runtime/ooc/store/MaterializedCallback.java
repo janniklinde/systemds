@@ -33,7 +33,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class MaterializedCallback<T extends SpillableObject> implements OOCStream.QueueCallback<T> {
-	private static final MemoryAllowance REVIVE_ALLOWANCE = new SyncMemoryAllowance(GlobalMemoryBroker.getSource());
+	private static volatile MemoryAllowance REVIVE_ALLOWANCE;
 
 	private StoreLease<T> _lease;
 	private final AtomicReference<DMLRuntimeException> _failure;
@@ -62,11 +62,29 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 		_store = store;
 	}
 
+	private static MemoryAllowance reviveAllowance() {
+		MemoryAllowance allowance = REVIVE_ALLOWANCE;
+		if(allowance != null)
+			return allowance;
+		synchronized(MaterializedCallback.class) {
+			if(REVIVE_ALLOWANCE == null) {
+				REVIVE_ALLOWANCE = new SyncMemoryAllowance(GlobalMemoryBroker.getSource()) {
+					@Override
+					public boolean isAdmissionExempt() {
+						return true;
+					}
+				};
+			}
+			return REVIVE_ALLOWANCE;
+		}
+	}
+
 	public synchronized long tryPark() {
 		if(_closed || _parked || _store == null || _index < 0 || _lease == null)
 			return 0;
-		if(!_lease.isSole() || _failure.get() != null)
+		if(_failure.get() != null)
 			return 0;
+		boolean sole = _lease.isSole();
 		BlockEntry entry = _lease.entry();
 		long bytes = entry != null ? entry.getSize() : 0;
 		if(bytes <= 0)
@@ -76,7 +94,7 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 		StoreLease<T> lease = _lease;
 		_lease = null;
 		lease.close();
-		return bytes;
+		return sole ? bytes : 0;
 	}
 
 	private synchronized void revive() {
@@ -84,7 +102,7 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 			return;
 		BlockEntry entry;
 		try {
-			entry = OOCUtils.pinAdmitted(_store.cache(), _store.streamId(), _index, REVIVE_ALLOWANCE, () -> false).get();
+			entry = OOCUtils.pinAdmitted(_store.cache(), _store.streamId(), _index, reviveAllowance(), () -> false).get();
 		}
 		catch(InterruptedException e) {
 			Thread.currentThread().interrupt();
@@ -95,7 +113,8 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 		}
 		if(entry == null)
 			throw new DMLRuntimeException("Parked block " + _index + " vanished before it was revived.");
-		_lease = StoreLease.createAsync(entry, () -> _store.cache().unpin(entry, REVIVE_ALLOWANCE).getCompletionFuture());
+		_lease = StoreLease.createAsync(entry,
+			() -> _store.cache().unpin(entry, reviveAllowance()).getCompletionFuture());
 		_store.cache().dereference(new BlockKey(_store.streamId(), _index));
 		_parked = false;
 	}
@@ -132,6 +151,8 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 		_closed = true;
 		if(_lease != null)
 			_lease.close();
+		else if(_parked)
+			_store.cache().dereference(new BlockKey(_store.streamId(), _index));
 	}
 
 	@Override

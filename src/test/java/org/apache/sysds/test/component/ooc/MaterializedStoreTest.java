@@ -37,6 +37,7 @@ import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.store.IndexedMaterializedStoreReader;
+import org.apache.sysds.runtime.ooc.store.MaterializedCallback;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.CountingLiveness;
 import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
@@ -333,6 +334,34 @@ public class MaterializedStoreTest {
 
 		Assert.assertTrue(complete.await(WAIT_SECONDS, TimeUnit.SECONDS));
 		Assert.assertEquals(2, count.get());
+		Assert.assertEquals(0, _readerAllowance.getUsedMemory());
+	}
+
+	@Test
+	public void testStoreBackedCallbacksCanParkSharedLeases() throws Exception {
+		OOCStreamMaterializer materializer = new OOCStreamMaterializer(_store,
+			indexes -> (int) indexes.getRowIndex() - 1, _materializerAllowance);
+		materializer.accept(new OOCStream.SimpleQueueCallback<>(tile(0, 1.0), null));
+		materializer.accept(OOCStream.eos(null));
+		materializer.completion().get(WAIT_SECONDS, TimeUnit.SECONDS);
+
+		StoreBackedStream<IndexedMatrixValue> stream = new StoreBackedStream<>(
+			_store.openReader(new SequentialAccessPattern(1), _readerAllowance, 1));
+		_store.sealReaders();
+		MaterializedCallback<IndexedMatrixValue> callback =
+			(MaterializedCallback<IndexedMatrixValue>) stream.dequeueCB();
+		MaterializedCallback<IndexedMatrixValue> retained =
+			(MaterializedCallback<IndexedMatrixValue>) callback.keepOpen();
+		long replayBytes = callback.pinnedEntry().getSize();
+
+		Assert.assertEquals(0, callback.publishedIndex());
+		Assert.assertEquals(0, retained.tryPark());
+		Assert.assertNull(retained.pinnedEntry());
+		Assert.assertEquals(replayBytes, callback.tryPark());
+		Assert.assertNull(callback.pinnedEntry());
+		retained.close();
+		callback.close();
+		stream.dequeueCB();
 		Assert.assertEquals(0, _readerAllowance.getUsedMemory());
 	}
 
