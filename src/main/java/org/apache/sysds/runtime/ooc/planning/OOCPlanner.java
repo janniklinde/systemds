@@ -147,7 +147,8 @@ public final class OOCPlanner {
 				.getInput(request.inputIndex());
 			OOCPrimitive dependency = primitive.getInputDependency(request.inputIndex());
 			if(input.hasMaterializedStore() && dependency instanceof MaterializeOOCPrimitive existingBoundary) {
-				boolean live = existingBoundary.registerRequest(request.expectedReaders(), request.liveConsumer());
+				boolean live = existingBoundary.registerRequest(request.expectedReaders(), request.liveConsumer(),
+					request.evictionPolicy());
 				if(request.liveRegistration() != null)
 					request.liveRegistration().accept(live);
 				continue;
@@ -158,7 +159,8 @@ public final class OOCPlanner {
 				boundaries.put(input, boundary);
 			}
 			primitive.discardInputHandle(request.inputIndex());
-			boolean live = boundary.registerRequest(request.expectedReaders(), request.liveConsumer());
+			boolean live = boundary.registerRequest(request.expectedReaders(), request.liveConsumer(),
+				request.evictionPolicy());
 			if(request.liveRegistration() != null)
 				request.liveRegistration().accept(live);
 			primitive.installMaterializedInput(request.inputIndex(), boundary);

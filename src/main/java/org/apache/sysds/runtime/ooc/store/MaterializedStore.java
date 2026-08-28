@@ -37,6 +37,7 @@ import java.util.BitSet;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongBinaryOperator;
 
 public final class MaterializedStore<T extends SpillableObject> {
 	private static final byte FORGOTTEN = 0;
@@ -209,6 +210,15 @@ public final class MaterializedStore<T extends SpillableObject> {
 
 	public OOCFuture<Void> readersSealed() {
 		return _readersSealedFuture;
+	}
+
+	public void addEvictionPolicy(LongBinaryOperator policy) {
+		if(_layout == null)
+			throw new IllegalStateException("Materialized store has no logical matrix-index layout.");
+		_cache.addEvictionPolicy(_streamId, slot -> {
+			MatrixIndexes indexes = _layout.delinearize((int) slot, _characteristics);
+			return policy.applyAsLong(indexes.getRowIndex(), indexes.getColumnIndex());
+		});
 	}
 
 	public OrderedMaterializedStoreReader<T> openReader(AccessPattern pattern, MemoryAllowance allowance,

@@ -26,6 +26,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.LongBinaryOperator;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
@@ -344,14 +345,25 @@ public abstract class OOCPrimitive {
 	}
 
 	public record OOCMaterializedInputRequest(int inputIndex, OOCStoreLayout layout, int expectedReaders,
-		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> liveConsumer, Consumer<Boolean> liveRegistration) {
+		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> liveConsumer, Consumer<Boolean> liveRegistration,
+		LongBinaryOperator evictionPolicy) {
 		public OOCMaterializedInputRequest(int inputIndex, OOCStoreLayout layout, int expectedReaders) {
-			this(inputIndex, layout, expectedReaders, null, null);
+			this(inputIndex, layout, expectedReaders, null, null, null);
+		}
+
+		public OOCMaterializedInputRequest(int inputIndex, OOCStoreLayout layout, int expectedReaders,
+			LongBinaryOperator evictionPolicy) {
+			this(inputIndex, layout, expectedReaders, null, null, evictionPolicy);
 		}
 
 		public OOCMaterializedInputRequest(int inputIndex, OOCStoreLayout layout, int expectedReaders,
 			Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> liveConsumer) {
-			this(inputIndex, layout, expectedReaders, liveConsumer, null);
+			this(inputIndex, layout, expectedReaders, liveConsumer, null, null);
+		}
+
+		public OOCMaterializedInputRequest(int inputIndex, OOCStoreLayout layout, int expectedReaders,
+			Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> liveConsumer, Consumer<Boolean> liveRegistration) {
+			this(inputIndex, layout, expectedReaders, liveConsumer, liveRegistration, null);
 		}
 	}
 }

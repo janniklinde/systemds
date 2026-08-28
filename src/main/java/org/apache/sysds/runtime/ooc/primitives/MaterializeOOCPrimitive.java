@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import java.util.function.LongBinaryOperator;
 import java.util.function.ToIntFunction;
 
 import org.apache.sysds.runtime.instructions.ooc.CachingStream;
@@ -48,6 +49,7 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 	private final AtomicBoolean _finished;
 	private final boolean _reusable;
 	private final List<Consumer<OOCStream.QueueCallback<IndexedMatrixValue>>> _liveConsumers;
+	private final List<LongBinaryOperator> _evictionPolicies;
 	private MaterializedStore<IndexedMatrixValue> _materializedStore;
 	private int _expectedReaders;
 	private int _consumers;
@@ -66,6 +68,7 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 		_finished = new AtomicBoolean();
 		_reusable = reusable;
 		_liveConsumers = new ArrayList<>();
+		_evictionPolicies = new ArrayList<>();
 	}
 
 	public static MaterializeOOCPrimitive reusable(OOCStreamable<IndexedMatrixValue> source) {
@@ -78,6 +81,11 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 
 	public synchronized boolean registerRequest(int expectedReaders,
 		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> liveConsumer) {
+		return registerRequest(expectedReaders, liveConsumer, null);
+	}
+
+	public synchronized boolean registerRequest(int expectedReaders,
+		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> liveConsumer, LongBinaryOperator evictionPolicy) {
 		if(expectedReaders <= 0)
 			throw new IllegalArgumentException("Materialization request requires at least one reader.");
 		boolean live = !hasStartedExecution();
@@ -90,6 +98,12 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 			_materializedStore.registerConsumer(expectedReaders);
 		if(live && liveConsumer != null)
 			_liveConsumers.add(liveConsumer);
+		if(evictionPolicy != null) {
+			if(_materializedStore == null)
+				_evictionPolicies.add(evictionPolicy);
+			else
+				_materializedStore.addEvictionPolicy(evictionPolicy);
+		}
 		return live;
 	}
 
@@ -133,6 +147,7 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 					_reusable ? -1 : _expectedReaders, consumers, logicalLayout ? _layout : null,
 					logicalLayout ? characteristics : null);
 				_materializedStore = store;
+				_evictionPolicies.forEach(store::addEvictionPolicy);
 				liveConsumers = List.copyOf(_liveConsumers);
 			}
 			AtomicInteger nextIndex = new AtomicInteger();
