@@ -61,6 +61,7 @@ import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.CtableOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.CorrelatedScanOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.FlatMapOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GeneralMMultOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
@@ -364,6 +365,14 @@ public final class OOCInstructionUtils {
 	public static <T> CompletableFuture<Void> submitOOCTasks(OOCStream<T> queue,
 		Consumer<OOCStream.QueueCallback<T>> consumer, StreamContext context) {
 		return submitOOCTasks(List.of(queue), (i, callback) -> consumer.accept(callback), null, null, context);
+	}
+
+	public static <D, O> void correlatedScan(OOCStreamable<IndexedMatrixValue> input, OOCStreamable<O> output,
+		Function<List<IndexedMatrixValue>, D> derive, BiFunction<List<IndexedMatrixValue>, D, List<O>> combine,
+		ToLongFunction<O> outputSize, long workspaceBytes, long outputBytesPerGroup, int maxPendingFetches,
+		StreamContext context) {
+		output.assignPrimitive(new CorrelatedScanOOCPrimitive<>(input, output, derive, combine, outputSize,
+			workspaceBytes, outputBytesPerGroup, maxPendingFetches, context));
 	}
 
 	public static <T extends AutoCloseable> CompletableFuture<Void> submitCloseableOOCTasks(OOCStream<T> queue,
