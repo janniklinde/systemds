@@ -79,8 +79,11 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	public List<OOCMaterializedInputRequest> requiredMaterializedInputs() {
-		return List.of(new OOCMaterializedInputRequest(0, OOCStoreLayout.ROW_MAJOR, 1),
-			new OOCMaterializedInputRequest(1, OOCStoreLayout.COL_MAJOR, 1));
+		long innerBlocks = OOCUtils.getNumColBlocks(getInput(0).getDataCharacteristics());
+		return List.of(new OOCMaterializedInputRequest(0, OOCStoreLayout.ROW_MAJOR, 1,
+			(row, col) -> (row - 1) * innerBlocks + col - 1),
+			new OOCMaterializedInputRequest(1, OOCStoreLayout.COL_MAJOR, 1,
+				(row, col) -> (col - 1) * innerBlocks + row - 1));
 	}
 
 	@Override
