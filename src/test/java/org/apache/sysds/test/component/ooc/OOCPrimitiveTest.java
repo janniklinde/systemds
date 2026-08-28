@@ -298,6 +298,66 @@ public class OOCPrimitiveTest {
 	}
 
 	@Test
+	public void testCorrelatedScanRetainsSpilledRowGroup() throws InterruptedException {
+		OOCCacheManager.reset();
+		boolean statistics = DMLScript.OOC_STATISTICS;
+		DMLScript.OOC_STATISTICS = true;
+		Statistics.resetOOCEvictionStats();
+		OOCCacheManager.getGlobalCache().updateLimits(1_500_000, 100_000);
+		try {
+			SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> output = new SubscribableTaskQueue<>();
+			input.setData(new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(800, 400, 200), FileFormat.BINARY)));
+			output.setData(new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(800, 1, 200), FileFormat.BINARY)));
+			for(int row = 1; row <= 4; row++)
+				for(int col = 1; col <= 2; col++)
+					input.enqueue(new IndexedMatrixValue(new MatrixIndexes(row, col),
+						new MatrixBlock(200, 200, row * 10d + col)));
+			input.closeInput();
+
+			CountDownLatch prefetchedGroups = new CountDownLatch(2);
+			OOCInstructionUtils.correlatedScan(input, output, values -> {
+				try {
+					prefetchedGroups.countDown();
+					Assert.assertTrue("Expected two correlated groups in flight",
+						prefetchedGroups.await(5, TimeUnit.SECONDS));
+					for(int attempt = 0; attempt < 100 && Statistics.getOOCEvictionWriteCount() == 0; attempt++)
+						Thread.sleep(10);
+				}
+				catch(InterruptedException error) {
+					Thread.currentThread().interrupt();
+					throw new RuntimeException(error);
+				}
+				double sum = 0;
+				for(IndexedMatrixValue value : values)
+					sum += ((MatrixBlock) value.getValue()).sum();
+				return sum;
+			}, (values, sum) -> List.of(new IndexedMatrixValue(
+				new MatrixIndexes(values.get(0).getIndexes().getRowIndex(), 1), new MatrixBlock(1, 1, sum))),
+			OOCUtils::memoryCharge, 128, 128, 2, new StreamContext());
+
+			output.start();
+			Map<Long, Double> sums = new HashMap<>();
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = output.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue value = current.get();
+					sums.put(value.getIndexes().getRowIndex(), value.getValue().get(0, 0));
+				}
+			for(long row = 1; row <= 4; row++)
+				Assert.assertEquals((row * 20 + 3) * 40_000, sums.get(row), 0);
+			Assert.assertTrue("Expected correlated-scan input materialization to spill",
+				Statistics.getOOCEvictionWriteCount() > 0);
+		}
+		finally {
+			OOCCacheManager.reset();
+			DMLScript.OOC_STATISTICS = statistics;
+		}
+	}
+
+	@Test
 	public void testReduce() {
 		SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
 		SubscribableTaskQueue<MatrixBlock> output = new SubscribableTaskQueue<>();
