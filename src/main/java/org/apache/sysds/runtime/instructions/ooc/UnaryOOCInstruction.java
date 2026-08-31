@@ -79,7 +79,7 @@ public class UnaryOOCInstruction extends ComputationOOCInstruction {
 			qOut = createWritableStream();
 			OOCStreamable<IndexedMatrixValue> input = min.getStreamable();
 			OOCInstructionUtils.equiMapBlock(input, qOut, block -> block.unaryOperations(uop, new MatrixBlock()),
-				getContext());
+				uop.sparseSafe, getContext());
 		}
 
 		ec.getMatrixObject(output).setStreamHandle(qOut);

@@ -92,8 +92,8 @@ public final class SliceOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
-	protected long getMaxTaskReservationBytes() {
-		return OOCUtils.estimateOutputTileBytes(_input.getDataCharacteristics());
+	public long getMaxTaskReservationBytes(IndexedMatrixValue... inputs) {
+		return OOCUtils.estimateFullTileBytes(_input.getDataCharacteristics());
 	}
 
 	@Override
@@ -152,8 +152,8 @@ public final class SliceOOCPrimitive extends OOCPrimitive {
 			throw new DMLRuntimeException("Targeted slice requires a materialized store with a known layout.");
 		long rowBlocks = Math.min(_lastRowBlock, dc.getNumRowBlocks());
 		long colBlocks = Math.min(_lastColBlock, dc.getNumColBlocks());
-		int count = Math.toIntExact(Math.max(0, rowBlocks - _firstRowBlock + 1) *
-			Math.max(0, colBlocks - _firstColBlock + 1));
+		int count = Math
+			.toIntExact(Math.max(0, rowBlocks - _firstRowBlock + 1) * Math.max(0, colBlocks - _firstColBlock + 1));
 		int[] selected = new int[count];
 		int pos = 0;
 		for(long row = _firstRowBlock; row <= rowBlocks; row++)

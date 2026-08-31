@@ -29,6 +29,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 public class TransposeOOCPrimitive extends OOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _output;
@@ -39,6 +40,19 @@ public class TransposeOOCPrimitive extends OOCPrimitive {
 		super(context, input);
 		_output = output;
 		_operation = operation;
+	}
+
+	public Function<MatrixBlock, MatrixBlock> getOperation() {
+		return _operation;
+	}
+
+	public OOCStreamable<IndexedMatrixValue> getOutput() {
+		return _output;
+	}
+
+	@Override
+	public long getMaxTaskReservationBytes(IndexedMatrixValue... inputs) {
+		return OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics());
 	}
 
 	@Override

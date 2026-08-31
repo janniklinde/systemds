@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
@@ -34,6 +35,23 @@ import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 public final class OOCPlanner {
+	private static final AtomicLong NEXT_EPOCH = new AtomicLong();
+	private static final ThreadLocal<Long> CURRENT_EPOCH = ThreadLocal.withInitial(() -> 0L);
+
+	public static long beginLoopIteration() {
+		long previous = CURRENT_EPOCH.get();
+		CURRENT_EPOCH.set(NEXT_EPOCH.incrementAndGet());
+		return previous;
+	}
+
+	public static void endLoopIteration(long previous) {
+		CURRENT_EPOCH.set(previous);
+	}
+
+	public static long currentEpoch() {
+		return CURRENT_EPOCH.get();
+	}
+
 	public static synchronized void compile(OOCPrimitive root) {
 		compile(root, false);
 	}
@@ -46,6 +64,7 @@ public final class OOCPlanner {
 	}
 
 	private static void compile(OOCPrimitive root, boolean startRoot) {
+		CorrelatedRowFusion.rewrite(root);
 		injectMaterializations(root, Collections.newSetFromMap(new IdentityHashMap<>()), new IdentityHashMap<>());
 		List<OOCPrimitive> primitives = new ArrayList<>();
 		collect(root, Collections.newSetFromMap(new IdentityHashMap<>()), primitives);
@@ -81,8 +100,8 @@ public final class OOCPlanner {
 		List<OOCFuture<DataCharacteristics>> pending = new ArrayList<>(critical.size());
 		for(int index : critical) {
 			OOCFuture<DataCharacteristics> dimensions = primitive.getInput(index).dimensions();
-			//a streamable that cannot signal late resolution leaves the primitive to its own guard, which keeps this
-			//a no-op for every plan that does not opt in
+			// a streamable that cannot signal late resolution leaves the primitive to its own guard, which keeps this
+			// a no-op for every plan that does not opt in
 			if(dimensions == null)
 				continue;
 			if(dimensions.isDone())

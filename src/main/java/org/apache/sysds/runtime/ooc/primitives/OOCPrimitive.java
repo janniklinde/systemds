@@ -43,6 +43,7 @@ import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
+import org.apache.sysds.runtime.ooc.planning.OOCTileOperation;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -60,6 +61,8 @@ public abstract class OOCPrimitive {
 	private volatile Throwable _failure;
 	protected OOCAccessPattern _pattern;
 	protected MemoryAllowance _allowance;
+	private OOCTileOperation _tileOperation;
+	private final long _planEpoch;
 
 	protected OOCPrimitive(StreamContext context, List<OOCPrimitive> children) {
 		this(context);
@@ -85,6 +88,7 @@ public abstract class OOCPrimitive {
 		_executionStarted = new AtomicBoolean();
 		_failed = new AtomicBoolean();
 		_pattern = OOCAccessPattern.UNSET;
+		_planEpoch = OOCPlanner.currentEpoch();
 		if(OOCWatchdog.WATCH_PRIMITIVES)
 			OOCWatchdog.registerPrimitive(this);
 	}
@@ -111,6 +115,18 @@ public abstract class OOCPrimitive {
 		return _pattern;
 	}
 
+	public final OOCTileOperation getTileOperation() {
+		return _tileOperation;
+	}
+
+	public final void setTileOperation(OOCTileOperation operation) {
+		if(_tileOperation != null)
+			throw new IllegalStateException("Tile operation already assigned");
+		if(Objects.requireNonNull(operation).getNumInputs() != _inputs.size())
+			throw new IllegalArgumentException("Tile operation input count does not match primitive inputs");
+		_tileOperation = operation;
+	}
+
 	public final boolean hasStartedExecution() {
 		return _executionStarted.get();
 	}
@@ -135,6 +151,14 @@ public abstract class OOCPrimitive {
 		return _inputs.get(index)._source;
 	}
 
+	public final int getNumInputs() {
+		return _inputs.size();
+	}
+
+	public final long getPlanEpoch() {
+		return _planEpoch;
+	}
+
 	public final OOCPrimitive getInputDependency(int index) {
 		return _inputs.get(index)._dependency;
 	}
@@ -145,6 +169,19 @@ public abstract class OOCPrimitive {
 		InputSlot input = _inputs.get(index);
 		input._dependency = boundary;
 		rebuildInputChildren();
+	}
+
+	public final void refreshInputDependencies() {
+		if(hasStartedExecution())
+			return;
+		for(InputSlot input : _inputs)
+			input._dependency = input._source.getPrimitive();
+		rebuildInputChildren();
+	}
+
+	public final void discardInputHandles() {
+		for(int i = 0; i < _inputs.size(); i++)
+			discardInputHandle(i);
 	}
 
 	private synchronized void consumeInputHandle(int index) {
@@ -210,10 +247,14 @@ public abstract class OOCPrimitive {
 	}
 
 	/**
-	 * Returns the largest single reservation a task of this primitive makes against its allowance, or 0 when the
-	 * geometry is not yet known and the plain fair share applies.
+	 * Returns the largest reservation for a task with the given ordered inputs. Callers may provide dummy tiles
+	 * carrying only indexes, shape, and sparsity. With no inputs, implementations return a conservative geometry-based
+	 * upper bound, or 0 when the geometry is not yet known and the plain fair share applies.
+	 *
+	 * @param inputs ordered real or dummy input tiles
+	 * @return required task reservation in bytes
 	 */
-	protected long getMaxTaskReservationBytes() {
+	public long getMaxTaskReservationBytes(IndexedMatrixValue... inputs) {
 		return 0;
 	}
 

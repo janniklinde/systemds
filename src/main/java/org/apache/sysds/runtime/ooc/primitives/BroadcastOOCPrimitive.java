@@ -50,10 +50,10 @@ import org.apache.sysds.runtime.ooc.util.OOCUtils;
  * secondary inputs.
  *
  * The secondary inputs are not replicated in memory: each is materialized into a store and read through an indexed
- * reader that pins tiles on demand and evicts them once their liveness count is exhausted. A side therefore degrades
- * to disk-backed random access rather than failing when it does not fit, which is why there is no size precondition
- * on the indexed sides. A side's band may span several column tiles, so a secondary input is not restricted to a
- * single column block the way a replicated broadcast would be.
+ * reader that pins tiles on demand and evicts them once their liveness count is exhausted. A side therefore degrades to
+ * disk-backed random access rather than failing when it does not fit, which is why there is no size precondition on the
+ * indexed sides. A side's band may span several column tiles, so a secondary input is not restricted to a single column
+ * block the way a replicated broadcast would be.
  */
 public final class BroadcastOOCPrimitive extends OOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue>[] _broadcasts;
@@ -90,10 +90,10 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 		super(context, inputs(streamed, broadcasts));
 		if(broadcasts.isEmpty())
 			throw new DMLRuntimeException("Broadcast primitive requires at least one indexed input.");
-		if(lookupRows.size() != broadcasts.size() || lookupCols.size() != broadcasts.size()
-			|| bandWidths.size() != broadcasts.size() || liveness.size() != broadcasts.size())
-			throw new DMLRuntimeException("Broadcast primitive requires one lookup, band width and liveness per "
-				+ "indexed input.");
+		if(lookupRows.size() != broadcasts.size() || lookupCols.size() != broadcasts.size() ||
+			bandWidths.size() != broadcasts.size() || liveness.size() != broadcasts.size())
+			throw new DMLRuntimeException(
+				"Broadcast primitive requires one lookup, band width and liveness per " + "indexed input.");
 		_broadcasts = broadcasts.toArray(new OOCStreamable[0]);
 		_output = output;
 		_lookupRows = lookupRows.toArray(new ToLongFunction[0]);
@@ -112,6 +112,37 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 		_pendingStores = new AtomicInteger(_broadcasts.length);
 		_stores = new MaterializedStore[_broadcasts.length];
 		_readers = new IndexedMaterializedStoreReader[_broadcasts.length];
+	}
+
+	public ToLongFunction<IndexedMatrixValue>[] getLookupRows() {
+		return _lookupRows.clone();
+	}
+
+	public ToLongFunction<IndexedMatrixValue>[] getLookupCols() {
+		return _lookupCols.clone();
+	}
+
+	public int[] getBandWidths() {
+		return _bandWidths.clone();
+	}
+
+	public BiFunction<IndexedMatrixValue, IndexedMatrixValue[][], IndexedMatrixValue> getOperation() {
+		return _operation;
+	}
+
+	public OOCStreamable<IndexedMatrixValue> getOutput() {
+		return _output;
+	}
+
+	@Override
+	public long getMaxTaskReservationBytes(IndexedMatrixValue... inputs) {
+		long broadcastPin = 0;
+		for(int i = 0; i < _broadcasts.length; i++) {
+			long logical = inputs.length > i + 1 ? OOCUtils.memoryCharge(inputs[i + 1]) : OOCUtils
+				.estimateFullTileBytes(_broadcasts[i].getDataCharacteristics());
+			broadcastPin += OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(logical) * _bandWidths[i];
+		}
+		return broadcastPin + OOCUtils.estimateFullTileBytes(_output.getDataCharacteristics());
 	}
 
 	private static OOCStreamable<?>[] inputs(OOCStreamable<IndexedMatrixValue> streamed,
@@ -196,16 +227,9 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 	}
 
 	private void startBroadcast() {
-		long broadcastPin = 0;
-		for(int i = 0; i < _broadcasts.length; i++) {
-			long logical = OOCUtils.estimateOutputTileBytes(_broadcasts[i].getDataCharacteristics());
-			//a whole band is pinned at once, so the admission charge has to cover every tile in it
-			broadcastPin += OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(logical) * _bandWidths[i];
-		}
-		long pinCharge = broadcastPin;
 		OOCStream<IndexedMatrixValue> streamed = getInputReadStream(0);
-		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(streamed, _allowance, value ->
-			pinCharge * 2 + OOCUtils.memoryCharge(value) * 2, true);
+		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(streamed, _allowance,
+			value -> getMaxTaskReservationBytes(value), true);
 		getContext().addInStream(streamed, admitted);
 		admitted.setSubscriber(this::accept);
 	}
@@ -238,15 +262,15 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 				for(int i = 0; i < _broadcasts.length; i++) {
 					lookupRows[i] = _lookupRows[i].applyAsLong(streamed);
 					lookupCols[i] = _lookupCols[i].applyAsLong(streamed);
-					//a band spans consecutive column tiles from the looked-up one, so a side is not limited to a
-					//single column block; the flat request list is regrouped per side before the operation runs
+					// a band spans consecutive column tiles from the looked-up one, so a side is not limited to a
+					// single column block; the flat request list is regrouped per side before the operation runs
 					for(int tile = 0; tile < _bandWidths[i]; tile++)
 						requests.add(_readers[i].request(lookupRows[i], lookupCols[i] + tile, budget));
 				}
 			}
 			catch(Throwable failure) {
-				//a later side failed to issue, so the tiles the earlier sides are still pinning would never be
-				//handed to anyone; release them as they arrive instead of leaking the pins
+				// a later side failed to issue, so the tiles the earlier sides are still pinning would never be
+				// handed to anyone; release them as they arrive instead of leaking the pins
 				for(OOCFuture<StoreLease<IndexedMatrixValue>> issued : requests)
 					issued.whenComplete((lease, ignored) -> {
 						if(lease != null)
@@ -292,14 +316,14 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 				budget.close();
 			}
 			finally {
-					int side = 0;
+				int side = 0;
 				int within = missing;
 				while(side < _bandWidths.length - 1 && within >= _bandWidths[side]) {
 					within -= _bandWidths[side];
 					side++;
 				}
-				fail(error != null ? error : new IllegalStateException("Missing broadcast tile ("
-					+ lookupRows[side] + "," + (lookupCols[side] + within) + ") on indexed input " + (side + 1)));
+				fail(error != null ? error : new IllegalStateException("Missing broadcast tile (" + lookupRows[side]
+					+ "," + (lookupCols[side] + within) + ") on indexed input " + (side + 1)));
 				completeOne();
 			}
 			return;

@@ -36,6 +36,7 @@ import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.Instruction;
 import org.apache.sysds.runtime.instructions.cp.BooleanObject;
 import org.apache.sysds.runtime.lineage.LineageDedupUtils;
+import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
 
 
 public class WhileProgramBlock extends ProgramBlock 
@@ -124,8 +125,15 @@ public class WhileProgramBlock extends ProgramBlock
 					ec.getLineage().createDedupPatch(this, ec);
 				
 				//execute all child blocks
-				for (int i=0 ; i < _childBlocks.size() ; i++) {
-					_childBlocks.get(i).execute(ec);
+				long previousEpoch = DMLScript.USE_OOC ? OOCPlanner.beginLoopIteration() : 0;
+				try {
+					for(int i = 0; i < _childBlocks.size(); i++) {
+						_childBlocks.get(i).execute(ec);
+					}
+				}
+				finally {
+					if(DMLScript.USE_OOC)
+						OOCPlanner.endLoopIteration(previousEpoch);
 				}
 				
 				if (DMLScript.LINEAGE_DEDUP) {

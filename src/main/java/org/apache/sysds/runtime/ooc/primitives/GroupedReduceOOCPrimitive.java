@@ -106,6 +106,34 @@ public final class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		_finalizedGroups = new AtomicInteger();
 	}
 
+	public Grouping getGrouping() {
+		return _grouping;
+	}
+
+	public Function<IndexedMatrixValue, MatrixBlock> getPartialOperation() {
+		return _partial;
+	}
+
+	public BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> getMergeOperation() {
+		return _merge;
+	}
+
+	public Function<MatrixBlock, MatrixBlock> getFinishOperation() {
+		return _finish;
+	}
+
+	public OOCStreamable<IndexedMatrixValue> getOutput() {
+		return _output;
+	}
+
+	@Override
+	public long getMaxTaskReservationBytes(IndexedMatrixValue... inputs) {
+		long inputBytes = inputs.length == 0 ? OOCUtils
+			.estimateOutputTileBytes(_inputs.get(0).getDataCharacteristics()) : OOCUtils.memoryCharge(inputs[0]);
+		long outputBytes = OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics());
+		return OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + outputBytes * 2;
+	}
+
 	@Override
 	protected void inferPatternsInternal() {
 		if(_grouping == Grouping.BLOCK_INDEX) {
@@ -165,8 +193,8 @@ public final class GroupedReduceOOCPrimitive extends OOCPrimitive {
 			OOCStream<IndexedMatrixValue> input = getInputReadStream(i);
 			getContext().addInStream(input);
 			AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(input, _allowance,
-				value -> OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(OOCUtils.memoryCharge(value))
-					+ outputBytes * 2);
+				value -> OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(OOCUtils.memoryCharge(value)) +
+					outputBytes * 2);
 			getContext().addInStream(admitted);
 			final int source = i;
 			admitted.setSubscriber(callback -> accept(source, callback));

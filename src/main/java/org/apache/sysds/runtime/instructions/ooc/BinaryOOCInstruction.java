@@ -133,6 +133,6 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 		OOCInstructionUtils.propagateDims(ec, output, min.getNumRows(), min.getNumColumns(), min.getBlocksize(), -1);
 		ec.getMatrixObject(output).setStreamHandle(qOut);
 		OOCInstructionUtils.equiMapBlock(min.getStreamable(), qOut,
-			block -> block.scalarOperations(sc_op, new MatrixBlock()), getContext());
+			block -> block.scalarOperations(sc_op, new MatrixBlock()), sc_op.sparseSafe, getContext());
 	}
 }

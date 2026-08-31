@@ -50,25 +50,32 @@ import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 /**
  * Applies a fused derive-and-combine operation to complete row groups of one materialized matrix. The anchor tiles
- * remain pinned from derivation through combination, allowing both stages to share one physical read of each group.
-	 * The bounded driver can overlap multiple group fetches. Workspace and output estimates are upper bounds; outputs
-	 * must not alias storage owned by an anchor tile.
+ * remain pinned from derivation through combination, allowing both stages to share one physical read of each group. The
+ * bounded driver can overlap multiple group fetches. Workspace and output estimates are upper bounds; outputs must not
+ * alias storage owned by an anchor tile.
  */
 public final class CorrelatedScanOOCPrimitive<D, O> extends OOCPrimitive {
-	private final OOCStreamable<IndexedMatrixValue> _input;
-	private final OOCStreamable<O> _output;
-	private final Function<List<IndexedMatrixValue>, D> _derive;
-	private final BiFunction<List<IndexedMatrixValue>, D, List<O>> _combine;
+	public enum InputAccess {
+		ROW_ALIGNED, FULL
+	}
+
+	private final List<OOCStreamable<IndexedMatrixValue>> _inputs;
+	private final List<InputAccess> _inputAccess;
+	private final List<OOCStreamable<O>> _outputs;
+	private final BiFunction<List<IndexedMatrixValue>, List<List<IndexedMatrixValue>>, D> _derive;
+	private final BiFunction<List<IndexedMatrixValue>, D, List<Output<O>>> _combine;
 	private final ToLongFunction<O> _outputSize;
 	private final long _workspaceBytes;
 	private final long _outputBytesPerGroup;
 	private final Semaphore _fetchSlots;
 	private final AtomicBoolean _cleaned = new AtomicBoolean();
+	private final AtomicBoolean _startupFinished = new AtomicBoolean();
 	private final AtomicInteger _active = new AtomicInteger(1);
-	private MaterializedStore<IndexedMatrixValue> _store;
-	private IndexedMaterializedStoreReader<IndexedMatrixValue> _reader;
+	private final AtomicInteger _pendingStores;
+	private final MaterializedStore<IndexedMatrixValue>[] _stores;
+	private final IndexedMaterializedStoreReader<IndexedMatrixValue>[] _readers;
 	private OOCStream<GroupWork> _ready;
-	private OOCStream<O> _outputStream;
+	private List<OOCStream<O>> _outputStreams;
 	private int _rowBlocks;
 	private int _colBlocks;
 	private long _taskBytes;
@@ -77,26 +84,85 @@ public final class CorrelatedScanOOCPrimitive<D, O> extends OOCPrimitive {
 		Function<List<IndexedMatrixValue>, D> derive, BiFunction<List<IndexedMatrixValue>, D, List<O>> combine,
 		ToLongFunction<O> outputSize, long workspaceBytes, long outputBytesPerGroup, int maxPendingFetches,
 		StreamContext context) {
-		super(context, input);
+		this(input, List.of(output), derive,
+			(values, derived) -> combine.apply(values, derived).stream().map(value -> new Output<>(0, value)).toList(),
+			outputSize, workspaceBytes, outputBytesPerGroup, maxPendingFetches, context);
+	}
+
+	public CorrelatedScanOOCPrimitive(OOCStreamable<IndexedMatrixValue> input, List<? extends OOCStreamable<O>> outputs,
+		Function<List<IndexedMatrixValue>, D> derive, BiFunction<List<IndexedMatrixValue>, D, List<Output<O>>> combine,
+		ToLongFunction<O> outputSize, long workspaceBytes, long outputBytesPerGroup, int maxPendingFetches,
+		StreamContext context) {
+		this(List.of(input), outputs, (anchor, sides) -> derive.apply(anchor), combine, outputSize, workspaceBytes,
+			outputBytesPerGroup, maxPendingFetches, context);
+	}
+
+	@SuppressWarnings("unchecked")
+	public CorrelatedScanOOCPrimitive(List<? extends OOCStreamable<IndexedMatrixValue>> inputs,
+		List<? extends OOCStreamable<O>> outputs,
+		BiFunction<List<IndexedMatrixValue>, List<List<IndexedMatrixValue>>, D> derive,
+		BiFunction<List<IndexedMatrixValue>, D, List<Output<O>>> combine, ToLongFunction<O> outputSize,
+		long workspaceBytes, long outputBytesPerGroup, int maxPendingFetches, StreamContext context) {
+		this(inputs, defaultInputAccess(inputs.size()), outputs, derive, combine, outputSize, workspaceBytes,
+			outputBytesPerGroup, maxPendingFetches, context);
+	}
+
+	@SuppressWarnings("unchecked")
+	public CorrelatedScanOOCPrimitive(List<? extends OOCStreamable<IndexedMatrixValue>> inputs,
+		List<InputAccess> inputAccess, List<? extends OOCStreamable<O>> outputs,
+		BiFunction<List<IndexedMatrixValue>, List<List<IndexedMatrixValue>>, D> derive,
+		BiFunction<List<IndexedMatrixValue>, D, List<Output<O>>> combine, ToLongFunction<O> outputSize,
+		long workspaceBytes, long outputBytesPerGroup, int maxPendingFetches, StreamContext context) {
+		super(context, inputs.toArray(OOCStreamable[]::new));
+		if(inputs.isEmpty())
+			throw new IllegalArgumentException("Correlated scan requires an anchor input.");
+		if(outputs.isEmpty())
+			throw new IllegalArgumentException("Correlated scan requires at least one output stream.");
 		if(workspaceBytes < 0 || outputBytesPerGroup < 0)
 			throw new IllegalArgumentException("Correlated scan memory estimates must not be negative.");
 		if(maxPendingFetches <= 0)
 			throw new IllegalArgumentException("Correlated scan must allow at least one pending fetch.");
-		_input = input;
-		_output = output;
+		if(inputAccess.size() != inputs.size() || inputAccess.get(0) != InputAccess.ROW_ALIGNED)
+			throw new IllegalArgumentException(
+				"Correlated scan requires one access mode per input and a row-aligned anchor.");
+		_inputs = List.copyOf(inputs);
+		_inputAccess = List.copyOf(inputAccess);
 		_derive = derive;
 		_combine = combine;
 		_outputSize = outputSize;
 		_workspaceBytes = workspaceBytes;
 		_outputBytesPerGroup = outputBytesPerGroup;
 		_fetchSlots = new Semaphore(maxPendingFetches);
+		_outputs = List.copyOf(outputs);
+		_pendingStores = new AtomicInteger(inputs.size());
+		_stores = new MaterializedStore[inputs.size()];
+		_readers = new IndexedMaterializedStoreReader[inputs.size()];
+	}
+
+	private static List<InputAccess> defaultInputAccess(int inputs) {
+		List<InputAccess> access = new ArrayList<>(inputs);
+		for(int i = 0; i < inputs; i++)
+			access.add(i == 0 ? InputAccess.ROW_ALIGNED : InputAccess.FULL);
+		return access;
+	}
+
+	public record Output<O>(int stream, O value) {
 	}
 
 	@Override
 	public List<OOCMaterializedInputRequest> requiredMaterializedInputs() {
-		long colBlocks = OOCUtils.getNumColBlocks(_input.getDataCharacteristics());
-		return List.of(new OOCMaterializedInputRequest(0, OOCStoreLayout.ROW_MAJOR, 1,
+		long colBlocks = OOCUtils.getNumColBlocks(_inputs.get(0).getDataCharacteristics());
+		List<OOCMaterializedInputRequest> requests = new ArrayList<>(_inputs.size());
+		requests.add(new OOCMaterializedInputRequest(0, OOCStoreLayout.ROW_MAJOR, 1,
 			(row, col) -> (row - 1) * colBlocks + col - 1));
+		for(int i = 1; i < _inputs.size(); i++) {
+			long sideColBlocks = OOCUtils.getNumColBlocks(_inputs.get(i).getDataCharacteristics());
+			requests.add(_inputAccess.get(i) == InputAccess.ROW_ALIGNED ? new OOCMaterializedInputRequest(i,
+				OOCStoreLayout.ROW_MAJOR, 1,
+				(row, col) -> (row - 1) * sideColBlocks + col - 1) : new OOCMaterializedInputRequest(i,
+					OOCStoreLayout.ROW_MAJOR, 1));
+		}
+		return requests;
 	}
 
 	@Override
@@ -115,36 +181,54 @@ public final class CorrelatedScanOOCPrimitive<D, O> extends OOCPrimitive {
 	}
 
 	@Override
-	protected long getMaxTaskReservationBytes() {
-		DataCharacteristics dc = _input.getDataCharacteristics();
+	public long getMaxTaskReservationBytes(IndexedMatrixValue... inputs) {
+		DataCharacteristics dc = _inputs.get(0).getDataCharacteristics();
 		return dc == null || !dc.dimsKnown() || dc.getBlocksize() <= 0 ? 0 : taskBytes(dc);
 	}
 
 	private long taskBytes(DataCharacteristics dc) {
 		long pinned = OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(OOCUtils.estimateFullTileBytes(dc)) *
 			dc.getNumColBlocks();
+		for(int i = 1; i < _inputs.size(); i++) {
+			DataCharacteristics side = _inputs.get(i).getDataCharacteristics();
+			if(side == null || !side.dimsKnown() || side.getBlocksize() <= 0)
+				throw new DMLRuntimeException("Correlated scan requires known side-input dimensions and block size.");
+			long blocks = _inputAccess.get(i) == InputAccess.ROW_ALIGNED ? side.getNumColBlocks() : OOCUtils
+				.getNumBlocks(side);
+			pinned += OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(OOCUtils.estimateFullTileBytes(side)) *
+				blocks;
+		}
 		return pinned + _workspaceBytes + _outputBytesPerGroup;
 	}
 
 	@Override
 	protected void startExecution() {
-		DataCharacteristics dc = _input.getDataCharacteristics();
+		DataCharacteristics dc = _inputs.get(0).getDataCharacteristics();
 		if(dc == null || !dc.dimsKnown() || dc.getBlocksize() <= 0)
 			throw new DMLRuntimeException("Correlated scan requires known input dimensions and block size.");
 		_rowBlocks = Math.toIntExact(dc.getNumRowBlocks());
 		_colBlocks = Math.toIntExact(dc.getNumColBlocks());
 		if(_rowBlocks <= 0 || _colBlocks <= 0)
 			throw new DMLRuntimeException("Correlated scan requires non-empty input block geometry.");
+		for(int i = 1; i < _inputs.size(); i++) {
+			DataCharacteristics side = _inputs.get(i).getDataCharacteristics();
+			if(_inputAccess.get(i) == InputAccess.ROW_ALIGNED && side.getNumRowBlocks() != _rowBlocks)
+				throw new DMLRuntimeException(
+					"Row-aligned correlated-scan inputs require matching row-block geometry.");
+		}
 		_taskBytes = taskBytes(dc);
-		_outputStream = _output.getWriteStream();
+		_outputStreams = _outputs.stream().map(OOCStreamable::getWriteStream).toList();
 		_ready = new SubscribableTaskQueue<>();
-		getContext().addOutStream(_outputStream, _ready);
+		getContext().addOutStream(_ready);
+		for(OOCStream<O> output : _outputStreams)
+			getContext().addOutStream(output);
 		OOCInstructionUtils.submitCloseableOOCTasks(_ready, this::process, getContext())
 			.whenComplete((ignored, error) -> {
 				try {
 					if(error != null)
 						fail(error);
-					_outputStream.closeInput();
+					for(OOCStream<O> output : _outputStreams)
+						output.closeInput();
 				}
 				catch(Throwable failure) {
 					fail(failure);
@@ -154,29 +238,40 @@ public final class CorrelatedScanOOCPrimitive<D, O> extends OOCPrimitive {
 				}
 			});
 
-		getMaterializedInput(0).whenComplete((store, error) -> {
-			if(error != null) {
-				fail(error);
-				completeOne();
+		for(int i = 0; i < _inputs.size(); i++) {
+			int input = i;
+			getMaterializedInput(i).whenComplete((store, error) -> prepareReader(input, store, error));
+		}
+	}
+
+	private void prepareReader(int input, MaterializedStore<IndexedMatrixValue> store, Throwable error) {
+		if(error != null) {
+			failStartup(error);
+			return;
+		}
+		_stores[input] = store;
+		store.completion().whenComplete((ignored, completionError) -> {
+			if(completionError != null) {
+				failStartup(completionError);
 				return;
 			}
-			_store = store;
-			store.completion().whenComplete((ignored, completionError) -> {
-				if(completionError != null) {
-					fail(completionError);
-					completeOne();
-					return;
-				}
-				try {
-					_reader = store.openIndexedReader(new CountingLiveness(_rowBlocks * _colBlocks, 1));
+			try {
+				long blocks = OOCUtils.getNumBlocks(_inputs.get(input).getDataCharacteristics());
+				int uses = _inputAccess.get(input) == InputAccess.ROW_ALIGNED ? 1 : _rowBlocks;
+				_readers[input] = store.openIndexedReader(new CountingLiveness(Math.toIntExact(blocks), uses));
+				if(_pendingStores.decrementAndGet() == 0 && _startupFinished.compareAndSet(false, true))
 					OOCInstructionUtils.submitOOCTask(this::drive, new StreamContext());
-				}
-				catch(Throwable failure) {
-					fail(failure);
-					completeOne();
-				}
-			});
+			}
+			catch(Throwable failure) {
+				failStartup(failure);
+			}
 		});
+	}
+
+	private void failStartup(Throwable error) {
+		fail(error);
+		if(_startupFinished.compareAndSet(false, true))
+			completeOne();
 	}
 
 	private void drive() {
@@ -218,10 +313,23 @@ public final class CorrelatedScanOOCPrimitive<D, O> extends OOCPrimitive {
 	}
 
 	private void requestGroup(int group, ReservationBudget budget) {
-		List<OOCFuture<StoreLease<IndexedMatrixValue>>> requests = new ArrayList<>(_colBlocks);
+		List<OOCFuture<StoreLease<IndexedMatrixValue>>> requests = new ArrayList<>();
+		List<Integer> widths = new ArrayList<>(_inputs.size());
 		try {
 			for(int col = 0; col < _colBlocks; col++)
-				requests.add(_reader.request(group + 1L, col + 1L, budget));
+				requests.add(_readers[0].request(group + 1L, col + 1L, budget));
+			widths.add(_colBlocks);
+			for(int input = 1; input < _inputs.size(); input++) {
+				DataCharacteristics dc = _inputs.get(input).getDataCharacteristics();
+				boolean rowAligned = _inputAccess.get(input) == InputAccess.ROW_ALIGNED;
+				int width = Math.toIntExact(rowAligned ? dc.getNumColBlocks() : OOCUtils.getNumBlocks(dc));
+				widths.add(width);
+				long firstRow = rowAligned ? group + 1L : 1L;
+				long lastRow = rowAligned ? firstRow : dc.getNumRowBlocks();
+				for(long row = firstRow; row <= lastRow; row++)
+					for(long col = 1; col <= dc.getNumColBlocks(); col++)
+						requests.add(_readers[input].request(row, col, budget));
+			}
 		}
 		catch(Throwable failure) {
 			requests.forEach(request -> request.whenComplete((lease, error) -> closeLease(lease)));
@@ -243,7 +351,7 @@ public final class CorrelatedScanOOCPrimitive<D, O> extends OOCPrimitive {
 				for(StoreLease<IndexedMatrixValue> lease : leases)
 					if(lease == null)
 						throw new DMLRuntimeException("Missing correlated-scan tile for block row " + (group + 1));
-				_ready.enqueue(new GroupWork(leases, budget));
+				_ready.enqueue(new GroupWork(leases, widths, budget));
 			}
 			catch(Throwable failure) {
 				leases.forEach(CorrelatedScanOOCPrimitive::closeLease);
@@ -256,32 +364,38 @@ public final class CorrelatedScanOOCPrimitive<D, O> extends OOCPrimitive {
 
 	private void process(GroupWork work) {
 		ReservationBudget budget = work.takeBudget();
-		List<OOCStream.QueueCallback<O>> callbacks = new ArrayList<>();
+		List<PendingOutput<O>> callbacks = new ArrayList<>();
 		boolean workspaceReserved = false;
 		try {
 			if(!budget.tryReserve(_workspaceBytes))
 				throw new DMLRuntimeException("Correlated-scan workspace exceeds its admitted task budget.");
 			workspaceReserved = true;
-			List<IndexedMatrixValue> anchor = work.values();
-			D derived = _derive.apply(anchor);
-			List<O> outputs = _combine.apply(anchor, derived);
+			List<IndexedMatrixValue> anchor = work.values(0);
+			List<List<IndexedMatrixValue>> sides = new ArrayList<>(_inputs.size() - 1);
+			for(int input = 1; input < _inputs.size(); input++)
+				sides.add(work.values(input));
+			D derived = _derive.apply(anchor, sides);
+			List<Output<O>> outputs = _combine.apply(anchor, derived);
 			if(outputs == null)
 				throw new DMLRuntimeException("Correlated scan produced a null output list.");
-			for(O output : outputs) {
-				if(output == null)
+			for(Output<O> output : outputs) {
+				if(output == null || output.value() == null)
 					throw new DMLRuntimeException("Correlated scan produced a null output.");
-				long bytes = _outputSize.applyAsLong(output);
+				if(output.stream() < 0 || output.stream() >= _outputStreams.size())
+					throw new DMLRuntimeException("Invalid correlated-scan output stream " + output.stream());
+				long bytes = _outputSize.applyAsLong(output.value());
 				if(!budget.tryReserve(bytes))
 					throw new DMLRuntimeException("Correlated-scan output exceeds its admitted task budget.");
-				callbacks.add(new InMemoryQueueCallback<>(output, null, budget, bytes));
+				callbacks.add(new PendingOutput<>(output.stream(),
+					new InMemoryQueueCallback<>(output.value(), null, budget, bytes)));
 			}
 			budget.release(_workspaceBytes);
 			workspaceReserved = false;
 			work.releaseLeases();
 			budget.close();
 			for(int i = 0; i < callbacks.size(); i++) {
-				OOCStream.QueueCallback<O> callback = callbacks.get(i);
-				_outputStream.enqueue(callback);
+				PendingOutput<O> output = callbacks.get(i);
+				_outputStreams.get(output.stream()).enqueue(output.callback());
 				callbacks.set(i, null);
 			}
 		}
@@ -289,9 +403,9 @@ public final class CorrelatedScanOOCPrimitive<D, O> extends OOCPrimitive {
 			fail(failure);
 		}
 		finally {
-			for(OOCStream.QueueCallback<O> callback : callbacks)
-				if(callback != null)
-					callback.close();
+			for(PendingOutput<O> output : callbacks)
+				if(output != null)
+					output.callback().close();
 			if(workspaceReserved)
 				budget.release(_workspaceBytes);
 			budget.close();
@@ -318,17 +432,15 @@ public final class CorrelatedScanOOCPrimitive<D, O> extends OOCPrimitive {
 		if(!_cleaned.compareAndSet(false, true))
 			return;
 		try {
-			if(_reader != null)
-				_reader.close();
+			for(IndexedMaterializedStoreReader<IndexedMatrixValue> reader : _readers)
+				if(reader != null)
+					reader.close();
 		}
 		finally {
-			try {
-				if(_store != null)
-					_store.close();
-			}
-			finally {
-				onComplete();
-			}
+			for(MaterializedStore<IndexedMatrixValue> store : _stores)
+				if(store != null)
+					store.close();
+			onComplete();
 		}
 	}
 
@@ -337,17 +449,28 @@ public final class CorrelatedScanOOCPrimitive<D, O> extends OOCPrimitive {
 			lease.close();
 	}
 
+	private record PendingOutput<O>(int stream, OOCStream.QueueCallback<O> callback) {
+	}
+
 	private static final class GroupWork implements AutoCloseable {
 		private List<StoreLease<IndexedMatrixValue>> _leases;
+		private final List<Integer> _widths;
 		private ReservationBudget _budget;
 
-		private GroupWork(List<StoreLease<IndexedMatrixValue>> leases, ReservationBudget budget) {
+		private GroupWork(List<StoreLease<IndexedMatrixValue>> leases, List<Integer> widths, ReservationBudget budget) {
 			_leases = leases;
+			_widths = widths;
 			_budget = budget;
 		}
 
-		private List<IndexedMatrixValue> values() {
-			return _leases.stream().map(StoreLease::value).toList();
+		private List<IndexedMatrixValue> values(int input) {
+			int offset = 0;
+			for(int i = 0; i < input; i++)
+				offset += _widths.get(i);
+			List<IndexedMatrixValue> values = new ArrayList<>(_widths.get(input));
+			for(int i = 0; i < _widths.get(input); i++)
+				values.add(_leases.get(offset + i).value());
+			return values;
 		}
 
 		private ReservationBudget takeBudget() {

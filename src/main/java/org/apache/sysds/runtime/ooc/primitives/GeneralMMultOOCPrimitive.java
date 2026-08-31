@@ -77,11 +77,36 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 		_plus = plus;
 	}
 
+	public AggregateBinaryOperator getMultiplyOperator() {
+		return _multiply;
+	}
+
+	public BinaryOperator getMergeOperator() {
+		return _plus;
+	}
+
+	public OOCStreamable<IndexedMatrixValue> getOutput() {
+		return _output;
+	}
+
+	@Override
+	public long getMaxTaskReservationBytes(IndexedMatrixValue... inputs) {
+		long leftBytes = inputs.length > 0 ? OOCUtils.memoryCharge(inputs[0]) : OOCUtils
+			.estimateFullTileBytes(getInput(0).getDataCharacteristics());
+		long rightBytes = inputs.length > 1 ? OOCUtils.memoryCharge(inputs[1]) : OOCUtils
+			.estimateFullTileBytes(getInput(1).getDataCharacteristics());
+		long outputBytes = OOCUtils.estimateFullTileBytes(_output.getDataCharacteristics());
+		return OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(leftBytes) +
+			OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(rightBytes) +
+			OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(outputBytes) + outputBytes * 3;
+	}
+
 	@Override
 	public List<OOCMaterializedInputRequest> requiredMaterializedInputs() {
 		long innerBlocks = OOCUtils.getNumColBlocks(getInput(0).getDataCharacteristics());
-		return List.of(new OOCMaterializedInputRequest(0, OOCStoreLayout.ROW_MAJOR, 1,
-			(row, col) -> (row - 1) * innerBlocks + col - 1),
+		return List.of(
+			new OOCMaterializedInputRequest(0, OOCStoreLayout.ROW_MAJOR, 1,
+				(row, col) -> (row - 1) * innerBlocks + col - 1),
 			new OOCMaterializedInputRequest(1, OOCStoreLayout.COL_MAJOR, 1,
 				(row, col) -> (col - 1) * innerBlocks + row - 1));
 	}
@@ -111,12 +136,7 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 		_innerBlocks = Math.toIntExact(OOCUtils.getNumColBlocks(left));
 		_colBlocks = Math.toIntExact(OOCUtils.getNumColBlocks(right));
 		_numTasks = _rowBlocks * _innerBlocks * _colBlocks;
-		long leftBytes = OOCUtils.estimateFullTileBytes(left);
-		long rightBytes = OOCUtils.estimateFullTileBytes(right);
-		long outputBytes = OOCUtils.estimateFullTileBytes(_output.getDataCharacteristics());
-		_taskBytes = OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(leftBytes) +
-			OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(rightBytes) +
-			OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(outputBytes) + outputBytes * 3;
+		_taskBytes = getMaxTaskReservationBytes();
 
 		_outputStream = _output.getWriteStream();
 		_ready = new SubscribableTaskQueue<>();

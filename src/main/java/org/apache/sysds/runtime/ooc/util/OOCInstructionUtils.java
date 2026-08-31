@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.ooc.util;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -59,6 +60,7 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
+import org.apache.sysds.runtime.ooc.planning.OOCTileOperation;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.CtableOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.CorrelatedScanOOCPrimitive;
@@ -120,8 +122,8 @@ public final class OOCInstructionUtils {
 	}
 
 	public static <T extends SpillableObject> void uncoordinatedDataGen(OOCStream<T> output, LongSupplier bulkBytes,
-		long maxBulkBytes, OOCAccessPattern pattern, BiFunction<Long, Consumer<T>, Boolean> producer,
-		Runnable cleanup, LongSupplier outputBulkBytes, Predicate<T> startsOutputBulk, Predicate<T> endsOutputBulk,
+		long maxBulkBytes, OOCAccessPattern pattern, BiFunction<Long, Consumer<T>, Boolean> producer, Runnable cleanup,
+		LongSupplier outputBulkBytes, Predicate<T> startsOutputBulk, Predicate<T> endsOutputBulk,
 		Predicate<T> refillsOutputBulk, StreamContext context) {
 		output.assignPrimitive(new UncoordinatedDataGenOOCPrimitive<>(output, bulkBytes, maxBulkBytes, pattern,
 			producer, cleanup, outputBulkBytes, startsOutputBulk, endsOutputBulk, refillsOutputBulk, context));
@@ -129,12 +131,31 @@ public final class OOCInstructionUtils {
 
 	public static void equiMapBlock(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
 		Function<MatrixBlock, MatrixBlock> operation, StreamContext context) {
-		equiMap(input, output, value -> operation.apply((MatrixBlock) value.getValue()), context);
+		equiMapBlock(input, output, operation, OOCTileOperation.denseOutput(), context);
+	}
+
+	public static void equiMapBlock(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
+		Function<MatrixBlock, MatrixBlock> operation, boolean sparsityPreserving, StreamContext context) {
+		equiMapBlock(input, output, operation,
+			sparsityPreserving ? OOCTileOperation.preservesSingleInputNnz() : OOCTileOperation.denseOutput(), context);
+	}
+
+	public static void equiMapBlock(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
+		Function<MatrixBlock, MatrixBlock> operation, ToLongFunction<long[]> worstCaseOutputNnz,
+		StreamContext context) {
+		equiMap(input, output, value -> operation.apply((MatrixBlock) value.getValue()), worstCaseOutputNnz, context);
 	}
 
 	public static void equiMap(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
 		Function<IndexedMatrixValue, MatrixBlock> operation, StreamContext context) {
-		output.assignPrimitive(new MappingOOCPrimitive(input, output, operation, context));
+		equiMap(input, output, operation, OOCTileOperation.denseOutput(), context);
+	}
+
+	public static void equiMap(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
+		Function<IndexedMatrixValue, MatrixBlock> operation, ToLongFunction<long[]> worstCaseOutputNnz,
+		StreamContext context) {
+		OOCTileOperation tileOperation = equiTileOperation(1, worstCaseOutputNnz);
+		output.assignPrimitive(new MappingOOCPrimitive(input, output, operation, tileOperation, context));
 	}
 
 	public static <I, O> void flatMap(OOCStreamable<I> input, OOCStream<O> output, Function<I, Collection<O>> operation,
@@ -149,7 +170,10 @@ public final class OOCInstructionUtils {
 
 	public static void transposedMap(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
 		Function<MatrixBlock, MatrixBlock> operation, StreamContext context) {
-		output.assignPrimitive(new TransposeOOCPrimitive(input, output, operation, context));
+		TransposeOOCPrimitive primitive = new TransposeOOCPrimitive(input, output, operation, context);
+		primitive.setTileOperation(
+			new OOCTileOperation(OOCTileOperation.preservesSingleInputNnz(), OOCTileOperation.Relation.TRANSPOSE));
+		output.assignPrimitive(primitive);
 	}
 
 	public static void transpose(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
@@ -178,8 +202,8 @@ public final class OOCInstructionUtils {
 
 	public static void slice(OOCStreamable<IndexedMatrixValue> input, OOCStream<IndexedMatrixValue> output,
 		long firstRowBlock, long lastRowBlock, long firstColBlock, long lastColBlock, StreamContext context) {
-		output.assignPrimitive(new SliceOOCPrimitive(input, output, firstRowBlock, lastRowBlock, firstColBlock,
-			lastColBlock, context));
+		output.assignPrimitive(
+			new SliceOOCPrimitive(input, output, firstRowBlock, lastRowBlock, firstColBlock, lastColBlock, context));
 	}
 
 	public static void repartition(List<? extends OOCStreamable<IndexedMatrixValue>> inputs,
@@ -199,15 +223,24 @@ public final class OOCInstructionUtils {
 	public static void equiJoin(OOCStreamable<IndexedMatrixValue> left, OOCStreamable<IndexedMatrixValue> right,
 		OOCStream<IndexedMatrixValue> output, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> operation,
 		StreamContext context) {
+		equiJoin(left, right, output, operation, OOCTileOperation.denseOutput(), context);
+	}
+
+	public static void equiJoin(OOCStreamable<IndexedMatrixValue> left, OOCStreamable<IndexedMatrixValue> right,
+		OOCStream<IndexedMatrixValue> output, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> operation,
+		ToLongFunction<long[]> worstCaseOutputNnz, StreamContext context) {
 		long cols = right.getDataCharacteristics().getNumColBlocks();
 		long inputBytes = Math.max(OOCUtils.estimateOutputTileBytes(left.getDataCharacteristics()),
 			OOCUtils.estimateOutputTileBytes(right.getDataCharacteristics()));
 		long outputBytes = OOCUtils.estimateOutputTileBytes(output.getDataCharacteristics());
 		ToIntFunction<IndexedMatrixValue> key = matrixIndexKey(cols);
-		keyedJoin(left, right, output, key, key, OOCUtils::memoryCharge,
+		JoinOOCPrimitive<IndexedMatrixValue, IndexedMatrixValue, IndexedMatrixValue> primitive = new JoinOOCPrimitive<>(
+			left, right, output, key, key, OOCUtils::memoryCharge,
 			(leftValue, rightValue) -> new IndexedMatrixValue(leftValue.getIndexes(),
 				operation.apply((MatrixBlock) leftValue.getValue(), (MatrixBlock) rightValue.getValue())),
 			inputBytes + OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + outputBytes, context);
+		primitive.setTileOperation(equiTileOperation(2, worstCaseOutputNnz));
+		output.assignPrimitive(primitive);
 	}
 
 	public static <O> void equiJoinIndexed(OOCStreamable<IndexedMatrixValue> left,
@@ -233,8 +266,8 @@ public final class OOCInstructionUtils {
 	public static void naryEquiJoin(List<OOCStreamable<IndexedMatrixValue>> inputs,
 		OOCStream<IndexedMatrixValue> output, Function<List<IndexedMatrixValue>, IndexedMatrixValue> operation,
 		StreamContext context) {
-		naryEquiJoin(inputs, output, operation, OOCUtils::memoryCharge,
-			context);
+		naryEquiJoin(inputs, output, operation, OOCUtils::memoryCharge, context);
+		output.getPrimitive().setTileOperation(equiTileOperation(inputs.size(), OOCTileOperation.denseOutput()));
 	}
 
 	public static <O> void naryEquiJoin(List<OOCStreamable<IndexedMatrixValue>> inputs, OOCStream<O> output,
@@ -258,7 +291,10 @@ public final class OOCInstructionUtils {
 	public static void matrixMultiply(OOCStreamable<IndexedMatrixValue> left, OOCStreamable<IndexedMatrixValue> right,
 		OOCStream<IndexedMatrixValue> output, AggregateBinaryOperator multiply, BinaryOperator plus,
 		StreamContext context) {
-		output.assignPrimitive(new GeneralMMultOOCPrimitive(left, right, output, multiply, plus, context));
+		GeneralMMultOOCPrimitive primitive = new GeneralMMultOOCPrimitive(left, right, output, multiply, plus, context);
+		primitive.setTileOperation(new OOCTileOperation(OOCTileOperation.denseOutput(),
+			OOCTileOperation.Relation.ROW_GROUP, OOCTileOperation.Relation.COL_GROUP));
+		output.assignPrimitive(primitive);
 	}
 
 	public static void indexedBroadcastMap(OOCStreamable<IndexedMatrixValue> streamed,
@@ -271,9 +307,9 @@ public final class OOCInstructionUtils {
 	}
 
 	/**
-	 * Pairs every tile of the streamed input with one indexed tile from each of several secondary inputs. The
-	 * secondary inputs are read through indexed store readers, so they need not fit in memory; a side that does not
-	 * fit degrades to disk-backed random access driven by its liveness counts.
+	 * Pairs every tile of the streamed input with one indexed tile from each of several secondary inputs. The secondary
+	 * inputs are read through indexed store readers, so they need not fit in memory; a side that does not fit degrades
+	 * to disk-backed random access driven by its liveness counts.
 	 *
 	 * @param streamed   the driving input
 	 * @param broadcasts the indexed inputs, one lookup and liveness each
@@ -323,7 +359,11 @@ public final class OOCInstructionUtils {
 		OOCStream<IndexedMatrixValue> output, GroupedReduceOOCPrimitive.Grouping grouping,
 		Function<IndexedMatrixValue, MatrixBlock> partial, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> merge,
 		Function<MatrixBlock, MatrixBlock> finish, StreamContext context) {
-		output.assignPrimitive(new GroupedReduceOOCPrimitive(input, output, grouping, partial, merge, finish, context));
+		GroupedReduceOOCPrimitive primitive = new GroupedReduceOOCPrimitive(input, output, grouping, partial, merge,
+			finish, context);
+		OOCTileOperation.Relation relation = grouping == GroupedReduceOOCPrimitive.Grouping.ROW_BLOCKS ? OOCTileOperation.Relation.ROW_GROUP : grouping == GroupedReduceOOCPrimitive.Grouping.COL_BLOCKS ? OOCTileOperation.Relation.COL_GROUP : OOCTileOperation.Relation.EQUI;
+		primitive.setTileOperation(new OOCTileOperation(OOCTileOperation.denseOutput(), relation));
+		output.assignPrimitive(primitive);
 	}
 
 	/**
@@ -340,8 +380,17 @@ public final class OOCInstructionUtils {
 	public static void naryEquiReduce(List<OOCStreamable<IndexedMatrixValue>> inputs,
 		OOCStream<IndexedMatrixValue> output, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> merge,
 		Function<MatrixBlock, MatrixBlock> finish, StreamContext context) {
-		output.assignPrimitive(new GroupedReduceOOCPrimitive(inputs, output, GroupedReduceOOCPrimitive.Grouping.BLOCK_INDEX,
-			value -> (MatrixBlock) value.getValue(), merge, finish, context));
+		GroupedReduceOOCPrimitive primitive = new GroupedReduceOOCPrimitive(inputs, output,
+			GroupedReduceOOCPrimitive.Grouping.BLOCK_INDEX, value -> (MatrixBlock) value.getValue(), merge, finish,
+			context);
+		primitive.setTileOperation(equiTileOperation(inputs.size(), OOCTileOperation.denseOutput()));
+		output.assignPrimitive(primitive);
+	}
+
+	private static OOCTileOperation equiTileOperation(int inputs, ToLongFunction<long[]> worstCaseOutputNnz) {
+		OOCTileOperation.Relation[] relations = new OOCTileOperation.Relation[inputs];
+		Arrays.fill(relations, OOCTileOperation.Relation.EQUI);
+		return new OOCTileOperation(worstCaseOutputNnz, relations);
 	}
 
 	public static <I, O> void reduce(OOCStreamable<I> input, OOCStream<O> output, Function<I, O> partial,
@@ -373,6 +422,29 @@ public final class OOCInstructionUtils {
 		StreamContext context) {
 		output.assignPrimitive(new CorrelatedScanOOCPrimitive<>(input, output, derive, combine, outputSize,
 			workspaceBytes, outputBytesPerGroup, maxPendingFetches, context));
+	}
+
+	public static <D, O> void correlatedScan(OOCStreamable<IndexedMatrixValue> input,
+		List<? extends OOCStreamable<O>> outputs, Function<List<IndexedMatrixValue>, D> derive,
+		BiFunction<List<IndexedMatrixValue>, D, List<CorrelatedScanOOCPrimitive.Output<O>>> combine,
+		ToLongFunction<O> outputSize, long workspaceBytes, long outputBytesPerGroup, int maxPendingFetches,
+		StreamContext context) {
+		CorrelatedScanOOCPrimitive<D, O> primitive = new CorrelatedScanOOCPrimitive<>(input, outputs, derive, combine,
+			outputSize, workspaceBytes, outputBytesPerGroup, maxPendingFetches, context);
+		for(OOCStreamable<O> output : outputs)
+			output.assignPrimitive(primitive);
+	}
+
+	public static <D, O> void correlatedScan(List<? extends OOCStreamable<IndexedMatrixValue>> inputs,
+		List<? extends OOCStreamable<O>> outputs,
+		BiFunction<List<IndexedMatrixValue>, List<List<IndexedMatrixValue>>, D> derive,
+		BiFunction<List<IndexedMatrixValue>, D, List<CorrelatedScanOOCPrimitive.Output<O>>> combine,
+		ToLongFunction<O> outputSize, long workspaceBytes, long outputBytesPerGroup, int maxPendingFetches,
+		StreamContext context) {
+		CorrelatedScanOOCPrimitive<D, O> primitive = new CorrelatedScanOOCPrimitive<>(inputs, outputs, derive, combine,
+			outputSize, workspaceBytes, outputBytesPerGroup, maxPendingFetches, context);
+		for(OOCStreamable<O> output : outputs)
+			output.assignPrimitive(primitive);
 	}
 
 	public static <T extends AutoCloseable> CompletableFuture<Void> submitCloseableOOCTasks(OOCStream<T> queue,

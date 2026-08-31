@@ -25,22 +25,55 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
+import org.apache.sysds.runtime.ooc.planning.OOCTileOperation;
 import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
-import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 public class MappingOOCPrimitive extends OOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _output;
 	private final Function<IndexedMatrixValue, MatrixBlock> _operation;
+	private final OOCTileOperation _tileOperation;
 
 	public MappingOOCPrimitive(OOCStreamable<IndexedMatrixValue> input, OOCStreamable<IndexedMatrixValue> output,
 		Function<IndexedMatrixValue, MatrixBlock> operation, StreamContext context) {
+		this(input, output, operation,
+			new OOCTileOperation(OOCTileOperation.denseOutput(), OOCTileOperation.Relation.EQUI), context);
+	}
+
+	public MappingOOCPrimitive(OOCStreamable<IndexedMatrixValue> input, OOCStreamable<IndexedMatrixValue> output,
+		Function<IndexedMatrixValue, MatrixBlock> operation, OOCTileOperation tileOperation, StreamContext context) {
 		super(context, input);
 		_output = output;
 		_operation = operation;
+		_tileOperation = tileOperation;
+		setTileOperation(tileOperation);
+	}
+
+	public Function<IndexedMatrixValue, MatrixBlock> getOperation() {
+		return _operation;
+	}
+
+	public OOCStreamable<IndexedMatrixValue> getOutput() {
+		return _output;
+	}
+
+	@Override
+	public long getMaxTaskReservationBytes(IndexedMatrixValue... inputs) {
+		DataCharacteristics dc = _output.getDataCharacteristics();
+		int blocksize = dc != null && dc.getBlocksize() > 0 ? dc.getBlocksize() : 1000;
+		IndexedMatrixValue input = inputs.length == 0 ? null : inputs[0];
+		long rows = input == null ? dc == null || !dc.dimsKnown() ? blocksize : Math.min(dc.getRows(),
+			blocksize) : input.getValue().getNumRows();
+		long cols = input == null ? dc == null || !dc.dimsKnown() ? blocksize : Math.min(dc.getCols(),
+			blocksize) : input.getValue().getNumColumns();
+		long cells = rows * cols;
+		long inputNnz = input == null ? -1 : input.getValue().getNonZeros();
+		long outputNnz = _tileOperation.worstCaseOutputNnz(new long[] {inputNnz}, cells);
+		return MatrixBlock.estimateSizeInMemory(rows, cols, outputNnz);
 	}
 
 	@Override
@@ -60,17 +93,11 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
-	protected long getMaxTaskReservationBytes() {
-		return OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics());
-	}
-
-	@Override
 	protected void startExecution() {
 		OOCStream<IndexedMatrixValue> input = getInputReadStream(0);
 		OOCStream<IndexedMatrixValue> output = _output.getWriteStream();
-		long outputBytes = OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics());
 		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(input, _allowance,
-			ignored -> outputBytes, true);
+			value -> getMaxTaskReservationBytes(value), true);
 		getContext().addOutStream(output);
 		OOCInstructionUtils.submitOOCTasks(admitted, callback -> {
 			ReservationBudget budget = AllocatedOOCStream.detachBudget(callback);

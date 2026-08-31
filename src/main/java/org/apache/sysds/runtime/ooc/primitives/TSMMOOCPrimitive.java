@@ -107,7 +107,7 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
-	protected long getMaxTaskReservationBytes() {
+	public long getMaxTaskReservationBytes(IndexedMatrixValue... inputs) {
 		DataCharacteristics inputDc = _input.getDataCharacteristics();
 		DataCharacteristics outputDc = _output.getDataCharacteristics();
 		if(inputDc == null || !inputDc.dimsKnown() || outputDc == null || !outputDc.dimsKnown())
@@ -181,8 +181,7 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 						return;
 					}
 					_inputReader = store.openIndexedReader(liveness);
-					OOCInstructionUtils.submitOOCTask(this::drain,
-						new StreamContext().addOutStream(_outputStream));
+					OOCInstructionUtils.submitOOCTask(this::drain, new StreamContext().addOutStream(_outputStream));
 				});
 		});
 	}
@@ -255,30 +254,32 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 			long groupIndex = group + 1L;
 			long leftIndex = left + 1L;
 			long rightIndex = right + 1L;
-			OOCFuture.allOf(List.of(
-				_inputReader.request(_type.isLeft() ? groupIndex : leftIndex,
-					_type.isLeft() ? leftIndex : groupIndex, budget),
-				_inputReader.request(_type.isLeft() ? groupIndex : rightIndex,
-					_type.isLeft() ? rightIndex : groupIndex, budget)), TSMMOOCPrimitive::closeLease)
+			OOCFuture
+				.allOf(List.of(
+					_inputReader.request(_type.isLeft() ? groupIndex : leftIndex,
+						_type.isLeft() ? leftIndex : groupIndex, budget),
+					_inputReader.request(_type.isLeft() ? groupIndex : rightIndex,
+						_type.isLeft() ? rightIndex : groupIndex, budget)),
+					TSMMOOCPrimitive::closeLease)
 				.whenComplete((inputs, inputError) -> {
-				if(inputError != null) {
-					budget.close();
-					fail(inputError);
-					finishPair(group);
-					return;
-				}
-				try {
-					if(inputs.get(0) == null || inputs.get(1) == null)
-						throw new DMLRuntimeException("Missing buffered TSMM tiles for group " + (group + 1));
-					_ready.enqueue(new MultiplyWork(group, left, right, inputs.get(0), inputs.get(1), budget));
-				}
-				catch(Throwable failure) {
-					inputs.forEach(TSMMOOCPrimitive::closeLease);
-					budget.close();
-					fail(failure);
-					finishPair(group);
-				}
-			});
+					if(inputError != null) {
+						budget.close();
+						fail(inputError);
+						finishPair(group);
+						return;
+					}
+					try {
+						if(inputs.get(0) == null || inputs.get(1) == null)
+							throw new DMLRuntimeException("Missing buffered TSMM tiles for group " + (group + 1));
+						_ready.enqueue(new MultiplyWork(group, left, right, inputs.get(0), inputs.get(1), budget));
+					}
+					catch(Throwable failure) {
+						inputs.forEach(TSMMOOCPrimitive::closeLease);
+						budget.close();
+						fail(failure);
+						finishPair(group);
+					}
+				});
 		});
 	}
 

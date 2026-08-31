@@ -148,7 +148,7 @@ public final class MMChainOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
-	protected long getMaxTaskReservationBytes() {
+	public long getMaxTaskReservationBytes(IndexedMatrixValue... inputs) {
 		DataCharacteristics xDc = _x.getDataCharacteristics();
 		return xDc == null || !xDc.dimsKnown() || xDc.getBlocksize() <= 0 ? 0 : taskBytes(xDc);
 	}

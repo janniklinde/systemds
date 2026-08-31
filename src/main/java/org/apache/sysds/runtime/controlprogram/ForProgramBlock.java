@@ -40,6 +40,7 @@ import org.apache.sysds.runtime.instructions.cp.IntObject;
 import org.apache.sysds.runtime.instructions.cp.ScalarObject;
 import org.apache.sysds.runtime.lineage.Lineage;
 import org.apache.sysds.runtime.lineage.LineageDedupUtils;
+import org.apache.sysds.runtime.ooc.planning.OOCPlanner;
 import org.apache.sysds.runtime.util.UtilFunctions;
 
 public class ForProgramBlock extends ProgramBlock
@@ -150,8 +151,15 @@ public class ForProgramBlock extends ProgramBlock
 					ec.getLineage().createDedupPatch(this, ec);
 				
 				//execute all child blocks
-				for (int i = 0; i < _childBlocks.size(); i++)
-					_childBlocks.get(i).execute(ec);
+				long previousEpoch = DMLScript.USE_OOC ? OOCPlanner.beginLoopIteration() : 0;
+				try {
+					for(int i = 0; i < _childBlocks.size(); i++)
+						_childBlocks.get(i).execute(ec);
+				}
+				finally {
+					if(DMLScript.USE_OOC)
+						OOCPlanner.endLoopIteration(previousEpoch);
+				}
 				
 				if (DMLScript.LINEAGE_DEDUP) {
 					LineageDedupUtils.replaceLineage(ec);

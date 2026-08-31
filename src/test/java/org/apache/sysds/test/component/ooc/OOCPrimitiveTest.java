@@ -27,6 +27,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import net.jcip.annotations.NotThreadSafe;
+
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.common.Types.FileFormat;
 import org.apache.sysds.common.Types.ValueType;
@@ -49,8 +51,11 @@ import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
+import org.apache.sysds.runtime.ooc.planning.OOCTileOperation;
+import org.apache.sysds.runtime.ooc.primitives.CorrelatedScanOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.store.CountingLiveness;
 import org.apache.sysds.runtime.ooc.store.IndexedMaterializedStoreReader;
@@ -63,6 +68,7 @@ import org.apache.sysds.utils.Statistics;
 import org.junit.Assert;
 import org.junit.Test;
 
+@NotThreadSafe
 public class OOCPrimitiveTest {
 	@Test
 	public void testOutputTileEstimateUsesDenseUpperBound() {
@@ -113,6 +119,90 @@ public class OOCPrimitiveTest {
 		sink.inferPatterns();
 		sink.requestPattern(OOCAccessPattern.COL_MAJOR);
 		Assert.assertEquals(OOCAccessPattern.ROW_MAJOR, sink.getAccessPattern());
+	}
+
+	@Test
+	public void testEquiJoinExposesTileRelationship() {
+		MatrixObject data = new MatrixObject(ValueType.FP64, "/dev/null",
+			new MetaDataFormat(new MatrixCharacteristics(2, 2, 2), FileFormat.BINARY));
+		SubscribableTaskQueue<IndexedMatrixValue> left = new SubscribableTaskQueue<>();
+		SubscribableTaskQueue<IndexedMatrixValue> right = new SubscribableTaskQueue<>();
+		SubscribableTaskQueue<IndexedMatrixValue> output = new SubscribableTaskQueue<>();
+		left.setData(data);
+		right.setData(data);
+		output.setData(data);
+		OOCInstructionUtils.equiJoin(
+			left, right, output, (leftBlock, rightBlock) -> leftBlock
+				.binaryOperations(new BinaryOperator(Plus.getPlusFnObject()), rightBlock),
+			nnz -> nnz[0] + nnz[1], new StreamContext());
+
+		OOCTileOperation operation = output.getPrimitive().getTileOperation();
+		Assert.assertEquals(2, operation.getNumInputs());
+		Assert.assertEquals(OOCTileOperation.Relation.EQUI, operation.getInputRelation(0));
+		Assert.assertEquals(OOCTileOperation.Relation.EQUI, operation.getInputRelation(1));
+		Assert.assertEquals(5, operation.worstCaseOutputNnz(new long[] {2, 3}, 10));
+	}
+
+	@Test
+	public void testMappingExposesFusionHooks() {
+		MatrixObject data = new MatrixObject(ValueType.FP64, "/dev/null",
+			new MetaDataFormat(new MatrixCharacteristics(2, 2, 2), FileFormat.BINARY));
+		SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
+		SubscribableTaskQueue<IndexedMatrixValue> output = new SubscribableTaskQueue<>();
+		input.setData(data);
+		output.setData(data);
+		OOCInstructionUtils.equiMapBlock(input, output, block -> block, true, new StreamContext());
+		MappingOOCPrimitive primitive = (MappingOOCPrimitive) output.getPrimitive();
+		MatrixBlock block = new MatrixBlock(2, 2, false);
+		block.set(0, 0, 1);
+		IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(1, 1), block);
+
+		Assert.assertSame(block, primitive.getOperation().apply(value));
+		Assert.assertEquals(MatrixBlock.estimateSizeInMemory(2, 2, 1), primitive.getMaxTaskReservationBytes(value));
+		Assert.assertEquals(MatrixBlock.estimateSizeInMemory(2, 2, 4), primitive.getMaxTaskReservationBytes());
+	}
+
+	@Test
+	public void testPlannerFusesCorrelatedRowMultiply() throws InterruptedException {
+		OOCCacheManager.reset();
+		try {
+			SubscribableTaskQueue<IndexedMatrixValue> x = matrixStream(2, 2, 1);
+			SubscribableTaskQueue<IndexedMatrixValue> derived = matrixStream(2, 1, 1);
+			SubscribableTaskQueue<IndexedMatrixValue> transposed = matrixStream(1, 2, 1);
+			SubscribableTaskQueue<IndexedMatrixValue> product = matrixStream(1, 2, 1);
+			for(double[] tile : List.of(new double[] {1, 1, 1}, new double[] {1, 2, 2}, new double[] {2, 1, 3},
+				new double[] {2, 2, 4}))
+				x.enqueue(new IndexedMatrixValue(new MatrixIndexes((long) tile[0], (long) tile[1]),
+					new MatrixBlock(1, 1, tile[2])));
+			x.closeInput();
+
+			BinaryOperator plus = new BinaryOperator(Plus.getPlusFnObject());
+			OOCInstructionUtils.rowGroupedReduce(x, derived,
+				(left, right) -> left.binaryOperations(plus, right, new MatrixBlock()), new StreamContext());
+			OOCInstructionUtils.transpose(derived, transposed, new StreamContext());
+			AggregateOperator aggregate = new AggregateOperator(0, Plus.getPlusFnObject());
+			OOCInstructionUtils.matrixMultiply(transposed, x, product,
+				new AggregateBinaryOperator(Multiply.getMultiplyFnObject(), aggregate), plus, new StreamContext());
+			CollectingSink sink = new CollectingSink(product, derived);
+
+			sink.start();
+			Assert.assertTrue("Correlated row fusion did not finish", sink._complete.await(10, TimeUnit.SECONDS));
+			Assert.assertNull(sink.getFailure());
+			Assert.assertTrue(derived.getPrimitive() instanceof CorrelatedScanOOCPrimitive);
+			Assert.assertTrue(product.getPrimitive() instanceof GroupedReduceOOCPrimitive);
+			Assert.assertEquals(Map.of("1,1", 24d, "1,2", 34d), sink._first);
+			Assert.assertEquals(Map.of("1,1", 3d, "2,1", 7d), sink._second);
+		}
+		finally {
+			OOCCacheManager.reset();
+		}
+	}
+
+	private static SubscribableTaskQueue<IndexedMatrixValue> matrixStream(long rows, long cols, int blocksize) {
+		SubscribableTaskQueue<IndexedMatrixValue> stream = new SubscribableTaskQueue<>();
+		stream.setData(new MatrixObject(ValueType.FP64, "/dev/null",
+			new MetaDataFormat(new MatrixCharacteristics(rows, cols, blocksize), FileFormat.BINARY)));
+		return stream;
 	}
 
 	@Test
@@ -308,10 +398,10 @@ public class OOCPrimitiveTest {
 			SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
 			SubscribableTaskQueue<IndexedMatrixValue> output = new SubscribableTaskQueue<>();
 			input.setData(new MatrixObject(ValueType.FP64, "/dev/null",
-				new MetaDataFormat(new MatrixCharacteristics(800, 400, 200), FileFormat.BINARY)));
+				new MetaDataFormat(new MatrixCharacteristics(1600, 400, 200), FileFormat.BINARY)));
 			output.setData(new MatrixObject(ValueType.FP64, "/dev/null",
-				new MetaDataFormat(new MatrixCharacteristics(800, 1, 200), FileFormat.BINARY)));
-			for(int row = 1; row <= 4; row++)
+				new MetaDataFormat(new MatrixCharacteristics(1600, 1, 200), FileFormat.BINARY)));
+			for(int row = 1; row <= 8; row++)
 				for(int col = 1; col <= 2; col++)
 					input.enqueue(new IndexedMatrixValue(new MatrixIndexes(row, col),
 						new MatrixBlock(200, 200, row * 10d + col)));
@@ -336,7 +426,7 @@ public class OOCPrimitiveTest {
 				return sum;
 			}, (values, sum) -> List.of(new IndexedMatrixValue(
 				new MatrixIndexes(values.get(0).getIndexes().getRowIndex(), 1), new MatrixBlock(1, 1, sum))),
-			OOCUtils::memoryCharge, 128, 128, 2, new StreamContext());
+				OOCUtils::memoryCharge, 128, 128, 2, new StreamContext());
 
 			output.start();
 			Map<Long, Double> sums = new HashMap<>();
@@ -346,7 +436,7 @@ public class OOCPrimitiveTest {
 					IndexedMatrixValue value = current.get();
 					sums.put(value.getIndexes().getRowIndex(), value.getValue().get(0, 0));
 				}
-			for(long row = 1; row <= 4; row++)
+			for(long row = 1; row <= 8; row++)
 				Assert.assertEquals((row * 20 + 3) * 40_000, sums.get(row), 0);
 			Assert.assertTrue("Expected correlated-scan input materialization to spill",
 				Statistics.getOOCEvictionWriteCount() > 0);
@@ -605,6 +695,63 @@ public class OOCPrimitiveTest {
 		protected void inferPatternsInternal() {
 			_pattern = OOCAccessPattern.ANY;
 			inferParentPatterns();
+		}
+
+		@Override
+		protected void requestPatternInternal(OOCAccessPattern accessPattern) {
+			_pattern = accessPattern;
+		}
+	}
+
+	private static final class CollectingSink extends OOCPrimitive {
+		private final Map<String, Double> _first = new ConcurrentHashMap<>();
+		private final Map<String, Double> _second = new ConcurrentHashMap<>();
+		private final CountDownLatch _sources = new CountDownLatch(2);
+		private final CountDownLatch _complete = new CountDownLatch(1);
+
+		private CollectingSink(OOCStreamable<IndexedMatrixValue> first, OOCStreamable<IndexedMatrixValue> second) {
+			super(new StreamContext(), first, second);
+		}
+
+		@Override
+		protected void startExecution() {
+			for(int i = 0; i < 2; i++) {
+				int input = i;
+				OOCStream<IndexedMatrixValue> stream = getInputReadStream(i);
+				getContext().addInStream(stream);
+				stream.setSubscriber(callback -> accept(input, callback));
+			}
+		}
+
+		private void accept(int input, OOCStream.QueueCallback<IndexedMatrixValue> callback) {
+			boolean terminal = callback.isEos() || callback.isFailure();
+			try(callback) {
+				if(callback.isFailure())
+					callback.get();
+				else if(!callback.isEos()) {
+					IndexedMatrixValue value = callback.get();
+					(input == 0 ? _first : _second).put(
+						value.getIndexes().getRowIndex() + "," + value.getIndexes().getColumnIndex(),
+						value.getValue().get(0, 0));
+				}
+			}
+			catch(Throwable error) {
+				fail(error);
+			}
+			if(terminal) {
+				_sources.countDown();
+				if(_sources.getCount() == 0) {
+					onComplete();
+					_complete.countDown();
+				}
+			}
+		}
+
+		@Override
+		protected void inferPatternsInternal() {
+			_pattern = OOCAccessPattern.ANY;
+			for(OOCPrimitive child : getChildren())
+				child.requestPattern(OOCAccessPattern.ROW_MAJOR);
 		}
 
 		@Override

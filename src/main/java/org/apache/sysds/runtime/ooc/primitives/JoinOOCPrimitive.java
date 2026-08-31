@@ -30,6 +30,7 @@ import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
@@ -65,6 +66,27 @@ public class JoinOOCPrimitive<L extends SpillableObject, R extends SpillableObje
 		_outputSize = outputSize;
 		_operation = operation;
 		_taskBytes = taskBytes;
+	}
+
+	public ToIntFunction<L> getLeftKey() {
+		return _leftKey;
+	}
+
+	public ToIntFunction<R> getRightKey() {
+		return _rightKey;
+	}
+
+	public BiFunction<L, R, O> getOperation() {
+		return _operation;
+	}
+
+	public OOCStreamable<O> getOutput() {
+		return _output;
+	}
+
+	@Override
+	public long getMaxTaskReservationBytes(IndexedMatrixValue... inputs) {
+		return _taskBytes;
 	}
 
 	@Override

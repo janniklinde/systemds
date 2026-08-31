@@ -86,7 +86,7 @@ public final class SourceReadOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
-	protected long getMaxTaskReservationBytes() {
+	public long getMaxTaskReservationBytes(IndexedMatrixValue... inputs) {
 		return _bulkBytes;
 	}
 

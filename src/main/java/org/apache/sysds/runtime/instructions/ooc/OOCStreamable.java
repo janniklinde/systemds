@@ -46,8 +46,8 @@ public interface OOCStreamable<T> {
 
 	default OOCFuture<DataCharacteristics> dimensions() {
 		DataCharacteristics characteristics = getDataCharacteristics();
-		return characteristics != null && characteristics.dimsKnown() && characteristics.getBlocksize() > 0 ?
-			OOCFuture.completed(characteristics) : null;
+		return characteristics != null && characteristics.dimsKnown() && characteristics.getBlocksize() > 0 ? OOCFuture
+			.completed(characteristics) : null;
 	}
 
 	CacheableData<?> getData();
@@ -60,6 +60,10 @@ public interface OOCStreamable<T> {
 
 	default void assignPrimitive(OOCPrimitive primitive) {
 		throw new UnsupportedOperationException("Stream does not support primitive assignment");
+	}
+
+	default void replacePrimitive(OOCPrimitive expected, OOCPrimitive replacement) {
+		throw new UnsupportedOperationException("Stream does not support primitive replacement");
 	}
 
 	default OOCStream<T> getReservedReadStream() {

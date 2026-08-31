@@ -42,8 +42,7 @@ import java.util.function.Consumer;
 public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCallback<T>> implements OOCStream<T> {
 
 	/** Queues that have buffered at least once, i.e. the candidates of a purge run. */
-	private static final ConcurrentLinkedQueue<WeakReference<SubscribableTaskQueue<?>>> BUFFERING =
-		new ConcurrentLinkedQueue<>();
+	private static final ConcurrentLinkedQueue<WeakReference<SubscribableTaskQueue<?>>> BUFFERING = new ConcurrentLinkedQueue<>();
 	private static final int PURGE_REGISTRY_PRUNE_INTERVAL = 4096;
 	private static final AtomicLong REGISTERED = new AtomicLong(0);
 	private static final AtomicLong PARKED_BLOCKS = new AtomicLong(0);
@@ -261,7 +260,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 			return;
 		_registeredForPurge = true;
 		BUFFERING.add(new WeakReference<>(this));
-		//the registry is only pruned by purge runs, which may never happen; keep it bounded by live queues
+		// the registry is only pruned by purge runs, which may never happen; keep it bounded by live queues
 		if(REGISTERED.incrementAndGet() % PURGE_REGISTRY_PRUNE_INTERVAL == 0)
 			pruneRegistry();
 	}
@@ -274,10 +273,10 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 
 	/**
 	 * Last resort against a hard stall in the {@code GlobalMemoryBroker}: force-parks the payloads of all buffered
-	 * in-memory callbacks into the cache, handing their bytes back to the broker. A buffered callback has by
-	 * definition not been handed to a consumer yet - the queue monitor held here is what guarantees that, since
-	 * dequeuing is synchronized on the same monitor. Consumers see the payload again through
-	 * {@code QueueCallback.get()}, which revives it from the cache.
+	 * in-memory callbacks into the cache, handing their bytes back to the broker. A buffered callback has by definition
+	 * not been handed to a consumer yet - the queue monitor held here is what guarantees that, since dequeuing is
+	 * synchronized on the same monitor. Consumers see the payload again through {@code QueueCallback.get()}, which
+	 * revives it from the cache.
 	 *
 	 * @return the number of bytes released back to the broker
 	 */
@@ -308,13 +307,13 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 		long freed = 0;
 		long blocks = 0;
 		synchronized(this) {
-			//iterate a snapshot: parking releases memory, which may re-enter this queue on the same thread
+			// iterate a snapshot: parking releases memory, which may re-enter this queue on the same thread
 			Object[] buffered = _data.toArray();
 			for(Object cb : buffered) {
 				long bytes = 0;
 				if(cb instanceof MaterializedCallback<?> mat)
 					bytes = mat.tryPark();
-				else if (cb instanceof InMemoryQueueCallback<?> mem)
+				else if(cb instanceof InMemoryQueueCallback<?> mem)
 					bytes = mem.tryPark(cache);
 				if(bytes > 0) {
 					freed += bytes;
@@ -396,6 +395,15 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 	}
 
 	@Override
+	public synchronized void replacePrimitive(OOCPrimitive expected, OOCPrimitive replacement) {
+		if(_primitive != expected)
+			throw new IllegalStateException("Primitive changed while rewriting the OOC plan");
+		if(expected.hasStartedExecution())
+			throw new IllegalStateException("Cannot rewrite an OOC stream after execution started");
+		_primitive = replacement;
+	}
+
+	@Override
 	public DataCharacteristics getDataCharacteristics() {
 		return _cdata == null ? null : _cdata.getDataCharacteristics();
 	}
@@ -419,8 +427,9 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 
 	@Override
 	public synchronized String debugState() {
-		return "STQ@" + System.identityHashCode(this) + "[avail=" + _availableCtr.get() + ", blocks=" + _blockCount.get()
-			+ ", buffered=" + _data.size() + ", closed=" + _closed.get() + ", eosDelivered=" + _terminalDelivered.get()
-			+ ", subscriber=" + (_subscriber == null ? "none" : _subscriber.getClass().getName()) + "]";
+		return "STQ@" + System.identityHashCode(this) + "[avail=" + _availableCtr.get() + ", blocks="
+			+ _blockCount.get() + ", buffered=" + _data.size() + ", closed=" + _closed.get() + ", eosDelivered="
+			+ _terminalDelivered.get() + ", subscriber="
+			+ (_subscriber == null ? "none" : _subscriber.getClass().getName()) + "]";
 	}
 }
