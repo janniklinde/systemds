@@ -676,7 +676,7 @@ public class DMLTranslator
 			// handle general case
 			BasicProgramBlock rtpb = new BasicProgramBlock(prog);
 			if(DMLScript.USE_OOC && LazyOOCInstruction.supports(sb.getHops())) {
-				rtpb.addInstruction(new LazyOOCInstruction(sb.getHops()));
+				rtpb.addInstruction(new LazyOOCInstruction(sb.getHops(), sb.liveOut().getVariableNames()));
 				retPB = rtpb;
 				retPB.setStatementBlock(sb);
 				retPB.setParseInfo(sb);

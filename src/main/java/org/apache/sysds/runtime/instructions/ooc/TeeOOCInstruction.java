@@ -92,8 +92,11 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 	private static void changeRef(OOCStreamable<IndexedMatrixValue> stream, int incr, MatrixObject owner,
 		ExecutionContext ec) {
 		OOCStreamable<IndexedMatrixValue> handle = resolveHandle(stream);
-		if(handle == null)
+		if(handle == null) {
+			if(incr < 0 && stream != null)
+				stream.discardHandle();
 			return;
+		}
 		if(owner != null)
 			registerOwner(handle, owner);
 

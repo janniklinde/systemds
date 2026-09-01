@@ -100,6 +100,7 @@ import org.apache.sysds.runtime.instructions.cp.FunctionCallCPInstruction;
 import org.apache.sysds.runtime.instructions.cp.IntObject;
 import org.apache.sysds.runtime.instructions.cp.ListObject;
 import org.apache.sysds.runtime.instructions.cp.ScalarObject;
+import org.apache.sysds.runtime.instructions.ooc.LazyOOCInstruction;
 import org.apache.sysds.runtime.io.IOUtilFunctions;
 import org.apache.sysds.runtime.lineage.LineageItem;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
@@ -405,11 +406,20 @@ public class Recompiler {
 		// incl rewrites does not lose these hop-lop constraints
 		Hop.resetVisitStatus(hops);
 		rSetMaxParallelism(hops, maxK);
-		
+
 		// construct lops
 		ArrayList<Lop> lops = new ArrayList<>(hops.size());
 		for( Hop hopRoot : hops ){
 			lops.add(hopRoot.constructLops());
+		}
+
+		if(DMLScript.USE_OOC && sb != null && !pred && !ProgramBlock.isThreadID(tid) &&
+			LazyOOCInstruction.supports(hops)) {
+			ArrayList<Instruction> newInst = new ArrayList<>(
+				List.of(new LazyOOCInstruction(hops, sb.liveOut().getVariableNames())));
+			if(DMLScript.EXPLAIN == ExplainType.RECOMPILE_HOPS || DMLScript.EXPLAIN == ExplainType.RECOMPILE_RUNTIME)
+				logExplainDAG(sb, hops, newInst);
+			return newInst;
 		}
 
 		// dynamic lop rewrites for the updated hop DAGs
