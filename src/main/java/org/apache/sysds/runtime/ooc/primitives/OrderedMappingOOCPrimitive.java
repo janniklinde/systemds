@@ -26,11 +26,13 @@ import java.util.function.Function;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.OrderedMaterializedStoreReader;
+import org.apache.sysds.runtime.ooc.store.SelectedAccessPattern;
 import org.apache.sysds.runtime.ooc.store.SequentialAccessPattern;
 import org.apache.sysds.runtime.ooc.store.StoreBackedStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
@@ -93,7 +95,7 @@ public final class OrderedMappingOOCPrimitive extends OOCPrimitive {
 					return;
 				}
 				try {
-					_reader = store.openReader(new SequentialAccessPattern(store.size()), _allowance, 1, false);
+					_reader = store.openReader(readOrder(store), _allowance, 1, false);
 					new StoreBackedStream<>(_reader).setSubscriber(this::accept);
 				}
 				catch(Throwable failure) {
@@ -102,6 +104,29 @@ public final class OrderedMappingOOCPrimitive extends OOCPrimitive {
 				}
 			});
 		});
+	}
+
+	private MaterializedStore.AccessPattern readOrder(MaterializedStore<IndexedMatrixValue> store) {
+		DataCharacteristics dc = store.characteristics();
+		if(store.layout() == null || store.layout() == _layout || dc == null || !dc.dimsKnown())
+			return new SequentialAccessPattern(store.size());
+		long rowBlocks = dc.getNumRowBlocks();
+		long colBlocks = dc.getNumColBlocks();
+		if(rowBlocks * colBlocks != store.size())
+			return new SequentialAccessPattern(store.size());
+		int[] selected = new int[store.size()];
+		int pos = 0;
+		if(_layout == OOCStoreLayout.ROW_MAJOR) {
+			for(long row = 1; row <= rowBlocks; row++)
+				for(long col = 1; col <= colBlocks; col++)
+					selected[pos++] = store.linearize(row, col);
+		}
+		else {
+			for(long col = 1; col <= colBlocks; col++)
+				for(long row = 1; row <= rowBlocks; row++)
+					selected[pos++] = store.linearize(row, col);
+		}
+		return new SelectedAccessPattern(store.size(), selected);
 	}
 
 	private void accept(OOCStream.QueueCallback<IndexedMatrixValue> callback) {

@@ -1197,8 +1197,8 @@ public class LibMatrixAgg {
 		// extract the required value from each CM_COV_Object
 		for( int i=0; i < numGroups; i++ ) 
 			for( int j=0; j < numCols2; j++ ) {
-				// result is 0-indexed, so is cmValues
-				result.appendValue(i, j, cmValues[i][j+cl].getRequiredResult(cmOp));
+				// cmValues is local to the column range, the result is indexed globally
+				result.appendValue(i, j + cl, cmValues[i][j].getRequiredResult(cmOp));
 			}
 	}
 

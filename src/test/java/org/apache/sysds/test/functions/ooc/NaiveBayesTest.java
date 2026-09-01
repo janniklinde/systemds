@@ -26,7 +26,6 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.util.DataConverter;
 import org.apache.sysds.test.TestConfiguration;
 import org.apache.sysds.test.TestUtils;
-import org.junit.Ignore;
 import org.junit.Test;
 
 /**
@@ -59,17 +58,15 @@ public class NaiveBayesTest extends OOCAlgorithmTestBase {
 	}
 
 	/**
-	 * The builtin reduces per class through {@code aggregate(target, groups)}. That maps to a groupedagg lop, which
-	 * exists for CP and Spark only, so OOC compilation of this script fails before execution.
+	 * The builtin reduces per class through {@code aggregate(target, groups)}, which the OOC groupedagg streams against
+	 * the broadcast class vector.
 	 */
 	@Test
-	@Ignore("groupedagg has no OOC lop: ParameterizedBuiltinOp.constructLopsGroupedAggregate leaves the lop null")
 	public void testNaiveBayesBuiltinDense() {
 		runNaiveBayesTest(TEST_NAME, 1.0);
 	}
 
 	@Test
-	@Ignore("groupedagg has no OOC lop: ParameterizedBuiltinOp.constructLopsGroupedAggregate leaves the lop null")
 	public void testNaiveBayesBuiltinSparse() {
 		runNaiveBayesTest(TEST_NAME, 0.2);
 	}

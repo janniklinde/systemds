@@ -244,10 +244,9 @@ public class ParameterizedBuiltinOp extends MultiThreadedHop {
 		//CP/Spark 
 		{
 			Lop grp_agg = null;
-			
-			if( et == ExecType.CP) 
-			{
-				int k = OptimizerUtils.getConstrainedNumThreads( _maxNumThreads );
+
+			if(et == ExecType.CP || et == ExecType.OOC) {
+				int k = OptimizerUtils.getConstrainedNumThreads(_maxNumThreads);
 				grp_agg = new GroupedAggregate(inputlops, getDataType(), getValueType(), et, k);
 				grp_agg.getOutputParameters().setDimensions(outputDim1, outputDim2, getBlocksize(), -1);
 			}
@@ -768,6 +767,10 @@ public class ParameterizedBuiltinOp extends MultiThreadedHop {
 			_etype = ExecType.CP;
 		}
 
+		if(_op == ParamBuiltinOp.GROUPEDAGG && _etype == ExecType.OOC && !isOOCGroupedAggregate()) {
+			_etype = ExecType.CP;
+		}
+
 		// If previous instructions were in spark force aggregating
 		// parameterized operations to be executed in spark
 		if(transitive && _etype == ExecType.CP && _etypeForced != ExecType.CP) {
@@ -787,6 +790,14 @@ public class ParameterizedBuiltinOp extends MultiThreadedHop {
 		return _etype;
 	}
 	
+	private boolean isOOCGroupedAggregate() {
+		Hop target = getTargetHop();
+		Hop ngroups = _paramIndexMap.get(Statement.GAGG_NUM_GROUPS) != null ? getParameterHop(
+			Statement.GAGG_NUM_GROUPS) : null;
+		return getParameterHop(Statement.GAGG_WEIGHTS) == null && ngroups instanceof LiteralOp &&
+			HopRewriteUtils.getIntValueSafe((LiteralOp) ngroups) >= 1 && target.getDim1() != 1 && target.dimsKnown();
+	}
+
 	@Override
 	public void refreshSizeInformation()
 	{

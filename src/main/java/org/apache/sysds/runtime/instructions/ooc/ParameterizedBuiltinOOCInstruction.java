@@ -29,6 +29,7 @@ import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.functionobjects.ParameterizedBuiltin;
 import org.apache.sysds.runtime.functionobjects.ValueFunction;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
+import org.apache.sysds.parser.Statement;
 import org.apache.sysds.runtime.instructions.cp.BooleanObject;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.cp.Data;
@@ -41,6 +42,10 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.SimpleOperator;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.meta.MatrixCharacteristics;
+import org.apache.sysds.runtime.ooc.store.CountingLiveness;
+import org.apache.sysds.runtime.ooc.util.OOCGroupedAggregate;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCRemoveEmptyMap;
 import org.apache.sysds.runtime.util.UtilFunctions;
@@ -87,6 +92,16 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 		}
 		else if(opcode.equalsIgnoreCase(Opcodes.RMEMPTY.toString())) {
 			return new ParameterizedBuiltinOOCInstruction(null, paramsMap, out, opcode, str);
+		}
+		else if(opcode.equalsIgnoreCase(Opcodes.GROUPEDAGG.toString())) {
+			String fn = paramsMap.get(Statement.GAGG_FN);
+			if(fn == null)
+				throw new DMLRuntimeException("Function parameter is missing in groupedAggregate.");
+			if(fn.equalsIgnoreCase("centralmoment") && paramsMap.get(Statement.GAGG_FN_CM_ORDER) == null)
+				throw new DMLRuntimeException(
+					"Mandatory \"order\" must be specified when fn=\"centralmoment\" in groupedAggregate.");
+			Operator op = InstructionUtils.parseGroupedAggOperator(fn, paramsMap.get(Statement.GAGG_FN_CM_ORDER));
+			return new ParameterizedBuiltinOOCInstruction(op, paramsMap, out, opcode, str);
 		}
 		else
 			throw new NotImplementedException(); // TODO
@@ -164,6 +179,9 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 		else if(instOpcode.equalsIgnoreCase(Opcodes.RMEMPTY.toString())) {
 			processRemoveEmpty(ec);
 		}
+		else if(instOpcode.equalsIgnoreCase(Opcodes.GROUPEDAGG.toString())) {
+			processGroupedAggregate(ec);
+		}
 		else
 			throw new NotImplementedException();
 	}
@@ -193,16 +211,16 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 			throw new DMLRuntimeException("Planner-backed OOC removeEmpty requires a positive block size");
 		final long otherLength = rows ? target.getNumColumns() : target.getNumRows();
 		if(otherLength < 0)
-			throw new DMLRuntimeException("Planner-backed OOC removeEmpty requires a known "
-				+ (rows ? "column" : "row") + " count, got " + target.getNumRows() + "x" + target.getNumColumns());
-		//the select vector holds one entry per margin position, so it carries the margin length even when neither it
-		//nor the target published one
+			throw new DMLRuntimeException("Planner-backed OOC removeEmpty requires a known " + (rows ? "column" : "row")
+				+ " count, got " + target.getNumRows() + "x" + target.getNumColumns());
+		// the select vector holds one entry per margin position, so it carries the margin length even when neither it
+		// nor the target published one
 		OOCRemoveEmptyMap map = collectSelect(select, rows ? target.getNumRows() : target.getNumColumns(), blen);
 		long kept = map.getKeptCount();
 
 		MatrixObject out = ec.getMatrixObject(output);
 		if(kept == 0) {
-			//CP returns a single zero row/column for a fully removed matrix, and an empty one otherwise
+			// CP returns a single zero row/column for a fully removed matrix, and an empty one otherwise
 			long emptyMargin = emptyReturn ? 1 : 0;
 			long rlen = rows ? emptyMargin : otherLength;
 			long clen = rows ? otherLength : emptyMargin;
@@ -212,9 +230,8 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 			target.getStreamable().discardHandle();
 			for(long row = 0; row < (rlen + blen - 1) / blen; row++)
 				for(long col = 0; col < (clen + blen - 1) / blen; col++)
-					empty.enqueue(new IndexedMatrixValue(new MatrixIndexes(row + 1, col + 1),
-						new MatrixBlock((int) Math.min(blen, rlen - row * blen),
-							(int) Math.min(blen, clen - col * blen), true)));
+					empty.enqueue(new IndexedMatrixValue(new MatrixIndexes(row + 1, col + 1), new MatrixBlock(
+						(int) Math.min(blen, rlen - row * blen), (int) Math.min(blen, clen - col * blen), true)));
 			empty.closeInput();
 			return;
 		}
@@ -234,14 +251,92 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 				int marginEntries = rows ? block.getNumRows() : block.getNumColumns();
 				int otherEntries = rows ? block.getNumColumns() : block.getNumRows();
 				map.forEachRun(marginBlock, marginEntries, (srcOffset, length, outputBlock, dstOffset) -> {
-					MatrixIndexes outputIndex = rows ? new MatrixIndexes(outputBlock + 1, otherBlock) : new MatrixIndexes(
-						otherBlock, outputBlock + 1);
+					MatrixIndexes outputIndex = rows ? new MatrixIndexes(outputBlock + 1,
+						otherBlock) : new MatrixIndexes(otherBlock, outputBlock + 1);
 					if(rows)
 						emit.copy(outputIndex, srcOffset, 0, length, otherEntries, dstOffset, 0);
 					else
 						emit.copy(outputIndex, 0, srcOffset, otherEntries, length, 0, dstOffset);
 				});
 			}, getContext());
+	}
+
+	private void processGroupedAggregate(ExecutionContext ec) {
+		MatrixObject target = ec.getMatrixObject(params.get(Statement.GAGG_TARGET));
+		MatrixObject groups = ec.getMatrixObject(params.get(Statement.GAGG_GROUPS));
+		if(params.get(Statement.GAGG_WEIGHTS) != null)
+			throw new DMLRuntimeException("Planner-backed OOC groupedAggregate does not support weights");
+		if(target.getNumRows() != groups.getNumRows() || groups.getNumColumns() != 1)
+			throw new DMLRuntimeException("Grouped aggregate dimension mismatch between target " + target.getNumRows()
+				+ "x" + target.getNumColumns() + " and groups " + groups.getNumRows() + "x" + groups.getNumColumns());
+
+		final int blen = target.getBlocksize();
+		if(blen <= 0)
+			throw new DMLRuntimeException("Planner-backed OOC groupedAggregate requires a positive block size");
+		final int cols = Math.toIntExact(target.getNumColumns());
+		final int ngroups = numGroups();
+		final Operator operator = _optr;
+
+		DataCharacteristics targetDc = target.getDataCharacteristics();
+		int broadcastBlocks = Math.toIntExact(groups.getDataCharacteristics().getNumRowBlocks());
+		int usesPerBlock = Math.toIntExact(targetDc.getNumColBlocks());
+		OOCStream<IndexedMatrixValue> paired = createWritableStream(new MatrixCharacteristics(-1, -1, blen, -1));
+		OOCInstructionUtils.indexedBroadcastMap(target.getStreamable(), groups.getStreamable(), paired,
+			tmp -> tmp.getIndexes().getRowIndex(), tmp -> 1, () -> new CountingLiveness(broadcastBlocks, usesPerBlock),
+			(tile, groupIds) -> new IndexedMatrixValue(tile.getIndexes(),
+				((MatrixBlock) groupIds.getValue()).append((MatrixBlock) tile.getValue(), new MatrixBlock(), true)),
+			getContext());
+
+		OOCStream<OOCGroupedAggregate> reduced = createWritableStream(4, 4, 4);
+		OOCInstructionUtils.reduce(paired, reduced, value -> {
+			MatrixBlock pairedBlock = (MatrixBlock) value.getValue();
+			int colOffset = Math.toIntExact((value.getIndexes().getColumnIndex() - 1) * blen);
+			MatrixBlock groupIds = pairedBlock.slice(0, pairedBlock.getNumRows() - 1, 0, 0, new MatrixBlock());
+			MatrixBlock tile = pairedBlock.slice(0, pairedBlock.getNumRows() - 1, 1, pairedBlock.getNumColumns() - 1,
+				new MatrixBlock());
+			OOCGroupedAggregate partial = new OOCGroupedAggregate(operator, ngroups, colOffset,
+				colOffset + tile.getNumColumns());
+			partial.add(groupIds, tile, colOffset);
+			return partial;
+		}, OOCGroupedAggregate::merge, OOCGroupedAggregate::estimateBytes,
+			() -> new OOCGroupedAggregate(operator, ngroups, 0, cols), getContext());
+
+		MatrixObject out = ec.getMatrixObject(output);
+		OOCInstructionUtils.propagateDims(ec, output, ngroups, cols, blen, -1);
+		OOCStream<IndexedMatrixValue> qOut = createWritableStream(out);
+		out.setStreamHandle(qOut);
+
+		reduced.start();
+		OOCGroupedAggregate aggregate;
+		try(OOCStream.QueueCallback<OOCGroupedAggregate> callback = reduced.dequeueCB()) {
+			if(callback == null)
+				throw new IllegalStateException("Grouped aggregate cannot reduce an empty OOC stream");
+			aggregate = callback.get();
+		}
+		try(OOCStream.QueueCallback<OOCGroupedAggregate> callback = reduced.dequeueCB()) {
+			if(callback != null)
+				throw new IllegalStateException("Grouped aggregate produced multiple results");
+		}
+
+		for(int rowLow = 0; rowLow < ngroups; rowLow += blen)
+			for(int colLow = 0; colLow < cols; colLow += blen) {
+				int rowHigh = Math.min(rowLow + blen, ngroups);
+				int colHigh = Math.min(colLow + blen, cols);
+				qOut.enqueue(new IndexedMatrixValue(new MatrixIndexes(rowLow / blen + 1L, colLow / blen + 1L),
+					aggregate.toMatrixBlock(rowLow, rowHigh, colLow, colHigh)));
+			}
+		qOut.closeInput();
+	}
+
+	private int numGroups() {
+		String declared = params.get(Statement.GAGG_NUM_GROUPS);
+		if(declared == null)
+			throw new DMLRuntimeException(
+				"Planner-backed OOC groupedAggregate requires ngroups, the data-dependent variant is CP");
+		double value = declared.startsWith(Lop.SCALAR_VAR_NAME_PREFIX) ? Double.NaN : Double.parseDouble(declared);
+		if(Double.isNaN(value) || value < 1)
+			throw new DMLRuntimeException("Invalid ngroups for OOC groupedAggregate: " + declared);
+		return (int) value;
 	}
 
 	private OOCRemoveEmptyMap collectSelect(MatrixObject select, long marginLength, int blen) {
