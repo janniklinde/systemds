@@ -158,7 +158,10 @@ public class LazyOOCInstruction extends Instruction {
 			plan._characteristics.put(root.getName(), dc);
 			MatrixObject matrix = new MatrixObject(root.getValueType(), OptimizerUtils.getUniqueTempFileName(),
 				new MetaDataFormat(dc, Types.FileFormat.BINARY));
+			Data previous = ec.removeVariable((String) entry.getKey());
 			ec.setVariable((String) entry.getKey(), matrix);
+			TeeOOCInstruction.releaseRef(ec, previous);
+			ec.cleanupDataObject(previous);
 			LazyStream stream = new LazyStream(plan, root.getName(), dc);
 			matrix.setStreamHandle(stream);
 		}
