@@ -294,8 +294,10 @@ public class ReshapeOOCInstruction extends ComputationOOCInstruction {
 							r++;
 							if(r == outputBlockRow[0].getNumRows()) {
 								// enqueue filled output blocks and allocate new ones
-								for(int b = 0; b < outputBlockRow.length; b++)
+								for(int b = 0; b < outputBlockRow.length; b++) {
+									outputBlockRow[b].recomputeNonZeros();
 									qOut.enqueue(new IndexedMatrixValue(new MatrixIndexes(br + 1, b + 1), outputBlockRow[b]));
+								}
 								br++;
 								// allocate new block row
 								outputBlockRow = allocateSliceBlocks(br, rows, cols, blen, numBlocksPerRowOut, numBlocksPerColOut, true);

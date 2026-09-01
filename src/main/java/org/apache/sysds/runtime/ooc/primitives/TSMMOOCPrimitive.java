@@ -68,6 +68,7 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 	private volatile IndexedMaterializedStoreReader<IndexedMatrixValue> _inputReader;
 	private StateTable<IndexedMatrixValue> _accumulators;
 	private AtomicIntegerArray _tilesSeen;
+	private AtomicIntegerArray _tilesArrived;
 	private AtomicIntegerArray _groupsScheduled;
 	private OOCStream<ComputeWork> _ready;
 	private OOCStream<IndexedMatrixValue> _outputStream;
@@ -133,6 +134,7 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 		if(_groups <= 0 || _width <= 0)
 			throw new DMLRuntimeException("TSMM OOC requires non-empty input block geometry.");
 		_tilesSeen = new AtomicIntegerArray(_groups);
+		_tilesArrived = new AtomicIntegerArray(_groups * _width);
 		_groupsScheduled = new AtomicIntegerArray(_groups);
 		_accumulators = new StateTable<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
 		long accumulatorPriorityOffset = (long) _width * _width;
@@ -203,8 +205,15 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 
 		try(callback) {
 			IndexedMatrixValue tile = callback.get();
-			int group = Math.toIntExact(
-				(_type.isLeft() ? tile.getIndexes().getRowIndex() : tile.getIndexes().getColumnIndex()) - 1);
+			long rowIndex = tile.getIndexes().getRowIndex();
+			long colIndex = tile.getIndexes().getColumnIndex();
+			int group = Math.toIntExact((_type.isLeft() ? rowIndex : colIndex) - 1);
+			int position = Math.toIntExact((_type.isLeft() ? colIndex : rowIndex) - 1);
+			if(group < 0 || group >= _groups || position < 0 || position >= _width)
+				throw new DMLRuntimeException("TSMM live tile " + tile.getIndexes() + " is outside the input geometry "
+					+ _groups + "x" + _width + ".");
+			if(!_tilesArrived.compareAndSet(group * _width + position, 0, 1))
+				return;
 			_tilesSeen.incrementAndGet(group);
 			tryScheduleGroup(group);
 		}

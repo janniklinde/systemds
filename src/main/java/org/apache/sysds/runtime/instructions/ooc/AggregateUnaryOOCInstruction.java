@@ -23,6 +23,7 @@ import org.apache.sysds.common.Types.CorrectionLocationType;
 import org.apache.sysds.conf.ConfigurationManager;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
+import org.apache.sysds.runtime.functionobjects.ReduceDiag;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.cp.DoubleObject;
@@ -39,6 +40,7 @@ import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 import java.util.HashMap;
+import java.util.function.Supplier;
 
 public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 	private AggregateOperator _aop = null;
@@ -161,9 +163,13 @@ public class AggregateUnaryOOCInstruction extends ComputationOOCInstruction {
 		int blocksize) {
 		OOCStream<MatrixBlock> result = createWritableStream(4, 4, 4);
 		DataCharacteristics dc = input.getDataCharacteristics();
-		OOCInstructionUtils.reduce(input.getStreamable(), result, value -> aggregatePartial(value, operator, blocksize),
-			this::mergeAggregate, OOCUtils::memoryCharge, () -> emptyAggregate(dc, operator, blocksize),
-			getContext());
+		boolean diagonalOnly = operator.indexFn instanceof ReduceDiag;
+		Supplier<MatrixBlock> empty = () -> emptyAggregate(dc, operator, blocksize);
+		OOCInstructionUtils.reduce(input.getStreamable(), result,
+			value -> diagonalOnly &&
+				value.getIndexes().getRowIndex() != value.getIndexes().getColumnIndex() ? empty.get()
+				: aggregatePartial(value, operator, blocksize),
+			this::mergeAggregate, OOCUtils::memoryCharge, empty, getContext());
 		result.start();
 		try(OOCStream.QueueCallback<MatrixBlock> callback = result.dequeueCB()) {
 			if(callback == null)
