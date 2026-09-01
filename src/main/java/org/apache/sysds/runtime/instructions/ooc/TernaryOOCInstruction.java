@@ -59,8 +59,8 @@ public class TernaryOOCInstruction extends ComputationOOCInstruction {
 		CPOperand in2 = new CPOperand(parts[2]);
 		CPOperand in3 = new CPOperand(parts[3]);
 		CPOperand out = new CPOperand(parts[4]);
-		int numThreads = parts.length > 5 ? Integer.parseInt(parts[5]) : 1;
-		TernaryOperator op = InstructionUtils.parseTernaryOperator(opcode, numThreads);
+		//the emitted thread count belongs to CP, OOC parallelizes over the tiles of the stream instead
+		TernaryOperator op = InstructionUtils.parseTernaryOperator(opcode, 1);
 		return new TernaryOOCInstruction(op, in1, in2, in3, out, opcode, str);
 	}
 
