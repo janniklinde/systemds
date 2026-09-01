@@ -94,8 +94,8 @@ public class ReorgOOCInstruction extends ComputationOOCInstruction {
 			InstructionUtils.checkNumFields(str, 2, 3);
 			in.split(parts[1]);
 			out.split(parts[2]);
-			int k = (parts.length > 3) ? Integer.parseInt(parts[3]) : 1;
-			return new ReorgOOCInstruction(new ReorgOperator(RevIndex.getRevIndexFnObject(), k), in, out, opcode, str);
+			//the emitted thread count belongs to CP, OOC parallelizes over the tiles of the stream instead
+			return new ReorgOOCInstruction(new ReorgOperator(RevIndex.getRevIndexFnObject()), in, out, opcode, str);
 		}
 		else if(opcode.equalsIgnoreCase(Opcodes.DIAG.toString())) {
 			InstructionUtils.checkNumFields(str, 2);
