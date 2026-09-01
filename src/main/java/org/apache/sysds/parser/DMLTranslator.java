@@ -91,6 +91,7 @@ import org.apache.sysds.runtime.controlprogram.Program;
 import org.apache.sysds.runtime.controlprogram.ProgramBlock;
 import org.apache.sysds.runtime.controlprogram.WhileProgramBlock;
 import org.apache.sysds.runtime.instructions.Instruction;
+import org.apache.sysds.runtime.instructions.ooc.LazyOOCInstruction;
 import org.apache.sysds.runtime.instructions.cp.VariableCPInstruction;
 
 public class DMLTranslator 
@@ -674,6 +675,13 @@ public class DMLTranslator
 
 			// handle general case
 			BasicProgramBlock rtpb = new BasicProgramBlock(prog);
+			if(DMLScript.USE_OOC && LazyOOCInstruction.supports(sb.getHops())) {
+				rtpb.addInstruction(new LazyOOCInstruction(sb.getHops()));
+				retPB = rtpb;
+				retPB.setStatementBlock(sb);
+				retPB.setParseInfo(sb);
+				return retPB;
+			}
 
 			// DAGs for Lops
 			dag = new Dag<>();

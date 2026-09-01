@@ -90,6 +90,7 @@ import org.apache.sysds.runtime.instructions.cp.StringObject;
 import org.apache.sysds.runtime.instructions.cp.VariableCPInstruction;
 import org.apache.sysds.runtime.instructions.fed.FEDInstruction;
 import org.apache.sysds.runtime.instructions.gpu.GPUInstruction;
+import org.apache.sysds.runtime.instructions.ooc.LazyOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.SPInstruction;
 import org.apache.sysds.runtime.lineage.Lineage;
@@ -479,6 +480,8 @@ public class ProgramConverter
 	
 	public static Instruction cloneInstruction( Instruction oInst, long pid, boolean plain, boolean cpFunctions ) 
 	{
+		if(oInst instanceof LazyOOCInstruction)
+			return ((LazyOOCInstruction) oInst).copy();
 		Instruction inst = null;
 		String tmpString = oInst.toString();
 		

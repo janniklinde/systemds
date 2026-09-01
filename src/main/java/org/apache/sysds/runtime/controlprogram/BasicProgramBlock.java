@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.lineage.LineageCacheConfig;
 import org.apache.sysds.runtime.lineage.LineageCacheStatistics;
 import org.apache.sysds.runtime.lineage.LineageItem;
 import org.apache.sysds.runtime.lineage.LineageItemUtils;
+import org.apache.sysds.runtime.instructions.ooc.LazyOOCInstruction;
 import org.apache.sysds.utils.stats.RecompileStatistics;
 
 public class BasicProgramBlock extends ProgramBlock 
@@ -89,7 +90,8 @@ public class BasicProgramBlock extends ProgramBlock
 			long t0 = DMLScript.STATISTICS ? System.nanoTime() : 0;
 			if( ConfigurationManager.isDynamicRecompilation()
 				&& _sb != null
-				&& _sb.requiresRecompilation() )
+				&& _sb.requiresRecompilation()
+				&& _inst.stream().noneMatch(LazyOOCInstruction.class::isInstance) )
 			{
 				tmp = Recompiler.recompileHopsDag(
 					_sb, _sb.getHops(), ec, null, false, true, _tid);

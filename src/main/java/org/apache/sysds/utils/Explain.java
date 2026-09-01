@@ -840,7 +840,7 @@ public class Explain
 		String tmp = null;
 		if ( inst instanceof SPInstruction || inst instanceof CPInstruction 
 			|| inst instanceof GPUInstruction || inst instanceof FEDInstruction
-			|| inst instanceof OOCInstruction)
+			|| inst instanceof OOCInstruction || inst.getType() == Instruction.IType.OUT_OF_CORE)
 			tmp = inst.toString();
 
 		if( REPLACE_SPECIAL_CHARACTERS && tmp != null){
