@@ -27,6 +27,7 @@ import org.apache.sysds.runtime.instructions.cp.CPOperand;
 import org.apache.sysds.runtime.instructions.cp.ScalarObject;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.ScalarOperator;
@@ -83,8 +84,12 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 			return;
 		}
 
-		boolean isColBroadcast = m1.getNumColumns() > 1 && m2.getNumColumns() == 1;
-		boolean isRowBroadcast = m1.getNumRows() > 1 && m2.getNumRows() == 1;
+		final long rows1 = m1.getNumRows(), cols1 = m1.getNumColumns();
+		final long rows2 = m2.getNumRows(), cols2 = m2.getNumColumns();
+		boolean isColBroadcast = rows1 == rows2 && cols2 == 1 && cols1 > 1;
+		boolean isRowBroadcast = cols1 == cols2 && rows2 == 1 && rows1 > 1;
+		boolean isOuter = !isColBroadcast && !isRowBroadcast && cols1 == 1 && rows2 == 1 &&
+			!(rows1 == rows2 && cols1 == cols2);
 
 		if (isColBroadcast && !isRowBroadcast) {
 			int broadcastBlocks = Math.toIntExact(m2.getDataCharacteristics().getNumRowBlocks());
@@ -109,6 +114,14 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 						broadcast.getValue(), tmpOut.getValue()));
 					return tmpOut;
 				}, getContext());
+		}
+		else if(isOuter) {
+			OOCInstructionUtils.cartesianMap(m1.getStreamable(), m2.getStreamable(), qOut, (left, right) -> {
+				MatrixIndexes indexes = new MatrixIndexes(left.getIndexes().getRowIndex(),
+					right.getIndexes().getColumnIndex());
+				return new IndexedMatrixValue(indexes, ((MatrixBlock) left.getValue())
+					.binaryOperations((BinaryOperator) _optr, right.getValue()));
+			}, getContext());
 		}
 		else {
 			if (m1.getNumColumns() != m2.getNumColumns() || m1.getNumRows() != m2.getNumRows())

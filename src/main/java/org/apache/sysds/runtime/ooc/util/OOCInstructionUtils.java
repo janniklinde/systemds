@@ -60,6 +60,7 @@ import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.CartesianOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.CtableOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.CorrelatedScanOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.FlatMapOOCPrimitive;
@@ -259,6 +260,12 @@ public final class OOCInstructionUtils {
 		OOCStream<IndexedMatrixValue> output, AggregateBinaryOperator multiply, BinaryOperator plus,
 		StreamContext context) {
 		output.assignPrimitive(new GeneralMMultOOCPrimitive(left, right, output, multiply, plus, context));
+	}
+
+	public static void cartesianMap(OOCStreamable<IndexedMatrixValue> left,
+		OOCStreamable<IndexedMatrixValue> right, OOCStream<IndexedMatrixValue> output,
+		BiFunction<IndexedMatrixValue, IndexedMatrixValue, IndexedMatrixValue> operation, StreamContext context) {
+		output.assignPrimitive(CartesianOOCPrimitive.create(left, right, output, operation, context));
 	}
 
 	public static void indexedBroadcastMap(OOCStreamable<IndexedMatrixValue> streamed,
