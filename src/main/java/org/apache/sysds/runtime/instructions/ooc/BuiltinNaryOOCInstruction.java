@@ -28,6 +28,8 @@ import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.functionobjects.Builtin;
+import org.apache.sysds.runtime.functionobjects.Multiply;
+import org.apache.sysds.runtime.functionobjects.Plus;
 import org.apache.sysds.runtime.functionobjects.ValueFunction;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.instructions.cp.CPOperand;
@@ -59,9 +61,8 @@ public class BuiltinNaryOOCInstruction extends ComputationOOCInstruction {
 		String opcode = parts[0];
 		boolean cbind = Opcodes.CBIND.toString().equals(opcode);
 		boolean bind = cbind || Opcodes.RBIND.toString().equals(opcode);
-		boolean minmax = Opcodes.NMIN.toString().equals(opcode) || Opcodes.NMAX.toString().equals(opcode);
-		if(!bind && !minmax)
-			throw new DMLRuntimeException("Only n-ary cbind, rbind, nmin, and nmax are supported: " + opcode);
+		if(!bind && valueFunction(opcode) == null)
+			throw new DMLRuntimeException("Only n-ary cbind, rbind, nmin, nmax, n+, and n* are supported: " + opcode);
 		if(parts.length <= 2)
 			throw new DMLRuntimeException("N-ary builtin requires at least one input: " + str);
 
@@ -72,13 +73,18 @@ public class BuiltinNaryOOCInstruction extends ComputationOOCInstruction {
 			if(bind && inputs[i - 1].getDataType() != Types.DataType.MATRIX)
 				throw new DMLRuntimeException("Only matrix inputs are supported for n-ary bind: " + str);
 		}
-		//nmin/nmax fold their scalar operands into an initial value, so only the value function is needed
-		Operator op = bind ? null : new SimpleOperator(minmaxFunction(opcode));
+		Operator op = bind ? null : new SimpleOperator(valueFunction(opcode));
 		return new BuiltinNaryOOCInstruction(op, inputs, out, bind, cbind, opcode, str);
 	}
 
-	private static ValueFunction minmaxFunction(String opcode) {
-		return Builtin.getBuiltinFnObject(opcode.substring(1));
+	private static ValueFunction valueFunction(String opcode) {
+		if(Opcodes.NP.toString().equals(opcode))
+			return Plus.getPlusFnObject();
+		if(Opcodes.NM.toString().equals(opcode))
+			return Multiply.getMultiplyFnObject();
+		if(Opcodes.NMIN.toString().equals(opcode) || Opcodes.NMAX.toString().equals(opcode))
+			return Builtin.getBuiltinFnObject(opcode.substring(1));
+		return null;
 	}
 
 	@Override
@@ -90,10 +96,10 @@ public class BuiltinNaryOOCInstruction extends ComputationOOCInstruction {
 			AppendOOCInstruction.bind(inputs, ec.getMatrixObject(output), _cbind, getContext());
 			return;
 		}
-		processMinMax(ec);
+		processElementwise(ec);
 	}
 
-	private void processMinMax(ExecutionContext ec) {
+	private void processElementwise(ExecutionContext ec) {
 		List<MatrixObject> matrices = new ArrayList<>();
 		List<ScalarObject> scalars = new ArrayList<>();
 		for(CPOperand input : _inputs) {
@@ -124,17 +130,14 @@ public class BuiltinNaryOOCInstruction extends ComputationOOCInstruction {
 				getContext());
 			return;
 		}
-		//min and max are associative and commutative, so tiles fold pairwise as soon as two of them share a block
-		//index; that keeps one accumulator per index instead of the n-1 unmatched tiles an n-ary join would hold
 		List<OOCStreamable<IndexedMatrixValue>> streams = new ArrayList<>(matrices.size());
 		for(MatrixObject matrix : matrices)
 			streams.add(matrix.getStreamable());
 		OOCInstructionUtils.naryEquiReduce(streams, qOut,
 			(left, right) -> MatrixBlock.naryOperations(_optr, new MatrixBlock[] {left, right}, NO_SCALARS,
 				new MatrixBlock()),
-			//the scalar operands fold in once at the end, which is equivalent under idempotent extrema
-			block -> scalarOperands.length == 0 ? block :
-				MatrixBlock.naryOperations(_optr, new MatrixBlock[] {block}, scalarOperands, new MatrixBlock()),
+			block -> scalarOperands.length == 0 ? block : MatrixBlock.naryOperations(_optr, new MatrixBlock[] {block},
+				scalarOperands, new MatrixBlock()),
 			getContext());
 	}
 }
