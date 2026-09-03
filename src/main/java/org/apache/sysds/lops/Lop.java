@@ -64,7 +64,7 @@ public abstract class Lop
 		SpoofFused,                                         //CP/SP generated fused operator
 		Sql,                                                //CP sql read
 		Federated,                                           //FED federated read
-		Tee,                                                //OOC Tee operator
+		Tee, SharedRows,                                    //OOC sharing operators
 	}
 	
 

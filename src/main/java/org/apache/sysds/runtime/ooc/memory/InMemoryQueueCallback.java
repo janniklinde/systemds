@@ -114,6 +114,10 @@ public class InMemoryQueueCallback<T> implements OOCStream.QueueCallback<T> {
 		}
 	}
 
+	public boolean isExclusive() {
+		return _handle.isExclusiveToRoot();
+	}
+
 	public boolean tryTransferOwnership(MemoryAllowance allowance) {
 		synchronized(_handle) {
 			long bytes = _handle._reservedBytes;

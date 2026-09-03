@@ -241,6 +241,7 @@ public enum Opcodes {
 	WRITE("write", InstructionType.Variable, InstructionType.Write),
 	CREATEVAR("createvar", InstructionType.Variable),
 	TEE("tee", InstructionType.Tee),
+	SHAREDROWS("sharedrows", InstructionType.Tee),
 
 	//Reorg instruction opcodes
 	TRANSPOSE("r'", InstructionType.Reorg),

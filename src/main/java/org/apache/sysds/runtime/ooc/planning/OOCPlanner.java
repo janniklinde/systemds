@@ -34,6 +34,9 @@ import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 public final class OOCPlanner {
+	private static final ThreadLocal<Integer> PLANNING_DEPTH = ThreadLocal.withInitial(() -> 0);
+	private static final ThreadLocal<List<Runnable>> DEFERRED_STARTS = ThreadLocal.withInitial(ArrayList::new);
+
 	public static synchronized void compile(OOCPrimitive root) {
 		compile(root, false);
 	}
@@ -46,6 +49,9 @@ public final class OOCPlanner {
 	}
 
 	private static void compile(OOCPrimitive root, boolean startRoot) {
+		int depth = PLANNING_DEPTH.get();
+		PLANNING_DEPTH.set(depth + 1);
+		try {
 		injectMaterializations(root, Collections.newSetFromMap(new IdentityHashMap<>()), new IdentityHashMap<>());
 		List<OOCPrimitive> primitives = new ArrayList<>();
 		collect(root, Collections.newSetFromMap(new IdentityHashMap<>()), primitives);
@@ -64,6 +70,22 @@ public final class OOCPlanner {
 		}
 		if(startRoot)
 			root.tryStartExecution();
+		}
+		finally {
+			PLANNING_DEPTH.set(depth);
+			if(depth == 0) {
+				List<Runnable> deferred = DEFERRED_STARTS.get();
+				while(!deferred.isEmpty())
+					deferred.remove(0).run();
+			}
+		}
+	}
+
+	public static boolean deferStart(Runnable start) {
+		if(PLANNING_DEPTH.get() == 0)
+			return false;
+		DEFERRED_STARTS.get().add(start);
+		return true;
 	}
 
 	/**

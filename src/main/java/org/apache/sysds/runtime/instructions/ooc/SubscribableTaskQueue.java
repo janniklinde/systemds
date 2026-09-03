@@ -256,6 +256,10 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 			onDeliveryFinished();
 	}
 
+	public boolean hasSubscriber() {
+		return _subscriber != null;
+	}
+
 	private void registerForPurge() {
 		if(_registeredForPurge)
 			return;
@@ -312,7 +316,9 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 			Object[] buffered = _data.toArray();
 			for(Object cb : buffered) {
 				long bytes = 0;
-				if(cb instanceof MaterializedCallback<?> mat)
+				if(cb instanceof OOCStream.PurgeableQueueCallback<?> purgeable)
+					bytes = purgeable.tryPark();
+				else if(cb instanceof MaterializedCallback<?> mat)
 					bytes = mat.tryPark();
 				else if (cb instanceof InMemoryQueueCallback<?> mem)
 					bytes = mem.tryPark(cache);

@@ -22,8 +22,10 @@ package org.apache.sysds.runtime.ooc.util;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -69,10 +71,13 @@ import org.apache.sysds.runtime.ooc.primitives.JoinOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.MMChainOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.NaryJoinOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OrderedMappingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.PlannableDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.ReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.SharedRowsOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.StreamingMMultOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.SliceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.SourceReadOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TSMMOOCPrimitive;
@@ -258,7 +263,24 @@ public final class OOCInstructionUtils {
 	public static void matrixMultiply(OOCStreamable<IndexedMatrixValue> left, OOCStreamable<IndexedMatrixValue> right,
 		OOCStream<IndexedMatrixValue> output, AggregateBinaryOperator multiply, BinaryOperator plus,
 		StreamContext context) {
-		output.assignPrimitive(new GeneralMMultOOCPrimitive(left, right, output, multiply, plus, context));
+		output.assignPrimitive(dependsOnSharedRows(left, new HashSet<>()) ||
+			dependsOnSharedRows(right, new HashSet<>()) ? new StreamingMMultOOCPrimitive(left, right, output, multiply,
+				plus, context) : new GeneralMMultOOCPrimitive(left, right, output, multiply, plus, context));
+	}
+
+	private static boolean dependsOnSharedRows(OOCStreamable<?> stream, Set<OOCPrimitive> visited) {
+		return dependsOnSharedRows(stream.getPrimitive(), visited);
+	}
+
+	private static boolean dependsOnSharedRows(OOCPrimitive primitive, Set<OOCPrimitive> visited) {
+		if(primitive == null || !visited.add(primitive))
+			return false;
+		if(primitive instanceof SharedRowsOOCPrimitive)
+			return true;
+		for(OOCPrimitive child : primitive.getChildren())
+			if(dependsOnSharedRows(child, visited))
+				return true;
+		return false;
 	}
 
 	public static void indexedBroadcastMap(OOCStreamable<IndexedMatrixValue> streamed,
@@ -373,6 +395,12 @@ public final class OOCInstructionUtils {
 		StreamContext context) {
 		output.assignPrimitive(new CorrelatedScanOOCPrimitive<>(input, output, derive, combine, outputSize,
 			workspaceBytes, outputBytesPerGroup, maxPendingFetches, context));
+	}
+
+	public static void sharedRows(OOCStreamable<IndexedMatrixValue> input,
+		List<OOCStreamable<IndexedMatrixValue>> outputs, int maxOpenRows, StreamContext context) {
+		SharedRowsOOCPrimitive primitive = new SharedRowsOOCPrimitive(input, outputs, maxOpenRows, context);
+		outputs.forEach(output -> output.assignPrimitive(primitive));
 	}
 
 	public static <T extends AutoCloseable> CompletableFuture<Void> submitCloseableOOCTasks(OOCStream<T> queue,

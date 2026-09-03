@@ -46,6 +46,7 @@ import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.AppendOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.BuiltinNaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.ReshapeOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.SharedRowsOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.QuaternaryOOCInstruction;
 
 public class OOCInstructionParser extends InstructionParser {
@@ -102,7 +103,9 @@ public class OOCInstructionParser extends InstructionParser {
 			case Reshape:
 				return ReshapeOOCInstruction.parseInstruction(str);
 			case Tee:
-				return TeeOOCInstruction.parseInstruction(str);
+				return InstructionUtils.getInstructionPartsWithValueType(str)[0]
+					.equals(Opcodes.SHAREDROWS.toString()) ? SharedRowsOOCInstruction
+						.parseInstruction(str) : TeeOOCInstruction.parseInstruction(str);
 			case CentralMoment:
 				return  CentralMomentOOCInstruction.parseInstruction(str);
 			case Covariance:

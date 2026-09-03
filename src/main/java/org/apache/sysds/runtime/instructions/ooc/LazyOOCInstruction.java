@@ -36,7 +36,6 @@ import org.apache.sysds.hops.Hop;
 import org.apache.sysds.hops.LiteralOp;
 import org.apache.sysds.hops.OptimizerUtils;
 import org.apache.sysds.hops.recompile.Recompiler;
-import org.apache.sysds.hops.rewrite.RewriteInjectOOCTee;
 import org.apache.sysds.runtime.controlprogram.BasicProgramBlock;
 import org.apache.sysds.runtime.controlprogram.LocalVariableMap;
 import org.apache.sysds.runtime.controlprogram.Program;
@@ -134,6 +133,10 @@ public class LazyOOCInstruction extends Instruction {
 				retainedOutputs, rootOutputs, immediateInputs));
 		}
 		roots.addAll(retainedOutputs.values());
+		IdentityHashMap<OOCStreamable<IndexedMatrixValue>, Hop> streamReads = new IdentityHashMap<>();
+		IdentityHashMap<Hop, Hop> coalesced = new IdentityHashMap<>();
+		for(int i = 0; i < roots.size(); i++)
+			roots.set(i, coalesceStreamReads(roots.get(i), bindings, streamReads, coalesced));
 		LinkedHashMap<String, Hop> outputs = new LinkedHashMap<String, Hop>();
 		LinkedHashMap<String, String> scalarOutputs = new LinkedHashMap<>();
 		for(Hop hop : roots) {
@@ -146,7 +149,6 @@ public class LazyOOCInstruction extends Instruction {
 			}
 			scalarOutputs.put(string, internal);
 		}
-		RewriteInjectOOCTee.injectTeesForRecompiledDag(roots);
 		Plan plan = new Plan(roots, bindings, ec.getProgram());
 		for(Map.Entry<Plan, List<String>> entry : expandedOutputs.entrySet()) {
 			entry.getKey().releaseExpandedReservations(entry.getValue());
@@ -241,6 +243,38 @@ public class LazyOOCInstruction extends Instruction {
 			replacement.getParent().add(hop);
 		}
 		return hop;
+	}
+
+	private static Hop coalesceStreamReads(Hop hop, Map<String, Data> bindings,
+		IdentityHashMap<OOCStreamable<IndexedMatrixValue>, Hop> streamReads, IdentityHashMap<Hop, Hop> memo) {
+		Hop known = memo.get(hop);
+		if(known != null)
+			return known;
+		for(int i = 0; i < hop.getInput().size(); i++) {
+			Hop old = hop.getInput().get(i);
+			Hop replacement = coalesceStreamReads(old, bindings, streamReads, memo);
+			if(old == replacement)
+				continue;
+			old.getParent().remove(hop);
+			hop.getInput().set(i, replacement);
+			if(!replacement.getParent().contains(hop))
+				replacement.getParent().add(hop);
+		}
+		Hop replacement = hop;
+		if(hop instanceof DataOp && ((DataOp) hop).getOp() == Types.OpOpData.TRANSIENTREAD &&
+			bindings.get(hop.getName()) instanceof MatrixObject) {
+			MatrixObject matrix = (MatrixObject) bindings.get(hop.getName());
+			if(matrix.hasStreamHandle()) {
+				OOCStreamable<IndexedMatrixValue> stream = matrix.getStreamable();
+				while(stream instanceof ReservedStreamable)
+					stream = ((ReservedStreamable) stream)._source;
+				Hop shared = streamReads.putIfAbsent(stream, hop);
+				if(shared != null)
+					replacement = shared;
+			}
+		}
+		memo.put(hop, replacement);
+		return replacement;
 	}
 
 	private static void collectTransientReads(Hop hop, Set<String> inputs, IdentityHashMap<Hop, Boolean> visited) {

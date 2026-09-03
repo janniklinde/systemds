@@ -58,6 +58,10 @@ public interface OOCStreamable<T> {
 		return null;
 	}
 
+	default OOCStreamable<T> claimConsumer() {
+		return this;
+	}
+
 	default void assignPrimitive(OOCPrimitive primitive) {
 		throw new UnsupportedOperationException("Stream does not support primitive assignment");
 	}

@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -355,6 +356,149 @@ public class OOCPrimitiveTest {
 			OOCCacheManager.reset();
 			DMLScript.OOC_STATISTICS = statistics;
 		}
+	}
+
+	@Test
+	public void testSharedRowsRetainsSpilledMultiBlockRows() throws Exception {
+		OOCCacheManager.reset();
+		boolean statistics = DMLScript.OOC_STATISTICS;
+		DMLScript.OOC_STATISTICS = true;
+		Statistics.resetOOCEvictionStats();
+		OOCCacheManager.getGlobalCache().updateLimits(1_500_000, 100_000);
+		try {
+			SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> left = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> right = new SubscribableTaskQueue<>();
+			MatrixObject data = new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(800, 400, 200), FileFormat.BINARY));
+			input.setData(data);
+			left.setData(data);
+			right.setData(data);
+			for(int row = 1; row <= 4; row++)
+				for(int col = 1; col <= 2; col++)
+					input.enqueue(new IndexedMatrixValue(new MatrixIndexes(row, col),
+						new MatrixBlock(200, 200, row * 10d + col)));
+			input.closeInput();
+			OOCInstructionUtils.sharedRows(input, List.of(left, right), 2, new StreamContext());
+
+			CompletableFuture<Map<String, Double>> leftValues = CompletableFuture.supplyAsync(() -> drain(left));
+			CompletableFuture<Map<String, Double>> rightValues = CompletableFuture.supplyAsync(() -> drain(right));
+			left.start();
+			Assert.assertEquals(leftValues.get(20, TimeUnit.SECONDS), rightValues.get(20, TimeUnit.SECONDS));
+			Assert.assertEquals(8, leftValues.get().size());
+			Assert.assertTrue("Expected shared-row input materialization to spill",
+				Statistics.getOOCEvictionWriteCount() > 0);
+		}
+		finally {
+			OOCCacheManager.reset();
+			DMLScript.OOC_STATISTICS = statistics;
+		}
+	}
+
+	@Test
+	public void testSharedRowsAllowsLateConsumer() throws Exception {
+		OOCCacheManager.reset();
+		try {
+			SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
+			MatrixObject data = new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(800, 400, 200), FileFormat.BINARY));
+			input.setData(data);
+			for(int row = 1; row <= 4; row++)
+				for(int col = 1; col <= 2; col++)
+					input.enqueue(new IndexedMatrixValue(new MatrixIndexes(row, col),
+						new MatrixBlock(200, 200, row * 10d + col)));
+			input.closeInput();
+
+			SubscribableTaskQueue<IndexedMatrixValue> first = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> late = new SubscribableTaskQueue<>();
+			first.setData(data);
+			late.setData(data);
+			OOCInstructionUtils.sharedRows(input, List.of(first, late), 2, new StreamContext());
+			CompletableFuture<Map<String, Double>> firstValues = CompletableFuture.supplyAsync(() -> drain(first));
+			first.start();
+			for(int attempt = 0; attempt < 100 && !firstValues.isDone(); attempt++) {
+				SubscribableTaskQueue.purgeBufferedStore();
+				Thread.sleep(10);
+			}
+			Map<String, Double> expected = firstValues.get(20, TimeUnit.SECONDS);
+			Assert.assertEquals(expected, drain(late));
+			Assert.assertEquals(8, expected.size());
+		}
+		finally {
+			OOCCacheManager.reset();
+		}
+	}
+
+	@Test
+	public void testStreamingMMultFromSharedRowsSpills() {
+		OOCCacheManager.reset();
+		boolean statistics = DMLScript.OOC_STATISTICS;
+		DMLScript.OOC_STATISTICS = true;
+		Statistics.resetOOCEvictionStats();
+		OOCCacheManager.getGlobalCache().updateLimits(1_500_000, 100_000);
+		try {
+			SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> left = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> right = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> transposed = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> output = new SubscribableTaskQueue<>();
+			MatrixObject data = new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(800, 400, 100), FileFormat.BINARY));
+			MatrixObject transposedData = new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(400, 800, 100), FileFormat.BINARY));
+			MatrixObject outputData = new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(400, 400, 100), FileFormat.BINARY));
+			input.setData(data);
+			left.setData(data);
+			right.setData(data);
+			transposed.setData(transposedData);
+			output.setData(outputData);
+			for(int row = 1; row <= 8; row++)
+				for(int col = 1; col <= 4; col++)
+					input.enqueue(new IndexedMatrixValue(new MatrixIndexes(row, col),
+						new MatrixBlock(100, 100, row * 10d + col)));
+			input.closeInput();
+
+			StreamContext context = new StreamContext();
+			OOCInstructionUtils.sharedRows(input, List.of(left, right), 2, context);
+			OOCInstructionUtils.transpose(left, transposed, context);
+			AggregateOperator aggregate = new AggregateOperator(0, Plus.getPlusFnObject());
+			OOCInstructionUtils.matrixMultiply(transposed, right, output,
+				new AggregateBinaryOperator(Multiply.getMultiplyFnObject(), aggregate),
+				new BinaryOperator(Plus.getPlusFnObject()), context);
+
+			output.start();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = output.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue value = current.get();
+					long outputRow = value.getIndexes().getRowIndex();
+					long outputCol = value.getIndexes().getColumnIndex();
+					double expected = 0;
+					for(int row = 1; row <= 8; row++)
+						expected += 100 * (row * 10d + outputRow) * (row * 10d + outputCol);
+					Assert.assertEquals(expected, value.getValue().get(0, 0), 0);
+					blocks++;
+				}
+			Assert.assertEquals(16, blocks);
+			Assert.assertTrue("Expected streaming multiply state to spill", Statistics.getOOCEvictionWriteCount() > 0);
+		}
+		finally {
+			OOCCacheManager.reset();
+			DMLScript.OOC_STATISTICS = statistics;
+		}
+	}
+
+	private static Map<String, Double> drain(OOCStream<IndexedMatrixValue> stream) {
+		Map<String, Double> values = new HashMap<>();
+		OOCStream.QueueCallback<IndexedMatrixValue> callback;
+		while((callback = stream.dequeueCB()) != null)
+			try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+				IndexedMatrixValue value = current.get();
+				values.put(value.getIndexes().toString(), value.getValue().get(0, 0));
+			}
+		return values;
 	}
 
 	@Test

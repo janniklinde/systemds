@@ -548,7 +548,7 @@ public class Dag<N extends Lop>
 						outputs[count++] = out.getOutputParameters().getLabel();
 					inst_string = node.getInstructions(inputs, outputs);
 				}
-				else if ( node.getType() == Type.Tee ) {
+				else if ( node.getType() == Type.Tee || node.getType() == Type.SharedRows ) {
 					String input = node.getInputs().get(0).getOutputParameters().getLabel();
 					inst_string = node.getInstructions(input, node.getOutputParameters().getLabel());
 				}

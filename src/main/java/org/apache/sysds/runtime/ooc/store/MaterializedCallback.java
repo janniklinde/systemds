@@ -97,6 +97,18 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 		return sole ? bytes : 0;
 	}
 
+	public synchronized boolean isParked() {
+		return _parked;
+	}
+
+	public synchronized BlockKey transferParkedReference() {
+		if(_closed || !_parked)
+			return null;
+		_parked = false;
+		_closed = true;
+		return new BlockKey(_store.streamId(), _index);
+	}
+
 	private synchronized void revive() {
 		if(!_parked)
 			return;

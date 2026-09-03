@@ -337,10 +337,10 @@ public abstract class OOCPrimitive {
 		private boolean _handleReserved;
 
 		private InputSlot(OOCStreamable<?> source) {
-			_source = source;
-			_dependency = source.getPrimitive();
+			_source = source.claimConsumer();
+			_dependency = _source.getPrimitive();
 			_handleReserved = true;
-			source.reserveLazyHandle();
+			_source.reserveLazyHandle();
 		}
 	}
 

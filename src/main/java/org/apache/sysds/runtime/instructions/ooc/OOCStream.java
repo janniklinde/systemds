@@ -72,6 +72,16 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 		boolean isFailure();
 	}
 
+	interface WrappedQueueCallback<T> extends QueueCallback<T> {
+		QueueCallback<T> delegate();
+	}
+
+	interface PurgeableQueueCallback<T> extends WrappedQueueCallback<T> {
+		long tryPark();
+
+		void releaseRetention();
+	}
+
 	interface GroupQueueCallback<T> extends QueueCallback<T> {
 		int size();
 

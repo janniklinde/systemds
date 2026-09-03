@@ -39,6 +39,7 @@ import org.apache.sysds.common.Types.ExecType;
 import org.apache.sysds.lops.LopsException;
 import org.apache.sysds.lops.Sql;
 import org.apache.sysds.lops.Tee;
+import org.apache.sysds.lops.SharedRows;
 import org.apache.sysds.parser.DataExpression;
 import static org.apache.sysds.parser.DataExpression.FED_RANGES;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject.UpdateType;
@@ -299,6 +300,10 @@ public class DataOp extends Hop {
 				l = new Tee(getInput(0).constructLops(), getDataType(), getValueType());
 				setOutputDimensions(l);
 				break;
+			case SHAREDROWS:
+				l = new SharedRows(getInput(0).constructLops(), getDataType(), getValueType());
+				setOutputDimensions(l);
+				break;
 				
 			default:
 				throw new LopsException("Invalid operation type for Data LOP: " + _op);
@@ -489,7 +494,8 @@ public class DataOp extends Hop {
 
 	@Override
 	public void refreshSizeInformation() {
-		if( _op == OpOpData.PERSISTENTWRITE || _op == OpOpData.TRANSIENTWRITE || _op == OpOpData.TEE ) {
+		if( _op == OpOpData.PERSISTENTWRITE || _op == OpOpData.TRANSIENTWRITE || _op == OpOpData.TEE
+			|| _op == OpOpData.SHAREDROWS ) {
 			Hop input1 = getInput().get(0);
 			setDim1(input1.getDim1());
 			setDim2(input1.getDim2());

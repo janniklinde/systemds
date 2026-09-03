@@ -94,6 +94,16 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 		putSlot(index, slot -> finalizeReferencePut(index, slot, pinned));
 	}
 
+	public void putTransferredReference(int index, BlockKey key) {
+		try {
+			putSlot(index, slot -> finalizeTransferredReference(slot, key));
+		}
+		catch(RuntimeException error) {
+			_cache.dereference(key);
+			throw error;
+		}
+	}
+
 	private void putSlot(int index, Consumer<Slot> finalizer) {
 		Slot slot;
 		synchronized(this) {
@@ -171,15 +181,22 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 
 	public OOCFuture<StoreLease<T>> acquire(int index, MemoryAllowance leaseAllowance) {
 		BlockKey key;
+		OOCFuture<Void> waitFor;
 		synchronized(this) {
 			checkOpen();
 			if(index < 0 || index >= _slots.length)
 				return OOCFuture.completed(null);
 			Slot slot = _slots[index];
-			if(slot == null || slot._putFuture != null)
+			if(slot == null)
 				return OOCFuture.completed(null);
+			waitFor = slot._putFuture;
+			if(waitFor != null)
+				key = null;
+			else
 			key = slot._key;
 		}
+		if(waitFor != null)
+			return waitFor.thenCompose(ignored -> acquire(index, leaseAllowance));
 		OOCFuture<BlockEntry> pinned = OOCUtils.pinAdmitted(_cache, key.getStreamId(), key.getSequenceNumber(),
 			leaseAllowance, () -> _closed);
 		OOCFuture<StoreLease<T>> result = new OOCFuture<>();
@@ -191,6 +208,11 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 					() -> _cache.unpin(entry, leaseAllowance).getCompletionFuture()));
 		});
 		return result;
+	}
+
+	public synchronized boolean contains(int index) {
+		checkOpen();
+		return index >= 0 && index < _slots.length && _slots[index] != null;
 	}
 
 	public StoreLease<T> peek(int index, MemoryAllowance leaseAllowance) {
@@ -306,6 +328,21 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 		}
 		if(cleared)
 			_cache.dereference(pinned.getKey());
+		putFuture.complete(null);
+	}
+
+	private void finalizeTransferredReference(Slot slot, BlockKey key) {
+		boolean cleared;
+		OOCFuture<Void> putFuture;
+		synchronized(this) {
+			slot._key = key;
+			slot._tableOwnedKey = false;
+			cleared = slot._cleared;
+			putFuture = slot._putFuture;
+			slot._putFuture = null;
+		}
+		if(cleared)
+			_cache.dereference(key);
 		putFuture.complete(null);
 	}
 

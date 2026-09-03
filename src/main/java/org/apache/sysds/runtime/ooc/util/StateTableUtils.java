@@ -20,7 +20,11 @@
 package org.apache.sysds.runtime.ooc.util;
 
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
+import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
@@ -45,13 +49,41 @@ public final class StateTableUtils {
 
 	public static <T extends SpillableObject> void put(StateTable<T> table, int slot, OOCStream.QueueCallback<T> tile,
 		MemoryAllowance allowance) {
+		OOCStream.QueueCallback<T> original = tile;
+		while(tile instanceof OOCStream.WrappedQueueCallback<?>) {
+			@SuppressWarnings("unchecked")
+			OOCStream.WrappedQueueCallback<T> wrapped = (OOCStream.WrappedQueueCallback<T>) tile;
+			tile = wrapped.delegate();
+		}
 		if(tile instanceof MaterializedCallback<T> pinned && pinned.pinnedEntry() != null) {
 			table.putReference(slot, pinned.pinnedEntry());
+			releaseRetention(original);
 			return;
 		}
+		if(tile instanceof MaterializedCallback<T> parked) {
+			BlockKey reference = parked.transferParkedReference();
+			if(reference != null) {
+				table.putTransferredReference(slot, reference);
+				releaseRetention(original);
+				return;
+			}
+		}
 		ManagedPayload<T> payload;
-		if(tile instanceof InMemoryQueueCallback<T> managed && managed.getManagedBytes() > 0)
+		if(tile instanceof InMemoryQueueCallback<T> managed && managed.getManagedBytes() > 0) {
+			if(managed.isExclusive())
 			payload = managed.extractManagedPayload();
+			else {
+				T value = tile.get();
+				if(!(value instanceof IndexedMatrixValue matrix))
+					throw new IllegalStateException("Cannot store an aliased mutable payload without copying it.");
+				@SuppressWarnings("unchecked")
+				T copy = (T) new IndexedMatrixValue(new MatrixIndexes(matrix.getIndexes()),
+					new MatrixBlock((MatrixBlock) matrix.getValue()));
+				long bytes = copy.size();
+				allowance.reserveBlocking(bytes);
+				payload = new ManagedPayload<>(copy, bytes, allowance);
+			}
+		}
 		else {
 			T value = tile.get();
 			long bytes = value.size();
@@ -65,6 +97,11 @@ public final class StateTableUtils {
 			payload.release();
 			throw error;
 		}
+	}
+
+	private static void releaseRetention(OOCStream.QueueCallback<?> callback) {
+		if(callback instanceof OOCStream.PurgeableQueueCallback<?> retained)
+			retained.releaseRetention();
 	}
 
 	public static <T extends SpillableObject> OOCFuture<Match<T>> putOrTake(StateTable<T> table, int slot,

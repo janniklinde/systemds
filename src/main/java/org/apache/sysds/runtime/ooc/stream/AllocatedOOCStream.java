@@ -20,6 +20,8 @@
 package org.apache.sysds.runtime.ooc.stream;
 
 import java.util.function.ToLongFunction;
+import java.util.function.Consumer;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
@@ -34,6 +36,7 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 	private final MemoryAllowance _allowance;
 	private final ToLongFunction<T> _reservationSize;
 	private final boolean _limitPassiveOutput;
+	private final AtomicBoolean _attached = new AtomicBoolean();
 	private volatile DMLRuntimeException _failure;
 	private int _pendingReservations;
 	private boolean _sourceComplete;
@@ -50,7 +53,29 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 		_reservationSize = reservationSize;
 		_limitPassiveOutput = limitPassiveOutput;
 		setData(source.getData());
-		source.setSubscriber(this::admit);
+	}
+
+	@Override
+	public void setSubscriber(Consumer<OOCStream.QueueCallback<T>> subscriber) {
+		super.setSubscriber(subscriber);
+		attach();
+	}
+
+	@Override
+	public T dequeue() {
+		attach();
+		return super.dequeue();
+	}
+
+	@Override
+	public OOCStream.QueueCallback<T> dequeueCB() {
+		attach();
+		return super.dequeueCB();
+	}
+
+	private void attach() {
+		if(_attached.compareAndSet(false, true))
+			_source.setSubscriber(this::admit);
 	}
 
 	public static ReservationBudget detachBudget(OOCStream.QueueCallback<?> callback) {

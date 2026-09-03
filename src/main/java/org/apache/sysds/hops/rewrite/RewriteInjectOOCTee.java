@@ -24,14 +24,17 @@ import org.apache.sysds.common.Types;
 import org.apache.sysds.common.Types.OpOpData;
 import org.apache.sysds.hops.DataOp;
 import org.apache.sysds.hops.Hop;
+import org.apache.sysds.hops.IndexingOp;
 import org.apache.sysds.hops.ReorgOp;
 import org.apache.sysds.parser.IfStatementBlock;
 import org.apache.sysds.parser.StatementBlock;
 import org.apache.sysds.parser.WhileStatementBlock;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -89,7 +92,7 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 
 		boolean isRewriteCandidate = DMLScript.USE_OOC
 			&& hop.getDataType().isMatrix()
-			&& !HopRewriteUtils.isData(hop, OpOpData.TEE)
+			&& !isSharingHop(hop)
 			&& hop.getParent().size() > 1
 			&& (!APPLY_ONLY_XtX_PATTERN || isSelfTranposePattern(hop));
 
@@ -119,7 +122,7 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 		// Check if this hop is a candidate for OOC Tee injection
 		if (DMLScript.USE_OOC 
 			&& hop.getDataType().isMatrix()
-			&& !HopRewriteUtils.isData(hop, OpOpData.TEE)
+			&& !isSharingHop(hop)
 			&& hop.getParent().size() > 1
 			&& (!APPLY_ONLY_XtX_PATTERN || isSelfTranposePattern(hop))) //FIXME remove
 		{
@@ -173,28 +176,162 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 		if(!DMLScript.USE_OOC || roots == null || roots.isEmpty())
 			return false;
 
-		List<Hop> shared = new ArrayList<>();
-		Hop.resetVisitStatus(roots);
-		for(Hop root : roots)
-			collectUnteedSharedHops(root, shared);
-		Hop.resetVisitStatus(roots);
-
-		for(Hop hop : shared)
+		Set<Hop> requiredTees = Collections.newSetFromMap(new IdentityHashMap<>());
+		boolean changed = stripTees(roots, requiredTees);
+		while(true) {
+			List<Hop> shared = collectSharedHops(roots, true);
+			Hop candidate = null;
+			List<Hop> correlated = Collections.emptyList();
+			for(Hop hop : shared) {
+				correlated = correlatedConsumers(hop);
+				if(!correlated.isEmpty()) {
+					candidate = hop;
+					break;
+				}
+			}
+			if(candidate == null)
+				break;
+			shareRowsHop(candidate, correlated);
+			changed = true;
+		}
+		for(Hop hop : requiredTees)
+			if(!hop.getParent().isEmpty() && !isSharingHop(hop))
+				teeSharedHop(hop);
+		List<Hop> remainingShared = collectSharedHops(roots, false);
+		for(Hop hop : remainingShared)
 			teeSharedHop(hop);
-		return !shared.isEmpty();
+		return changed || !remainingShared.isEmpty();
 	}
 
-	private static void collectUnteedSharedHops(Hop hop, List<Hop> shared) {
+	private static boolean stripTees(ArrayList<Hop> roots, Set<Hop> requiredTees) {
+		List<Hop> tees = new ArrayList<>();
+		Hop.resetVisitStatus(roots);
+		for(Hop root : roots)
+			collectTees(root, tees);
+		Hop.resetVisitStatus(roots);
+		for(Hop tee : tees) {
+			Hop input = tee.getInput().get(0);
+			requiredTees.add(input);
+			for(Hop parent : new ArrayList<>(tee.getParent()))
+				HopRewriteUtils.replaceChildReference(parent, tee, input);
+			HopRewriteUtils.removeAllChildReferences(tee);
+		}
+		return !tees.isEmpty();
+	}
+
+	private static void collectTees(Hop hop, List<Hop> tees) {
 		if(hop.isVisited())
 			return;
 		hop.setVisited(true);
-
 		for(Hop input : hop.getInput())
-			collectUnteedSharedHops(input, shared);
+			collectTees(input, tees);
+		if(HopRewriteUtils.isData(hop, OpOpData.TEE))
+			tees.add(hop);
+	}
 
-		if(hop.getDataType().isMatrix() && hop.getParent().size() > 1
-			&& !HopRewriteUtils.isData(hop, OpOpData.TEE))
+	private static List<Hop> collectSharedHops(ArrayList<Hop> roots, boolean excludeRowShared) {
+		List<Hop> shared = new ArrayList<>();
+		Hop.resetVisitStatus(roots);
+		for(Hop root : roots)
+			collectSharedHops(root, shared, excludeRowShared);
+		Hop.resetVisitStatus(roots);
+		return shared;
+	}
+
+	private static void collectSharedHops(Hop hop, List<Hop> shared, boolean excludeRowShared) {
+		if(hop.isVisited())
+			return;
+		hop.setVisited(true);
+		for(Hop input : hop.getInput())
+			collectSharedHops(input, shared, excludeRowShared);
+		if(hop.getDataType().isMatrix() && hop.getParent().size() > 1 && !isSharingHop(hop) &&
+			(!excludeRowShared || !dependsOnSharedRows(hop, Collections.newSetFromMap(new IdentityHashMap<>()))))
 			shared.add(hop);
+	}
+
+	private static boolean dependsOnSharedRows(Hop hop, Set<Hop> visited) {
+		if(!visited.add(hop))
+			return false;
+		for(Hop input : hop.getInput())
+			if(HopRewriteUtils.isData(input, OpOpData.SHAREDROWS) || dependsOnSharedRows(input, visited))
+				return true;
+		return false;
+	}
+
+	private static void shareRowsHop(Hop sharedInput, List<Hop> correlated) {
+		DataOp sharedRows = new DataOp("shared_rows_" + sharedInput.getName(), sharedInput.getDataType(),
+			sharedInput.getValueType(), OpOpData.SHAREDROWS, null, sharedInput.getDim1(), sharedInput.getDim2(),
+			sharedInput.getNnz(), sharedInput.getBlocksize());
+		HopRewriteUtils.addChildReference(sharedRows, sharedInput);
+		for(Hop consumer : correlated)
+			HopRewriteUtils.replaceChildReference(consumer, sharedInput, sharedRows);
+	}
+
+	private static List<Hop> correlatedConsumers(Hop shared) {
+		Set<Hop> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+		List<Hop> pending = new ArrayList<>(shared.getParent());
+		while(!pending.isEmpty()) {
+			Hop candidate = pending.remove(pending.size() - 1);
+			if(!visited.add(candidate))
+				continue;
+			if(HopRewriteUtils.isMatrixMultiply(candidate) && candidate.getInput().size() == 2 &&
+				dependsOn(candidate.getInput().get(0), shared, Collections.newSetFromMap(new IdentityHashMap<>())) &&
+				dependsOn(candidate.getInput().get(1), shared, Collections.newSetFromMap(new IdentityHashMap<>()))) {
+				List<Hop> consumers = new ArrayList<>(2);
+				for(Hop input : candidate.getInput()) {
+					Hop closest = null;
+					int closestDistance = Integer.MAX_VALUE;
+					for(Hop consumer : shared.getParent()) {
+						if(consumer instanceof IndexingOp || HopRewriteUtils.isData(consumer, OpOpData.SHAREDROWS))
+							continue;
+						int distance = input == shared && consumer == candidate ? 0 : distanceTo(input, consumer,
+							new IdentityHashMap<>());
+						if(distance < closestDistance) {
+							closest = consumer;
+							closestDistance = distance;
+						}
+					}
+					if(closest != null && !consumers.contains(closest))
+						consumers.add(closest);
+				}
+				if(consumers.size() == 2)
+					return consumers;
+			}
+			pending.addAll(candidate.getParent());
+		}
+		return Collections.emptyList();
+	}
+
+	private static int distanceTo(Hop current, Hop target, IdentityHashMap<Hop, Integer> memo) {
+		if(current == target)
+			return 0;
+		Integer known = memo.get(current);
+		if(known != null)
+			return known;
+		int distance = Integer.MAX_VALUE;
+		memo.put(current, distance);
+		for(Hop input : current.getInput()) {
+			int childDistance = distanceTo(input, target, memo);
+			if(childDistance != Integer.MAX_VALUE)
+				distance = Math.min(distance, childDistance + 1);
+		}
+		memo.put(current, distance);
+		return distance;
+	}
+
+	private static boolean dependsOn(Hop current, Hop target, Set<Hop> visited) {
+		if(current == target)
+			return true;
+		if(!visited.add(current))
+			return false;
+		for(Hop input : current.getInput())
+			if(dependsOn(input, target, visited))
+				return true;
+		return false;
+	}
+
+	private static boolean isSharingHop(Hop hop) {
+		return HopRewriteUtils.isData(hop, OpOpData.TEE) || HopRewriteUtils.isData(hop, OpOpData.SHAREDROWS);
 	}
 
 	private static void teeSharedHop(Hop sharedInput) {
