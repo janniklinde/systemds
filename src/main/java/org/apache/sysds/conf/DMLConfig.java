@@ -159,6 +159,9 @@ public class DMLConfig
 	public static final String OOC_MEM_CACHE_MIN = "sysds.ooc.memory.cache.min";         // in bytes
 	public static final String OOC_MEM_HEADROOM_MIN = "sysds.ooc.memory.headroom.min";      // in bytes
 	public static final String OOC_MEM_HEADROOM_MIN_FRACTION = "sysds.ooc.memory.headroom.min.fraction";
+	public static final String OOC_SOURCE_BULK_BYTES = "sysds.ooc.source.bulksize";        // in bytes, per scan phase
+	public static final String OOC_REPLAY_MEMORY = "sysds.ooc.source.replay.memory";       // in bytes
+	public static final String OOC_REPLAY_PREFETCH = "sysds.ooc.source.replay.prefetch";   // in blocks
 
 	/** Asynchronous triggering of Spark OPs and operator placement **/
 	public static final String ASYNC_PREFETCH = "sysds.async.prefetch";  // boolean: enable asynchronous prefetching spark/gpu intermediates
@@ -189,14 +192,17 @@ public class DMLConfig
 		_defaultVals.put(OOC_MEM_BROKER_FRACTION, "0.3333");
 		_defaultVals.put(OOC_MEM_BROKER_MIN, String.valueOf(64L * 1024 * 1024)); // 64MB
 		_defaultVals.put(OOC_MEM_BROKER_MAX, String.valueOf(3L * 1024 * 1024 * 1024)); // 3GB
-		_defaultVals.put(OOC_MEM_PREFETCH_FRACTION, "0.083");
-		_defaultVals.put(OOC_MEM_PREFETCH_MIN, String.valueOf(32L * 1024 * 1024));
-		_defaultVals.put(OOC_MEM_PREFETCH_MAX, String.valueOf(200L << 20) );
-		_defaultVals.put(OOC_MEM_CACHE_FRACTION, "0.5" );
-		_defaultVals.put(OOC_MEM_CACHE_FRACTION_HARD, "0.6" );
+		_defaultVals.put(OOC_MEM_PREFETCH_FRACTION, "0.1");
+		_defaultVals.put(OOC_MEM_PREFETCH_MIN, String.valueOf(64L * 1024 * 1024));
+		_defaultVals.put(OOC_MEM_PREFETCH_MAX, String.valueOf(1000L * 1024 * 1024)); // 1GB
+		_defaultVals.put(OOC_MEM_CACHE_FRACTION, "0.5");
+		_defaultVals.put(OOC_MEM_CACHE_FRACTION_HARD, "0.6");
 		_defaultVals.put(OOC_MEM_CACHE_MIN, String.valueOf(64L * 1024 * 1024)); // 64MB
 		_defaultVals.put(OOC_MEM_HEADROOM_MIN, String.valueOf(512L * 1024 * 1024)); // 512MB
 		_defaultVals.put(OOC_MEM_HEADROOM_MIN_FRACTION, "0.1");
+		_defaultVals.put(OOC_SOURCE_BULK_BYTES, String.valueOf(300L * 1024 * 1024)); // 300MB
+		_defaultVals.put(OOC_REPLAY_MEMORY, String.valueOf(300L * 1024 * 1024)); // 300MB
+		_defaultVals.put(OOC_REPLAY_PREFETCH, "32");
 		_defaultVals.put(CP_PARALLEL_OPS,        "true" );
 		_defaultVals.put(CP_PARALLEL_IO,         "true" );
 		_defaultVals.put(IO_COMPRESSION_CODEC,   "none");

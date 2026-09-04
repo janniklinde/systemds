@@ -20,6 +20,8 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.common.Opcodes;
+import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
@@ -30,12 +32,12 @@ import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 public class ReblockOOCInstruction extends ComputationOOCInstruction {
-	private static final long SOURCE_BULK_BYTES = 100_000_000L;
 	private final int blen;
 
 	private ReblockOOCInstruction(Operator op, CPOperand in, CPOperand out, int blocksize, String opcode,
@@ -67,10 +69,14 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 		OOCStream<IndexedMatrixValue> source = createWritableStream();
 		source.setData(min);
 		boolean knownGeometry = mc.dimsKnown() && mc.getRows() > 0 && mc.getCols() > 0 && mc.getBlocksize() > 0;
-		long tileBytes = knownGeometry ? OOCUtils.estimateFullTileBytes(mc) : SOURCE_BULK_BYTES;
+		// A phase is one atomic reservation, and the broker never grants more than it holds, so a bulk size
+		// above the broker blocks forever. Half leaves room for a second phase to be admitted concurrently.
+		long bulkLimit = Math.min(ConfigurationManager.getDMLConfig().getLongValue(DMLConfig.OOC_SOURCE_BULK_BYTES),
+			GlobalMemoryBroker.get().getAllowedMemory() / 2);
+		long tileBytes = knownGeometry ? OOCUtils.estimateFullTileBytes(mc) : bulkLimit;
 		long numBlocks = knownGeometry ? OOCUtils.getNumBlocks(mc) : Long.MAX_VALUE;
 		long totalBytes = numBlocks > Long.MAX_VALUE / tileBytes ? Long.MAX_VALUE : numBlocks * tileBytes;
-		long productionLimit = Math.min(SOURCE_BULK_BYTES, totalBytes);
+		long productionLimit = Math.min(bulkLimit, totalBytes);
 		long bulkBytes = productionLimit;
 		MaterializedStoreStreamable materialized = OOCInstructionUtils.sourceRead(source, min, min.getFileName(),
 			mc.getRows(), mc.getCols(), mc.getBlocksize(), mc.getNonZeros(), bulkBytes, productionLimit, getContext());

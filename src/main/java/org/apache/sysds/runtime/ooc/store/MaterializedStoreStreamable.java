@@ -24,6 +24,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
+import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.instructions.ooc.CachingStream;
@@ -42,10 +44,8 @@ import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 public final class MaterializedStoreStreamable implements OOCStreamable<IndexedMatrixValue> {
-	private static final int REPLAY_PREFETCH = 16;
-	private static final int LIVE_PREFETCH = REPLAY_PREFETCH;
-	private static final long REPLAY_MEMORY_LIMIT = 100L * 1024 * 1024;
-
+	private final int _replayPrefetch;
+	private final long _replayMemory;
 	private final MaterializeOOCPrimitive _primitive;
 	private final OOCFuture<DataCharacteristics> _dimensions;
 	private MaterializedStore<IndexedMatrixValue> _store;
@@ -66,6 +66,10 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		OOCStoreLayout layout) {
 		if(source == null)
 			throw new IllegalArgumentException("Materialized stream requires a source.");
+		DMLConfig conf = ConfigurationManager.getDMLConfig();
+		_replayPrefetch = conf.getIntValue(DMLConfig.OOC_REPLAY_PREFETCH);
+		_replayMemory = Math.min(conf.getLongValue(DMLConfig.OOC_REPLAY_MEMORY),
+			GlobalMemoryBroker.getSource().getAllowedMemory() / 2);
 		_data = data;
 		_dimensions = new OOCFuture<>();
 		_primitive = MaterializeOOCPrimitive.reusable(source, layout);
@@ -133,9 +137,9 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 				}
 				OrderedMaterializedStoreReader<IndexedMatrixValue> reader = null;
 				SyncMemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.getSource(),
-					REPLAY_MEMORY_LIMIT);
+					_replayMemory);
 				try {
-					reader = store.openReader(new SequentialAccessPattern(store.size()), allowance, REPLAY_PREFETCH);
+					reader = store.openReader(new SequentialAccessPattern(store.size()), allowance, _replayPrefetch);
 					output.setAllowance(allowance);
 					synchronized(this) {
 						_pendingReaders--;
@@ -500,7 +504,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 
 		private boolean hasLiveWork() {
 			return (_activated.get() && (liveHeadReady()
-				|| (inFlightSize() < LIVE_PREFETCH && !liveIndicesEmpty()))) || liveFinished();
+				|| (inFlightSize() < _owner._replayPrefetch && !liveIndicesEmpty()))) || liveFinished();
 		}
 
 		private boolean liveFinished() {
@@ -512,7 +516,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			if(store != null && _activated.get()) {
 				ensureAllowance();
 				deliverLive(store);
-				while(inFlightSize() < LIVE_PREFETCH) {
+				while(inFlightSize() < _owner._replayPrefetch) {
 					Integer index = pollLive();
 					if(index == null)
 						break;
@@ -623,7 +627,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 
 		private synchronized void ensureAllowance() {
 			if(_allowance == null)
-				_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.getSource(), REPLAY_MEMORY_LIMIT);
+				_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.getSource(), _owner._replayMemory);
 		}
 
 		private void closeLive() {
