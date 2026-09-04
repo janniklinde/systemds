@@ -45,8 +45,8 @@ import java.util.concurrent.TimeUnit;
  * Watchdog to help debug OOC streams/tasks that never close.
  */
 public final class OOCWatchdog {
-	public static final boolean WATCH = Boolean.getBoolean("sysds.ooc.watchdog");
-	public static final boolean WATCH_PRIMITIVES = WATCH || Boolean.getBoolean("sysds.ooc.watchdog.primitives");
+	public static final boolean WATCH = false;
+	public static final boolean WATCH_PRIMITIVES = false;
 	private static final double PINNED_NEAR_LIMIT_RATIO = 0.9;
 	private static final int TOP_PINNED_STREAMS = 5;
 	private static final ConcurrentHashMap<String, Entry> OPEN = new ConcurrentHashMap<>();

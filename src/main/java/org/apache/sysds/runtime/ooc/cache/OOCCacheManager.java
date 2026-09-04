@@ -20,6 +20,8 @@
 package org.apache.sysds.runtime.ooc.cache;
 
 import org.apache.sysds.api.DMLScript;
+import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
@@ -47,34 +49,48 @@ import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import scala.Tuple2;
 
 public class OOCCacheManager {
-	private static final double OOC_BUFFER_PERCENTAGE =
-		Double.parseDouble(System.getProperty("sysds.ooc.cache.percentage", "0.5"));
-	private static final double OOC_BUFFER_PERCENTAGE_HARD =
-		Double.parseDouble(System.getProperty("sysds.ooc.cache.percentage.hard", "0.6"));
-	private static final long MIN_NON_OOC_HEAP_BYTES = 512L << 20; // 512 MB
-	private static final double MIN_NON_OOC_HEAP_FRACTION = 0.1;
-	private static final long _evictionLimit;
-	private static final long _hardLimit;
+	private static volatile Tuple2<Long, Long> _limits;
 
 	private static final AtomicReference<OOCIOHandler> _ioHandler;
 	private static final AtomicReference<OOCCacheScheduler> _scheduler;
 	private static final AtomicReference<OOCCache> _globalCache;
 
 	static {
-		Tuple2<Long, Long> limits = cacheLimits(Runtime.getRuntime().maxMemory(),
-			GlobalMemoryBroker.get().getAllowedMemory() + GlobalMemoryBroker.getSource().getAllowedMemory());
-		_evictionLimit = limits._1;
-		_hardLimit = limits._2;
 		_ioHandler = new AtomicReference<>();
 		_scheduler = new AtomicReference<>();
 		_globalCache = new AtomicReference<>();
 	}
 
-	static Tuple2<Long, Long> cacheLimits(long maxHeap, long brokerAllowedMemory) {
-		long evictionLimit = (long)(maxHeap * OOC_BUFFER_PERCENTAGE);
-		long configuredHardLimit = (long)(maxHeap * OOC_BUFFER_PERCENTAGE_HARD);
-		long reserved = Math.max(MIN_NON_OOC_HEAP_BYTES, (long)(maxHeap * MIN_NON_OOC_HEAP_FRACTION));
-		long hardLimit = Math.min(configuredHardLimit, Math.max(0, maxHeap - brokerAllowedMemory - reserved));
+	private static Tuple2<Long, Long> limits() {
+		Tuple2<Long, Long> limits = _limits;
+		if(limits == null) {
+			synchronized(OOCCacheManager.class) {
+				if(_limits == null)
+					_limits = cacheLimits(Runtime.getRuntime().maxMemory(),
+						GlobalMemoryBroker.get().getAllowedMemory() + GlobalMemoryBroker.getSource().getAllowedMemory(),
+						ConfigurationManager.getDMLConfig());
+				limits = _limits;
+			}
+		}
+		return limits;
+	}
+
+	public static Tuple2<Long, Long> cacheLimits(long maxHeap, long brokerAllowedMemory, DMLConfig conf) {
+		long reserved = Math.max(conf.getLongValue(DMLConfig.OOC_MEM_HEADROOM_MIN),
+			(long) (maxHeap * conf.getDoubleValue(DMLConfig.OOC_MEM_HEADROOM_MIN_FRACTION)));
+		long available = Math.max(0, maxHeap - brokerAllowedMemory - reserved);
+		long minCache = conf.getLongValue(DMLConfig.OOC_MEM_CACHE_MIN);
+		if(available < minCache)
+			throw new DMLRuntimeException("OOC memory split is infeasible: a heap of " + (maxHeap >> 20) + "MB leaves "
+				+ (available >> 20) + "MB for the cache after " + (brokerAllowedMemory >> 20) + "MB of brokers and "
+				+ (reserved >> 20) + "MB of headroom, below the " + (minCache >> 20)
+				+ "MB minimum. Raise -Xmx or lower " + DMLConfig.OOC_MEM_BROKER_MAX + ", "
+				+ DMLConfig.OOC_MEM_HEADROOM_MIN + " or " + DMLConfig.OOC_MEM_CACHE_MIN + ".");
+
+		double hardFraction = conf.getDoubleValue(DMLConfig.OOC_MEM_CACHE_FRACTION_HARD);
+		long configuredHardLimit = hardFraction < 0 ? available : (long) (maxHeap * hardFraction);
+		long hardLimit = Math.min(configuredHardLimit, available);
+		long evictionLimit = (long) (maxHeap * conf.getDoubleValue(DMLConfig.OOC_MEM_CACHE_FRACTION));
 		if(evictionLimit >= hardLimit && hardLimit < configuredHardLimit)
 			evictionLimit = Math.max(0, hardLimit - configuredHardLimit + evictionLimit);
 		else
@@ -93,6 +109,7 @@ public class OOCCacheManager {
 			cacheScheduler.shutdown();
 		if(globalCache != null)
 			globalCache.shutdown();
+		_limits = null;
 
 		if (DMLScript.OOC_STATISTICS)
 			Statistics.resetOOCEvictionStats();
@@ -126,7 +143,8 @@ public class OOCCacheManager {
 				return scheduler;
 
 			OOCIOHandler ioHandler = new OOCIOHandlerImpl();
-			scheduler = new OOCLRUCacheScheduler(ioHandler, _evictionLimit, _hardLimit, Math.max(40000000, (long)((_hardLimit - _evictionLimit) * 0.1)));
+			scheduler = new OOCLRUCacheScheduler(ioHandler, getEvictionLimit(), getHardLimit(),
+				Math.max(40000000, (long) ((getHardLimit() - getEvictionLimit()) * 0.1)));
 
 			if(_scheduler.compareAndSet(null, scheduler)) {
 				_ioHandler.set(ioHandler);
@@ -148,11 +166,11 @@ public class OOCCacheManager {
 	}
 
 	public static long getHardLimit() {
-		return _hardLimit;
+		return limits()._2;
 	}
 
 	public static long getEvictionLimit() {
-		return _evictionLimit;
+		return limits()._1;
 	}
 
 	public static OOCCache getGlobalCache() {
@@ -160,20 +178,11 @@ public class OOCCacheManager {
 			OOCCache cache = _globalCache.get();
 			if(cache != null)
 				return cache;
-			cache = new OOCCacheImpl(new OOCIOHandlerImpl(), _hardLimit, _evictionLimit);
+			cache = new OOCCacheImpl(new OOCIOHandlerImpl(), getHardLimit(), getEvictionLimit());
 			if(_globalCache.compareAndSet(null, cache))
 				return cache;
 			cache.shutdown();
 		}
-	}
-
-	public static OOCIOHandler getIOHandler() {
-		OOCIOHandler io = _ioHandler.get();
-		if(io != null)
-			return io;
-		// Ensure initialization happens
-		getCache();
-		return _ioHandler.get();
 	}
 
 	/**
@@ -229,8 +238,7 @@ public class OOCCacheManager {
 		IndexedMatrixValue value, OOCIOHandler.SourceBlockDescriptor descriptor) {
 		BlockKey key = new BlockKey(streamId, blockId);
 		return new CachedQueueCallback<>(
-			getCache().putAndPinSourceBacked(key, value, OOCUtils.memoryCharge(value),
-				descriptor), null);
+			getCache().putAndPinSourceBacked(key, value, OOCUtils.memoryCharge(value), descriptor), null);
 	}
 
 	public static OOCStream.QueueCallback<IndexedMatrixValue> putAndPinRawSourceBacked(BlockKey key, Object data, long size,

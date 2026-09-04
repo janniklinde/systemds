@@ -26,6 +26,7 @@ import org.apache.hadoop.mapred.JobConf;
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.common.Types;
 import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
@@ -60,22 +61,26 @@ import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicReference;
 
 final class SourceStore {
-	private static final int READER_SIZE = 16;
 	private static final int MAX_READ_AHEAD_COUNT = 64;
 	private static final int MAX_DECLINED_OFFERS = 16;
-	private static final int MAX_POOLED_READERS = 64;
+
+	private final int _maxPooledReaders;
+	private final int _readBufferBytes;
 
 	private final ThreadPoolExecutor _scanExec;
 	private final ConcurrentHashMap<BlockKey, OOCIOHandler.SourceBlockDescriptor> _locations = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<String, BlockLayoutIndex> _layouts = new ConcurrentHashMap<>();
-	private final ConcurrentHashMap<String, ConcurrentLinkedDeque<SequenceFile.Reader>> _readerPool =
-		new ConcurrentHashMap<>();
+	private final ConcurrentHashMap<String, ConcurrentLinkedDeque<SequenceFile.Reader>> _readerPool = new ConcurrentHashMap<>();
 	private final AtomicInteger _pooledReaders = new AtomicInteger();
 	private final int _scanCallerId = OOCEventLog.registerCaller("read_src");
 	private volatile JobConf _readConf;
 
 	SourceStore() {
-		_scanExec = new ThreadPoolExecutor(READER_SIZE, READER_SIZE, 0L, TimeUnit.MILLISECONDS,
+		DMLConfig conf = ConfigurationManager.getDMLConfig();
+		int readers = conf.getIntValue(DMLConfig.OOC_IO_READER_THREADS);
+		_maxPooledReaders = conf.getIntValue(DMLConfig.OOC_IO_READER_POOL);
+		_readBufferBytes = conf.getIntValue(DMLConfig.OOC_IO_READER_BUFFER);
+		_scanExec = new ThreadPoolExecutor(readers, readers, 0L, TimeUnit.MILLISECONDS,
 			new ArrayBlockingQueue<>(100000));
 	}
 
@@ -169,7 +174,8 @@ final class SourceStore {
 			}
 		}
 		try {
-			return new SequenceFile.Reader(readConf(), SequenceFile.Reader.file(new Path(path)));
+			return new SequenceFile.Reader(readConf(), SequenceFile.Reader.file(new Path(path)),
+				SequenceFile.Reader.bufferSize(_readBufferBytes));
 		}
 		catch(IOException e) {
 			throw new DMLRuntimeException(e);
@@ -177,7 +183,7 @@ final class SourceStore {
 	}
 
 	private void returnReader(String path, SequenceFile.Reader reader) {
-		if(_pooledReaders.get() >= MAX_POOLED_READERS) {
+		if(_pooledReaders.get() >= _maxPooledReaders) {
 			IOUtilFunctions.closeSilently(reader);
 			return;
 		}
@@ -227,7 +233,6 @@ final class SourceStore {
 				return;
 		}
 	}
-
 
 	CompletableFuture<OOCIOHandler.SourceReadResult> scan(OOCIOHandler.SourceReadRequest request,
 		long maxBytesInFlight) {
@@ -372,7 +377,8 @@ final class SourceStore {
 		MatrixIndexes key = new MatrixIndexes();
 		BlockLayoutIndex layout = _layouts.computeIfAbsent(path.toString(), p -> new BlockLayoutIndex());
 
-		try(SequenceFile.Reader reader = new SequenceFile.Reader(job, SequenceFile.Reader.file(path))) {
+		try(SequenceFile.Reader reader = new SequenceFile.Reader(job, SequenceFile.Reader.file(path),
+			SequenceFile.Reader.bufferSize(_readBufferBytes))) {
 			long pos = filePositions.get(fileIdx);
 			if(pos > 0)
 				reader.seek(pos);
@@ -432,7 +438,6 @@ final class SourceStore {
 		else
 			request.target.enqueue(value);
 	}
-
 
 	private static void closeTarget(OOCStream<IndexedMatrixValue> target, boolean close) {
 		if(!close)

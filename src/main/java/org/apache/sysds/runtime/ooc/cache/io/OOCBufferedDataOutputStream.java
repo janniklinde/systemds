@@ -36,10 +36,6 @@ class OOCBufferedDataOutputStream extends FilterOutputStream implements DataOutp
 	private long _position;
 	private long _flushedPosition;
 
-	OOCBufferedDataOutputStream(OutputStream out) {
-		this(out, 8192);
-	}
-
 	OOCBufferedDataOutputStream(OutputStream out, int size) {
 		super(out);
 		if(size <= 0)

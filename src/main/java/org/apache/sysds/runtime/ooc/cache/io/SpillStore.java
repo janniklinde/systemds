@@ -20,6 +20,8 @@
 package org.apache.sysds.runtime.ooc.cache.io;
 
 import org.apache.sysds.api.DMLScript;
+import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.io.IOUtilFunctions;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
@@ -74,9 +76,14 @@ final class SpillStore {
 	private final AtomicBoolean _started = new AtomicBoolean(false);
 	private final int _evictCallerId = OOCEventLog.registerCaller("write");
 	private volatile PartitionFile[] _partitions = new PartitionFile[16];
+	private final int _readBufferBytes;
+	private final int _writeBufferBytes;
 
 	@SuppressWarnings("unchecked")
 	SpillStore() {
+		DMLConfig conf = ConfigurationManager.getDMLConfig();
+		_readBufferBytes = (conf.getIntValue(DMLConfig.OOC_IO_READER_BUFFER) / 8) * 8;
+		_writeBufferBytes = (conf.getIntValue(DMLConfig.OOC_IO_WRITER_BUFFER) / 8) * 8;
 		_spillDir = LocalFileUtils.getUniqueWorkingDir("ooc_stream");
 		_writeExec = new ThreadPoolExecutor(WRITER_SIZE, WRITER_SIZE, 0L, TimeUnit.MILLISECONDS,
 			new ArrayBlockingQueue<>(100000));
@@ -122,7 +129,7 @@ final class SpillStore {
 
 		try(RandomAccessFile raf = new RandomAccessFile(partitionPath(partitionId), "r")) {
 			raf.seek(offset);
-			OOCBufferedDataInputStream in = new OOCBufferedDataInputStream(raf);
+			OOCBufferedDataInputStream in = new OOCBufferedDataInputStream(raf, _readBufferBytes);
 			StreamTrace.spillRead(block.getKey().getStreamId(), block.getSize());
 			long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 			SpillableObject obj = SpillableObjectRegistry.read(in);
@@ -239,7 +246,7 @@ final class SpillStore {
 
 			try {
 				fos = new FileOutputStream(filename);
-				dos = new OOCBufferedDataOutputStream(fos);
+				dos = new OOCBufferedDataOutputStream(fos, _writeBufferBytes);
 
 				Tuple2<BlockEntry, OOCFuture<Void>> tpl;
 				waitingForFlush = new ConcurrentLinkedDeque<>();
@@ -292,7 +299,7 @@ final class SpillStore {
 				}
 			}
 			catch(InterruptedException ex) {
-				//writers are interrupted by a normal shutdown, so this is termination rather than a failure
+				// writers are interrupted by a normal shutdown, so this is termination rather than a failure
 				Thread.currentThread().interrupt();
 				return;
 			}

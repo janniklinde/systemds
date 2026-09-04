@@ -143,6 +143,23 @@ public class DMLConfig
 	public static final String FEDERATED_MONITOR_FREQUENCY = "sysds.federated.monitorFreq";
 	public static final int DEFAULT_FEDERATED_PORT = 4040; // borrowed default Spark Port
 	public static final int DEFAULT_NUMBER_OF_FEDERATED_WORKER_THREADS = 8;
+
+	public static final String OOC_IO_READER_BUFFER = "sysds.ooc.io.reader.buffersize";
+	public static final String OOC_IO_WRITER_BUFFER = "sysds.ooc.io.writer.buffersize";
+	public static final String OOC_IO_READER_THREADS = "sysds.ooc.io.reader.threads";
+	public static final String OOC_IO_READER_POOL = "sysds.ooc.io.reader.poolsize";
+	public static final String OOC_MEM_BROKER_FRACTION = "sysds.ooc.memory.broker.fraction";
+	public static final String OOC_MEM_BROKER_MIN = "sysds.ooc.memory.broker.min";        // in bytes
+	public static final String OOC_MEM_BROKER_MAX = "sysds.ooc.memory.broker.max";        // in bytes, -1 disables the cap
+	public static final String OOC_MEM_PREFETCH_FRACTION = "sysds.ooc.memory.prefetch.fraction";
+	public static final String OOC_MEM_PREFETCH_MIN = "sysds.ooc.memory.prefetch.min";      // in bytes
+	public static final String OOC_MEM_PREFETCH_MAX = "sysds.ooc.memory.prefetch.max";      // in bytes, -1 disables the cap
+	public static final String OOC_MEM_CACHE_FRACTION = "sysds.ooc.memory.cache.fraction.soft";
+	public static final String OOC_MEM_CACHE_FRACTION_HARD = "sysds.ooc.memory.cache.fraction.hard";
+	public static final String OOC_MEM_CACHE_MIN = "sysds.ooc.memory.cache.min";         // in bytes
+	public static final String OOC_MEM_HEADROOM_MIN = "sysds.ooc.memory.headroom.min";      // in bytes
+	public static final String OOC_MEM_HEADROOM_MIN_FRACTION = "sysds.ooc.memory.headroom.min.fraction";
+
 	/** Asynchronous triggering of Spark OPs and operator placement **/
 	public static final String ASYNC_PREFETCH = "sysds.async.prefetch";  // boolean: enable asynchronous prefetching spark/gpu intermediates
 	public static final String ASYNC_SPARK_BROADCAST = "sysds.async.broadcast";  // boolean: enable asynchronous broadcasting CP intermediates
@@ -165,6 +182,21 @@ public class DMLConfig
 		_defaultVals.put(SCRATCH_SPACE,          "scratch_space" );
 		_defaultVals.put(OPTIMIZATION_LEVEL,     String.valueOf(OptimizerUtils.DEFAULT_OPTLEVEL.ordinal()) );
 		_defaultVals.put(DEFAULT_BLOCK_SIZE,     String.valueOf(OptimizerUtils.DEFAULT_BLOCKSIZE) );
+		_defaultVals.put(OOC_IO_READER_BUFFER, String.valueOf(512 * 1024));
+		_defaultVals.put(OOC_IO_WRITER_BUFFER, String.valueOf(512 * 1024));
+		_defaultVals.put(OOC_IO_READER_THREADS, "16");
+		_defaultVals.put(OOC_IO_READER_POOL, "64");
+		_defaultVals.put(OOC_MEM_BROKER_FRACTION, "0.3333");
+		_defaultVals.put(OOC_MEM_BROKER_MIN, String.valueOf(64L * 1024 * 1024)); // 64MB
+		_defaultVals.put(OOC_MEM_BROKER_MAX, String.valueOf(3L * 1024 * 1024 * 1024)); // 3GB
+		_defaultVals.put(OOC_MEM_PREFETCH_FRACTION, "0.083");
+		_defaultVals.put(OOC_MEM_PREFETCH_MIN, String.valueOf(32L * 1024 * 1024));
+		_defaultVals.put(OOC_MEM_PREFETCH_MAX, String.valueOf(200L << 20) );
+		_defaultVals.put(OOC_MEM_CACHE_FRACTION, "0.5" );
+		_defaultVals.put(OOC_MEM_CACHE_FRACTION_HARD, "0.6" );
+		_defaultVals.put(OOC_MEM_CACHE_MIN, String.valueOf(64L * 1024 * 1024)); // 64MB
+		_defaultVals.put(OOC_MEM_HEADROOM_MIN, String.valueOf(512L * 1024 * 1024)); // 512MB
+		_defaultVals.put(OOC_MEM_HEADROOM_MIN_FRACTION, "0.1");
 		_defaultVals.put(CP_PARALLEL_OPS,        "true" );
 		_defaultVals.put(CP_PARALLEL_IO,         "true" );
 		_defaultVals.put(IO_COMPRESSION_CODEC,   "none");
@@ -350,6 +382,11 @@ public class DMLConfig
 		return Double.parseDouble( getTextValue(tagName) );
 	}
 	
+	public long getLongValue( String tagName )
+	{
+		return Long.parseLong( getTextValue(tagName) );
+	}
+
 	/**
 	 * Method to get the string value of an element identified by a tag name
 	 * @param element the DOM element
@@ -489,7 +526,8 @@ public class DMLConfig
 			GPU_MEMORY_ALLOCATOR, GPU_MEMORY_UTILIZATION_FACTOR, USE_SSL_FEDERATED_COMMUNICATION,
 			FEDERATED_SSL_CERT, FEDERATED_SSL_KEY, FEDERATED_SSL_TRUST,
 			DEFAULT_FEDERATED_INITIALIZATION_TIMEOUT, FEDERATED_TIMEOUT, FEDERATED_MONITOR_FREQUENCY, FEDERATED_COMPRESSION,
-			ASYNC_PREFETCH, ASYNC_SPARK_BROADCAST, ASYNC_SPARK_CHECKPOINT, IO_COMPRESSION_CODEC
+			ASYNC_PREFETCH, ASYNC_SPARK_BROADCAST, ASYNC_SPARK_CHECKPOINT, IO_COMPRESSION_CODEC,
+			OOC_IO_READER_BUFFER, OOC_IO_WRITER_BUFFER, OOC_IO_READER_THREADS, OOC_IO_READER_POOL
 		}; 
 		
 		StringBuilder sb = new StringBuilder();

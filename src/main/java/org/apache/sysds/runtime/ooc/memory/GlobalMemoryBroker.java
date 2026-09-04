@@ -19,6 +19,8 @@
 
 package org.apache.sysds.runtime.ooc.memory;
 
+import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.utils.Statistics;
 
@@ -34,9 +36,9 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	private static final long RECLAIM_RETRY_DELAY_MS = 2;
 	private static final double RECLAIM_PRESSURE = 0.85;
 	/**
-	 * Fraction of the broker budget above which buffered callbacks are force-parked into the cache. Matches the
-	 * onset of {@link BrokerMode#STRICT} (see {@link #updateMode()}): strict mode is the engine's own definition of
-	 * "memory is tight", and it is where admission starts refusing, so the valve has to be armed by then.
+	 * Fraction of the broker budget above which buffered callbacks are force-parked into the cache. Matches the onset
+	 * of {@link BrokerMode#STRICT} (see {@link #updateMode()}): strict mode is the engine's own definition of "memory
+	 * is tight", and it is where admission starts refusing, so the valve has to be armed by then.
 	 */
 	private static final double PURGE_PRESSURE = Double
 		.parseDouble(System.getProperty("sysds.ooc.purge.pressure", "0.80"));
@@ -46,18 +48,42 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		RELAXED, STRICT
 	}
 
-	private static final long MAX_BROKER_BYTES = 3L << 30; // 3 GB
-	private static final GlobalMemoryBroker BROKER = new GlobalMemoryBroker(
-		Math.min(MAX_BROKER_BYTES, Runtime.getRuntime().maxMemory() / 3));
-	private static final GlobalMemoryBroker SOURCE_BROKER = new GlobalMemoryBroker(
-		Math.min(200L*1024*1024, Runtime.getRuntime().maxMemory() / 12));
+	private static volatile GlobalMemoryBroker BROKER;
+	private static volatile GlobalMemoryBroker SOURCE_BROKER;
 
 	public static GlobalMemoryBroker get() {
-		return BROKER;
+		GlobalMemoryBroker broker = BROKER;
+		if(broker == null) {
+			synchronized(GlobalMemoryBroker.class) {
+				if(BROKER == null)
+					BROKER = new GlobalMemoryBroker(brokerBytes(DMLConfig.OOC_MEM_BROKER_FRACTION,
+						DMLConfig.OOC_MEM_BROKER_MIN, DMLConfig.OOC_MEM_BROKER_MAX));
+				broker = BROKER;
+			}
+		}
+		return broker;
 	}
 
 	public static GlobalMemoryBroker getSource() {
-		return SOURCE_BROKER;
+		GlobalMemoryBroker broker = SOURCE_BROKER;
+		if(broker == null) {
+			synchronized(GlobalMemoryBroker.class) {
+				if(SOURCE_BROKER == null)
+					SOURCE_BROKER = new GlobalMemoryBroker(brokerBytes(DMLConfig.OOC_MEM_PREFETCH_FRACTION,
+						DMLConfig.OOC_MEM_PREFETCH_MIN, DMLConfig.OOC_MEM_PREFETCH_MAX));
+				broker = SOURCE_BROKER;
+			}
+		}
+		return broker;
+	}
+
+	private static long brokerBytes(String fractionKey, String minKey, String maxKey) {
+		DMLConfig conf = ConfigurationManager.getDMLConfig();
+		long heap = Runtime.getRuntime().maxMemory();
+		long min = conf.getLongValue(minKey);
+		long max = conf.getLongValue(maxKey);
+		long bytes = Math.max(min, (long) (heap * conf.getDoubleValue(fractionKey)));
+		return max < 0 ? bytes : Math.min(bytes, Math.max(min, max));
 	}
 
 	public long getAllowedMemory() {
@@ -122,8 +148,8 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			if(minSize < 0 || maxSize < minSize)
 				throw new IllegalArgumentException();
 			long free = _allowedBytes - _usedBytes;
-			if(free >= minSize && (_brokerMode != BrokerMode.STRICT || allowance.isAdmissionExempt()
-				|| allowance.getUsedMemory() < getFairShareFloored(minSize))) {
+			if(free >= minSize && (_brokerMode != BrokerMode.STRICT || allowance.isAdmissionExempt() ||
+				allowance.getUsedMemory() < getFairShareFloored(minSize))) {
 				long ceiling = Math.max(allowance.getTargetMemory(), allowance.getUsedMemory() + minSize);
 				long grantHeadroom = Math.max(0, ceiling - allowance.getGrantedMemory());
 				allow = Math.min(Math.min(free, maxSize), grantHeadroom);
@@ -188,8 +214,8 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	}
 
 	/**
-	 * Last resort against a hard stall: force-park queue-buffered callbacks into the cache so their bytes return to
-	 * the broker. Runs off the caller thread because parking releases memory, which re-enters this broker.
+	 * Last resort against a hard stall: force-park queue-buffered callbacks into the cache so their bytes return to the
+	 * broker. Runs off the caller thread because parking releases memory, which re-enters this broker.
 	 */
 	private void schedulePurge() {
 		boolean storeBacked = this == SOURCE_BROKER;
@@ -281,10 +307,10 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	}
 
 	/**
-	 * The fair share is a cap on how far one allowance may run ahead of the others, and admission lets a request
-	 * cross it (the test is {@code used < share}, not {@code used + bytes <= share}). That grace only means something
-	 * while the share is at least a task: below that, the very first block already puts an allowance over its share
-	 * and freezes it for good. Hold the share at one task in plus one out so every allowance can always work.
+	 * The fair share is a cap on how far one allowance may run ahead of the others, and admission lets a request cross
+	 * it (the test is {@code used < share}, not {@code used + bytes <= share}). That grace only means something while
+	 * the share is at least a task: below that, the very first block already puts an allowance over its share and
+	 * freezes it for good. Hold the share at one task in plus one out so every allowance can always work.
 	 */
 	private long getFairShareFloored(long taskBytes) {
 		long floor = taskBytes > 0 && taskBytes <= Long.MAX_VALUE / 2 ? 2 * taskBytes : taskBytes;

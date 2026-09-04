@@ -40,7 +40,6 @@ import jdk.incubator.vector.VectorSpecies;
 class OOCBufferedDataInputStream implements DataInput, MatrixBlockDataInput {
 	private static final int PAGE_SIZE = 4096;
 	private static final int PAGE_MASK = PAGE_SIZE - 1;
-	private static final int DEFAULT_BUFFER_SIZE = 64 * 1024;
 	private static final VectorSpecies<Double> DOUBLE_SPECIES = DoubleVector.SPECIES_PREFERRED;
 	private static final int DOUBLE_VECTOR_LENGTH = DOUBLE_SPECIES.length();
 
@@ -52,10 +51,6 @@ class OOCBufferedDataInputStream implements DataInput, MatrixBlockDataInput {
 	private long _filePos;
 	private int _pos;
 	private int _count;
-
-	OOCBufferedDataInputStream(RandomAccessFile in) throws IOException {
-		this(in, DEFAULT_BUFFER_SIZE);
-	}
 
 	OOCBufferedDataInputStream(RandomAccessFile in, int size) throws IOException {
 		if(size <= 0)
