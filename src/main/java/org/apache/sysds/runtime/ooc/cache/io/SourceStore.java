@@ -40,6 +40,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.stats.StreamTrace;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
+import org.apache.sysds.runtime.util.HDFSTool;
 import org.apache.sysds.utils.Statistics;
 
 import java.io.IOException;
@@ -75,6 +76,15 @@ final class SourceStore {
 	private final int _scanCallerId = OOCEventLog.registerCaller("read_src");
 	private volatile JobConf _readConf;
 
+	// Recycling
+	private final ConcurrentHashMap<Integer, ConcurrentLinkedDeque<MatrixBlock>> _recycled = new ConcurrentHashMap<>();
+	private final AtomicInteger _recycledCount = new AtomicInteger();
+	private final AtomicLong _recycledBytes = new AtomicLong();
+	private final long _maxRecycledBytes;
+	private final int _maxPerShape;
+	private final AtomicLong _recycleHits = new AtomicLong();
+	private final AtomicLong _recycleMisses = new AtomicLong();
+
 	SourceStore() {
 		DMLConfig conf = ConfigurationManager.getDMLConfig();
 		int readers = conf.getIntValue(DMLConfig.OOC_IO_READER_THREADS);
@@ -82,6 +92,8 @@ final class SourceStore {
 		_readBufferBytes = conf.getIntValue(DMLConfig.OOC_IO_READER_BUFFER);
 		_scanExec = new ThreadPoolExecutor(readers, readers, 0L, TimeUnit.MILLISECONDS,
 			new ArrayBlockingQueue<>(100000));
+		_maxPerShape = 4 * readers;
+		_maxRecycledBytes = 8L * readers * 1024 * 1024;
 	}
 
 	boolean contains(BlockKey key) {
@@ -104,6 +116,7 @@ final class SourceStore {
 		_scanExec.shutdownNow();
 		_locations.clear();
 		_layouts.clear();
+		clearRecycled();
 		closePooledReaders();
 	}
 
@@ -129,17 +142,88 @@ final class SourceStore {
 		JobConf conf = _readConf;
 		if(conf == null) {
 			synchronized(this) {
-				if(_readConf == null)
-					_readConf = new JobConf(ConfigurationManager.getCachedJobConf());
+				if(_readConf == null) {
+					JobConf created = readJob();
+					disableLocalChecksumVerification(created);
+					_readConf = created;
+				}
 				conf = _readConf;
 			}
 		}
 		return conf;
 	}
 
+	private static void disableLocalChecksumVerification(JobConf conf) {
+		try {
+			FileSystem.getLocal(conf).setVerifyChecksum(false);
+		}
+		catch(IOException e) {
+			throw new DMLRuntimeException(e);
+		}
+	}
+
+	private static JobConf readJob() {
+		JobConf conf = new JobConf(ConfigurationManager.getCachedJobConf());
+		if(HDFSTool.USE_BINARYBLOCK_SERIALIZATION)
+			HDFSTool.addBinaryBlockSerializationFramework(conf);
+		return conf;
+	}
+
+	void recycle(Object data) {
+		if(!(data instanceof IndexedMatrixValue))
+			return;
+		Object value = ((IndexedMatrixValue) data).getValue();
+		if(!(value instanceof MatrixBlock))
+			return;
+		MatrixBlock mb = (MatrixBlock) value;
+		if(mb.isInSparseFormat() || mb.getDenseBlock() == null || !mb.getDenseBlock().isContiguous())
+			return;
+		double[] values = mb.getDenseBlockValues();
+		if(values == null)
+			return;
+		long bytes = (long) values.length * 8;
+		if(_recycledBytes.get() + bytes > _maxRecycledBytes)
+			return;
+		ConcurrentLinkedDeque<MatrixBlock> pool = _recycled.computeIfAbsent(values.length,
+			k -> new ConcurrentLinkedDeque<>());
+		if(pool.size() >= _maxPerShape)
+			return;
+		pool.addLast(mb);
+		_recycledCount.incrementAndGet();
+		_recycledBytes.addAndGet(bytes);
+	}
+
+	private MatrixBlock borrowBlock() {
+		int widest = -1;
+		for(Integer capacity : _recycled.keySet())
+			if(capacity > widest)
+				widest = capacity;
+		if(widest >= 0) {
+			ConcurrentLinkedDeque<MatrixBlock> pool = _recycled.get(widest);
+			MatrixBlock mb = pool == null ? null : pool.pollLast();
+			if(mb != null) {
+				_recycledCount.decrementAndGet();
+				_recycledBytes.addAndGet(-8L * widest);
+				_recycleHits.incrementAndGet();
+				return mb;
+			}
+		}
+		_recycleMisses.incrementAndGet();
+		return new MatrixBlock();
+	}
+
+	private void clearRecycled() {
+		if(DMLScript.OOC_STATISTICS)
+			System.out.printf("  block recycling:\thits %d, misses %d, parked %d%n",
+				_recycleHits.get(), _recycleMisses.get(), _recycledCount.get());
+		_recycled.clear();
+		_recycledCount.set(0);
+		_recycledBytes.set(0);
+	}
+
 	private Object readSingle(OOCIOHandler.SourceBlockDescriptor src, long readAheadBudget, OOCCache cache) {
 		MatrixIndexes ix = new MatrixIndexes();
-		MatrixBlock mb = new MatrixBlock();
+		MatrixBlock mb = borrowBlock();
 
 		SequenceFile.Reader reader = borrowReader(src.path);
 		boolean reusable = false;
@@ -261,7 +345,7 @@ final class SourceStore {
 		final CompletableFuture<OOCIOHandler.SourceReadResult> result = new CompletableFuture<>();
 		final ConcurrentLinkedDeque<OOCIOHandler.SourceBlockDescriptor> descriptors = new ConcurrentLinkedDeque<>();
 
-		JobConf job = new JobConf(ConfigurationManager.getCachedJobConf());
+		JobConf job = readConf();
 		Path path = new Path(request.path);
 
 		Path[] files;

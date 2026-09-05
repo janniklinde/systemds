@@ -162,6 +162,15 @@ public final class BlockEntry {
 		return _size;
 	}
 
+	public synchronized Object clearAndDetach() {
+		if (_pinCount != 0 || _data == null)
+			return null;
+		Object data = _data;
+		_data = null;
+		_retainHintCount = 0;
+		return data;
+	}
+
 	/**
 	 * Pins the underlying data in memory
 	 * @return the new number of pins (0 if pin was unsuccessful)

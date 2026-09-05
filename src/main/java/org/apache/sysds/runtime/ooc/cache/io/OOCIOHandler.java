@@ -51,6 +51,9 @@ public interface OOCIOHandler {
 	 */
 	void registerSourceLocation(BlockKey key, SourceBlockDescriptor descriptor);
 
+	default void recycle(Object data) {
+	}
+
 	/**
 	 * Schedule an asynchronous read from an external source into the provided target stream.
 	 * The returned future completes when either EOF is reached or the requested byte budget

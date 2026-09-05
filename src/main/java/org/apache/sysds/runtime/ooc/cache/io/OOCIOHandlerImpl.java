@@ -20,6 +20,8 @@
 package org.apache.sysds.runtime.ooc.cache.io;
 
 import org.apache.sysds.api.DMLScript;
+import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
@@ -33,7 +35,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 public class OOCIOHandlerImpl implements OOCIOHandler {
-	private static final int READER_SIZE = 16;
 	private static final long MIN_READ_BYTES = 512_000;
 
 	private final ThreadPoolExecutor _readExec;
@@ -44,7 +45,8 @@ public class OOCIOHandlerImpl implements OOCIOHandler {
 	private volatile OOCCache _cache;
 
 	public OOCIOHandlerImpl() {
-		_readExec = new ThreadPoolExecutor(READER_SIZE, READER_SIZE, 0L, TimeUnit.MILLISECONDS,
+		int readers = ConfigurationManager.getDMLConfig().getIntValue(DMLConfig.OOC_IO_READER_THREADS);
+		_readExec = new ThreadPoolExecutor(readers, readers, 0L, TimeUnit.MILLISECONDS,
 			new ArrayBlockingQueue<>(100000));
 		_spill = new SpillStore();
 		_source = new SourceStore();
@@ -82,6 +84,7 @@ public class OOCIOHandlerImpl implements OOCIOHandler {
 		return future;
 	}
 
+
 	@Override
 	public CompletableFuture<Boolean> scheduleDeletion(BlockEntry block) {
 		_spill.delete(block);
@@ -92,6 +95,11 @@ public class OOCIOHandlerImpl implements OOCIOHandler {
 	@Override
 	public void registerSourceLocation(BlockKey key, SourceBlockDescriptor descriptor) {
 		_source.register(key, descriptor);
+	}
+
+	@Override
+	public void recycle(Object data) {
+		_source.recycle(data);
 	}
 
 	@Override

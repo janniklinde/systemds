@@ -555,7 +555,7 @@ public class OOCCacheImpl implements OOCCache {
 		entry.unpin();
 		if(entry.getReferenceCount() <= 0) {
 			removeEntry(entry.getKey());
-			entry.clear();
+			_ioHandler.recycle(entry.clearAndDetach());
 			entry.setCacheMeta(null);
 			if(meta.backed)
 				_ioHandler.scheduleDeletion(entry);
@@ -590,7 +590,7 @@ public class OOCCacheImpl implements OOCCache {
 			entry.unpin();
 			if(entry.getReferenceCount() <= 0) {
 				removeEntry(entry.getKey());
-				entry.clear();
+				_ioHandler.recycle(entry.clearAndDetach());
 				entry.setCacheMeta(null);
 				if(meta.backed)
 					_ioHandler.scheduleDeletion(entry);
@@ -674,7 +674,7 @@ public class OOCCacheImpl implements OOCCache {
 						BlockEntry entry = meta.entry;
 						if(entry.getState() == BlockState.WARM) {
 							StreamTrace.dropWarm(entry.getKey().getStreamId());
-							entry.clear();
+							_ioHandler.recycle(entry.clearAndDetach());
 							entry.setState(BlockState.COLD);
 							clearLive(entry);
 							_ownedBytes -= entry.getSize();
