@@ -303,10 +303,12 @@ final class SourceStore {
 				return;
 			MatrixIndexes indexes = new MatrixIndexes();
 			MatrixBlock matrix = new MatrixBlock();
-			long ioStart = DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
+			long ioStart = DMLScript.OOC_LOG_EVENTS || DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 			if(!reader.next(indexes, matrix))
 				return;
 			bytes += index.endAt(next) - start;
+			if(DMLScript.OOC_STATISTICS)
+				Statistics.incrementOOCSourceScan(1, System.nanoTime() - ioStart, index.endAt(next) - start);
 			if(DMLScript.OOC_LOG_EVENTS)
 				OOCEventLog.onDiskReadEvent(_scanCallerId, ioStart, System.nanoTime(), index.endAt(next) - start);
 			if(cache.activate(BlockLayoutIndex.unpackKey(packedKey), new IndexedMatrixValue(indexes, matrix))) {
@@ -468,12 +470,19 @@ final class SourceStore {
 				reader.seek(pos);
 
 			long ioStart = DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
+			long scanBlocks = 0, scanBytes = 0, scanNanos = 0;
 			while(!stop.get()) {
 				long recordStart = reader.getPosition();
 				MatrixBlock value = new MatrixBlock();
+				long readStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 				if(!reader.next(key, value))
 					break;
 				long recordEnd = reader.getPosition();
+				if(DMLScript.OOC_STATISTICS) {
+					scanNanos += System.nanoTime() - readStart;
+					scanBlocks++;
+					scanBytes += recordEnd - recordStart;
+				}
 				long blockSize = value.getExactSerializedSize();
 				boolean shouldBreak = false;
 
@@ -509,6 +518,9 @@ final class SourceStore {
 					ioStart = currTime;
 				}
 			}
+
+			if(DMLScript.OOC_STATISTICS)
+				Statistics.incrementOOCSourceScan(scanBlocks, scanNanos, scanBytes);
 
 			if(!stop.get())
 				completed.set(fileIdx, 1);

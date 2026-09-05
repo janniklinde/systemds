@@ -230,6 +230,9 @@ public class Statistics
 	private static final LongAdder oocLoadFromDiskCalls = new LongAdder();
 	private static final LongAdder oocLoadFromDiskTimeNanos = new LongAdder();
 	private static final LongAdder oocLoadFromDiskBytesSize = new LongAdder();
+	private static final LongAdder oocSourceScanBlocks = new LongAdder();
+	private static final LongAdder oocSourceScanTimeNanos = new LongAdder();
+	private static final LongAdder oocSourceScanBytesSize = new LongAdder();
 	private static final LongAdder oocEvictionWriteCalls = new LongAdder();
 	private static final LongAdder oocEvictionWriteTimeNanos = new LongAdder();
 	private static final LongAdder oocEvictionWriteBytesSize = new LongAdder();
@@ -364,6 +367,9 @@ public class Statistics
 		oocLoadFromDiskCalls.reset();
 		oocLoadFromDiskTimeNanos.reset();
 		oocLoadFromDiskBytesSize.reset();
+		oocSourceScanBlocks.reset();
+		oocSourceScanTimeNanos.reset();
+		oocSourceScanBytesSize.reset();
 		oocEvictionWriteCalls.reset();
 		oocEvictionWriteTimeNanos.reset();
 		oocEvictionWriteBytesSize.reset();
@@ -487,6 +493,17 @@ public class Statistics
 		oocLoadFromDiskBytesSize.add(bytes);
 	}
 
+	/**
+	 * Source reads served by the streaming scan rather than by a cache miss. These never reach
+	 * {@link #accumulateOOCLoadFromDiskBytes}, so without them the reported disk bytes are a subset of
+	 * what the engine actually reads and cannot be compared against what the device delivered.
+	 */
+	public static void incrementOOCSourceScan(long blocks, long nanos, long bytes) {
+		oocSourceScanBlocks.add(blocks);
+		oocSourceScanTimeNanos.add(nanos);
+		oocSourceScanBytesSize.add(bytes);
+	}
+
 	public static void accumulateOOCEvictionWriteTime(long nanos) {
 		oocEvictionWriteTimeNanos.add(nanos);
 	}
@@ -531,6 +548,11 @@ public class Statistics
 			oocPutCalls.longValue(), putThroughput));
 		sb.append(String.format(Locale.US, "  loadFromDisk:\t\t%d (time %.3f sec, %.3f GB)\n",
 			oocLoadFromDiskCalls.longValue(), oocLoadFromDiskTimeNanos.longValue() / 1e9, oocLoadFromDiskBytesSize.longValue() / 1e9));
+		sb.append(String.format(Locale.US, "  source scans:\t\t%d (time %.3f sec, %.3f GB)\n",
+			oocSourceScanBlocks.longValue(), oocSourceScanTimeNanos.longValue() / 1e9,
+			oocSourceScanBytesSize.longValue() / 1e9));
+		sb.append(String.format(Locale.US, "  total source reads:\t%.3f GB\n",
+			(oocLoadFromDiskBytesSize.longValue() + oocSourceScanBytesSize.longValue()) / 1e9));
 		sb.append(String.format(Locale.US, "  evict writes:\t\t%d (time %.3f sec, %.3f GB)\n",
 			oocEvictionWriteCalls.longValue(), oocEvictionWriteTimeNanos.longValue() / 1e9, oocEvictionWriteBytesSize.longValue() / 1e9));
 		sb.append(String.format(Locale.US, "  reclaim runs:\t\t%d (time %.3f sec, %.3f GB)\n",
