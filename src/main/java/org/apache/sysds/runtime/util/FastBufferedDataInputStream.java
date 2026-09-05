@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.io.InputStream;
 
 import org.apache.sysds.runtime.data.SparseBlock;
+import org.apache.hadoop.io.DataInputBuffer;
 import org.apache.sysds.runtime.data.SparseBlockCSR;
 import org.apache.sysds.runtime.io.IOUtilFunctions;
 import org.apache.sysds.runtime.matrix.data.MatrixBlockDataInput;
@@ -158,7 +159,21 @@ public class FastBufferedDataInputStream extends FilterInputStream implements Da
 		
 		//counter for non-zero elements
 		long nnz = 0;
-		
+
+		if( in instanceof DataInputBuffer ) {
+			DataInputBuffer din = (DataInputBuffer) in;
+			int pos = din.getPosition();
+			if( pos + (long)len*8 <= din.getLength() ) {
+				byte[] data = din.getData();
+				for( int i=0, off=pos; i<len; i++, off+=8 ) {
+					varr[i] = Double.longBitsToDouble( baToLong(data, off) );
+					nnz += (varr[i]!=0) ? 1 : 0;
+				}
+				din.skipBytes(len*8);
+				return nnz;
+			}
+		}
+
 		// outer loop for buffered read
 		// note: if len is close to INT_MAX, i+=_bufflen/8 might 
 		// create an integer overflow and hence we use long
