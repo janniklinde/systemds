@@ -35,6 +35,9 @@ import scala.Tuple2;
 import scala.Tuple3;
 
 import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.nio.channels.Channels;
+import java.nio.file.Paths;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.lang.invoke.MethodHandles;
@@ -77,11 +80,13 @@ final class SpillStore {
 	private final int _evictCallerId = OOCEventLog.registerCaller("write");
 	private volatile PartitionFile[] _partitions = new PartitionFile[16];
 	private final int _readBufferBytes;
+	private final boolean _direct;
 	private final int _writeBufferBytes;
 
 	@SuppressWarnings("unchecked")
 	SpillStore() {
 		DMLConfig conf = ConfigurationManager.getDMLConfig();
+		_direct = conf.getBooleanValue(DMLConfig.OOC_IO_DIRECT);
 		_readBufferBytes = (conf.getIntValue(DMLConfig.OOC_IO_READER_BUFFER) / 8) * 8;
 		_writeBufferBytes = (conf.getIntValue(DMLConfig.OOC_IO_WRITER_BUFFER) / 8) * 8;
 		_spillDir = LocalFileUtils.getUniqueWorkingDir("ooc_stream");
@@ -127,9 +132,10 @@ final class SpillStore {
 		if(partition == null)
 			throw new DMLRuntimeException("Failed to load partition for: " + partitionId);
 
-		try(RandomAccessFile raf = new RandomAccessFile(partitionPath(partitionId), "r")) {
-			raf.seek(offset);
-			OOCBufferedDataInputStream in = new OOCBufferedDataInputStream(raf, _readBufferBytes);
+		try(InputStream stream = openInput(partitionId, offset)) {
+			int size = _direct ? (int) (partition.index.endAt(partition.index.slotOf(offset)) - offset + 7) / 8 *
+				8 : _readBufferBytes;
+			OOCBufferedDataInputStream in = new OOCBufferedDataInputStream(stream, size, offset);
 			StreamTrace.spillRead(block.getKey().getStreamId(), block.getSize());
 			long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 			SpillableObject obj = SpillableObjectRegistry.read(in);
@@ -148,6 +154,17 @@ final class SpillStore {
 		catch(IOException e) {
 			throw new DMLRuntimeException(e);
 		}
+	}
+
+	private InputStream openInput(int partitionId, long offset) throws IOException {
+		if(_direct) {
+			OOCDirectInputStream in = new OOCDirectInputStream(Paths.get(partitionPath(partitionId)), _readBufferBytes);
+			in.seek(offset);
+			return in;
+		}
+		RandomAccessFile file = new RandomAccessFile(partitionPath(partitionId), "r");
+		file.seek(offset);
+		return Channels.newInputStream(file.getChannel());
 	}
 
 	private void readAhead(PartitionFile partition, int slot, OOCBufferedDataInputStream in, long budget,

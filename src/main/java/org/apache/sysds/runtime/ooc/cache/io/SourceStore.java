@@ -20,6 +20,9 @@
 package org.apache.sysds.runtime.ooc.cache.io;
 
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.LocalFileSystem;
+import org.apache.hadoop.fs.RawLocalFileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.SequenceFile;
 import org.apache.hadoop.mapred.JobConf;
@@ -44,6 +47,7 @@ import org.apache.sysds.runtime.util.HDFSTool;
 import org.apache.sysds.utils.Statistics;
 
 import java.io.IOException;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -67,6 +71,7 @@ final class SourceStore {
 
 	private final int _maxPooledReaders;
 	private final int _readBufferBytes;
+	private final boolean _direct;
 
 	private final ThreadPoolExecutor _scanExec;
 	private final ConcurrentHashMap<BlockKey, OOCIOHandler.SourceBlockDescriptor> _locations = new ConcurrentHashMap<>();
@@ -90,6 +95,7 @@ final class SourceStore {
 		int readers = conf.getIntValue(DMLConfig.OOC_IO_READER_THREADS);
 		_maxPooledReaders = conf.getIntValue(DMLConfig.OOC_IO_READER_POOL);
 		_readBufferBytes = conf.getIntValue(DMLConfig.OOC_IO_READER_BUFFER);
+		_direct = conf.getBooleanValue(DMLConfig.OOC_IO_DIRECT);
 		_scanExec = new ThreadPoolExecutor(readers, readers, 0L, TimeUnit.MILLISECONDS,
 			new ArrayBlockingQueue<>(100000));
 		_maxPerShape = 4 * readers;
@@ -258,11 +264,27 @@ final class SourceStore {
 			}
 		}
 		try {
-			return new SequenceFile.Reader(readConf(), SequenceFile.Reader.file(new Path(path)),
-				SequenceFile.Reader.bufferSize(_readBufferBytes));
+			return openReader(readConf(), new Path(path));
 		}
 		catch(IOException e) {
 			throw new DMLRuntimeException(e);
+		}
+	}
+
+	private SequenceFile.Reader openReader(JobConf job, Path path) throws IOException {
+		FileSystem fs = IOUtilFunctions.getFileSystem(path, job);
+		if(!_direct || !(fs instanceof LocalFileSystem || fs instanceof RawLocalFileSystem))
+			return new SequenceFile.Reader(job, SequenceFile.Reader.file(path),
+				SequenceFile.Reader.bufferSize(_readBufferBytes));
+		FSDataInputStream in = new FSDataInputStream(
+			new OOCDirectInputStream(Paths.get(fs.makeQualified(path).toUri()), _readBufferBytes));
+		try {
+			return new SequenceFile.Reader(job, SequenceFile.Reader.stream(in),
+				SequenceFile.Reader.length(fs.getFileStatus(path).getLen()));
+		}
+		catch(IOException | RuntimeException e) {
+			in.close();
+			throw e;
 		}
 	}
 
@@ -463,8 +485,7 @@ final class SourceStore {
 		MatrixIndexes key = new MatrixIndexes();
 		BlockLayoutIndex layout = _layouts.computeIfAbsent(path.toString(), p -> new BlockLayoutIndex());
 
-		try(SequenceFile.Reader reader = new SequenceFile.Reader(job, SequenceFile.Reader.file(path),
-			SequenceFile.Reader.bufferSize(_readBufferBytes))) {
+		try(SequenceFile.Reader reader = openReader(job, path)) {
 			long pos = filePositions.get(fileIdx);
 			if(pos > 0)
 				reader.seek(pos);

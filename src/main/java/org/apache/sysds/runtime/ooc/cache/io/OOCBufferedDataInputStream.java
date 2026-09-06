@@ -25,6 +25,8 @@ import org.apache.sysds.runtime.io.IOUtilFunctions;
 import org.apache.sysds.runtime.matrix.data.MatrixBlockDataInput;
 
 import java.io.DataInput;
+import java.io.InputStream;
+import java.nio.channels.Channels;
 import java.io.DataInputStream;
 import java.io.EOFException;
 import java.io.IOException;
@@ -43,7 +45,8 @@ class OOCBufferedDataInputStream implements DataInput, MatrixBlockDataInput {
 	private static final VectorSpecies<Double> DOUBLE_SPECIES = DoubleVector.SPECIES_PREFERRED;
 	private static final int DOUBLE_VECTOR_LENGTH = DOUBLE_SPECIES.length();
 
-	private final RandomAccessFile _in;
+	private final DataInputStream _in;
+	private final boolean _direct;
 	private final byte[] _buff;
 	private final byte[] _tmp;
 	private final DoubleBuffer[] _doubleDecodeBuffers;
@@ -53,16 +56,21 @@ class OOCBufferedDataInputStream implements DataInput, MatrixBlockDataInput {
 	private int _count;
 
 	OOCBufferedDataInputStream(RandomAccessFile in, int size) throws IOException {
+		this(Channels.newInputStream(in.getChannel()), size, in.getFilePointer());
+	}
+
+	OOCBufferedDataInputStream(InputStream in, int size, long position) throws IOException {
 		if(size <= 0)
 			throw new IllegalArgumentException("Buffer size <= 0.");
 		if(size % 8 != 0)
 			throw new IllegalArgumentException("Buffer size not a multiple of 8.");
-		_in = in;
+		_in = new DataInputStream(in);
+		_direct = in instanceof OOCDirectInputStream;
 		_buff = new byte[size];
 		_tmp = new byte[8];
 		_doubleDecodeBuffers = createDoubleDecodeBuffers(_buff);
 		_bufflen = size;
-		_filePos = in.getFilePointer();
+		_filePos = position;
 		_pos = 0;
 		_count = 0;
 	}
@@ -255,6 +263,8 @@ class OOCBufferedDataInputStream implements DataInput, MatrixBlockDataInput {
 	}
 
 	private int getRefillLength() {
+		if(_direct)
+			return _bufflen;
 		int pageOffset = (int)(_filePos & PAGE_MASK);
 		if(pageOffset == 0)
 			return _bufflen;

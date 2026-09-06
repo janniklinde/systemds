@@ -20,6 +20,9 @@
 package org.apache.sysds.test.component.ooc.cache;
 
 import org.apache.sysds.common.Types;
+import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
+import java.io.File;
 import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
@@ -46,12 +49,20 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 	private static final String TEST_CLASS_DIR = TEST_DIR + SourceBackedReadOOCIOHandlerTest.class.getSimpleName() + "/";
 
 	private OOCIOHandlerImpl handler;
+	private boolean direct;
+	private DMLConfig previousConfig;
 
 	@Override
 	@Before
 	public void setUp() {
 		TestUtils.clearAssertionInformation();
 		addTestConfiguration(TEST_NAME, new TestConfiguration(TEST_CLASS_DIR, TEST_NAME));
+		previousConfig = ConfigurationManager.getDMLConfig();
+		DMLConfig config = new DMLConfig();
+		config.setTextValue(DMLConfig.OOC_IO_DIRECT, Boolean.toString(direct));
+		if(new File("../data_dir").isDirectory())
+			config.setTextValue(DMLConfig.LOCAL_TMP_DIR, "../data_dir");
+		ConfigurationManager.setLocalConfig(config);
 		handler = new OOCIOHandlerImpl();
 	}
 
@@ -59,6 +70,7 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 	public void tearDown() {
 		if (handler != null)
 			handler.shutdown();
+		ConfigurationManager.setLocalConfig(previousConfig);
 	}
 
 	@Test
@@ -87,11 +99,44 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 		Assert.assertEquals(SparseBlock.Type.CSR, readBlock.getSparseBlock().getSparseBlockType());
 	}
 
+	@Test
+	public void testDirectSourceAndSpillReads() throws Exception {
+		handler.shutdown();
+		direct = true;
+		DMLConfig config = new DMLConfig();
+		config.setTextValue(DMLConfig.OOC_IO_DIRECT, "true");
+		if(new File("../data_dir").isDirectory())
+			config.setTextValue(DMLConfig.LOCAL_TMP_DIR, "../data_dir");
+		ConfigurationManager.setLocalConfig(config);
+		handler = new OOCIOHandlerImpl();
+		testSourceBackedScheduleRead(false);
+		testSourceBackedScheduleRead(true);
+		testDenseSpillRead();
+		testUltraSparseSpillReadUsesCSR();
+	}
+
+	@Test
+	public void testDenseSpillRead() throws Exception {
+		MatrixBlock block = MatrixBlock.randOperations(317, 319, 1.0, -1, 1, "uniform", 17);
+		for(int i = 0; i < 2; i++) {
+			IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(i + 1, 1), block);
+			BlockEntry entry = BlockEntryTestAccess.newBlockEntry(new BlockKey(8, i), value.size(), value);
+			handler.scheduleEviction(entry).get();
+			BlockEntryTestAccess.setDataUnsafe(entry, null);
+			handler.scheduleRead(entry).get();
+			MatrixBlock actual = (MatrixBlock) ((IndexedMatrixValue) BlockEntryTestAccess.getDataUnsafe(entry))
+				.getValue();
+			TestUtils.compareMatrices(block, actual, 0);
+		}
+	}
+
 	private void testSourceBackedScheduleRead(boolean ultraSparse) throws Exception {
+		addTestConfiguration(TEST_NAME,
+			new TestConfiguration(TEST_CLASS_DIR + direct + "/" + ultraSparse + "/", TEST_NAME));
 		getAndLoadTestConfiguration(TEST_NAME);
-		final int rows = ultraSparse ? 1000 : 4;
-		final int cols = ultraSparse ? 1000 : 4;
-		final int blen = ultraSparse ? 1000 : 2;
+		final int rows = ultraSparse ? 1000 : 635;
+		final int cols = ultraSparse ? 1000 : 639;
+		final int blen = ultraSparse ? 1000 : 319;
 
 		MatrixBlock src = ultraSparse ? new MatrixBlock(rows, cols, true) :
 			MatrixBlock.randOperations(rows, cols, 1.0, -1, 1, "uniform", 17);
