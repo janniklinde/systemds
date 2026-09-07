@@ -23,31 +23,40 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.channels.ClosedChannelException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Objects;
 
 import com.sun.nio.file.ExtendedOpenOption;
 import org.apache.hadoop.fs.FSInputStream;
+import org.apache.hadoop.util.CleanerUtil;
 
 final class OOCDirectInputStream extends FSInputStream {
 	private static final int ALIGNMENT = 4096;
 	private final FileChannel _channel;
 	private ByteBuffer _buffer;
+	private ByteBuffer _allocation;
 	private long _bufferStart;
 	private long _position;
 
 	OOCDirectInputStream(Path path, int bufferSize) throws IOException {
 		if(bufferSize <= 0)
 			throw new IllegalArgumentException("Direct read buffer size must be positive");
-		_buffer = ByteBuffer.allocateDirect((bufferSize + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT + ALIGNMENT)
-			.alignedSlice(ALIGNMENT);
-		_buffer.limit(0);
+		if(!CleanerUtil.UNMAP_SUPPORTED)
+			throw new IOException("OOC direct buffer cleanup unavailable: " + CleanerUtil.UNMAP_NOT_SUPPORTED_REASON);
 		try {
 			_channel = FileChannel.open(path, StandardOpenOption.READ, ExtendedOpenOption.DIRECT);
 		}
 		catch(UnsupportedOperationException e) {
 			throw new IOException("OOC direct reads are not supported for " + path, e);
+		}
+		try {
+			allocateBuffer(bufferSize);
+		}
+		catch(IOException | RuntimeException | Error e) {
+			_channel.close();
+			throw e;
 		}
 	}
 
@@ -59,6 +68,8 @@ final class OOCDirectInputStream extends FSInputStream {
 
 	@Override
 	public int read(byte[] bytes, int offset, int length) throws IOException {
+		if(!_channel.isOpen())
+			throw new ClosedChannelException();
 		Objects.checkFromIndexSize(offset, length, bytes.length);
 		if(length == 0)
 			return 0;
@@ -68,7 +79,7 @@ final class OOCDirectInputStream extends FSInputStream {
 			int size = (int) Math.min((long) length + skip, Integer.MAX_VALUE - 2L * ALIGNMENT);
 			size = (size + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT;
 			if(size > _buffer.capacity())
-				_buffer = ByteBuffer.allocateDirect(size + ALIGNMENT).alignedSlice(ALIGNMENT);
+				allocateBuffer(size);
 			_buffer.clear();
 			_buffer.limit(size);
 			int n = _channel.read(_buffer, start);
@@ -103,6 +114,26 @@ final class OOCDirectInputStream extends FSInputStream {
 
 	@Override
 	public void close() throws IOException {
-		_channel.close();
+		try {
+			_channel.close();
+		}
+		finally {
+			releaseBuffer();
+		}
+	}
+
+	private void allocateBuffer(int size) throws IOException {
+		releaseBuffer();
+		_allocation = ByteBuffer.allocateDirect((size + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT + ALIGNMENT);
+		_buffer = _allocation.alignedSlice(ALIGNMENT);
+		_buffer.limit(0);
+	}
+
+	private void releaseBuffer() throws IOException {
+		if(_allocation != null) {
+			CleanerUtil.getCleaner().freeBuffer(_allocation);
+			_allocation = null;
+			_buffer = null;
+		}
 	}
 }
