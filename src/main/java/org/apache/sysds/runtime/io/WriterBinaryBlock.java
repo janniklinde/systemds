@@ -28,6 +28,7 @@ import org.apache.hadoop.io.SequenceFile.Writer;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.sysds.conf.CompilerConfig.ConfigType;
 import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.hops.OptimizerUtils;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.compress.CompressedMatrixBlock;
@@ -239,6 +240,7 @@ public class WriterBinaryBlock extends MatrixWriter {
 
 	@Override
 	public long writeMatrixFromStream(String fname, OOCStream<IndexedMatrixValue> stream, long rlen, long clen, int blen) throws IOException {
+		boolean omitEmpty = ConfigurationManager.getDMLConfig().getBooleanValue(DMLConfig.OOC_SPARSE_COO);
 		Path path = new Path(fname);
 		SequenceFile.Writer writer = null;
 
@@ -252,6 +254,8 @@ public class WriterBinaryBlock extends MatrixWriter {
 			while((i_val = stream.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
 				MatrixBlock mb = (MatrixBlock) i_val.getValue();
 				MatrixIndexes ix = i_val.getIndexes();
+				if(omitEmpty && mb.isEmptyBlock(false))
+					continue;
 
 				// 3. Append (key, value) record as a new value in the file
 				writer.append(ix, mb);

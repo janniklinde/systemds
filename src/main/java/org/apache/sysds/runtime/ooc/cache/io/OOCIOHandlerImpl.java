@@ -45,7 +45,9 @@ public class OOCIOHandlerImpl implements OOCIOHandler {
 	private volatile OOCCache _cache;
 
 	public OOCIOHandlerImpl() {
-		int readers = ConfigurationManager.getDMLConfig().getIntValue(DMLConfig.OOC_IO_READER_THREADS);
+		DMLConfig conf = ConfigurationManager.getDMLConfig();
+		int readers = conf.getIntValue(DMLConfig.OOC_IO_READER_THREADS);
+		OOCMatrixBlock.setUseCOO(conf.getBooleanValue(DMLConfig.OOC_SPARSE_COO));
 		_readExec = new ThreadPoolExecutor(readers, readers, 0L, TimeUnit.MILLISECONDS,
 			new ArrayBlockingQueue<>(100000));
 		_spill = new SpillStore();

@@ -19,6 +19,9 @@
 
 package org.apache.sysds.runtime.io;
 
+import org.apache.sysds.conf.DMLConfig;
+import org.apache.sysds.conf.ConfigurationManager;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.concurrent.Callable;
@@ -196,11 +199,13 @@ public class WriterBinaryBlockParallel extends WriterBinaryBlock
 		private final Path _path;
 		private final JobConf _job;
 		private final OOCStream<IndexedMatrixValue> _stream;
+		private final boolean _omitEmpty;
 
 		public WriteStreamTask(Path path, JobConf job, OOCStream<IndexedMatrixValue> stream) {
 			_path = path;
 			_job = job;
 			_stream = stream;
+			_omitEmpty = ConfigurationManager.getDMLConfig().getBooleanValue(DMLConfig.OOC_SPARSE_COO);
 		}
 
 		@Override
@@ -213,6 +218,8 @@ public class WriterBinaryBlockParallel extends WriterBinaryBlock
 				while((i_val = _stream.dequeue()) != LocalTaskQueue.NO_MORE_TASKS) {
 					MatrixBlock mb = (MatrixBlock) i_val.getValue();
 					MatrixIndexes ix = i_val.getIndexes();
+					if(_omitEmpty && mb.isEmptyBlock(false))
+						continue;
 					writer.append(ix, mb);
 					totalNnz += mb.getNonZeros();
 				}

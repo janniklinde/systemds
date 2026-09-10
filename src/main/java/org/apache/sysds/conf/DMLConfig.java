@@ -145,6 +145,7 @@ public class DMLConfig
 	public static final int DEFAULT_NUMBER_OF_FEDERATED_WORKER_THREADS = 8;
 
 	public static final String OOC_IO_DIRECT = "sysds.ooc.io.direct";
+	public static final String OOC_SPARSE_COO = "sysds.ooc.sparse.coo";
 	public static final String OOC_IO_READER_BUFFER = "sysds.ooc.io.reader.buffersize";
 	public static final String OOC_IO_WRITER_BUFFER = "sysds.ooc.io.writer.buffersize";
 	public static final String OOC_IO_READER_THREADS = "sysds.ooc.io.reader.threads";
@@ -187,6 +188,7 @@ public class DMLConfig
 		_defaultVals.put(OPTIMIZATION_LEVEL,     String.valueOf(OptimizerUtils.DEFAULT_OPTLEVEL.ordinal()) );
 		_defaultVals.put(DEFAULT_BLOCK_SIZE,     String.valueOf(OptimizerUtils.DEFAULT_BLOCKSIZE) );
 		_defaultVals.put(OOC_IO_DIRECT, "false");
+		_defaultVals.put(OOC_SPARSE_COO, "true");
 		_defaultVals.put(OOC_IO_READER_BUFFER, String.valueOf(512 * 1024));
 		_defaultVals.put(OOC_IO_WRITER_BUFFER, String.valueOf(512 * 1024));
 		_defaultVals.put(OOC_IO_READER_THREADS, "16");
