@@ -178,10 +178,7 @@ final class SourceStore {
 	void recycle(Object data) {
 		if(!(data instanceof IndexedMatrixValue))
 			return;
-		Object value = ((IndexedMatrixValue) data).getValue();
-		if(!(value instanceof OOCMatrixBlock))
-			return;
-		MatrixBlock mb = (MatrixBlock) value;
+		MatrixBlock mb = (MatrixBlock) ((IndexedMatrixValue) data).getValue();
 		if(mb.isInSparseFormat() || mb.getDenseBlock() == null || !mb.getDenseBlock().isContiguous())
 			return;
 		double[] values = mb.getDenseBlockValues();
@@ -215,7 +212,7 @@ final class SourceStore {
 			}
 		}
 		_recycleMisses.incrementAndGet();
-		return new OOCMatrixBlock();
+		return new MatrixBlock();
 	}
 
 	private void clearRecycled() {
@@ -324,7 +321,7 @@ final class SourceStore {
 			if(packedKey == BlockLayoutIndex.NO_KEY || start != reader.getPosition())
 				return;
 			MatrixIndexes indexes = new MatrixIndexes();
-			MatrixBlock matrix = new OOCMatrixBlock();
+			MatrixBlock matrix = new MatrixBlock();
 			long ioStart = DMLScript.OOC_LOG_EVENTS || DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 			if(!reader.next(indexes, matrix))
 				return;
@@ -494,7 +491,7 @@ final class SourceStore {
 			long scanBlocks = 0, scanBytes = 0, scanNanos = 0;
 			while(!stop.get()) {
 				long recordStart = reader.getPosition();
-				MatrixBlock value = new OOCMatrixBlock();
+				MatrixBlock value = new MatrixBlock();
 				long readStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 				if(!reader.next(key, value))
 					break;

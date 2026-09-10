@@ -22,6 +22,7 @@ package org.apache.sysds.runtime.ooc.cache.io;
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.conf.ConfigurationManager;
 import org.apache.sysds.conf.DMLConfig;
+import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
@@ -47,7 +48,7 @@ public class OOCIOHandlerImpl implements OOCIOHandler {
 	public OOCIOHandlerImpl() {
 		DMLConfig conf = ConfigurationManager.getDMLConfig();
 		int readers = conf.getIntValue(DMLConfig.OOC_IO_READER_THREADS);
-		OOCMatrixBlock.setUseCOO(conf.getBooleanValue(DMLConfig.OOC_SPARSE_COO));
+		MatrixBlock.setUseCOO(conf.getBooleanValue(DMLConfig.OOC_SPARSE_COO));
 		_readExec = new ThreadPoolExecutor(readers, readers, 0L, TimeUnit.MILLISECONDS,
 			new ArrayBlockingQueue<>(100000));
 		_spill = new SpillStore();

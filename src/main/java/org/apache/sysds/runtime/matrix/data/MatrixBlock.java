@@ -2106,12 +2106,18 @@ public class MatrixBlock extends MatrixValue implements CacheBlock<MatrixBlock>,
 	
 	////////
 	// Input/Output functions
-	
+
+	private static SparseBlock.Type _ultraSparseType = SparseBlock.Type.CSR;
+
+	public static void setUseCOO(boolean useCOO) {
+		_ultraSparseType = useCOO ? SparseBlock.Type.COO : SparseBlock.Type.CSR;
+	}
+
 	@Override
 	public void readFields(DataInput in)
 		throws IOException
 	{
-		readFields(in, SparseBlock.Type.CSR);
+		readFields(in, _ultraSparseType);
 	}
 
 	public void readFields(DataInput in, SparseBlock.Type ultraSparseType)

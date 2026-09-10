@@ -45,7 +45,7 @@ public final class SpillableObjectRegistry {
 		return switch(type) {
 			case INDEXED_MATRIX_VALUE -> {
 				IndexedMatrixValue matrix = new IndexedMatrixValue();
-				MatrixBlock value = new OOCMatrixBlock();
+				MatrixBlock value = new MatrixBlock();
 				matrix.getIndexes().readFields(in);
 				value.readFields(in);
 				matrix.setValue(value);
