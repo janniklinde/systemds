@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.ooc.memory;
 
+import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.conf.ConfigurationManager;
 import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
@@ -162,6 +163,8 @@ public class GlobalMemoryBroker implements MemoryBroker {
 			notifyReservationWaiters();
 		if(purge)
 			schedulePurge();
+		if(DMLScript.OOC_STATISTICS && allow == 0 && minSize > 0)
+			Statistics.incrementOOCBrokerRejection(this == SOURCE_BROKER);
 		return allow;
 	}
 
@@ -287,6 +290,10 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		BrokerMode newMode = free > _allowedBytes / 5 ? BrokerMode.RELAXED : BrokerMode.STRICT;
 		if(newMode == _brokerMode)
 			return false;
+		if(DMLScript.OOC_STATISTICS && newMode == BrokerMode.STRICT)
+			Statistics.enterOOCBrokerStrictMode(this == SOURCE_BROKER);
+		else if(DMLScript.OOC_STATISTICS && _brokerMode == BrokerMode.STRICT)
+			Statistics.exitOOCBrokerStrictMode(this == SOURCE_BROKER);
 		_brokerMode = newMode;
 		return true;
 	}

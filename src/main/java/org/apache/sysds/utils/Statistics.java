@@ -241,6 +241,22 @@ public class Statistics
 	private static final LongAdder oocMemoryReclaimBytes = new LongAdder();
 	private static final LongAdder oocSourceBrokerPurges = new LongAdder();
 	private static final LongAdder oocGlobalBrokerPurges = new LongAdder();
+	private static final LongAdder oocSourceBrokerRejections = new LongAdder();
+	private static final LongAdder oocGlobalBrokerRejections = new LongAdder();
+	private static final LongAdder oocSourceBrokerStrictEntries = new LongAdder();
+	private static final LongAdder oocGlobalBrokerStrictEntries = new LongAdder();
+	private static final LongAdder oocSourceBrokerStrictTime = new LongAdder();
+	private static final LongAdder oocGlobalBrokerStrictTime = new LongAdder();
+	private static final AtomicLong oocSourceBrokerStrictStart = new AtomicLong();
+	private static final AtomicLong oocGlobalBrokerStrictStart = new AtomicLong();
+	private static final LongAdder oocReaderTasks = new LongAdder();
+	private static final LongAdder oocReaderQueueWaitTime = new LongAdder();
+	private static final LongAdder oocReaderServiceTime = new LongAdder();
+	private static final AtomicLong oocReaderQueueWaitMax = new AtomicLong();
+	private static final AtomicLong oocReaderActive = new AtomicLong();
+	private static final AtomicLong oocReaderActiveMax = new AtomicLong();
+	private static final AtomicLong oocReaderQueueMax = new AtomicLong();
+	private static final AtomicLong oocReaderThreads = new AtomicLong();
 	private static final AtomicLong oocStatsStartTime = new AtomicLong(System.nanoTime());
 
 	public static long getNoOfExecutedSPInst() {
@@ -378,6 +394,22 @@ public class Statistics
 		oocMemoryReclaimBytes.reset();
 		oocSourceBrokerPurges.reset();
 		oocGlobalBrokerPurges.reset();
+		oocSourceBrokerRejections.reset();
+		oocGlobalBrokerRejections.reset();
+		oocSourceBrokerStrictEntries.reset();
+		oocGlobalBrokerStrictEntries.reset();
+		oocSourceBrokerStrictTime.reset();
+		oocGlobalBrokerStrictTime.reset();
+		oocSourceBrokerStrictStart.set(0);
+		oocGlobalBrokerStrictStart.set(0);
+		oocReaderTasks.reset();
+		oocReaderQueueWaitTime.reset();
+		oocReaderServiceTime.reset();
+		oocReaderQueueWaitMax.set(0);
+		oocReaderActive.set(0);
+		oocReaderActiveMax.set(0);
+		oocReaderQueueMax.set(0);
+		oocReaderThreads.set(0);
 		oocStatsStartTime.set(System.nanoTime());
 	}
 
@@ -532,6 +564,37 @@ public class Statistics
 		oocGlobalBrokerPurges.increment();
 	}
 
+	public static void incrementOOCBrokerRejection(boolean source) {
+		(source ? oocSourceBrokerRejections : oocGlobalBrokerRejections).increment();
+	}
+
+	public static void enterOOCBrokerStrictMode(boolean source) {
+		(source ? oocSourceBrokerStrictEntries : oocGlobalBrokerStrictEntries).increment();
+		(source ? oocSourceBrokerStrictStart : oocGlobalBrokerStrictStart).set(System.nanoTime());
+	}
+
+	public static void exitOOCBrokerStrictMode(boolean source) {
+		AtomicLong start = source ? oocSourceBrokerStrictStart : oocGlobalBrokerStrictStart;
+		long nanos = start.getAndSet(0);
+		if(nanos != 0)
+			(source ? oocSourceBrokerStrictTime : oocGlobalBrokerStrictTime).add(System.nanoTime() - nanos);
+	}
+
+	public static void recordOOCReaderTaskStart(long queueWaitNanos, int threads, int queueDepth) {
+		oocReaderTasks.increment();
+		oocReaderQueueWaitTime.add(queueWaitNanos);
+		oocReaderQueueWaitMax.accumulateAndGet(queueWaitNanos, Math::max);
+		oocReaderThreads.accumulateAndGet(threads, Math::max);
+		oocReaderQueueMax.accumulateAndGet(queueDepth, Math::max);
+		long active = oocReaderActive.incrementAndGet();
+		oocReaderActiveMax.accumulateAndGet(active, Math::max);
+	}
+
+	public static void recordOOCReaderTaskEnd(long serviceNanos) {
+		oocReaderServiceTime.add(serviceNanos);
+		oocReaderActive.decrementAndGet();
+	}
+
 	public static String displayOOCEvictionStats() {
 		long elapsedNanos = Math.max(1, System.nanoTime() - oocStatsStartTime.get());
 		double elapsedSeconds = elapsedNanos / 1e9;
@@ -560,6 +623,30 @@ public class Statistics
 			oocMemoryReclaimBytes.longValue() / 1e9));
 		sb.append(String.format(Locale.US, "  broker purges (source/global):\t%d/%d\n",
 			oocSourceBrokerPurges.longValue(), oocGlobalBrokerPurges.longValue()));
+		sb.append(String.format(Locale.US, "  broker rejections (source/global):\t%d/%d\n",
+			oocSourceBrokerRejections.longValue(), oocGlobalBrokerRejections.longValue()));
+		long now = System.nanoTime();
+		long sourceStrict = oocSourceBrokerStrictTime.longValue();
+		long globalStrict = oocGlobalBrokerStrictTime.longValue();
+		long sourceStart = oocSourceBrokerStrictStart.get();
+		long globalStart = oocGlobalBrokerStrictStart.get();
+		if(sourceStart != 0)
+			sourceStrict += now - sourceStart;
+		if(globalStart != 0)
+			globalStrict += now - globalStart;
+		sb.append(String.format(Locale.US, "  broker strict (source/global):\t%d/%d (time %.3f/%.3f sec)\n",
+			oocSourceBrokerStrictEntries.longValue(), oocGlobalBrokerStrictEntries.longValue(),
+			sourceStrict / 1e9, globalStrict / 1e9));
+		long readerTasks = oocReaderTasks.longValue();
+		sb.append(String.format(Locale.US,
+			"  reader tasks:\t\t%d (queue time %.3f sec, avg %.3f ms, max %.3f ms)\n", readerTasks,
+			oocReaderQueueWaitTime.longValue() / 1e9,
+			readerTasks == 0 ? 0 : oocReaderQueueWaitTime.longValue() / 1e6 / readerTasks,
+			oocReaderQueueWaitMax.longValue() / 1e6));
+		sb.append(String.format(Locale.US,
+			"  reader executor:\tactive max %d/%d, queue max %d, service %.3f sec\n",
+			oocReaderActiveMax.get(), oocReaderThreads.get(), oocReaderQueueMax.get(),
+			oocReaderServiceTime.longValue() / 1e9));
 		return sb.toString();
 	}
 	

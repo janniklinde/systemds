@@ -28,6 +28,7 @@ import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
+import org.apache.sysds.utils.Statistics;
 
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -127,15 +128,21 @@ public class OOCIOHandlerImpl implements OOCIOHandler {
 		private final BlockEntry _block;
 		private final OOCFuture<BlockEntry> _future;
 		private final int _pinnedPartitionId;
+		private final long _submittedAt;
 
 		private ReadTask(BlockEntry block, OOCFuture<BlockEntry> future, int pinnedPartitionId) {
 			_block = block;
 			_future = future;
 			_pinnedPartitionId = pinnedPartitionId;
+			_submittedAt = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 		}
 
 		@Override
 		public void run() {
+			long startedAt = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
+			if(DMLScript.OOC_STATISTICS)
+				Statistics.recordOOCReaderTaskStart(startedAt - _submittedAt, _readExec.getMaximumPoolSize(),
+					_readExec.getQueue().size());
 			try {
 				long ioStart = DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
 				long budget = readAheadBudget(_block);
@@ -151,6 +158,8 @@ public class OOCIOHandlerImpl implements OOCIOHandler {
 				_future.completeExceptionally(e);
 			}
 			finally {
+				if(DMLScript.OOC_STATISTICS)
+					Statistics.recordOOCReaderTaskEnd(System.nanoTime() - startedAt);
 				_spill.unpinPartitionForRead(_pinnedPartitionId);
 			}
 		}
