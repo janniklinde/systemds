@@ -44,6 +44,7 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.channels.ClosedByInterruptException;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -82,10 +83,14 @@ final class SpillStore {
 	private final int _readBufferBytes;
 	private final boolean _direct;
 	private final int _writeBufferBytes;
+	private final int _maxPooledReaders;
+	private final ConcurrentHashMap<Integer, ConcurrentLinkedDeque<DirectRangeReader>> _directReaderPool = new ConcurrentHashMap<>();
+	private final AtomicInteger _pooledDirectReaders = new AtomicInteger();
 
 	@SuppressWarnings("unchecked")
 	SpillStore() {
 		DMLConfig conf = ConfigurationManager.getDMLConfig();
+		_maxPooledReaders = conf.getIntValue(DMLConfig.OOC_IO_READER_POOL);
 		_direct = conf.getBooleanValue(DMLConfig.OOC_IO_DIRECT);
 		_readBufferBytes = (conf.getIntValue(DMLConfig.OOC_IO_READER_BUFFER) / 8) * 8;
 		_writeBufferBytes = (conf.getIntValue(DMLConfig.OOC_IO_WRITER_BUFFER) / 8) * 8;
@@ -132,10 +137,13 @@ final class SpillStore {
 		if(partition == null)
 			throw new DMLRuntimeException("Failed to load partition for: " + partitionId);
 
+		int slot = partition.index.slotOf(offset);
+		int size = (int) (partition.index.endAt(slot) - offset);
+		if(_direct && readAheadBudget <= 0)
+			return readDirect(partitionId, offset, size, block);
+
 		try(InputStream stream = openInput(partitionId, offset)) {
-			int size = _direct ? (int) (partition.index.endAt(partition.index.slotOf(offset)) - offset + 7) / 8 *
-				8 : _readBufferBytes;
-			OOCBufferedDataInputStream in = new OOCBufferedDataInputStream(stream, size, offset);
+			OOCBufferedDataInputStream in = new OOCBufferedDataInputStream(stream, _readBufferBytes, offset);
 			StreamTrace.spillRead(block.getKey().getStreamId(), block.getSize());
 			long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 			SpillableObject obj = SpillableObjectRegistry.read(in);
@@ -153,6 +161,69 @@ final class SpillStore {
 		}
 		catch(IOException e) {
 			throw new DMLRuntimeException(e);
+		}
+	}
+
+	private Object readDirect(int partitionId, long offset, int size, BlockEntry block) {
+		DirectRangeReader reader = borrowDirectReader(partitionId);
+		boolean reusable = false;
+		try {
+			StreamTrace.spillRead(block.getKey().getStreamId(), block.getSize());
+			long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
+			SpillableObject obj = SpillableObjectRegistry.read(new org.apache.sysds.runtime.util.ByteBufferDataInput(
+				reader.read(offset, size)));
+			if(DMLScript.OOC_STATISTICS) {
+				Statistics.incrementOOCLoadFromDisk();
+				Statistics.accumulateOOCLoadFromDiskTime(System.nanoTime() - ioStart);
+				Statistics.accumulateOOCLoadFromDiskBytes(block.getSize());
+			}
+			reusable = true;
+			return obj;
+		}
+		catch(IOException e) {
+			throw new DMLRuntimeException(e);
+		}
+		finally {
+			if(reusable)
+				returnDirectReader(partitionId, reader);
+			else
+				IOUtilFunctions.closeSilently(reader);
+		}
+	}
+
+	private DirectRangeReader borrowDirectReader(int partitionId) {
+		ConcurrentLinkedDeque<DirectRangeReader> pool = _directReaderPool.get(partitionId);
+		if(pool != null) {
+			DirectRangeReader reader = pool.pollLast();
+			if(reader != null) {
+				_pooledDirectReaders.decrementAndGet();
+				return reader;
+			}
+		}
+		try {
+			return new DirectRangeReader(Paths.get(partitionPath(partitionId)));
+		}
+		catch(IOException e) {
+			throw new DMLRuntimeException(e);
+		}
+	}
+
+	private void returnDirectReader(int partitionId, DirectRangeReader reader) {
+		if(_pooledDirectReaders.get() >= _maxPooledReaders || partition(partitionId) == null) {
+			IOUtilFunctions.closeSilently(reader);
+			return;
+		}
+		_directReaderPool.computeIfAbsent(partitionId, p -> new ConcurrentLinkedDeque<>()).addLast(reader);
+		_pooledDirectReaders.incrementAndGet();
+	}
+
+	private void closeDirectReaders(int partitionId) {
+		ConcurrentLinkedDeque<DirectRangeReader> pool = _directReaderPool.remove(partitionId);
+		if(pool == null)
+			return;
+		for(DirectRangeReader reader; (reader = pool.pollLast()) != null; ) {
+			_pooledDirectReaders.decrementAndGet();
+			IOUtilFunctions.closeSilently(reader);
 		}
 	}
 
@@ -234,6 +305,8 @@ final class SpillStore {
 		synchronized(_spillLock) {
 			_partitions = new PartitionFile[0];
 		}
+		for(Integer partitionId : _directReaderPool.keySet())
+			closeDirectReaders(partitionId);
 		if(started)
 			LocalFileUtils.deleteFileIfExists(_spillDir);
 	}
@@ -444,6 +517,7 @@ final class SpillStore {
 			if(partition == null || --partition.refCount != 0)
 				return;
 			PARTITIONS.setRelease(_partitions, partitionId, null);
+			closeDirectReaders(partitionId);
 			try {
 				_deleteExec.execute(() -> LocalFileUtils.deleteFileIfExists(partitionPath(partitionId), true));
 			}
