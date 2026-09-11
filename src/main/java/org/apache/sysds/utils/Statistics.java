@@ -644,9 +644,11 @@ public class Statistics
 			readerTasks == 0 ? 0 : oocReaderQueueWaitTime.longValue() / 1e6 / readerTasks,
 			oocReaderQueueWaitMax.longValue() / 1e6));
 		sb.append(String.format(Locale.US,
-			"  reader executor:\tactive max %d/%d, queue max %d, service %.3f sec\n",
-			oocReaderActiveMax.get(), oocReaderThreads.get(), oocReaderQueueMax.get(),
-			oocReaderServiceTime.longValue() / 1e9));
+			"  reader executor:\tactive avg %.2f, max %d/%d, utilization %.1f%%, queue max %d, service %.3f sec\n",
+			oocReaderServiceTime.longValue() / (double) elapsedNanos, oocReaderActiveMax.get(),
+			oocReaderThreads.get(), oocReaderThreads.get() == 0 ? 0 :
+				100d * oocReaderServiceTime.longValue() / elapsedNanos / oocReaderThreads.get(),
+			oocReaderQueueMax.get(), oocReaderServiceTime.longValue() / 1e9));
 		return sb.toString();
 	}
 	
