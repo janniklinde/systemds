@@ -77,7 +77,9 @@ final class SourceStore {
 	private final ConcurrentHashMap<BlockKey, OOCIOHandler.SourceBlockDescriptor> _locations = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<String, BlockLayoutIndex> _layouts = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<String, ConcurrentLinkedDeque<SequenceFile.Reader>> _readerPool = new ConcurrentHashMap<>();
+	private final ConcurrentHashMap<String, ConcurrentLinkedDeque<DirectRecordReader>> _directReaderPool = new ConcurrentHashMap<>();
 	private final AtomicInteger _pooledReaders = new AtomicInteger();
+	private final AtomicInteger _pooledDirectReaders = new AtomicInteger();
 	private final int _scanCallerId = OOCEventLog.registerCaller("read_src");
 	private volatile JobConf _readConf;
 
@@ -124,6 +126,7 @@ final class SourceStore {
 		_layouts.clear();
 		clearRecycled();
 		closePooledReaders();
+		closePooledDirectReaders();
 	}
 
 	Object read(BlockEntry block, long readAheadBudget, OOCCache cache) {
@@ -225,6 +228,8 @@ final class SourceStore {
 	}
 
 	private Object readSingle(OOCIOHandler.SourceBlockDescriptor src, long readAheadBudget, OOCCache cache) {
+		if(_direct)
+			return readSingleDirect(src);
 		MatrixIndexes ix = new MatrixIndexes();
 		MatrixBlock mb = borrowBlock();
 
@@ -249,6 +254,52 @@ final class SourceStore {
 				IOUtilFunctions.closeSilently(reader);
 		}
 		return new IndexedMatrixValue(ix, mb);
+	}
+
+	private Object readSingleDirect(OOCIOHandler.SourceBlockDescriptor src) {
+		MatrixBlock mb = borrowBlock();
+		DirectRecordReader reader = borrowDirectReader(src.path);
+		boolean reusable = false;
+		try {
+			IndexedMatrixValue value = reader.read(src, mb);
+			reusable = true;
+			return value;
+		}
+		catch(IOException e) {
+			throw new DMLRuntimeException(e);
+		}
+		finally {
+			if(reusable)
+				returnDirectReader(src.path, reader);
+			else
+				IOUtilFunctions.closeSilently(reader);
+		}
+	}
+
+	private DirectRecordReader borrowDirectReader(String path) {
+		ConcurrentLinkedDeque<DirectRecordReader> pool = _directReaderPool.get(path);
+		if(pool != null) {
+			DirectRecordReader reader = pool.pollLast();
+			if(reader != null) {
+				_pooledDirectReaders.decrementAndGet();
+				return reader;
+			}
+		}
+		try {
+			return new DirectRecordReader(path);
+		}
+		catch(IOException e) {
+			throw new DMLRuntimeException(e);
+		}
+	}
+
+	private void returnDirectReader(String path, DirectRecordReader reader) {
+		if(_pooledDirectReaders.get() >= _maxPooledReaders) {
+			IOUtilFunctions.closeSilently(reader);
+			return;
+		}
+		_directReaderPool.computeIfAbsent(path, p -> new ConcurrentLinkedDeque<>()).addLast(reader);
+		_pooledDirectReaders.incrementAndGet();
 	}
 
 	private SequenceFile.Reader borrowReader(String path) {
@@ -301,6 +352,14 @@ final class SourceStore {
 		}
 		_readerPool.clear();
 		_pooledReaders.set(0);
+	}
+
+	private void closePooledDirectReaders() {
+		for(ConcurrentLinkedDeque<DirectRecordReader> pool : _directReaderPool.values())
+			for(DirectRecordReader reader; (reader = pool.pollLast()) != null; )
+				IOUtilFunctions.closeSilently(reader);
+		_directReaderPool.clear();
+		_pooledDirectReaders.set(0);
 	}
 
 	private void readAhead(OOCIOHandler.SourceBlockDescriptor src, SequenceFile.Reader reader, long budget,
