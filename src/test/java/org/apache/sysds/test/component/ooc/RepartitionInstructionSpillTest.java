@@ -274,6 +274,40 @@ public class RepartitionInstructionSpillTest {
 	}
 
 	@Test
+	public void testSparseMatrixVectorMMultSpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			indexedInput(ec, "X", 1600, 1600, 200);
+			input(ec, "v", 1600, 1, 200, 8, 1, false, 3);
+			MatrixObject out = matrixObject(1600, 1, 200);
+			ec.setVariable("R", out);
+
+			MMultOOCInstruction.parseInstruction("OOC°ba+*°X·MATRIX·FP64°v·MATRIX·FP64°R·MATRIX·FP64°1")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			result.start();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					MatrixBlock block = (MatrixBlock) current.get().getValue();
+					long row = current.get().getIndexes().getRowIndex() - 1;
+					int first = (int) row * 200;
+					Assert.assertEquals(3 * (1600d * first * 1000 + 1600d * 1601 / 2), block.get(0, 0), 0);
+					blocks++;
+				}
+			waitForSpill();
+			Assert.assertEquals(8, blocks);
+			Assert.assertNull("Sparse matrix-vector multiply initialized the legacy LRU cache",
+				OOCCacheManager.getCacheIfInitialized());
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
+	@Test
 	public void testAliasedMMultSpill() throws InterruptedException {
 		boolean statistics = prepareSpillCache();
 		try {

@@ -75,6 +75,7 @@ import org.apache.sysds.runtime.ooc.primitives.PlannableDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.ReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.SliceOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.SparseMatrixVectorOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.SourceReadOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TSMMOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TransposeOOCPrimitive;
@@ -260,6 +261,11 @@ public final class OOCInstructionUtils {
 		OOCStream<IndexedMatrixValue> output, AggregateBinaryOperator multiply, BinaryOperator plus,
 		StreamContext context) {
 		output.assignPrimitive(new GeneralMMultOOCPrimitive(left, right, output, multiply, plus, context));
+	}
+
+	public static void sparseMatrixVectorMultiply(OOCStreamable<IndexedMatrixValue> matrix,
+		OOCStreamable<IndexedMatrixValue> vector, OOCStream<IndexedMatrixValue> output, StreamContext context) {
+		output.assignPrimitive(new SparseMatrixVectorOOCPrimitive(matrix, vector, output, context));
 	}
 
 	public static void cartesianMap(OOCStreamable<IndexedMatrixValue> left,
