@@ -33,7 +33,6 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
-import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
@@ -78,7 +77,7 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 		long totalBytes = numBlocks > Long.MAX_VALUE / tileBytes ? Long.MAX_VALUE : numBlocks * tileBytes;
 		long productionLimit = Math.min(bulkLimit, totalBytes);
 		long bulkBytes = productionLimit;
-		MaterializedStoreStreamable materialized = OOCInstructionUtils.sourceRead(source, min, min.getFileName(),
+		OOCStreamable<IndexedMatrixValue> materialized = OOCInstructionUtils.sourceRead(source, min, min.getFileName(),
 			mc.getRows(), mc.getCols(), mc.getBlocksize(), mc.getNonZeros(), bulkBytes, productionLimit, getContext());
 
 		if(!knownGeometry || blen <= 0 || mc.getBlocksize() == blen) {

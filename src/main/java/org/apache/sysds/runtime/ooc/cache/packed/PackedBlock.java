@@ -52,6 +52,14 @@ public final class PackedBlock implements SpillableObject {
 		return new PackedBlock(values.clone(), sizes.clone(), totalSize);
 	}
 
+	public int count() {
+		return values.length;
+	}
+
+	public Object value(int index) {
+		return values[index];
+	}
+
 	@Override
 	public boolean tryWrite(DataOutput out) throws IOException {
 		out.writeInt(values.length);

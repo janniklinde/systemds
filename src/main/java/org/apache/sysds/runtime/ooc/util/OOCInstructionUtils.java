@@ -19,6 +19,9 @@
 
 package org.apache.sysds.runtime.ooc.util;
 
+import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
+
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -83,6 +86,7 @@ import org.apache.sysds.runtime.ooc.primitives.UncoordinatedDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
+import org.apache.sysds.runtime.ooc.store.PartitionedStoreStreamable;
 import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.stream.TaskContext;
@@ -159,11 +163,15 @@ public final class OOCInstructionUtils {
 		transposedMap(input, output, MatrixBlock::transpose, context);
 	}
 
-	public static MaterializedStoreStreamable sourceRead(OOCStream<IndexedMatrixValue> output, CacheableData<?> data,
-		String path, long rows, long cols, int blocksize, long nonZeros, long bulkBytes, long productionLimit,
-		StreamContext context) {
+	public static OOCStreamable<IndexedMatrixValue> sourceRead(OOCStream<IndexedMatrixValue> output,
+		CacheableData<?> data, String path, long rows, long cols, int blocksize, long nonZeros, long bulkBytes,
+		long productionLimit, StreamContext context) {
 		output.assignPrimitive(new SourceReadOOCPrimitive(output, path, rows, cols, blocksize, nonZeros, bulkBytes,
 			productionLimit, context));
+		long partitionBytes = ConfigurationManager.getDMLConfig()
+			.getLongValue(DMLConfig.OOC_MATERIALIZED_PARTITION_BYTES);
+		if(partitionBytes > 0 && rows > 1 && cols > 1 && nonZeros >= 0 && nonZeros / (double) rows / cols < 0.1)
+			return new PartitionedStoreStreamable(output, data, partitionBytes);
 		return new MaterializedStoreStreamable(output, data);
 	}
 

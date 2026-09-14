@@ -147,7 +147,7 @@ public abstract class OOCPrimitive {
 		rebuildInputChildren();
 	}
 
-	private synchronized void consumeInputHandle(int index) {
+	protected final synchronized void consumeInputHandle(int index) {
 		InputSlot input = _inputs.get(index);
 		if(!input._handleReserved)
 			throw new IllegalStateException("Input " + index + " no longer owns a lazy handle.");

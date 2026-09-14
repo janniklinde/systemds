@@ -27,6 +27,12 @@ import java.util.function.IntPredicate;
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.common.Types.FileFormat;
 import org.apache.sysds.common.Types.ValueType;
+import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
+import org.apache.sysds.runtime.io.WriterBinaryBlock;
+import org.apache.sysds.runtime.ooc.primitives.PartitionedMatrixVectorOOCPrimitive;
+import org.apache.sysds.runtime.instructions.ooc.ReblockOOCInstruction;
+import org.apache.sysds.runtime.ooc.store.PartitionedStoreStreamable;
 import org.apache.sysds.runtime.controlprogram.LocalVariableMap;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
@@ -269,6 +275,64 @@ public class RepartitionInstructionSpillTest {
 			Assert.assertEquals(2, blocks);
 		}
 		finally {
+			reset(statistics);
+		}
+	}
+
+	@Test
+	public void testPartitionedMatrixVectorSourceSpill() throws Exception {
+		boolean statistics = prepareSpillCache();
+		DMLConfig previous = ConfigurationManager.getDMLConfig();
+		Path directory = Files.createTempDirectory(Path.of("../data_dir"), "partition-matvec-");
+		try {
+			ConfigurationManager.setGlobalConfig(DMLConfig.parseDMLConfig(
+				"<root>" + "<sysds.ooc.materialized.partition.bytes>8192</sysds.ooc.materialized.partition.bytes>"
+					+ "<sysds.localtmpdir>../data_dir/partition-test-tmp</sysds.localtmpdir>"
+					+ "<sysds.scratch>../data_dir/partition-test-scratch</sysds.scratch></root>"));
+			MatrixBlock matrix = new MatrixBlock(800, 800, true);
+			for(int row = 0; row < 800; row++)
+				for(int col = row % 50; col < 800; col += 50)
+					matrix.set(row, col, row % 7 + 1);
+			matrix.recomputeNonZeros();
+			String path = directory.resolve("X").toString();
+			new WriterBinaryBlock(1).writeMatrixToHDFS(matrix, path, 800, 800, 50, matrix.getNonZeros(), false);
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			MatrixObject disk = matrixObject(800, 800, 50, path, FileFormat.BINARY);
+			disk.getDataCharacteristics().setNonZeros(matrix.getNonZeros());
+			ec.setVariable("disk", disk);
+			MatrixObject x = matrixObject(800, 800, 50);
+			ec.setVariable("X", x);
+			ReblockOOCInstruction.parseInstruction("OOC°rblk°disk·MATRIX·FP64°X·MATRIX·FP64°50").processInstruction(ec);
+			Assert.assertTrue(x.getStreamable() instanceof PartitionedStoreStreamable);
+			input(ec, "v", 800, 1, 50, 16, 1, false, 3);
+			for(int repeat = 0; repeat < 2; repeat++) {
+				MatrixObject out = matrixObject(800, 1, 50);
+				ec.setVariable("R", out);
+				MMultOOCInstruction.parseInstruction("OOC°ba+*°X·MATRIX·FP64°v·MATRIX·FP64°R·MATRIX·FP64°1")
+					.processInstruction(ec);
+				OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+				Assert.assertTrue(result.getPrimitive() instanceof PartitionedMatrixVectorOOCPrimitive);
+				result.start();
+				int rows = 0;
+				OOCStream.QueueCallback<IndexedMatrixValue> callback;
+				while((callback = result.dequeueCB()) != null) {
+					try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+						IndexedMatrixValue value = current.get();
+						MatrixBlock block = (MatrixBlock) value.getValue();
+						int first = (int) (value.getIndexes().getRowIndex() - 1) * 50;
+						for(int row = 0; row < block.getNumRows(); row++)
+							Assert.assertEquals(48d * ((first + row) % 7 + 1), block.get(row, 0), 0);
+						rows += block.getNumRows();
+					}
+				}
+				Assert.assertEquals(800, rows);
+				waitForSpill();
+				input(ec, "v", 800, 1, 50, 16, 1, false, 3);
+			}
+			x.getStreamable().scheduleMaterializedStoreDeletion();
+		}
+		finally {
+			ConfigurationManager.setGlobalConfig(previous);
 			reset(statistics);
 		}
 	}

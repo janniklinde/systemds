@@ -19,6 +19,10 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
+import org.apache.sysds.runtime.ooc.store.PartitionedStoreStreamable;
+import org.apache.sysds.runtime.ooc.primitives.PartitionedMatrixVectorOOCPrimitive;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
+
 import org.apache.sysds.common.Opcodes;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
@@ -73,7 +77,13 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 				-1);
 			ec.getMatrixObject(output).setStreamHandle(out);
 			BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
-			if(vin.getDataCharacteristics().getCols() == 1) {
+			if(vin.getDataCharacteristics().getCols() == 1 &&
+				min.getStreamable() instanceof PartitionedStoreStreamable &&
+				8d * (mdc.getRows() + mdc.getCols()) < GlobalMemoryBroker.get().getAllowedMemory() / 3) {
+				out.assignPrimitive(new PartitionedMatrixVectorOOCPrimitive(min.getStreamable(), vin.getStreamable(),
+					out, getContext()));
+			}
+			else if(vin.getDataCharacteristics().getCols() == 1) {
 				OOCInstructionUtils.sparseMatrixVectorMultiply(min.getStreamable(), vin.getStreamable(), out,
 					getContext());
 			}

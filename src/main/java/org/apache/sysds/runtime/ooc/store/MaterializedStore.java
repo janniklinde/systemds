@@ -100,13 +100,23 @@ public final class MaterializedStore<T extends SpillableObject> {
 	}
 
 	StoreLease<T> publishPinnedLive(int index, T value, long bytes, MemoryAllowance allowance) {
+		return publishPinnedLive(index, value, bytes, allowance, false);
+	}
+
+	StoreLease<T> publishPinnedUnpackedLive(int index, T value, long bytes, MemoryAllowance allowance) {
+		return publishPinnedLive(index, value, bytes, allowance, true);
+	}
+
+	private StoreLease<T> publishPinnedLive(int index, T value, long bytes, MemoryAllowance allowance,
+		boolean unpacked) {
 		BlockEntry entry;
 		try {
 			if(_complete || _closed)
 				throw new IllegalStateException("Store no longer accepts published items");
 			if(index < 0 || index == Integer.MAX_VALUE)
 				throw new IndexOutOfBoundsException("Invalid index: " + index);
-			entry = _cache.putPinned(_streamId, index, value, bytes, allowance);
+			entry = unpacked ? _cache.putUnpackedPinned(_streamId, index, value, bytes, allowance) : _cache
+				.putPinned(_streamId, index, value, bytes, allowance);
 		}
 		catch(RuntimeException ex) {
 			if(bytes > 0)

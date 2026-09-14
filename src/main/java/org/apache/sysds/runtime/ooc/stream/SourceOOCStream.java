@@ -78,7 +78,7 @@ public class SourceOOCStream extends SubscribableTaskQueue<IndexedMatrixValue> {
 	}
 
 	public OOCIOHandler.SourceBlockDescriptor getDescriptor(MatrixIndexes indexes) {
-		return _idx.get(indexes);
+		return _idx.remove(indexes);
 	}
 
 	private void waitForBackpressure() {
