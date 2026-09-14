@@ -102,11 +102,6 @@ public class OOCIOHandlerImpl implements OOCIOHandler {
 	}
 
 	@Override
-	public void recycle(Object data) {
-		_source.recycle(data);
-	}
-
-	@Override
 	public CompletableFuture<SourceReadResult> scheduleSourceRead(SourceReadRequest request) {
 		return _source.scan(request, request.maxBytesInFlight);
 	}
