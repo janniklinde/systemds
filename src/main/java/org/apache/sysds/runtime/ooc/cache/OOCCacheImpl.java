@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.ooc.cache;
 
+import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.ooc.cache.collections.MaskedOnceArrayList;
 import org.apache.sysds.runtime.ooc.cache.collections.SegmentedStreamTableList;
 import org.apache.sysds.runtime.ooc.cache.eviction.EvictController;
@@ -45,6 +46,7 @@ public class OOCCacheImpl implements OOCCache {
 	private static final long EVICTION_CANDIDATE_BYTE_FACTOR = 250_000;
 	private static final long MAX_READ_AHEAD_BYTES = 512_000;
 	private static final double EVICT_OVERSHOOT_MARGIN = 0.05;
+	private static final long ENTRY_METADATA_BYTES = 512;
 
 	private final OOCIOHandler _ioHandler;
 	private final SegmentedStreamTableList<BlockEntry> _blocks;
@@ -63,6 +65,7 @@ public class OOCCacheImpl implements OOCCache {
 	private long _hardLimit;
 	private long _evictionLimit;
 	private long _ownedBytes;
+	private long _metadataBytes;
 	private long _evictingBytes;
 	private boolean _running;
 
@@ -71,6 +74,7 @@ public class OOCCacheImpl implements OOCCache {
 		_hardLimit = hardLimit;
 		_evictionLimit = evictionLimit;
 		_ownedBytes = 0;
+		_metadataBytes = 0;
 		_ownedEntries = 0;
 		_evictingBytes = 0;
 		_running = true;
@@ -112,7 +116,7 @@ public class OOCCacheImpl implements OOCCache {
 	public synchronized long readAheadBudget() {
 		if(!_running)
 			return 0;
-		return Math.max(0, Math.min(MAX_READ_AHEAD_BYTES, _hardLimit - _ownedBytes));
+		return Math.max(0, Math.min(MAX_READ_AHEAD_BYTES, _hardLimit - _ownedBytes - _metadataBytes));
 	}
 
 	@Override
@@ -177,9 +181,17 @@ public class OOCCacheImpl implements OOCCache {
 				releaseBytes = entry.getSize();
 				result = CacheUnpinHandle.committed(entry, allowance, releaseBytes);
 			}
-			else if(canAcceptOwnedBytes(entry.getSize())) {
+			else if(entry.getReferenceCount() <= 0 || canAcceptOwnedBytes(entry.getSize())) {
 				releaseBytes = entry.getSize();
 				result = commitLastUnpin(meta, allowance);
+			}
+			else if(meta.backed) {
+				entry.unpin();
+				entry.clearAndDetach();
+				entry.setState(BlockState.COLD);
+				clearLive(entry);
+				releaseBytes = entry.getSize();
+				result = CacheUnpinHandle.committed(entry, allowance, releaseBytes);
 			}
 			else {
 				CacheUnpinHandle handle = CacheUnpinHandle.deferred(entry, allowance);
@@ -269,7 +281,7 @@ public class OOCCacheImpl implements OOCCache {
 		for(java.util.Map.Entry<Long, long[]> e : agg.entrySet())
 			byStream.append(" s").append(e.getKey()).append("[n=").append(e.getValue()[0]).append(" bytes=")
 				.append(e.getValue()[1]).append(" maxPin=").append(e.getValue()[2]).append(']');
-		return "owned=" + _ownedBytes + " evicting=" + _evictingBytes + " deferredUnpins="
+		return "owned=" + _ownedBytes + " metadata=" + _metadataBytes + " evicting=" + _evictingBytes + " deferredUnpins="
 			+ _deferredUnpins.size() + " entries=" + entries + " pinned=" + pinned + " pinnedBytes=" + pinnedBytes
 			+ " evictionPressure=" + evictionPressure() + " evictLimit=" + _evictionLimit + " hard=" + _hardLimit
 			+ "\n   eviction: passes=" + _evPasses.sum() + " scanned=" + _evScanned.sum() + " evicted="
@@ -292,6 +304,10 @@ public class OOCCacheImpl implements OOCCache {
 		return _ownedBytes;
 	}
 
+	public synchronized long getMetadataSize() {
+		return _metadataBytes;
+	}
+
 	@Override
 	public synchronized void shutdown() {
 		StreamTrace.dump();
@@ -299,6 +315,7 @@ public class OOCCacheImpl implements OOCCache {
 		_blocks.clear();
 		_deferredUnpins.clear();
 		_ownedBytes = 0;
+		_metadataBytes = 0;
 		_ownedEntries = 0;
 		_evictingBytes = 0;
 		_ioHandler.shutdown();
@@ -581,7 +598,7 @@ public class OOCCacheImpl implements OOCCache {
 				_deferredUnpins.poll();
 				continue;
 			}
-			if(!canAcceptOwnedBytes(meta.entry.getSize()))
+			if(meta.entry.getReferenceCount() > 0 && !meta.backed && !canAcceptOwnedBytes(meta.entry.getSize()))
 				return completions == null ? Collections.emptyList() : completions;
 			_deferredUnpins.poll();
 			CacheUnpinHandle handle = meta.deferredUnpin;
@@ -594,6 +611,11 @@ public class OOCCacheImpl implements OOCCache {
 				entry.setCacheMeta(null);
 				if(meta.backed)
 					_ioHandler.scheduleDeletion(entry);
+			}
+			else if(meta.backed && !canAcceptOwnedBytes(entry.getSize())) {
+				entry.clearAndDetach();
+				entry.setState(BlockState.COLD);
+				clearLive(entry);
 			}
 			else {
 				entry.setState(meta.backed ? BlockState.WARM : BlockState.HOT);
@@ -615,7 +637,7 @@ public class OOCCacheImpl implements OOCCache {
 	}
 
 	private boolean canAcceptOwnedBytes(long bytes) {
-		return _ownedBytes + bytes <= _hardLimit;
+		return _ownedBytes + _metadataBytes + bytes <= _hardLimit;
 	}
 
 	private long evictionTarget() {
@@ -625,7 +647,8 @@ public class OOCCacheImpl implements OOCCache {
 	}
 
 	private void scheduleEvictionIfNeeded() {
-		if(evictionPressure() <= _evictionLimit || !_evictionRunning.compareAndSet(false, true))
+		if(_ownedBytes <= _evictingBytes || evictionPressure() <= _evictionLimit ||
+			!_evictionRunning.compareAndSet(false, true))
 			return;
 		_collectorExecutor.execute(this::runEviction);
 	}
@@ -638,6 +661,7 @@ public class OOCCacheImpl implements OOCCache {
 	}
 
 	private void runEviction() {
+		boolean exhausted = false;
 		try {
 			while(true) {
 				long bytes;
@@ -655,8 +679,10 @@ public class OOCCacheImpl implements OOCCache {
 				long scanStart = System.nanoTime();
 				List<IndexedObjectPair<BlockEntry>> candidates = collectEvictionCandidates(bytes);
 				_evScanNanos.add(System.nanoTime() - scanStart);
-				if(candidates.isEmpty())
+				if(candidates.isEmpty()) {
+					exhausted = true;
 					return;
+				}
 
 				List<BlockEntry> toWrite = new ArrayList<>();
 				List<DeferredCompletion> completions;
@@ -697,14 +723,16 @@ public class OOCCacheImpl implements OOCCache {
 				completions.forEach(this::completeDeferred);
 				for(BlockEntry entry : toWrite)
 					_ioHandler.scheduleEviction(entry).whenComplete((ignored, ex) -> onEvicted(entry, ex));
-				if(!progress)
+				if(!progress) {
+					exhausted = true;
 					return;
+				}
 			}
 		}
 		finally {
 			_evictionRunning.set(false);
 			synchronized(this) {
-				if(evictionPressure() > _evictionLimit)
+				if(!exhausted && evictionPressure() > _evictionLimit)
 					scheduleEvictionIfNeeded();
 			}
 		}
@@ -813,7 +841,7 @@ public class OOCCacheImpl implements OOCCache {
 	}
 
 	private long evictionPressure() {
-		return _ownedBytes - _evictingBytes;
+		return _ownedBytes - _evictingBytes + _metadataBytes;
 	}
 
 	private BlockEntry findEntry(BlockKey key) {
@@ -822,18 +850,25 @@ public class OOCCacheImpl implements OOCCache {
 	}
 
 	private void putEntry(BlockEntry entry) {
+		if(_hardLimit > 0 && _metadataBytes + ENTRY_METADATA_BYTES > _hardLimit)
+			throw new DMLRuntimeException("OOC cache metadata exceeds its hard limit: " + (_metadataBytes + ENTRY_METADATA_BYTES)
+				+ " bytes for retained entries (limit " + _hardLimit + "). Use larger blocks or source partitioning.");
 		MaskedOnceArrayList<BlockEntry> stream = _blocks.getOrCreate(entry.getKey().getStreamId());
 		int index = blockIndex(entry.getKey());
 		if(stream.get(index) != null)
 			throw new IllegalStateException("Cache entry already exists: " + entry.getKey());
 		stream.put(index, entry);
+		_metadataBytes += ENTRY_METADATA_BYTES;
+		scheduleEvictionIfNeeded();
 	}
 
 	private BlockEntry removeEntry(BlockKey key) {
 		MaskedOnceArrayList<BlockEntry> stream = _blocks.get(key.getStreamId());
 		if(stream == null)
 			return null;
-		return stream.clear(blockIndex(key)) ? null : stream.get(blockIndex(key));
+		if(stream.clear(blockIndex(key)))
+			_metadataBytes -= ENTRY_METADATA_BYTES;
+		return null;
 	}
 
 	private void setLive(BlockEntry entry) {

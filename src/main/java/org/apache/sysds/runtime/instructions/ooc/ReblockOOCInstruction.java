@@ -68,11 +68,10 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 		OOCStream<IndexedMatrixValue> source = createWritableStream();
 		source.setData(min);
 		boolean knownGeometry = mc.dimsKnown() && mc.getRows() > 0 && mc.getCols() > 0 && mc.getBlocksize() > 0;
-		// A phase is one atomic reservation, and the broker never grants more than it holds, so a bulk size
-		// above the broker blocks forever. Half leaves room for a second phase to be admitted concurrently.
-		long bulkLimit = Math.min(ConfigurationManager.getDMLConfig().getLongValue(DMLConfig.OOC_SOURCE_BULK_BYTES),
-			GlobalMemoryBroker.get().getAllowedMemory() / 2);
-		long tileBytes = knownGeometry ? OOCUtils.estimateFullTileBytes(mc) : bulkLimit;
+		long allowedMemory = GlobalMemoryBroker.get().getAllowedMemory();
+		long configuredBulkBytes = ConfigurationManager.getDMLConfig().getLongValue(DMLConfig.OOC_SOURCE_BULK_BYTES);
+		long tileBytes = knownGeometry ? OOCUtils.estimateFullTileBytes(mc) : configuredBulkBytes;
+		long bulkLimit = Math.min(Math.max(configuredBulkBytes, tileBytes), allowedMemory);
 		long numBlocks = knownGeometry ? OOCUtils.getNumBlocks(mc) : Long.MAX_VALUE;
 		long totalBytes = numBlocks > Long.MAX_VALUE / tileBytes ? Long.MAX_VALUE : numBlocks * tileBytes;
 		long productionLimit = Math.min(bulkLimit, totalBytes);

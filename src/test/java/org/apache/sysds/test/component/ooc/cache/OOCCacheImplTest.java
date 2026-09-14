@@ -24,6 +24,7 @@ import static org.apache.sysds.test.component.ooc.cache.OOCCacheTestUtils.await;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
@@ -115,6 +116,7 @@ public class OOCCacheImplTest {
 		await(_cache.unpin(entry, _producer), WAIT_TIMEOUT_SEC);
 		await(() -> _io.evictionCount() == 1 && BlockEntryTestAccess.getDataUnsafe(entry) == null, WAIT_TIMEOUT_SEC);
 		Assert.assertEquals(0, _producer.getUsedMemory());
+		Assert.assertEquals(512, _cache.getMetadataSize());
 
 		BlockEntry pinned = _cache.pin(key, _reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 
@@ -126,6 +128,49 @@ public class OOCCacheImplTest {
 
 		await(_cache.unpin(pinned, _reader), WAIT_TIMEOUT_SEC);
 		Assert.assertEquals(0, _reader.getUsedMemory());
+		_cache.dereference(entry);
+		Assert.assertEquals(0, _cache.getMetadataSize());
+	}
+
+	@Test
+	public void testRetainedMetadataHasHardLimit() {
+		BlockEntry[] entries = new BlockEntry[7];
+		for(int i = 0; i < entries.length; i++) {
+			_producer.reserveBlocking(1);
+			entries[i] = _cache.putPinned(STREAM_ID, i, "tile", 1, _producer);
+		}
+		Assert.assertEquals(7 * 512, _cache.getMetadataSize());
+		_producer.reserveBlocking(1);
+		try {
+			_cache.putPinned(STREAM_ID, entries.length, "tile", 1, _producer);
+			Assert.fail("Expected cache metadata capacity failure");
+		}
+		catch(DMLRuntimeException expected) {
+			Assert.assertTrue(expected.getMessage().contains("metadata exceeds its hard limit"));
+		}
+		finally {
+			_producer.release(1);
+		}
+		for(BlockEntry entry : entries) {
+			_cache.dereference(entry);
+			_cache.unpin(entry, _producer);
+		}
+		Assert.assertEquals(0, _cache.getMetadataSize());
+	}
+
+	@Test
+	public void testBackedLastUnpinDropsPayloadWhenMetadataFillsCache() throws Exception {
+		useZeroHardLimitCache();
+		_producer.reserveBlocking(BYTES);
+		BlockEntry entry = _cache.putPinned(STREAM_ID, BLOCK_ID, "backed", BYTES, _producer);
+		_cache.markBacked(entry);
+
+		await(_cache.unpin(entry, _producer), WAIT_TIMEOUT_SEC);
+		Assert.assertNull(BlockEntryTestAccess.getDataUnsafe(entry));
+		Assert.assertEquals(512, _cache.getMetadataSize());
+		Assert.assertEquals(0, _producer.getUsedMemory());
+		_cache.dereference(entry);
+		Assert.assertEquals(0, _cache.getMetadataSize());
 	}
 
 	@Test
@@ -160,7 +205,7 @@ public class OOCCacheImplTest {
 		Assert.assertEquals(BYTES, _producer.getUsedMemory());
 		Assert.assertEquals(0, _cache.getOwnedCacheSize());
 
-		_cache.updateLimits(BYTES, BYTES);
+		_cache.updateLimits(BYTES + _cache.getMetadataSize(), BYTES + _cache.getMetadataSize());
 		deferred.getCompletionFuture().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 
 		Assert.assertTrue(deferred.isCommitted());
@@ -186,7 +231,7 @@ public class OOCCacheImplTest {
 		Assert.assertEquals(0, _cache.getOwnedCacheSize());
 
 		OOCCache.UnpinHandle cleanup = _cache.unpin(repinned, _producer);
-		_cache.updateLimits(BYTES, BYTES);
+		_cache.updateLimits(BYTES + _cache.getMetadataSize(), BYTES + _cache.getMetadataSize());
 		cleanup.getCompletionFuture().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 		Assert.assertEquals(0, _producer.getUsedMemory());
 	}
@@ -288,7 +333,7 @@ public class OOCCacheImplTest {
 		BlockEntry entry = _cache.putPinned(key, "owned", BYTES, _producer);
 		await(_cache.unpin(entry, _producer), WAIT_TIMEOUT_SEC);
 
-		Assert.assertEquals(empty - BYTES, _cache.readAheadBudget());
+		Assert.assertEquals(empty - BYTES - _cache.getMetadataSize(), _cache.readAheadBudget());
 	}
 
 	private void useEvictingCache() {
