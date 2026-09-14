@@ -247,8 +247,8 @@ getPairedCandidates = function(Matrix[Double] S, Matrix[Double] R,
   nr = nrow(I); nc = ncol(I);
   rix = matrix(I * seq(1,nr), nr*nc, 1);
   cix = matrix(I * t(seq(1,nc)), nr*nc, 1);
-  rix = removeEmpty(target=rix, margin="rows");
-  cix = removeEmpty(target=cix, margin="rows");
+  rix = removeEmpty(target=rix, margin="rows", select=rix != 0);
+  cix = removeEmpty(target=cix, margin="rows", select=cix != 0);
 
   P = matrix(0,0,ncol(S))
   if( sum(rix)!=0 ) {

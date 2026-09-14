@@ -93,6 +93,10 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 		else if(opcode.equalsIgnoreCase(Opcodes.RMEMPTY.toString())) {
 			return new ParameterizedBuiltinOOCInstruction(null, paramsMap, out, opcode, str);
 		}
+		else if(opcode.equalsIgnoreCase(Opcodes.LOWERTRI.toString()) ||
+			opcode.equalsIgnoreCase(Opcodes.UPPERTRI.toString())) {
+			return new ParameterizedBuiltinOOCInstruction(null, paramsMap, out, opcode, str);
+		}
 		else if(opcode.equalsIgnoreCase(Opcodes.GROUPEDAGG.toString())) {
 			String fn = paramsMap.get(Statement.GAGG_FN);
 			if(fn == null)
@@ -150,6 +154,32 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 				if(callback != null)
 					throw new IllegalStateException("Contains produced multiple results");
 			}
+		}
+		else if(instOpcode.equalsIgnoreCase(Opcodes.LOWERTRI.toString()) ||
+			instOpcode.equalsIgnoreCase(Opcodes.UPPERTRI.toString())) {
+			MatrixObject target = ec.getMatrixObject(params.get("target"));
+			boolean lower = instOpcode.equalsIgnoreCase(Opcodes.LOWERTRI.toString());
+			boolean diag = Boolean.parseBoolean(params.get("diag"));
+			boolean values = Boolean.parseBoolean(params.get("values"));
+			OOCStream<IndexedMatrixValue> outputStream = createWritableStream();
+
+			OOCInstructionUtils.propagateDims(ec, output, target.getNumRows(), target.getNumColumns(),
+				target.getBlocksize(), -1);
+			ec.getMatrixObject(output).setStreamHandle(outputStream);
+			OOCInstructionUtils.equiMap(target.getStreamable(), outputStream, value -> {
+				MatrixIndexes indexes = value.getIndexes();
+				MatrixBlock block = (MatrixBlock) value.getValue();
+				boolean retained = lower ? indexes.getRowIndex() > indexes.getColumnIndex() :
+					indexes.getRowIndex() < indexes.getColumnIndex();
+				boolean removed = lower ? indexes.getRowIndex() < indexes.getColumnIndex() :
+					indexes.getRowIndex() > indexes.getColumnIndex();
+				if(retained)
+					return values ? new MatrixBlock(block) :
+						new MatrixBlock(block.getNumRows(), block.getNumColumns(), 1d);
+				if(removed)
+					return new MatrixBlock(block.getNumRows(), block.getNumColumns(), true);
+				return block.extractTriangular(new MatrixBlock(), lower, diag, values);
+			}, getContext());
 		}
 		else if(instOpcode.equalsIgnoreCase(Opcodes.REXPAND.toString())) {
 			MatrixObject targetObj = ec.getMatrixObject(params.get("target"));

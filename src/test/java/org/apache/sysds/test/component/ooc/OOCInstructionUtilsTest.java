@@ -111,6 +111,44 @@ public class OOCInstructionUtilsTest {
 	}
 
 	@Test
+	public void testUpperTriangular() {
+		ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+		SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
+		MatrixObject source = matrixObject(4, 4, 2);
+		MatrixObject output = matrixObject(-1, -1, 2);
+		source.setStreamHandle(input);
+		ec.setVariable("A", source);
+		ec.setVariable("R", output);
+		for(int row = 1; row <= 2; row++)
+			for(int col = 1; col <= 2; col++)
+				input.enqueue(new IndexedMatrixValue(new MatrixIndexes(row, col), new MatrixBlock(2, 2, 1d)));
+		input.closeInput();
+
+		ParameterizedBuiltinOOCInstruction
+			.parseInstruction("OOC°uppertri°target=A°diag=false°values=true°R·MATRIX·FP64")
+			.processInstruction(ec);
+		OOCStream<IndexedMatrixValue> result = output.getStreamHandle();
+		result.start();
+		OOCStream.QueueCallback<IndexedMatrixValue> callback;
+		while((callback = result.dequeueCB()) != null)
+			try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+				IndexedMatrixValue value = current.get();
+				MatrixIndexes indexes = value.getIndexes();
+				MatrixBlock block = (MatrixBlock) value.getValue();
+				if(indexes.getRowIndex() > indexes.getColumnIndex())
+					Assert.assertEquals(0, block.getNonZeros());
+				else if(indexes.getRowIndex() < indexes.getColumnIndex())
+					Assert.assertEquals(4, block.getNonZeros());
+				else {
+					Assert.assertEquals(0, block.get(0, 0), 0);
+					Assert.assertEquals(1, block.get(0, 1), 0);
+					Assert.assertEquals(0, block.get(1, 0), 0);
+					Assert.assertEquals(0, block.get(1, 1), 0);
+				}
+			}
+	}
+
+	@Test
 	public void testSliceLineCtable() {
 		OOCCacheManager.reset();
 		try {

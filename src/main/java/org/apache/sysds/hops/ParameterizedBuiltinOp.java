@@ -754,8 +754,7 @@ public class ParameterizedBuiltinOp extends MultiThreadedHop {
 		// 2. For paramserv function, always be CP mode so that
 		// the parameter server could have a central instruction
 		// to determine the local or remote workers
-		if(_op == ParamBuiltinOp.LOWER_TRI || _op == ParamBuiltinOp.UPPER_TRI ||
-			_op == ParamBuiltinOp.TRANSFORMCOLMAP || _op == ParamBuiltinOp.TRANSFORMMETA ||
+		if(_op == ParamBuiltinOp.TRANSFORMCOLMAP || _op == ParamBuiltinOp.TRANSFORMMETA ||
 			_op == ParamBuiltinOp.TOSTRING || _op == ParamBuiltinOp.LIST || _op == ParamBuiltinOp.CDF ||
 			_op == ParamBuiltinOp.INVCDF || _op == ParamBuiltinOp.PARAMSERV) {
 			_etype = ExecType.CP;
