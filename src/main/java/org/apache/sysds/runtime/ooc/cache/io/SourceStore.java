@@ -83,15 +83,6 @@ final class SourceStore {
 	private final int _scanCallerId = OOCEventLog.registerCaller("read_src");
 	private volatile JobConf _readConf;
 
-	// Recycling
-	private final ConcurrentHashMap<Integer, ConcurrentLinkedDeque<MatrixBlock>> _recycled = new ConcurrentHashMap<>();
-	private final AtomicInteger _recycledCount = new AtomicInteger();
-	private final AtomicLong _recycledBytes = new AtomicLong();
-	private final long _maxRecycledBytes;
-	private final int _maxPerShape;
-	private final AtomicLong _recycleHits = new AtomicLong();
-	private final AtomicLong _recycleMisses = new AtomicLong();
-
 	SourceStore() {
 		DMLConfig conf = ConfigurationManager.getDMLConfig();
 		int readers = conf.getIntValue(DMLConfig.OOC_IO_READER_THREADS);
@@ -100,8 +91,6 @@ final class SourceStore {
 		_direct = conf.getBooleanValue(DMLConfig.OOC_IO_DIRECT);
 		_scanExec = new ThreadPoolExecutor(readers, readers, 0L, TimeUnit.MILLISECONDS,
 			new ArrayBlockingQueue<>(100000));
-		_maxPerShape = 4 * readers;
-		_maxRecycledBytes = 8L * readers * 1024 * 1024;
 	}
 
 	boolean contains(BlockKey key) {
@@ -124,7 +113,6 @@ final class SourceStore {
 		_scanExec.shutdownNow();
 		_locations.clear();
 		_layouts.clear();
-		clearRecycled();
 		closePooledReaders();
 		closePooledDirectReaders();
 	}
@@ -178,60 +166,11 @@ final class SourceStore {
 		return conf;
 	}
 
-	void recycle(Object data) {
-		if(!(data instanceof IndexedMatrixValue))
-			return;
-		MatrixBlock mb = (MatrixBlock) ((IndexedMatrixValue) data).getValue();
-		if(mb.isInSparseFormat() || mb.getDenseBlock() == null || !mb.getDenseBlock().isContiguous())
-			return;
-		double[] values = mb.getDenseBlockValues();
-		if(values == null)
-			return;
-		long bytes = (long) values.length * 8;
-		if(_recycledBytes.get() + bytes > _maxRecycledBytes)
-			return;
-		ConcurrentLinkedDeque<MatrixBlock> pool = _recycled.computeIfAbsent(values.length,
-			k -> new ConcurrentLinkedDeque<>());
-		if(pool.size() >= _maxPerShape)
-			return;
-		pool.addLast(mb);
-		_recycledCount.incrementAndGet();
-		_recycledBytes.addAndGet(bytes);
-	}
-
-	private MatrixBlock borrowBlock() {
-		int widest = -1;
-		for(Integer capacity : _recycled.keySet())
-			if(capacity > widest)
-				widest = capacity;
-		if(widest >= 0) {
-			ConcurrentLinkedDeque<MatrixBlock> pool = _recycled.get(widest);
-			MatrixBlock mb = pool == null ? null : pool.pollLast();
-			if(mb != null) {
-				_recycledCount.decrementAndGet();
-				_recycledBytes.addAndGet(-8L * widest);
-				_recycleHits.incrementAndGet();
-				return mb;
-			}
-		}
-		_recycleMisses.incrementAndGet();
-		return new MatrixBlock();
-	}
-
-	private void clearRecycled() {
-		if(DMLScript.OOC_STATISTICS)
-			System.out.printf("  block recycling:\thits %d, misses %d, parked %d%n",
-				_recycleHits.get(), _recycleMisses.get(), _recycledCount.get());
-		_recycled.clear();
-		_recycledCount.set(0);
-		_recycledBytes.set(0);
-	}
-
 	private Object readSingle(OOCIOHandler.SourceBlockDescriptor src, long readAheadBudget, OOCCache cache) {
 		if(_direct)
 			return readSingleDirect(src);
 		MatrixIndexes ix = new MatrixIndexes();
-		MatrixBlock mb = borrowBlock();
+		MatrixBlock mb = new MatrixBlock();
 
 		SequenceFile.Reader reader = borrowReader(src.path);
 		boolean reusable = false;
@@ -257,7 +196,7 @@ final class SourceStore {
 	}
 
 	private Object readSingleDirect(OOCIOHandler.SourceBlockDescriptor src) {
-		MatrixBlock mb = borrowBlock();
+		MatrixBlock mb = new MatrixBlock();
 		DirectRecordReader reader = borrowDirectReader(src.path);
 		boolean reusable = false;
 		try {
