@@ -38,6 +38,7 @@ final class DirectRangeReader implements Closeable {
 	private final FileChannel _channel;
 	private ByteBuffer _allocation;
 	private ByteBuffer _buffer;
+	private byte[] _heapBuffer;
 
 	DirectRangeReader(Path path) throws IOException {
 		_path = path;
@@ -58,6 +59,14 @@ final class DirectRangeReader implements Closeable {
 		_buffer.position(skip);
 		_buffer.order(ByteOrder.BIG_ENDIAN);
 		return _buffer;
+	}
+
+	ByteBuffer readHeap(long offset, int length) throws IOException {
+		ByteBuffer direct = read(offset, length);
+		if(_heapBuffer == null || _heapBuffer.length < length)
+			_heapBuffer = new byte[length];
+		direct.get(_heapBuffer, 0, length);
+		return ByteBuffer.wrap(_heapBuffer, 0, length).order(ByteOrder.BIG_ENDIAN);
 	}
 
 	private void ensureCapacity(int size) throws IOException {

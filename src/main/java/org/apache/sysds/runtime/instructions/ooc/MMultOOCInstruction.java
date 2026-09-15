@@ -73,7 +73,8 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 				-1);
 			ec.getMatrixObject(output).setStreamHandle(out);
 			BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
-			if(vin.getDataCharacteristics().getCols() == 1) {
+			if(vin.getDataCharacteristics().getCols() == 1 && mdc.getNonZeros() >= 0 &&
+				MatrixBlock.evalSparseFormatInMemory(mdc)) {
 				OOCInstructionUtils.sparseMatrixVectorMultiply(min.getStreamable(), vin.getStreamable(), out,
 					getContext());
 			}

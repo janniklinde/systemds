@@ -98,6 +98,9 @@ public class SegmentedStreamTableList<T> {
 					continue;
 				segment = newSegment;
 			}
+			Object[] currentSegments = (Object[]) SEGMENTS.getAcquire(this);
+			if(segmentIndex >= currentSegments.length || ARRAY.getAcquire(currentSegments, segmentIndex) != segment)
+				continue;
 
 			@SuppressWarnings("unchecked")
 			MaskedOnceArrayList<T> streamTable = (MaskedOnceArrayList<T>) ARRAY.getAcquire(segment, offset);
@@ -105,8 +108,11 @@ public class SegmentedStreamTableList<T> {
 				return streamTable;
 
 			MaskedOnceArrayList<T> newTable = new MaskedOnceArrayList<>(_streamPartitionSize);
-			if(ARRAY.compareAndSet(segment, offset, null, newTable))
-				return newTable;
+			if(ARRAY.compareAndSet(segment, offset, null, newTable)) {
+				currentSegments = (Object[]) SEGMENTS.getAcquire(this);
+				if(segmentIndex < currentSegments.length && ARRAY.getAcquire(currentSegments, segmentIndex) == segment)
+					return newTable;
+			}
 		}
 	}
 

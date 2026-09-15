@@ -68,7 +68,9 @@ public class MaskedOnceArrayList<T> {
 			MaskedOnceArray[] partitions = ensurePartitionCapacity(partitionIndex);
 			MaskedOnceArray<T> partition = partitionAt(partitions, partitionIndex);
 			boolean changed = partition.put(offset, value);
-			if(PARTITION.getAcquire(partitions, partitionIndex) == partition && !partition.isRetired())
+			MaskedOnceArray[] currentPartitions = (MaskedOnceArray[]) PARTITIONS.getAcquire(this);
+			if(partitionIndex < currentPartitions.length &&
+				PARTITION.getAcquire(currentPartitions, partitionIndex) == partition && !partition.isRetired())
 				return changed;
 		}
 	}

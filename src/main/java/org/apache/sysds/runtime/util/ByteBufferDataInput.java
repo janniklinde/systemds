@@ -23,6 +23,7 @@ import java.io.DataInput;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.DoubleBuffer;
 
 import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixBlockDataInput;
@@ -123,10 +124,10 @@ public class ByteBufferDataInput implements DataInput, MatrixBlockDataInput
 	
 	@Override
 	public long readDoubleArray(int len, double[] varr) throws IOException  {
-		long nnz = 0;
-		for( int i=0; i<len; i++ )
-			nnz += (varr[i] = _buff.getDouble()) != 0 ? 1 : 0;
-		return nnz;
+		DoubleBuffer values = _buff.slice().order(_buff.order()).asDoubleBuffer();
+		values.get(varr, 0, len);
+		_buff.position(_buff.position() + len * Double.BYTES);
+		return UtilFunctions.computeNnz(varr, 0, len);
 	}
 
 	@Override

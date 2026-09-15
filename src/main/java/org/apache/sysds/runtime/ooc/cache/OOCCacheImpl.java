@@ -220,9 +220,13 @@ public class OOCCacheImpl implements OOCCache {
 
 	@Override
 	public synchronized int reference(BlockEntry entry) {
+		if(getMeta(entry) != null)
+			return entry.addReference();
+		BlockEntry current = findEntry(entry.getKey());
+		if(current != null)
+			return current.addReference();
 		ColdEntry cold = findCold(entry.getKey());
-		int refs = getMeta(entry) == null && cold != null ? ++cold.refs : entry.addReference();
-		return refs;
+		return cold == null ? 0 : ++cold.refs;
 	}
 
 	@Override

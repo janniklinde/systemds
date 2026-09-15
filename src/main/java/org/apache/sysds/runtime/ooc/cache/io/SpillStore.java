@@ -143,7 +143,8 @@ final class SpillStore {
 			return readDirect(partitionId, offset, size, block);
 
 		try(InputStream stream = openInput(partitionId, offset)) {
-			OOCBufferedDataInputStream in = new OOCBufferedDataInputStream(stream, _readBufferBytes, offset);
+			int bufferSize = _direct ? (size + 7) / 8 * 8 : _readBufferBytes;
+			OOCBufferedDataInputStream in = new OOCBufferedDataInputStream(stream, bufferSize, offset);
 			StreamTrace.spillRead(block.getKey().getStreamId(), block.getSize());
 			long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 			SpillableObject obj = SpillableObjectRegistry.read(in);
@@ -171,7 +172,7 @@ final class SpillStore {
 			StreamTrace.spillRead(block.getKey().getStreamId(), block.getSize());
 			long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 			SpillableObject obj = SpillableObjectRegistry.read(new org.apache.sysds.runtime.util.ByteBufferDataInput(
-				reader.read(offset, size)));
+				size < _readBufferBytes / 2 ? reader.readHeap(offset, size) : reader.read(offset, size)));
 			if(DMLScript.OOC_STATISTICS) {
 				Statistics.incrementOOCLoadFromDisk();
 				Statistics.accumulateOOCLoadFromDiskTime(System.nanoTime() - ioStart);
