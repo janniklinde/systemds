@@ -112,6 +112,10 @@ public final class BlockEntry {
 		return _referenceCount;
 	}
 
+	void setReferenceCount(int count) {
+		_referenceCount = count;
+	}
+
 	public Object getCacheMeta() {
 		return _cacheMeta;
 	}

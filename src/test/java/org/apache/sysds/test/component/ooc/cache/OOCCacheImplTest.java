@@ -116,12 +116,12 @@ public class OOCCacheImplTest {
 		await(_cache.unpin(entry, _producer), WAIT_TIMEOUT_SEC);
 		await(() -> _io.evictionCount() == 1 && BlockEntryTestAccess.getDataUnsafe(entry) == null, WAIT_TIMEOUT_SEC);
 		Assert.assertEquals(0, _producer.getUsedMemory());
-		Assert.assertEquals(512, _cache.getMetadataSize());
+		Assert.assertEquals(128, _cache.getMetadataSize());
 
 		BlockEntry pinned = _cache.pin(key, _reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 
 		Assert.assertNotNull(pinned);
-		Assert.assertSame(entry, pinned);
+		Assert.assertEquals(entry.getKey(), pinned.getKey());
 		Assert.assertEquals(payload, pinned.getData());
 		Assert.assertEquals(1, _io.readCount());
 		Assert.assertEquals(BYTES, _reader.getUsedMemory());
@@ -167,7 +167,7 @@ public class OOCCacheImplTest {
 
 		await(_cache.unpin(entry, _producer), WAIT_TIMEOUT_SEC);
 		Assert.assertNull(BlockEntryTestAccess.getDataUnsafe(entry));
-		Assert.assertEquals(512, _cache.getMetadataSize());
+		Assert.assertEquals(128, _cache.getMetadataSize());
 		Assert.assertEquals(0, _producer.getUsedMemory());
 		_cache.dereference(entry);
 		Assert.assertEquals(0, _cache.getMetadataSize());
@@ -288,7 +288,7 @@ public class OOCCacheImplTest {
 		Assert.assertEquals(BYTES, _cache.getOwnedCacheSize());
 
 		BlockEntry pinned = _cache.pinIfLive(STREAM_ID, BLOCK_ID, _reader);
-		Assert.assertSame(entry, pinned);
+		Assert.assertEquals(entry.getKey(), pinned.getKey());
 		Assert.assertEquals("read-ahead", pinned.getData());
 		Assert.assertEquals(0, _io.readCount());
 

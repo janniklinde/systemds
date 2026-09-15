@@ -42,8 +42,8 @@ final class DirectRecordReader implements Closeable {
 		_reader = new DirectRangeReader(path);
 	}
 
-	IndexedMatrixValue read(OOCIOHandler.SourceBlockDescriptor src, MatrixBlock matrix) throws IOException {
-		ByteBuffer buffer = _reader.read(src.offset, src.recordLength);
+	IndexedMatrixValue read(String path, long offset, int sourceRecordLength, MatrixBlock matrix) throws IOException {
+		ByteBuffer buffer = _reader.read(offset, sourceRecordLength);
 
 		int recordLength = buffer.getInt();
 		if(recordLength == SYNC_ESCAPE) {
@@ -52,7 +52,7 @@ final class DirectRecordReader implements Closeable {
 		}
 		int keyLength = buffer.getInt();
 		if(keyLength < 16 || recordLength < keyLength || recordLength > buffer.remaining())
-			throw new IOException("Invalid SequenceFile record at " + src.offset + " in " + src.path);
+			throw new IOException("Invalid SequenceFile record at " + offset + " in " + path);
 
 		ByteBufferDataInput input = new ByteBufferDataInput(buffer);
 		MatrixIndexes indexes = new MatrixIndexes();
@@ -63,7 +63,7 @@ final class DirectRecordReader implements Closeable {
 		matrix.readFields(input);
 		if(buffer.position() != valueEnd)
 			throw new IOException("Matrix block consumed " + (buffer.position() - valueEnd)
-				+ " unexpected bytes at " + src.offset + " in " + src.path);
+				+ " unexpected bytes at " + offset + " in " + path);
 		return new IndexedMatrixValue(indexes, matrix);
 	}
 

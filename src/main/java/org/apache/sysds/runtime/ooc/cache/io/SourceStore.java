@@ -40,6 +40,8 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
+import org.apache.sysds.runtime.ooc.cache.collections.MaskedOnceArrayList;
+import org.apache.sysds.runtime.ooc.cache.collections.SegmentedStreamTableList;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.stats.StreamTrace;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
@@ -74,7 +76,7 @@ final class SourceStore {
 	private final boolean _direct;
 
 	private final ThreadPoolExecutor _scanExec;
-	private final ConcurrentHashMap<BlockKey, OOCIOHandler.SourceBlockDescriptor> _locations = new ConcurrentHashMap<>();
+	private final SegmentedStreamTableList<SourceLocation> _locations = new SegmentedStreamTableList<>();
 	private final ConcurrentHashMap<String, BlockLayoutIndex> _layouts = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<String, ConcurrentLinkedDeque<SequenceFile.Reader>> _readerPool = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<String, ConcurrentLinkedDeque<DirectRecordReader>> _directReaderPool = new ConcurrentHashMap<>();
@@ -94,18 +96,26 @@ final class SourceStore {
 	}
 
 	boolean contains(BlockKey key) {
-		return _locations.containsKey(key);
+		return location(key) != null;
+	}
+
+	private SourceLocation location(BlockKey key) {
+		MaskedOnceArrayList<SourceLocation> stream = _locations.get(key.getStreamId());
+		return stream == null ? null : stream.get(Math.toIntExact(key.getSequenceNumber()));
 	}
 
 	void register(BlockKey key, OOCIOHandler.SourceBlockDescriptor descriptor) {
-		_locations.put(key, descriptor);
+		_locations.getOrCreate(key.getStreamId()).put(Math.toIntExact(key.getSequenceNumber()),
+			new SourceLocation(descriptor.path, descriptor.offset, descriptor.recordLength));
 		BlockLayoutIndex index = _layouts.get(descriptor.path);
 		if(index != null)
 			index.setKey(index.slotOf(descriptor.offset), BlockLayoutIndex.packKey(key));
 	}
 
 	void delete(BlockKey key) {
-		_locations.remove(key);
+		MaskedOnceArrayList<SourceLocation> stream = _locations.get(key.getStreamId());
+		if(stream != null)
+			stream.clear(Math.toIntExact(key.getSequenceNumber()));
 	}
 
 	void shutdown() {
@@ -118,12 +128,9 @@ final class SourceStore {
 	}
 
 	Object read(BlockEntry block, long readAheadBudget, OOCCache cache) {
-		OOCIOHandler.SourceBlockDescriptor src = _locations.get(block.getKey());
+		SourceLocation src = location(block.getKey());
 		if(src == null)
 			throw new DMLRuntimeException("Failed to load source location for: " + block.getKey());
-		if(src.format != Types.FileFormat.BINARY)
-			throw new DMLRuntimeException("Unsupported format for source read: " + src.format);
-
 		StreamTrace.sourceRead(block.getKey().getStreamId(), block.getSize());
 		long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 		Object data = readSingle(src, readAheadBudget, cache);
@@ -166,7 +173,7 @@ final class SourceStore {
 		return conf;
 	}
 
-	private Object readSingle(OOCIOHandler.SourceBlockDescriptor src, long readAheadBudget, OOCCache cache) {
+	private Object readSingle(SourceLocation src, long readAheadBudget, OOCCache cache) {
 		if(_direct)
 			return readSingleDirect(src);
 		MatrixIndexes ix = new MatrixIndexes();
@@ -195,12 +202,12 @@ final class SourceStore {
 		return new IndexedMatrixValue(ix, mb);
 	}
 
-	private Object readSingleDirect(OOCIOHandler.SourceBlockDescriptor src) {
+	private Object readSingleDirect(SourceLocation src) {
 		MatrixBlock mb = new MatrixBlock();
 		DirectRecordReader reader = borrowDirectReader(src.path);
 		boolean reusable = false;
 		try {
-			IndexedMatrixValue value = reader.read(src, mb);
+			IndexedMatrixValue value = reader.read(src.path, src.offset, src.recordLength, mb);
 			reusable = true;
 			return value;
 		}
@@ -301,7 +308,7 @@ final class SourceStore {
 		_pooledDirectReaders.set(0);
 	}
 
-	private void readAhead(OOCIOHandler.SourceBlockDescriptor src, SequenceFile.Reader reader, long budget,
+	private void readAhead(SourceLocation src, SequenceFile.Reader reader, long budget,
 		OOCCache cache) throws IOException {
 		BlockLayoutIndex index = _layouts.get(src.path);
 		if(index == null)
@@ -335,6 +342,9 @@ final class SourceStore {
 			else if(++declined >= MAX_DECLINED_OFFERS)
 				return;
 		}
+	}
+
+	private record SourceLocation(String path, long offset, int recordLength) {
 	}
 
 	CompletableFuture<OOCIOHandler.SourceReadResult> scan(OOCIOHandler.SourceReadRequest request,
@@ -478,7 +488,8 @@ final class SourceStore {
 		AtomicLong bytesRead, long byteLimit, Object budgetLock,
 		ConcurrentLinkedDeque<OOCIOHandler.SourceBlockDescriptor> descriptors) throws IOException {
 		MatrixIndexes key = new MatrixIndexes();
-		BlockLayoutIndex layout = _layouts.computeIfAbsent(path.toString(), p -> new BlockLayoutIndex());
+		String sourcePath = path.toString();
+		BlockLayoutIndex layout = _layouts.computeIfAbsent(sourcePath, p -> new BlockLayoutIndex());
 
 		try(SequenceFile.Reader reader = openReader(job, path)) {
 			long pos = filePositions.get(fileIdx);
@@ -521,7 +532,7 @@ final class SourceStore {
 
 				MatrixIndexes outIdx = new MatrixIndexes(key);
 				IndexedMatrixValue imv = new IndexedMatrixValue(outIdx, value);
-				OOCIOHandler.SourceBlockDescriptor descriptor = new OOCIOHandler.SourceBlockDescriptor(path.toString(),
+				OOCIOHandler.SourceBlockDescriptor descriptor = new OOCIOHandler.SourceBlockDescriptor(sourcePath,
 					request.format, outIdx, recordStart, (int) (recordEnd - recordStart), blockSize);
 
 				emitSourceValue(request, imv, descriptor);

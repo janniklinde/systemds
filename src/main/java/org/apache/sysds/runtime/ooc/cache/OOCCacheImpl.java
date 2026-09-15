@@ -47,9 +47,11 @@ public class OOCCacheImpl implements OOCCache {
 	private static final long MAX_READ_AHEAD_BYTES = 512_000;
 	private static final double EVICT_OVERSHOOT_MARGIN = 0.05;
 	private static final long ENTRY_METADATA_BYTES = 512;
+	private static final long COLD_METADATA_BYTES = 128;
 
 	private final OOCIOHandler _ioHandler;
 	private final SegmentedStreamTableList<BlockEntry> _blocks;
+	private final SegmentedStreamTableList<ColdEntry> _coldBlocks;
 	private final SegmentedStreamTableList<EvictController> _evictControllers;
 	private final EvictController _defaultEvictController;
 	private final ConcurrentLinkedQueue<BlockKey> _deferredUnpins;
@@ -79,6 +81,7 @@ public class OOCCacheImpl implements OOCCache {
 		_evictingBytes = 0;
 		_running = true;
 		_blocks = new SegmentedStreamTableList<>();
+		_coldBlocks = new SegmentedStreamTableList<>();
 		_evictControllers = new SegmentedStreamTableList<>();
 		_defaultEvictController = new EvictController();
 		_deferredUnpins = new ConcurrentLinkedQueue<>();
@@ -125,6 +128,12 @@ public class OOCCacheImpl implements OOCCache {
 			if(!_running)
 				return false;
 			BlockEntry entry = findEntry(key);
+			ColdEntry cold = entry == null ? findCold(key) : null;
+			if(cold != null) {
+				if(_metadataBytes + ENTRY_METADATA_BYTES - COLD_METADATA_BYTES + cold.size > _hardLimit)
+					return false;
+				entry = restoreCold(key);
+			}
 			EntryMeta meta = getMeta(entry);
 			if(meta == null || entry.getDataUnsafe() != null || entry.getState() == BlockState.READING)
 				return false;
@@ -190,6 +199,7 @@ public class OOCCacheImpl implements OOCCache {
 				entry.clearAndDetach();
 				entry.setState(BlockState.COLD);
 				clearLive(entry);
+				compactCold(meta);
 				releaseBytes = entry.getSize();
 				result = CacheUnpinHandle.committed(entry, allowance, releaseBytes);
 			}
@@ -210,7 +220,9 @@ public class OOCCacheImpl implements OOCCache {
 
 	@Override
 	public synchronized int reference(BlockEntry entry) {
-		return entry.addReference();
+		ColdEntry cold = findCold(entry.getKey());
+		int refs = getMeta(entry) == null && cold != null ? ++cold.refs : entry.addReference();
+		return refs;
 	}
 
 	@Override
@@ -219,7 +231,7 @@ public class OOCCacheImpl implements OOCCache {
 		synchronized(this) {
 			EntryMeta meta = getMeta(entry);
 			if(meta == null)
-				return 0;
+				return dereference(entry.getKey());
 			refs = entry.forget();
 			if(refs <= 0)
 				removeIfUnused(meta);
@@ -229,10 +241,22 @@ public class OOCCacheImpl implements OOCCache {
 
 	@Override
 	public int dereference(BlockKey key) {
-		BlockEntry entry = findEntry(key);
-		if(entry == null)
-			return 0;
-		return dereference(entry);
+		synchronized(this) {
+			BlockEntry entry = findEntry(key);
+			if(entry != null)
+				return dereference(entry);
+			ColdEntry cold = findCold(key);
+			if(cold == null)
+				return 0;
+			int refs = --cold.refs;
+			if(refs <= 0 && cold.pendingPins == 0) {
+				removeCold(key);
+				BlockEntry deletion = new BlockEntry(key, cold.size, null, BlockState.COLD);
+				deletion.setBackingLocation(cold.backingLocation);
+				_ioHandler.scheduleDeletion(deletion);
+			}
+			return refs;
+		}
 	}
 
 	@Override
@@ -313,6 +337,7 @@ public class OOCCacheImpl implements OOCCache {
 		StreamTrace.dump();
 		_running = false;
 		_blocks.clear();
+		_coldBlocks.clear();
 		_deferredUnpins.clear();
 		_ownedBytes = 0;
 		_metadataBytes = 0;
@@ -330,11 +355,15 @@ public class OOCCacheImpl implements OOCCache {
 			checkRunning();
 			BlockEntry entry = findEntry(key);
 			EntryMeta meta = getMeta(entry);
-			if(meta == null)
+			ColdEntry cold = meta == null ? findCold(key) : null;
+			if(meta == null && cold == null) {
 				return OOCFuture.completed(null);
-			if(liveOnly && entry.getDataUnsafe() == null)
+			}
+			if(liveOnly && (entry == null || entry.getDataUnsafe() == null))
 				return OOCFuture.completed(null);
-			if(meta.deferredUnpin != null) {
+			if(cold != null)
+				reserveBytes = cold.size;
+			else if(meta.deferredUnpin != null) {
 				if(meta.deferredUnpin.allowance == allowance) {
 					deferredUnpinHandle = meta.deferredUnpin;
 					meta.deferredUnpin = null;
@@ -349,20 +378,29 @@ public class OOCCacheImpl implements OOCCache {
 				return OOCFuture.completed(null);
 			else
 				reserveBytes = entry.getSize();
+			if(deferredUnpinEntry == null) {
+				if(cold != null)
+					cold.pendingPins++;
+				else
+					meta.pendingPins++;
+			}
 		}
 		if(deferredUnpinEntry != null) {
 			deferredUnpinHandle.complete(false);
 			return OOCFuture.completed(deferredUnpinEntry);
 		}
 		if(!waitForAdmission) {
-			if(!allowance.tryReserve(reserveBytes))
+			if(!allowance.tryReserve(reserveBytes)) {
+				releasePendingPin(key);
 				return OOCFuture.completed(null);
+			}
 			return pinReserved(key, allowance, reserveBytes, liveOnly);
 		}
 
 		OOCFuture<BlockEntry> result = new OOCFuture<>();
 		allowance.reserveAsync(reserveBytes).whenComplete((ignored, error) -> {
 			if(error != null) {
+				releasePendingPin(key);
 				result.completeExceptionally(error);
 				return;
 			}
@@ -400,12 +438,17 @@ public class OOCCacheImpl implements OOCCache {
 			}
 			else {
 				BlockEntry entry = findEntry(key);
+				if(entry == null && !liveOnly)
+					entry = restoreCold(key);
 				meta = getMeta(entry);
 				if(meta == null || (liveOnly && entry.getDataUnsafe() == null)) {
+					if(meta != null && meta.pendingPins > 0)
+						meta.pendingPins--;
 					releaseReserved = true;
 					returnNull = true;
 				}
 				else if(meta.deferredUnpin != null) {
+					meta.pendingPins--;
 					deferredUnpinHandle = meta.deferredUnpin;
 					meta.deferredUnpin = null;
 					deferredUnpinEntry = meta.entry;
@@ -418,11 +461,13 @@ public class OOCCacheImpl implements OOCCache {
 					Statistics.incrementOOCEvictionGet();
 				}
 				else if(isResidentForPin(entry)) {
+					meta.pendingPins--;
 					deferredCompletion = pinResident(meta);
 					Statistics.incrementOOCEvictionGet();
 					resident = entry;
 				}
 				else if(liveOnly) {
+					meta.pendingPins--;
 					releaseReserved = true;
 					returnNull = true;
 				}
@@ -452,19 +497,22 @@ public class OOCCacheImpl implements OOCCache {
 		boolean releaseReserved = false;
 		DeferredCompletion deferredCompletion = null;
 		BlockEntry resident = null;
-		synchronized(this) {
+			synchronized(this) {
 			boolean readSettled = meta.readFuture == null || meta.readFuture.isDone();
 			if(!_running || getMeta(meta.entry) != meta) {
+				meta.pendingPins = Math.max(0, meta.pendingPins - 1);
 				releaseReserved = true;
 				readFuture = null;
 			}
 			else if(meta.entry.getDataUnsafe() != null) {
+				meta.pendingPins--;
 				deferredCompletion = pinResident(meta);
 				Statistics.incrementOOCEvictionGet();
 				resident = meta.entry;
 				readFuture = null;
 			}
 			else if(readSettled) {
+				meta.pendingPins--;
 				awaitRead(meta);
 				OOCFuture<BlockEntry> scheduled = _ioHandler.scheduleRead(meta.entry);
 				meta.readFuture = scheduled;
@@ -479,6 +527,7 @@ public class OOCCacheImpl implements OOCCache {
 				});
 			}
 			else {
+				meta.pendingPins--;
 				awaitRead(meta);
 				readFuture = meta.readFuture;
 			}
@@ -616,6 +665,7 @@ public class OOCCacheImpl implements OOCCache {
 				entry.clearAndDetach();
 				entry.setState(BlockState.COLD);
 				clearLive(entry);
+				compactCold(meta);
 			}
 			else {
 				entry.setState(meta.backed ? BlockState.WARM : BlockState.HOT);
@@ -693,7 +743,8 @@ public class OOCCacheImpl implements OOCCache {
 						if(evictionPressure() <= evictionTarget())
 							break;
 						EntryMeta meta = getMeta(candidate.obj());
-						if(meta == null || candidate.obj().getPinCount() > 0 || meta.deferredUnpin != null)
+						if(meta == null || candidate.obj().getPinCount() > 0 || meta.deferredUnpin != null ||
+							meta.pendingPins > 0)
 							continue;
 						if(meta.readWaiters > 0)
 							continue;
@@ -705,6 +756,7 @@ public class OOCCacheImpl implements OOCCache {
 							clearLive(entry);
 							_ownedBytes -= entry.getSize();
 							_ownedEntries--;
+							compactCold(meta);
 							_evEvicted.increment();
 							progress = true;
 						}
@@ -766,6 +818,8 @@ public class OOCCacheImpl implements OOCCache {
 			_ownedEntries--;
 			_evictingBytes -= entry.getSize();
 			removeIfUnused(meta);
+			if(getMeta(entry) != null)
+				compactCold(meta);
 			completions = processDeferredUnpins();
 			scheduleEvictionIfNeeded();
 		}
@@ -813,7 +867,7 @@ public class OOCCacheImpl implements OOCCache {
 
 	private void removeIfUnused(EntryMeta meta) {
 		if(meta.entry.getReferenceCount() > 0 || meta.entry.getPinCount() > 0 || meta.deferredUnpin != null ||
-			meta.readWaiters > 0)
+			meta.pendingPins > 0 || meta.readWaiters > 0)
 			return;
 		BlockEntry entry = meta.entry;
 		if(isCacheOwned(entry)) {
@@ -849,13 +903,76 @@ public class OOCCacheImpl implements OOCCache {
 		return stream == null ? null : stream.get(blockIndex(key));
 	}
 
+	private ColdEntry findCold(BlockKey key) {
+		MaskedOnceArrayList<ColdEntry> stream = _coldBlocks.get(key.getStreamId());
+		return stream == null ? null : stream.get(blockIndex(key));
+	}
+
+	private void compactCold(EntryMeta meta) {
+		BlockEntry entry = meta.entry;
+		if(!meta.backed || entry.getPinCount() != 0 || meta.readWaiters != 0 ||
+			meta.deferredUnpin != null || meta.pendingPins > 0 || entry.getReferenceCount() <= 0)
+			return;
+		BlockKey key = entry.getKey();
+		_blocks.get(key.getStreamId()).clear(blockIndex(key));
+		if(!_coldBlocks.getOrCreate(key.getStreamId()).put(blockIndex(key),
+			new ColdEntry(entry.getSize(), entry.getBackingLocation(), entry.getReferenceCount())))
+			throw new IllegalStateException("Compact cache entry already exists: " + key);
+		entry.setCacheMeta(null);
+		_metadataBytes += COLD_METADATA_BYTES - ENTRY_METADATA_BYTES;
+	}
+
+	private BlockEntry restoreCold(BlockKey key) {
+		ColdEntry cold = findCold(key);
+		if(cold == null)
+			return null;
+		removeCold(key);
+		BlockEntry entry = new BlockEntry(key, cold.size, null, BlockState.COLD);
+		entry.setReferenceCount(cold.refs);
+		entry.setBackingLocation(cold.backingLocation);
+		EntryMeta meta = new EntryMeta(entry);
+		meta.backed = true;
+		meta.pendingPins = cold.pendingPins;
+		entry.setCacheMeta(meta);
+		if(!_blocks.getOrCreate(key.getStreamId()).put(blockIndex(key), entry))
+			throw new IllegalStateException("Cache entry already exists while restoring: " + key);
+		_metadataBytes += ENTRY_METADATA_BYTES;
+		return entry;
+	}
+
+	private void removeCold(BlockKey key) {
+		MaskedOnceArrayList<ColdEntry> stream = _coldBlocks.get(key.getStreamId());
+		if(stream != null && stream.clear(blockIndex(key)))
+			_metadataBytes -= COLD_METADATA_BYTES;
+	}
+
+	private synchronized void releasePendingPin(BlockKey key) {
+		BlockEntry entry = findEntry(key);
+		EntryMeta meta = getMeta(entry);
+		if(meta != null) {
+			meta.pendingPins = Math.max(0, meta.pendingPins - 1);
+			removeIfUnused(meta);
+			return;
+		}
+		ColdEntry cold = findCold(key);
+		if(cold != null && cold.pendingPins > 0) {
+			cold.pendingPins--;
+			if(cold.refs <= 0) {
+				removeCold(key);
+				BlockEntry deletion = new BlockEntry(key, cold.size, null, BlockState.COLD);
+				deletion.setBackingLocation(cold.backingLocation);
+				_ioHandler.scheduleDeletion(deletion);
+			}
+		}
+	}
+
 	private void putEntry(BlockEntry entry) {
 		if(_hardLimit > 0 && _metadataBytes + ENTRY_METADATA_BYTES > _hardLimit)
 			throw new DMLRuntimeException("OOC cache metadata exceeds its hard limit: " + (_metadataBytes + ENTRY_METADATA_BYTES)
 				+ " bytes for retained entries (limit " + _hardLimit + "). Use larger blocks or source partitioning.");
 		MaskedOnceArrayList<BlockEntry> stream = _blocks.getOrCreate(entry.getKey().getStreamId());
 		int index = blockIndex(entry.getKey());
-		if(stream.get(index) != null)
+		if(stream.get(index) != null || findCold(entry.getKey()) != null)
 			throw new IllegalStateException("Cache entry already exists: " + entry.getKey());
 		stream.put(index, entry);
 		_metadataBytes += ENTRY_METADATA_BYTES;
@@ -904,11 +1021,25 @@ public class OOCCacheImpl implements OOCCache {
 		private boolean backed;
 		private OOCFuture<BlockEntry> readFuture;
 		private int readWaiters;
+		private int pendingPins;
 		private CacheUnpinHandle deferredUnpin;
 
 		private EntryMeta(BlockEntry entry) {
 			this.entry = entry;
 			backed = entry.getState().isBackedByDisk();
+		}
+	}
+
+	private static final class ColdEntry {
+		private final long size;
+		private final long backingLocation;
+		private int refs;
+		private int pendingPins;
+
+		private ColdEntry(long size, long backingLocation, int refs) {
+			this.size = size;
+			this.backingLocation = backingLocation;
+			this.refs = refs;
 		}
 	}
 
