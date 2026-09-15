@@ -279,6 +279,28 @@ public class OOCMemoryAllowanceTest {
 	}
 
 	@Test
+	public void testGrowingReusableBudget() {
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
+		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);
+		try {
+			allowance.reserveBlocking(20);
+			ReservationBudget budget = new ReservationBudget(allowance, 20).enableReuse().enableGrowth();
+			Assert.assertTrue(budget.tryReserve(60));
+			Assert.assertEquals(60, budget.getGrantedMemory());
+			Assert.assertEquals(60, allowance.getUsedMemory());
+			Assert.assertFalse(budget.tryReserve(50));
+			budget.release(60);
+			budget.close();
+			Assert.assertEquals(0, allowance.getUsedMemory());
+		}
+		finally {
+			if(allowance.getUsedMemory() > 0)
+				allowance.release(allowance.getUsedMemory());
+			allowance.destroy();
+		}
+	}
+
+	@Test
 	public void testAllocatedStreamFailure() {
 		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
 		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);

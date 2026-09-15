@@ -27,6 +27,7 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 	private long _available;
 	private boolean _closed;
 	private boolean _reusable;
+	private boolean _growable;
 
 	public ReservationBudget(MemoryAllowance parent, long bytes) {
 		if(parent == null)
@@ -45,15 +46,46 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 		return this;
 	}
 
+	public synchronized ReservationBudget enableGrowth() {
+		if(_closed)
+			throw new IllegalStateException("Cannot grow a closed budget.");
+		_growable = true;
+		return this;
+	}
+
 	@Override
-	public synchronized boolean tryReserve(long bytes) {
+	public boolean tryReserve(long bytes) {
 		checkNonNegative(bytes);
 		if(bytes == 0)
 			return true;
-		if(_closed || _available < bytes)
-			return false;
-		_available -= bytes;
-		return true;
+		while(true) {
+			long growth;
+			synchronized(this) {
+				if(_closed)
+					return false;
+				if(_available >= bytes) {
+					_available -= bytes;
+					return true;
+				}
+				if(!_growable)
+					return false;
+				growth = bytes - _available;
+			}
+			if(!_parent.tryReserveTask(growth))
+				return false;
+			boolean revoked;
+			synchronized(this) {
+				revoked = _closed;
+				if(!revoked) {
+					_outstanding += growth;
+					_available += growth;
+				}
+			}
+			if(revoked) {
+				_parent.release(growth);
+				return false;
+			}
+		}
 	}
 
 	/**

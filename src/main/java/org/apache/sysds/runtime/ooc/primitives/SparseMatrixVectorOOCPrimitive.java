@@ -19,6 +19,7 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -47,6 +48,7 @@ import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.utils.stats.InfrastructureAnalyzer;
 
 public final class SparseMatrixVectorOOCPrimitive extends OOCPrimitive {
+	private static final long BATCH_BYTES = 16L * 1024 * 1024;
 	private final OOCStreamable<IndexedMatrixValue> _output;
 	private final long _rowBudget;
 	private final AtomicBoolean _cleaned = new AtomicBoolean();
@@ -159,7 +161,7 @@ public final class SparseMatrixVectorOOCPrimitive extends OOCPrimitive {
 				finishRow();
 				return;
 			}
-			ReservationBudget budget = new ReservationBudget(_allowance, _rowBudget);
+			ReservationBudget budget = new ReservationBudget(_allowance, _rowBudget).enableReuse().enableGrowth();
 			try {
 				int rows = (int) Math.min(_blocksize,
 					getInput(0).getDataCharacteristics().getRows() - (long) row * _blocksize);
@@ -182,6 +184,10 @@ public final class SparseMatrixVectorOOCPrimitive extends OOCPrimitive {
 			return;
 		}
 		if(state._column == _colBlocks) {
+			if(!state._batch.isEmpty()) {
+				_ready.enqueue(state);
+				return;
+			}
 			try {
 				state._accumulator.recomputeNonZeros();
 				OOCUtils.enqueueExact(_outputStream,
@@ -196,9 +202,20 @@ public final class SparseMatrixVectorOOCPrimitive extends OOCPrimitive {
 			}
 			return;
 		}
-		OOCFuture
-			.allOf(List.of(_matrixReader.request(state._row + 1L, state._column + 1L, state._budget),
-				_vectorReader.request(state._column + 1L, 1, state._budget)), StoreLease::close)
+		if(state._batchBytes >= BATCH_BYTES) {
+			_ready.enqueue(state);
+			return;
+		}
+		boolean admitted = state._batch.isEmpty();
+		OOCFuture<StoreLease<IndexedMatrixValue>> matrix = state._pendingMatrix != null ?
+			OOCFuture.completed(state._pendingMatrix) : admitted ?
+			_matrixReader.request(state._row + 1L, state._column + 1L, state._budget) :
+			_matrixReader.requestAvailable(state._row + 1L, state._column + 1L, state._budget);
+		OOCFuture<StoreLease<IndexedMatrixValue>> vector = state._pendingVector != null ?
+			OOCFuture.completed(state._pendingVector) : admitted ?
+			_vectorReader.request(state._column + 1L, 1, state._budget) :
+			_vectorReader.requestAvailable(state._column + 1L, 1, state._budget);
+		OOCFuture.allOf(List.of(matrix, vector), StoreLease::close)
 			.whenComplete((leases, error) -> {
 				if(error != null) {
 					state.close();
@@ -206,17 +223,48 @@ public final class SparseMatrixVectorOOCPrimitive extends OOCPrimitive {
 					finishRow();
 					return;
 				}
-				state._matrix = leases.get(0);
-				state._vector = leases.get(1);
-				_ready.enqueue(state);
+				StoreLease<IndexedMatrixValue> matrixLease = leases.get(0);
+				StoreLease<IndexedMatrixValue> vectorLease = leases.get(1);
+				if(!admitted && (matrixLease == null || vectorLease == null)) {
+					state._pendingMatrix = matrixLease;
+					state._pendingVector = vectorLease;
+					_ready.enqueue(state);
+					return;
+				}
+				state._column++;
+				if(matrixLease != null && vectorLease != null) {
+					state._pendingMatrix = null;
+					state._pendingVector = null;
+					state._batch.add(new BatchItem(matrixLease, vectorLease));
+					state._batchBytes += OOCUtils.memoryCharge(matrixLease.value()) +
+						OOCUtils.memoryCharge(vectorLease.value());
+				}
+				else {
+					List<OOCFuture<Void>> closed = new ArrayList<>(2);
+					if(matrixLease != null)
+						closed.add(matrixLease.closeAsync());
+					if(vectorLease != null)
+						closed.add(vectorLease.closeAsync());
+					OOCFuture.allOf(closed).whenComplete((ignored, closeError) -> {
+						if(closeError != null) {
+							state.close();
+							fail(closeError);
+							finishRow();
+						}
+						else
+							advance(state);
+					});
+					return;
+				}
+				advance(state);
 			});
 	}
 
 	private void process(RowState state) {
 		try {
-			if(state._matrix != null && state._vector != null) {
-				MatrixBlock matrix = (MatrixBlock) state._matrix.value().getValue();
-				MatrixBlock vector = (MatrixBlock) state._vector.value().getValue();
+			for(BatchItem item : state._batch) {
+				MatrixBlock matrix = (MatrixBlock) item._matrix.value().getValue();
+				MatrixBlock vector = (MatrixBlock) item._vector.value().getValue();
 				if(!matrix.isEmptyBlock(false) && !vector.isEmptyBlock(false)) {
 					double[] out = state._accumulator.getDenseBlockValues();
 					if(matrix.isInSparseFormat()) {
@@ -237,14 +285,14 @@ public final class SparseMatrixVectorOOCPrimitive extends OOCPrimitive {
 					}
 				}
 			}
-			state._column++;
-			OOCFuture<Void> matrixClosed = state._matrix != null ? state._matrix.closeAsync() : OOCFuture
-				.completed(null);
-			OOCFuture<Void> vectorClosed = state._vector != null ? state._vector.closeAsync() : OOCFuture
-				.completed(null);
-			state._matrix = null;
-			state._vector = null;
-			OOCFuture.allOf(List.of(matrixClosed, vectorClosed)).whenComplete((ignored, error) -> {
+			List<OOCFuture<Void>> closed = new ArrayList<>(state._batch.size() * 2);
+			for(BatchItem item : state._batch) {
+				closed.add(item._matrix.closeAsync());
+				closed.add(item._vector.closeAsync());
+			}
+			state._batch.clear();
+			state._batchBytes = 0;
+			OOCFuture.allOf(closed).whenComplete((ignored, error) -> {
 				if(error != null) {
 					state.close();
 					fail(error);
@@ -294,8 +342,10 @@ public final class SparseMatrixVectorOOCPrimitive extends OOCPrimitive {
 		private final MatrixBlock _accumulator;
 		private int _column;
 		private ReservationBudget _budget;
-		private StoreLease<IndexedMatrixValue> _matrix;
-		private StoreLease<IndexedMatrixValue> _vector;
+		private final List<BatchItem> _batch = new ArrayList<>();
+		private long _batchBytes;
+		private StoreLease<IndexedMatrixValue> _pendingMatrix;
+		private StoreLease<IndexedMatrixValue> _pendingVector;
 
 		private RowState(int row, MatrixBlock accumulator, ReservationBudget budget) {
 			_row = row;
@@ -305,12 +355,19 @@ public final class SparseMatrixVectorOOCPrimitive extends OOCPrimitive {
 
 		@Override
 		public void close() {
-			if(_matrix != null)
-				_matrix.close();
-			if(_vector != null)
-				_vector.close();
+			if(_pendingMatrix != null)
+				_pendingMatrix.close();
+			if(_pendingVector != null)
+				_pendingVector.close();
+			for(BatchItem item : _batch) {
+				item._matrix.close();
+				item._vector.close();
+			}
 			if(_budget != null)
 				_budget.close();
 		}
+	}
+
+	private record BatchItem(StoreLease<IndexedMatrixValue> _matrix, StoreLease<IndexedMatrixValue> _vector) {
 	}
 }

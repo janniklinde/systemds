@@ -104,6 +104,29 @@ public final class IndexedMaterializedStoreReader<T extends SpillableObject> imp
 		return result;
 	}
 
+	public OOCFuture<StoreLease<T>> requestAvailable(long row, long col, MemoryAllowance requestAllowance) {
+		if(_layout == null)
+			throw new IllegalStateException("Materialized reader has no logical matrix-index layout.");
+		int index = _layout.linearize(row, col, _characteristics);
+		checkReady(index);
+		reserve(index);
+		OOCFuture<BlockEntry> pinned = _cache.pin(_streamId, index, requestAllowance);
+		OOCFuture<StoreLease<T>> result = new OOCFuture<>();
+		pinned.whenComplete((entry, error) -> {
+			if(error != null) {
+				_liveness.unreserve(index);
+				result.completeExceptionally(error);
+			}
+			else if(entry == null) {
+				_liveness.unreserve(index);
+				result.complete(null);
+			}
+			else
+				result.complete(StoreLease.createAsync(entry, () -> release(index, entry, requestAllowance)));
+		});
+		return result;
+	}
+
 	public StoreLease<T> requestIfLive(MatrixIndexes indexes, MemoryAllowance requestAllowance) {
 		return requestIfLive(indexes.getRowIndex(), indexes.getColumnIndex(), requestAllowance);
 	}
