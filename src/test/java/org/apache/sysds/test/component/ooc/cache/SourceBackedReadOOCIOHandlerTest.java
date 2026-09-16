@@ -20,6 +20,7 @@
 package org.apache.sysds.test.component.ooc.cache;
 
 import org.apache.sysds.common.Types;
+import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.conf.ConfigurationManager;
 import org.apache.sysds.conf.DMLConfig;
 import java.io.File;
@@ -38,6 +39,9 @@ import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerImpl;
 import org.apache.sysds.test.AutomatedTestBase;
 import org.apache.sysds.test.TestConfiguration;
 import org.apache.sysds.test.TestUtils;
+import org.apache.sysds.utils.Statistics;
+import java.util.HashSet;
+import java.util.Set;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -71,6 +75,60 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 		if (handler != null)
 			handler.shutdown();
 		ConfigurationManager.setLocalConfig(previousConfig);
+	}
+
+	@Test
+	public void testBoundedSourceScanReadsEachTileOnce() throws Exception {
+		getAndLoadTestConfiguration(TEST_NAME);
+		boolean previousStats = DMLScript.OOC_STATISTICS;
+		DMLScript.OOC_STATISTICS = true;
+		try {
+			for(boolean useDirect : new boolean[] {false, true}) {
+				handler.shutdown();
+				DMLConfig config = new DMLConfig();
+				config.setTextValue(DMLConfig.OOC_IO_DIRECT, Boolean.toString(useDirect));
+				if(new File("../data_dir").isDirectory())
+					config.setTextValue(DMLConfig.LOCAL_TMP_DIR, "../data_dir");
+				ConfigurationManager.setLocalConfig(config);
+				handler = new OOCIOHandlerImpl();
+				for(double sparsity : new double[] {1.0, 0.001}) {
+					MatrixBlock src = MatrixBlock.randOperations(635, 639, sparsity, -1, 1, "uniform", 17);
+					String fname = input("bounded_src");
+					writeBinaryMatrix(src, fname, 319);
+					long tileSize = expectedBlock(src, new MatrixIndexes(1, 1), 319).getExactSerializedSize();
+					for(long limit : new long[] {1, 2 * tileSize, 2 * tileSize - 1}) {
+						Statistics.resetOOCEvictionStats();
+						SubscribableTaskQueue<IndexedMatrixValue> target = new SubscribableTaskQueue<>();
+						OOCIOHandler.SourceReadRequest request = new OOCIOHandler.SourceReadRequest(fname,
+							Types.FileFormat.BINARY, 635, 639, 319, src.getNonZeros(), limit, true, target);
+						OOCIOHandler.SourceReadResult result = handler.scheduleSourceRead(request).get();
+						Set<String> indexes = new HashSet<>();
+						int batches = 0;
+						while(true) {
+							Assert.assertTrue(++batches <= 7);
+							Assert.assertTrue(result.bytesRead <= limit || result.blocks.size() == 1);
+							Assert.assertEquals(result.bytesRead,
+								result.blocks.stream().mapToLong(block -> block.serializedSize).sum());
+							for(int i = 0; i < result.blocks.size(); i++) {
+								IndexedMatrixValue value = target.dequeue();
+								Assert.assertTrue(indexes.add(value.getIndexes().toString()));
+								TestUtils.compareMatrices(expectedBlock(src, value.getIndexes(), 319),
+									(MatrixBlock) value.getValue(), 0);
+							}
+							if(result.eof)
+								break;
+							result = handler.continueSourceRead(result.continuation, limit).get();
+						}
+						Assert.assertEquals(6, indexes.size());
+						Assert.assertTrue(Statistics.displayOOCEvictionStats().matches("(?s).*source scans:\\s+6 \\(.*"));
+					}
+				}
+			}
+		}
+		finally {
+			DMLScript.OOC_STATISTICS = previousStats;
+			Statistics.resetOOCEvictionStats();
+		}
 	}
 
 	@Test

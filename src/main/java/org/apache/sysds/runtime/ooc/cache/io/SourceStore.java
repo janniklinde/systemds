@@ -49,6 +49,7 @@ import org.apache.sysds.runtime.util.HDFSTool;
 import org.apache.sysds.utils.Statistics;
 
 import java.io.IOException;
+import java.io.EOFException;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -491,7 +492,9 @@ final class SourceStore {
 		String sourcePath = path.toString();
 		BlockLayoutIndex layout = _layouts.computeIfAbsent(sourcePath, p -> new BlockLayoutIndex());
 
-		try(SequenceFile.Reader reader = openReader(job, path)) {
+		try(SequenceFile.Reader reader = openReader(job, path);
+			FSDataInputStream headers = !reader.isCompressed() && byteLimit != Long.MAX_VALUE ?
+				IOUtilFunctions.getFileSystem(path, job).open(path) : null) {
 			long pos = filePositions.get(fileIdx);
 			if(pos > 0)
 				reader.seek(pos);
@@ -500,6 +503,35 @@ final class SourceStore {
 			long scanBlocks = 0, scanBytes = 0, scanNanos = 0;
 			while(!stop.get()) {
 				long recordStart = reader.getPosition();
+				if(headers != null) {
+					headers.seek(recordStart);
+					int recordLength;
+					try {
+						recordLength = headers.readInt();
+						if(recordLength == -1) {
+							headers.skipBytes(16);
+							recordLength = headers.readInt();
+						}
+					}
+					catch(EOFException e) {
+						break;
+					}
+					int keyLength = headers.readInt();
+					if(keyLength < 16 || recordLength < keyLength)
+						throw new IOException("Invalid SequenceFile record at " + recordStart + " in " + path);
+					long valueSize = recordLength - keyLength;
+					synchronized(budgetLock) {
+						long currentBytes = bytesRead.get();
+						if(stop.get())
+							break;
+						if(currentBytes > 0 && valueSize > byteLimit - currentBytes) {
+							stop.set(true);
+							budgetHit.set(true);
+							break;
+						}
+						bytesRead.addAndGet(valueSize);
+					}
+				}
 				MatrixBlock value = new MatrixBlock();
 				long readStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 				if(!reader.next(key, value))
@@ -513,17 +545,19 @@ final class SourceStore {
 				long blockSize = value.getExactSerializedSize();
 				boolean shouldBreak = false;
 
-				synchronized(budgetLock) {
-					long currentBytes = bytesRead.get();
-					if(stop.get())
-						shouldBreak = true;
-					else if(currentBytes > 0 && blockSize > byteLimit - currentBytes) {
-						stop.set(true);
-						budgetHit.set(true);
-						shouldBreak = true;
+				if(headers == null) {
+					synchronized(budgetLock) {
+						long currentBytes = bytesRead.get();
+						if(stop.get())
+							shouldBreak = true;
+						else if(currentBytes > 0 && blockSize > byteLimit - currentBytes) {
+							stop.set(true);
+							budgetHit.set(true);
+							shouldBreak = true;
+						}
+						else
+							bytesRead.addAndGet(blockSize);
 					}
-					else
-						bytesRead.addAndGet(blockSize);
 				}
 				if(shouldBreak)
 					break;
