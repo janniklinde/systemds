@@ -36,6 +36,7 @@ import org.apache.sysds.common.Types.DataType;
 import org.apache.sysds.common.Types.Direction;
 import org.apache.sysds.common.Types.OpOpData;
 import org.apache.sysds.common.Types.OpOp2;
+import org.apache.sysds.common.Types.OpOp1;
 import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.hops.DataOp;
 import org.apache.sysds.hops.Hop;
@@ -77,6 +78,42 @@ import org.junit.Test;
 import org.mockito.Mockito;
 
 public class OOCInstructionUtilsTest {
+	@Test
+	public void testBandFanoutThroughSkinnyMatmulAndSquare() {
+		Hop x = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
+			40000, 200, -1, 100);
+		Hop tee = HopRewriteUtils.createDataOp("tee", x, OpOpData.TEE);
+		Hop c = new DataOp("Ct", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
+			200, 10, -1, 100);
+		Hop product = HopRewriteUtils.createMatrixMultiply(tee, c);
+		Hop squared = HopRewriteUtils.createUnary(product, OpOp1.POW2);
+		Hop sums = HopRewriteUtils.createAggUnaryOp(squared, AggOp.SUM, Direction.Row);
+		Hop result = HopRewriteUtils.createBinary(tee, sums, OpOp2.MULT);
+		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandStreamingDirection(tee, sums));
+		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandStreamingDirection(tee,
+			HopRewriteUtils.createAggUnaryOp(product, AggOp.SUM_SQ, Direction.Row)));
+		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandFanoutDirection(tee));
+		Assert.assertEquals(List.of(result, product), HopRewriteUtils.getBandFanoutConsumers(tee, Direction.Row));
+		Hop store = HopRewriteUtils.createDataOp("X", tee, OpOpData.TRANSIENTWRITE);
+		RewriteInjectOOCTee.injectBandFanouts(new ArrayList<>(List.of(result, store)));
+		Hop group = result.getInput(0);
+		Assert.assertSame(group, product.getInput(0));
+		Assert.assertSame(tee, store.getInput(0));
+		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandFanoutDirection(group));
+	}
+
+	@Test
+	public void testBandStreamingRejectsWideAndColumnMatmulPaths() {
+		Hop x = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
+			40000, 200, -1, 100);
+		Hop c = new DataOp("Ct", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
+			200, 200, -1, 100);
+		Hop product = HopRewriteUtils.createMatrixMultiply(x, c);
+		Assert.assertNull(HopRewriteUtils.getBandStreamingDirection(x,
+			HopRewriteUtils.createAggUnaryOp(product, AggOp.SUM, Direction.Row)));
+		Assert.assertNull(HopRewriteUtils.getBandStreamingDirection(x,
+			HopRewriteUtils.createAggUnaryOp(product, AggOp.SUM, Direction.Col)));
+	}
 	@Test(timeout = 20000)
 	public void testFanoutFallsBackForInactiveConsumer() {
 		checkLateFanoutReader(true);

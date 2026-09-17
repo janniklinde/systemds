@@ -109,12 +109,18 @@ public class HopRewriteUtils {
 			Hop summary = parent.getInput(1);
 			while(isData(summary, OpOpData.TEE))
 				summary = summary.getInput(0);
-			if(summary instanceof AggUnaryOp && summary.getInput(0) == tee
-				&& tee.getParent().contains(summary)
-				&& getBandStreamingDirection(tee, summary) == direction) {
+			if(summary instanceof AggUnaryOp && getBandStreamingDirection(tee, summary) == direction) {
+				Hop consumer = summary;
+				Hop source = summary.getInput(0);
+				while(source != null && source != tee) {
+					consumer = source;
+					source = getBandStreamingInput(source, direction);
+				}
+				if(source != tee || !tee.getParent().contains(consumer))
+					continue;
 				consumers.add(parent);
-				if(!consumers.contains(summary))
-					consumers.add(summary);
+				if(!consumers.contains(consumer))
+					consumers.add(consumer);
 			}
 		}
 		return consumers;
@@ -129,11 +135,26 @@ public class HopRewriteUtils {
 			return null;
 		AggUnaryOp aggregate = (AggUnaryOp) right;
 		Hop source = aggregate.getInput(0);
-		while(isData(source, OpOpData.TEE))
-			source = source.getInput(0);
 		Direction direction = aggregate.getDirection();
-		return source == left && aggregate.getOp() == AggOp.SUM
+		while(source != null && source != left)
+			source = getBandStreamingInput(source, direction);
+		return source == left && (aggregate.getOp() == AggOp.SUM || aggregate.getOp() == AggOp.SUM_SQ)
 			&& (direction == Direction.Row || direction == Direction.Col) ? direction : null;
+	}
+
+	private static Hop getBandStreamingInput(Hop hop, Direction direction) {
+		if(isData(hop, OpOpData.TEE))
+			return hop.getInput(0);
+		if(isUnary(hop, OpOp1.POW2)
+			|| isBinary(hop, OpOp2.POW) && isLiteralOfValue(hop.getInput(1), 2))
+			return hop.getInput(0);
+		if(direction == Direction.Row && isMatrixMultiply(hop) && hop.dimsKnown()) {
+			Hop right = hop.getInput(1);
+			if(right.dimsKnown() && hop.getBlocksize() > 0 && right.getDim2() <= hop.getBlocksize()
+				&& right.getBlocksize() == hop.getInput(0).getBlocksize())
+				return hop.getInput(0);
+		}
+		return null;
 	}
 
 
