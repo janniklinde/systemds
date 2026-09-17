@@ -198,6 +198,9 @@ public abstract class OOCPrimitive {
 		}
 	}
 
+	public void onPlanStarted() {
+	}
+
 	protected long getAllowanceLimit(GlobalMemoryBroker broker) {
 		long fairShare = broker.getAllowedMemory() / 3;
 		long taskBytes = getMaxTaskReservationBytes();

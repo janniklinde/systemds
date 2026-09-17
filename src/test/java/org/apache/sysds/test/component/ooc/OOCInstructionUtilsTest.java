@@ -28,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import org.apache.sysds.common.Types.FileFormat;
 import org.apache.sysds.common.Types.AggOp;
@@ -49,6 +50,7 @@ import org.apache.sysds.runtime.instructions.ooc.BinaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CtableOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.DataGenOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
+import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.ooc.ParameterizedBuiltinOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.cp.IntObject;
@@ -72,8 +74,79 @@ import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.StateTableUtils;
 import org.junit.Assert;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 public class OOCInstructionUtilsTest {
+	@Test(timeout = 20000)
+	public void testFanoutFallsBackForInactiveConsumer() {
+		checkLateFanoutReader(true);
+	}
+
+	@Test(timeout = 20000)
+	public void testFanoutFallsBackForReaderOpenedLater() {
+		checkLateFanoutReader(false);
+	}
+
+	@SuppressWarnings("unchecked")
+	private void checkLateFanoutReader(boolean registerSecond) {
+		OOCStreamable<IndexedMatrixValue> input = Mockito.mock(OOCStreamable.class);
+		SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
+		SubscribableTaskQueue<IndexedMatrixValue> replay = new SubscribableTaskQueue<>();
+		Mockito.doReturn(matrixObject(2, 2, 2)).when(input).getData();
+		Mockito.when(input.getReservedReadStream()).thenReturn(source, replay);
+		FanoutOOCPrimitive fanout = new FanoutOOCPrimitive(input, true, 2, new StreamContext());
+		OOCStream<IndexedMatrixValue> first = fanout.getReadStream();
+		OOCStream<IndexedMatrixValue> second = registerSecond ? fanout.getReadStream() : null;
+		if(!registerSecond)
+			fanout.reserveLazyHandle();
+		AtomicInteger received = new AtomicInteger();
+		AtomicInteger terminals = new AtomicInteger();
+		AtomicInteger releases = new AtomicInteger();
+		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> consumer = callback -> {
+			try(callback) {
+				if(callback.isEos())
+					terminals.incrementAndGet();
+				else {
+					Assert.assertEquals(7, callback.get().getValue().get(0, 0), 0);
+					received.incrementAndGet();
+				}
+			}
+		};
+		first.setSubscriber(consumer);
+		first.start();
+		fanout.scheduleMaterializedStoreDeletion();
+		IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(2, 2, 7d));
+		source.enqueue(new MaterializedCallback<>(StoreLease.create(value, releases::incrementAndGet)));
+		source.closeInput();
+		Assert.assertEquals(1, received.get());
+		Assert.assertEquals(1, terminals.get());
+		Assert.assertEquals(1, releases.get());
+		Assert.assertFalse(fanout.isProcessed());
+		Mockito.verify(input, Mockito.never()).discardHandle();
+		replay.enqueue(new MaterializedCallback<>(StoreLease.create(value, releases::incrementAndGet)));
+		replay.closeInput();
+		if(!registerSecond)
+			second = fanout.getReservedReadStream();
+		second.setSubscriber(consumer);
+		Assert.assertEquals(2, received.get());
+		Assert.assertEquals(2, terminals.get());
+		Assert.assertEquals(2, releases.get());
+		Assert.assertTrue(fanout.isProcessed());
+		Mockito.verify(input, Mockito.times(2)).reserveLazyHandle();
+		Mockito.verify(input, Mockito.times(2)).getReservedReadStream();
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	public void testUnusedFanoutReleasesReaderClaims() {
+		OOCStreamable<IndexedMatrixValue> input = Mockito.mock(OOCStreamable.class);
+		FanoutOOCPrimitive fanout = new FanoutOOCPrimitive(input, true, 2, new StreamContext());
+		fanout.scheduleMaterializedStoreDeletion();
+		Mockito.verify(input, Mockito.times(2)).reserveLazyHandle();
+		Mockito.verify(input, Mockito.times(2)).discardHandle();
+		Assert.assertTrue(fanout.isProcessed());
+	}
+
 	@Test
 	public void testBandFanoutGroupsMatchingConsumersAndPreservesOtherEdges() {
 		Hop x = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
@@ -101,7 +174,7 @@ public class OOCInstructionUtilsTest {
 	}
 
 	@Test
-	public void testLiveFanoutSharesLeaseAndWaitsForBothConsumers() {
+	public void testCachedFanoutSharesLeaseAfterPlanStartup() {
 		MatrixObject matrix = matrixObject(2, 2, 2);
 		SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
 		input.setData(matrix);
@@ -117,7 +190,7 @@ public class OOCInstructionUtilsTest {
 					held.set(callback.keepOpen());
 			}
 		});
-		first.start();
+		fanout.tryStartExecution();
 		IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(2, 2, 7d));
 		AtomicInteger releases = new AtomicInteger();
 		input.enqueue(new MaterializedCallback<>(StoreLease.create(value, releases::incrementAndGet)));
@@ -134,6 +207,8 @@ public class OOCInstructionUtilsTest {
 				}
 			}
 		});
+		Assert.assertNull(held.get());
+		fanout.onPlanStarted();
 		Assert.assertSame(value, held.get().get());
 		Assert.assertEquals(1, received.get());
 		Assert.assertEquals(0, releases.get());
@@ -166,13 +241,12 @@ public class OOCInstructionUtilsTest {
 					}
 				}
 			});
-			if(i == 0) {
+			if(i == 0)
 				output.start();
-				input.enqueue(new MaterializedCallback<>(StoreLease.create(value, releases::incrementAndGet)));
-			}
 			if(i < 2)
 				Assert.assertEquals(0, received.get());
 		}
+		input.enqueue(new MaterializedCallback<>(StoreLease.create(value, releases::incrementAndGet)));
 		Assert.assertEquals(3, received.get());
 		Assert.assertEquals(1, releases.get());
 		input.closeInput();

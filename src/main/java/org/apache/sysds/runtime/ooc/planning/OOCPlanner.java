@@ -64,6 +64,8 @@ public final class OOCPlanner {
 		}
 		if(startRoot)
 			root.tryStartExecution();
+		for(OOCPrimitive primitive : primitives)
+			primitive.onPlanStarted();
 	}
 
 	/**
