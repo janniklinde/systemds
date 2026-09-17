@@ -20,6 +20,7 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.commons.lang3.NotImplementedException;
+import org.apache.sysds.common.Types.Direction;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
@@ -36,6 +37,7 @@ import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class BinaryOOCInstruction extends ComputationOOCInstruction {
+	private Direction _bandStreaming;
 	
 	protected BinaryOOCInstruction(OOCType type, Operator bop, 
 			CPOperand in1, CPOperand in2, CPOperand out, String opcode, String istr) {
@@ -44,15 +46,21 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 
 	public static BinaryOOCInstruction parseInstruction(String str) {
 		String[] parts = InstructionUtils.getInstructionPartsWithValueType(str);
-		InstructionUtils.checkNumFields(parts, 3);
+		InstructionUtils.checkNumFields(parts, 3, 4);
 		String opcode = parts[0];
 		CPOperand in1 = new CPOperand(parts[1]);
 		CPOperand in2 = new CPOperand(parts[2]);
 		CPOperand out = new CPOperand(parts[3]);
 		Operator bop = InstructionUtils.parseExtendedBinaryOrBuiltinOperator(opcode, in1, in2);
 		
-		return new BinaryOOCInstruction(
+		BinaryOOCInstruction instruction = new BinaryOOCInstruction(
 			OOCType.Binary, bop, in1, in2, out, opcode, str);
+		if(parts.length == 5) {
+			if(!parts[4].equals("band=Row") && !parts[4].equals("band=Col"))
+				throw new IllegalArgumentException("Invalid OOC band streaming axis: " + parts[4]);
+			instruction._bandStreaming = Direction.valueOf(parts[4].substring(5));
+		}
+		return instruction;
 	}
 	
 	@Override
@@ -90,6 +98,15 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 		boolean isRowBroadcast = cols1 == cols2 && rows2 == 1 && rows1 > 1;
 		boolean isOuter = !isColBroadcast && !isRowBroadcast && cols1 == 1 && rows2 == 1 &&
 			!(rows1 == rows2 && cols1 == cols2);
+
+		if((_bandStreaming == Direction.Row && isColBroadcast)
+			|| (_bandStreaming == Direction.Col && isRowBroadcast)) {
+			OOCInstructionUtils.bandStreamingBroadcast(m1.getStreamable(), m2.getStreamable(), qOut,
+				_bandStreaming == Direction.Row, (tile, summary) -> new IndexedMatrixValue(tile.getIndexes(),
+					tile.getValue().binaryOperations((BinaryOperator) _optr, summary.getValue(), new MatrixBlock())),
+				getContext());
+			return;
+		}
 
 		if (isColBroadcast && !isRowBroadcast) {
 			int broadcastBlocks = Math.toIntExact(m2.getDataCharacteristics().getNumRowBlocks());

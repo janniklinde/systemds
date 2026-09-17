@@ -82,12 +82,60 @@ import org.apache.sysds.runtime.util.UtilFunctions;
 
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 
 public class HopRewriteUtils {
+	public static Direction getBandFanoutDirection(Hop tee) {
+		if(!isData(tee, OpOpData.TEE))
+			return null;
+		for(Direction direction : new Direction[] {Direction.Row, Direction.Col}) {
+			List<Hop> consumers = getBandFanoutConsumers(tee, direction);
+			if(!consumers.isEmpty() && consumers.size() == tee.getParent().size())
+				return direction;
+		}
+		return null;
+	}
+
+	public static List<Hop> getBandFanoutConsumers(Hop tee, Direction direction) {
+		List<Hop> consumers = new ArrayList<>();
+		for(Hop parent : tee.getParent()) {
+			if(!isBinary(parent, OpOp2.MULT, OpOp2.DIV, OpOp2.PLUS, OpOp2.MINUS)
+				|| parent.getInput(0) != tee)
+				continue;
+			Hop summary = parent.getInput(1);
+			while(isData(summary, OpOpData.TEE))
+				summary = summary.getInput(0);
+			if(summary instanceof AggUnaryOp && summary.getInput(0) == tee
+				&& tee.getParent().contains(summary)
+				&& getBandStreamingDirection(tee, summary) == direction) {
+				consumers.add(parent);
+				if(!consumers.contains(summary))
+					consumers.add(summary);
+			}
+		}
+		return consumers;
+	}
+
+	public static Direction getBandStreamingDirection(Hop left, Hop right) {
+		while(isData(left, OpOpData.TEE))
+			left = left.getInput(0);
+		while(isData(right, OpOpData.TEE))
+			right = right.getInput(0);
+		if(!(right instanceof AggUnaryOp) || !left.dimsKnown() || !right.dimsKnown())
+			return null;
+		AggUnaryOp aggregate = (AggUnaryOp) right;
+		Hop source = aggregate.getInput(0);
+		while(isData(source, OpOpData.TEE))
+			source = source.getInput(0);
+		Direction direction = aggregate.getDirection();
+		return source == left && aggregate.getOp() == AggOp.SUM
+			&& (direction == Direction.Row || direction == Direction.Col) ? direction : null;
+	}
+
 
 	public static boolean isValueTypeCast( OpOp1 op ) {
 		return op == OpOp1.CAST_AS_BOOLEAN

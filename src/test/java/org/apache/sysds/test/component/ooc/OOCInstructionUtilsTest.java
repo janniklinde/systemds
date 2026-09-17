@@ -19,15 +19,27 @@
 
 package org.apache.sysds.test.component.ooc;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.sysds.common.Types.FileFormat;
+import org.apache.sysds.common.Types.AggOp;
+import org.apache.sysds.common.Types.DataType;
+import org.apache.sysds.common.Types.Direction;
+import org.apache.sysds.common.Types.OpOpData;
+import org.apache.sysds.common.Types.OpOp2;
 import org.apache.sysds.common.Types.ValueType;
+import org.apache.sysds.hops.DataOp;
+import org.apache.sysds.hops.Hop;
+import org.apache.sysds.hops.rewrite.HopRewriteUtils;
+import org.apache.sysds.hops.rewrite.RewriteInjectOOCTee;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.LocalVariableMap;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
@@ -47,14 +59,279 @@ import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
+import org.apache.sysds.runtime.ooc.primitives.BroadcastStreamingOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.FanoutOOCPrimitive;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
+import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
+import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.store.MaterializedCallback;
 import org.apache.sysds.runtime.ooc.store.StoreLease;
+import org.apache.sysds.runtime.ooc.store.StateTable;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
+import org.apache.sysds.runtime.ooc.util.StateTableUtils;
 import org.junit.Assert;
 import org.junit.Test;
 
 public class OOCInstructionUtilsTest {
+	@Test
+	public void testBandFanoutGroupsMatchingConsumersAndPreservesOtherEdges() {
+		Hop x = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
+			40000, 200, -1, 100);
+		Hop tee = HopRewriteUtils.createDataOp("tee", x, OpOpData.TEE);
+		Hop sums = HopRewriteUtils.createAggUnaryOp(tee, AggOp.SUM, Direction.Row);
+		Hop first = HopRewriteUtils.createBinary(tee, sums, OpOp2.MULT);
+		Hop second = HopRewriteUtils.createBinary(tee, sums, OpOp2.DIV);
+		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandFanoutDirection(tee));
+		Hop store = HopRewriteUtils.createDataOp("X", tee, OpOpData.TRANSIENTWRITE);
+		Assert.assertNull(HopRewriteUtils.getBandFanoutDirection(tee));
+		Assert.assertNull(HopRewriteUtils.getBandFanoutDirection(x));
+		RewriteInjectOOCTee.injectBandFanouts(new ArrayList<>(List.of(first, second, store)));
+		Hop group = first.getInput(0);
+		Assert.assertNotSame(tee, group);
+		Assert.assertSame(group, second.getInput(0));
+		Assert.assertSame(group, sums.getInput(0));
+		Assert.assertSame(tee, store.getInput(0));
+		Assert.assertSame(tee, group.getInput(0));
+		Assert.assertEquals(3, group.getParent().size());
+		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandFanoutDirection(group));
+		RewriteInjectOOCTee.injectBandFanouts(new ArrayList<>(List.of(first, second, store)));
+		Assert.assertSame(group, first.getInput(0));
+		Assert.assertSame(tee, group.getInput(0));
+	}
+
+	@Test
+	public void testLiveFanoutSharesLeaseAndWaitsForBothConsumers() {
+		MatrixObject matrix = matrixObject(2, 2, 2);
+		SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
+		input.setData(matrix);
+		FanoutOOCPrimitive fanout = new FanoutOOCPrimitive(input, true, 2, new StreamContext());
+		OOCStream<IndexedMatrixValue> first = fanout.getReadStream();
+		AtomicReference<OOCStream.QueueCallback<IndexedMatrixValue>> held = new AtomicReference<>();
+		AtomicInteger terminals = new AtomicInteger();
+		first.setSubscriber(callback -> {
+			try(callback) {
+				if(callback.isEos())
+					terminals.incrementAndGet();
+				else
+					held.set(callback.keepOpen());
+			}
+		});
+		first.start();
+		IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(2, 2, 7d));
+		AtomicInteger releases = new AtomicInteger();
+		input.enqueue(new MaterializedCallback<>(StoreLease.create(value, releases::incrementAndGet)));
+		Assert.assertNull(held.get());
+		OOCStream<IndexedMatrixValue> second = fanout.getReadStream();
+		AtomicInteger received = new AtomicInteger();
+		second.setSubscriber(callback -> {
+			try(callback) {
+				if(callback.isEos())
+					terminals.incrementAndGet();
+				else {
+					Assert.assertSame(value, callback.get());
+					received.incrementAndGet();
+				}
+			}
+		});
+		Assert.assertSame(value, held.get().get());
+		Assert.assertEquals(1, received.get());
+		Assert.assertEquals(0, releases.get());
+		held.get().close();
+		Assert.assertEquals(1, releases.get());
+		input.closeInput();
+		Assert.assertEquals(2, terminals.get());
+		Assert.assertTrue(fanout.isProcessed());
+	}
+
+	@Test
+	public void testLiveFanoutSupportsThreeConsumers() {
+		MatrixObject matrix = matrixObject(2, 2, 2);
+		SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
+		input.setData(matrix);
+		FanoutOOCPrimitive fanout = new FanoutOOCPrimitive(input, true, 3, new StreamContext());
+		IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(2, 2, 7d));
+		AtomicInteger received = new AtomicInteger();
+		AtomicInteger terminals = new AtomicInteger();
+		AtomicInteger releases = new AtomicInteger();
+		for(int i = 0; i < 3; i++) {
+			OOCStream<IndexedMatrixValue> output = fanout.getReadStream();
+			output.setSubscriber(callback -> {
+				try(callback) {
+					if(callback.isEos())
+						terminals.incrementAndGet();
+					else {
+						Assert.assertSame(value, callback.get());
+						received.incrementAndGet();
+					}
+				}
+			});
+			if(i == 0) {
+				output.start();
+				input.enqueue(new MaterializedCallback<>(StoreLease.create(value, releases::incrementAndGet)));
+			}
+			if(i < 2)
+				Assert.assertEquals(0, received.get());
+		}
+		Assert.assertEquals(3, received.get());
+		Assert.assertEquals(1, releases.get());
+		input.closeInput();
+		Assert.assertEquals(3, terminals.get());
+	}
+
+	@Test(timeout = 20000)
+	public void testFanoutRejectsNonMaterializedCallbacks() {
+		SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
+		input.setData(matrixObject(2, 2, 2));
+		FanoutOOCPrimitive fanout = new FanoutOOCPrimitive(input, true, 2, new StreamContext());
+		OOCStream<IndexedMatrixValue> first = fanout.getReadStream();
+		OOCStream<IndexedMatrixValue> second = fanout.getReadStream();
+		first.setSubscriber(OOCStream.QueueCallback::close);
+		second.setSubscriber(OOCStream.QueueCallback::close);
+		first.start();
+		input.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(2, 2, 7d)));
+		Assert.assertNotNull(fanout.getFailure());
+		Assert.assertTrue(fanout.getFailure().getMessage().contains("requires materialized callbacks"));
+		Assert.assertTrue(fanout.isProcessed());
+	}
+
+	@Test(timeout = 20000)
+	public void testStateInsertionTransfersManagedPayloadWithoutReservation() throws Exception {
+		OOCCacheManager.reset();
+		SyncMemoryAllowance owner = new SyncMemoryAllowance(GlobalMemoryBroker.get()) {
+			@Override
+			public OOCFuture<Void> reserveAsync(long bytes) {
+				throw new AssertionError("Insertion attempted asynchronous admission");
+			}
+
+			@Override
+			public void reserveBlocking(long bytes) {
+				throw new AssertionError("Insertion attempted blocking admission");
+			}
+		};
+		SyncMemoryAllowance reader = new SyncMemoryAllowance(GlobalMemoryBroker.get());
+		try(StateTable<IndexedMatrixValue> table = new StateTable<>()) {
+			IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(2, 2, 7d));
+			Assert.assertTrue(owner.tryReserve(value.size()));
+			try(InMemoryQueueCallback<IndexedMatrixValue> callback = new InMemoryQueueCallback<>(value, null, owner,
+				value.size())) {
+				StateTableUtils.put(table, 0, callback, owner);
+			}
+			try(StoreLease<IndexedMatrixValue> lease = table.acquire(0, reader).get()) {
+				Assert.assertNotNull(lease);
+				Assert.assertEquals(7, ((MatrixBlock) lease.value().getValue()).get(0, 0), 0);
+			}
+		}
+		finally {
+			reader.destroy();
+			owner.destroy();
+			OOCCacheManager.reset();
+		}
+	}
+
+	@Test
+	public void testStreamingBroadcastEmitsBeforeInputCompletion() throws Exception {
+		OOCCacheManager.reset();
+		SyncMemoryAllowance parkedOwner = new SyncMemoryAllowance(GlobalMemoryBroker.get());
+		SubscribableTaskQueue<IndexedMatrixValue> tiles = new SubscribableTaskQueue<>();
+		SubscribableTaskQueue<IndexedMatrixValue> summaries = new SubscribableTaskQueue<>();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			MatrixObject matrix = matrixObject(4, 4, 2);
+			MatrixObject summary = matrixObject(4, 1, 2);
+			MatrixObject output = matrixObject(4, 4, 2);
+			matrix.setStreamHandle(tiles);
+			summary.setStreamHandle(summaries);
+			ec.setVariable("X", matrix);
+			ec.setVariable("S", summary);
+			ec.setVariable("Y", output);
+			BinaryOOCInstruction.parseInstruction("OOC°*°X·MATRIX·FP64°S·MATRIX·FP64°Y·MATRIX·FP64°band=Row")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = output.getStreamHandle();
+			Assert.assertTrue(result.getPrimitive().requiredMaterializedInputs().isEmpty());
+			AtomicInteger pendingEvents = new AtomicInteger();
+			AtomicLong pendingBytes = new AtomicLong();
+			((BroadcastStreamingOOCPrimitive) result.getPrimitive()).setPendingListener((band, bytes) -> {
+				pendingBytes.addAndGet(bytes);
+				pendingEvents.incrementAndGet();
+			});
+			CountDownLatch firstOutput = new CountDownLatch(1);
+			CountDownLatch parked = new CountDownLatch(1);
+			AtomicInteger blocks = new AtomicInteger();
+			CompletableFuture<Void> complete = new CompletableFuture<>();
+			result.setSubscriber(callback -> {
+				try(callback) {
+					if(callback.isFailure())
+						callback.get();
+					else if(callback.isEos())
+						complete.complete(null);
+					else {
+						IndexedMatrixValue value = callback.get();
+						double expected = value.getIndexes().getRowIndex() == 1 ? 16 : 36;
+						MatrixBlock block = (MatrixBlock) value.getValue();
+						for(int row = 0; row < 2; row++)
+							for(int col = 0; col < 2; col++)
+								Assert.assertEquals(expected, block.get(row, col), 0);
+						blocks.incrementAndGet();
+						firstOutput.countDown();
+					}
+				}
+				catch(Throwable failure) {
+					complete.completeExceptionally(failure);
+				}
+			});
+			result.start();
+			IndexedMatrixValue waiting = new IndexedMatrixValue(new MatrixIndexes(2, 2), new MatrixBlock(2, 2, 3d));
+			tiles.enqueue(new MaterializedCallback<>(StoreLease.create(waiting, parked::countDown)));
+			Assert.assertTrue("Unmatched input callback was not released", parked.await(10, TimeUnit.SECONDS));
+			summaries.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(2, 1, 8d)));
+			tiles.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 2), new MatrixBlock(2, 2, 2d)));
+			Assert.assertTrue("Broadcast waited for input completion", firstOutput.await(10, TimeUnit.SECONDS));
+			Assert.assertFalse(complete.isDone());
+			summaries.enqueue(new IndexedMatrixValue(new MatrixIndexes(2, 1), new MatrixBlock(2, 1, 12d)));
+			tiles.enqueue(new IndexedMatrixValue(new MatrixIndexes(2, 1), new MatrixBlock(2, 2, 3d)));
+			IndexedMatrixValue parkedValue = new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(2, 2, 2d));
+			parkedOwner.reserveBlocking(parkedValue.size());
+			InMemoryQueueCallback<IndexedMatrixValue> parkedCallback = new InMemoryQueueCallback<>(parkedValue, null,
+				parkedOwner, parkedValue.size());
+			Assert.assertTrue(parkedCallback.tryPark(OOCCacheManager.getGlobalCache()) > 0);
+			Assert.assertTrue(parkedCallback.isParked());
+			tiles.enqueue(parkedCallback);
+			tiles.closeInput();
+			summaries.closeInput();
+			complete.get(10, TimeUnit.SECONDS);
+			Assert.assertEquals(4, blocks.get());
+			Assert.assertEquals(8, pendingEvents.get());
+			Assert.assertEquals(0, pendingBytes.get());
+			Assert.assertEquals(0, parkedOwner.getUsedMemory());
+		}
+		finally {
+			parkedOwner.destroy();
+			OOCCacheManager.reset();
+		}
+	}
+
+	@Test
+	public void testBandStreamingRecognitionThroughTees() {
+		Hop x = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
+			40000, 200, -1, 100);
+		Hop tee = HopRewriteUtils.createDataOp("tee", x, OpOpData.TEE);
+		Hop nested = HopRewriteUtils.createDataOp("nested", tee, OpOpData.TEE);
+		Hop sums = HopRewriteUtils.createAggUnaryOp(nested, AggOp.SUM, Direction.Row);
+		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandStreamingDirection(tee, sums));
+		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandStreamingDirection(x,
+			HopRewriteUtils.createDataOp("summaryTee", sums, OpOpData.TEE)));
+		Assert.assertEquals(Direction.Col, HopRewriteUtils.getBandStreamingDirection(nested,
+			HopRewriteUtils.createAggUnaryOp(x, AggOp.SUM, Direction.Col)));
+		Assert.assertNull(HopRewriteUtils.getBandStreamingDirection(x,
+			HopRewriteUtils.createAggUnaryOp(x, AggOp.SUM, Direction.RowCol)));
+		Assert.assertNull(HopRewriteUtils.getBandStreamingDirection(x,
+			HopRewriteUtils.createAggUnaryOp(x, AggOp.MIN, Direction.Row)));
+		Hop other = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
+			40000, 200, -1, 100);
+		Assert.assertNull(HopRewriteUtils.getBandStreamingDirection(other, sums));
+	}
+
 	@Test
 	public void testSingleContributorAppendPropagatesDimensions() {
 		MatrixObject empty = matrixObject(0, 4, 2);

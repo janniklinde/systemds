@@ -50,8 +50,13 @@ public final class StateTableUtils {
 			return;
 		}
 		ManagedPayload<T> payload;
-		if(tile instanceof InMemoryQueueCallback<T> managed && managed.getManagedBytes() > 0)
+		if(tile instanceof InMemoryQueueCallback<T> managed && managed.getManagedBytes() > 0) {
+			if(managed.pinnedEntry() != null) {
+				table.putReference(slot, managed.pinnedEntry());
+				return;
+			}
 			payload = managed.extractManagedPayload();
+		}
 		else {
 			T value = tile.get();
 			long bytes = value.size();

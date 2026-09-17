@@ -19,6 +19,8 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
+import org.apache.sysds.common.Types.Direction;
+import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
@@ -27,6 +29,7 @@ import org.apache.sysds.runtime.instructions.cp.Data;
 import org.apache.sysds.runtime.instructions.cp.ListObject;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
+import org.apache.sysds.runtime.ooc.primitives.FanoutOOCPrimitive;
 
 import java.util.Collections;
 import java.util.Map;
@@ -36,6 +39,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 public class TeeOOCInstruction extends ComputationOOCInstruction {
+	private Direction _fanout;
+	private int _consumers;
 
 	private static final ConcurrentHashMap<OOCStreamable<IndexedMatrixValue>, Integer> refCtr = new ConcurrentHashMap<>();
 
@@ -147,11 +152,19 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 
 	public static TeeOOCInstruction parseInstruction(String str) {
 		String[] parts = InstructionUtils.getInstructionPartsWithValueType(str);
-		InstructionUtils.checkNumFields(parts, 2);
+		InstructionUtils.checkNumFields(parts, parts.length == 4 ? 3 : 2);
 		String opcode = parts[0];
 		CPOperand in1 = new CPOperand(parts[1]);
 		CPOperand out = new CPOperand(parts[2]);
-		return new TeeOOCInstruction(OOCType.Tee, in1, out, opcode, str);
+		TeeOOCInstruction instruction = new TeeOOCInstruction(OOCType.Tee, in1, out, opcode, str);
+		if(parts.length == 4) {
+			String[] fanout = parts[3].split(":");
+			if(!fanout[0].equals("fanout=Row") && !fanout[0].equals("fanout=Col"))
+				throw new DMLRuntimeException("Invalid OOC fanout direction: " + parts[3]);
+			instruction._fanout = Direction.valueOf(fanout[0].substring(7));
+			instruction._consumers = fanout.length == 2 ? Integer.parseInt(fanout[1]) : 2;
+		}
+		return instruction;
 	}
 
 	public void processInstruction(ExecutionContext ec) {
@@ -162,6 +175,13 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 			incrRef(created, 1);
 			return created;
 		});
+		registerOwner(handle, min);
+		if(_fanout != null) {
+			MatrixObject mo = ec.getMatrixObject(output);
+			mo.setMetaData(min.getMetaData());
+			mo.setStreamHandle(new FanoutOOCPrimitive(handle, _fanout == Direction.Row, _consumers, getContext()));
+			return;
+		}
 		incrRef(handle, 1);
 
 		//get output and create new resettable stream
@@ -169,7 +189,6 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 		mo.setStreamHandle(handle);
 		mo.setMetaData(min.getMetaData());
 
-		registerOwner(handle, min);
 		registerOwner(handle, mo);
 	}
 }

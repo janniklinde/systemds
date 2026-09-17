@@ -21,12 +21,20 @@ package org.apache.sysds.lops;
 
 import org.apache.sysds.common.Types;
 import org.apache.sysds.common.Types.DataType;
+import org.apache.sysds.common.Types.Direction;
 import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 
 public class Tee extends Lop {
 
 	public static final String OPCODE = "tee";
+	private Direction _fanout;
+	private int _consumers;
+
+	public void setFanout(Direction direction, int consumers) {
+		_fanout = direction;
+		_consumers = consumers;
+	}
 	/**
 	 * Constructor to be invoked by base class.
 	 *
@@ -55,6 +63,7 @@ public class Tee extends Lop {
 			prepOutputOperand(output)
 		);
 
-		return ret;
+		return _fanout == null ? ret : InstructionUtils.concatOperands(ret,
+			"fanout=" + _fanout.name() + ":" + _consumers);
 	}
 }

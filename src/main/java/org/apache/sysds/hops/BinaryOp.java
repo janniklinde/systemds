@@ -28,6 +28,7 @@ import org.apache.sysds.common.Types.Direction;
 import org.apache.sysds.common.Types.ExecType;
 import org.apache.sysds.common.Types.OpOp1;
 import org.apache.sysds.common.Types.OpOp2;
+import org.apache.sysds.common.Types.OpOpData;
 import org.apache.sysds.common.Types.OpOpDnn;
 import org.apache.sysds.common.Types.ParamBuiltinOp;
 import org.apache.sysds.common.Types.ValueType;
@@ -49,6 +50,7 @@ import org.apache.sysds.lops.DnnTransform;
 import org.apache.sysds.lops.Lop;
 import org.apache.sysds.lops.PickByCount;
 import org.apache.sysds.lops.SortKeys;
+import org.apache.sysds.lops.Tee;
 import org.apache.sysds.lops.Unary;
 import org.apache.sysds.lops.UnaryCP;
 import org.apache.sysds.runtime.lineage.LineageCacheConfig;
@@ -500,6 +502,17 @@ public class BinaryOp extends MultiThreadedHop {
 						OptimizerUtils.getConstrainedNumThreads(_maxNumThreads), inplace);
 
 				setOutputDimensions(binary);
+				if(et == ExecType.OOC && binary instanceof Binary
+					&& HopRewriteUtils.isBinary(this, OpOp2.MULT, OpOp2.DIV, OpOp2.PLUS, OpOp2.MINUS)) {
+					((Binary) binary).setBandStreaming(HopRewriteUtils.getBandStreamingDirection(left, right));
+					Hop summary = right;
+					while(HopRewriteUtils.isData(summary, OpOpData.TEE))
+						summary = summary.getInput(0);
+					if(left.getLops() instanceof Tee && summary instanceof AggUnaryOp
+						&& summary.getExecType() == ExecType.OOC)
+						((Tee) left.getLops()).setFanout(
+							HopRewriteUtils.getBandFanoutDirection(left), left.getParent().size());
+				}
 				setLineNumbers(binary);
 				setLops(binary);
 			}

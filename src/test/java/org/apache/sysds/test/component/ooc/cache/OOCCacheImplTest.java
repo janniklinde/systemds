@@ -29,6 +29,7 @@ import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.test.component.ooc.cache.OOCCacheTestUtils.RecordingOOCIOHandler;
@@ -129,6 +130,47 @@ public class OOCCacheImplTest {
 		await(_cache.unpin(pinned, _reader), WAIT_TIMEOUT_SEC);
 		Assert.assertEquals(0, _reader.getUsedMemory());
 		_cache.dereference(entry);
+		Assert.assertEquals(0, _cache.getMetadataSize());
+	}
+
+	@Test
+	public void testSharedReadProtectsPendingPinsFromEarlyUnpin() throws Exception {
+		_cache.shutdown();
+		OOCFuture<BlockEntry> read = new OOCFuture<>();
+		BlockEntry[] reading = new BlockEntry[1];
+		_io = new RecordingOOCIOHandler() {
+			@Override
+			public OOCFuture<BlockEntry> scheduleRead(BlockEntry block) {
+				reading[0] = block;
+				return read;
+			}
+		};
+		_cache = new OOCCacheImpl(_io, 0, 0);
+		BlockKey key = new BlockKey(STREAM_ID, BLOCK_ID);
+		_producer.reserveBlocking(BYTES);
+		BlockEntry entry = _cache.putPinned(key, "payload", BYTES, _producer);
+		_cache.markBacked(entry);
+		await(_cache.unpin(entry, _producer), WAIT_TIMEOUT_SEC);
+		Assert.assertNull(BlockEntryTestAccess.getDataUnsafe(entry));
+
+		OOCFuture<BlockEntry> first = _cache.pin(key, _reader);
+		OOCFuture<BlockEntry> second = _cache.pin(key, _reader);
+		second.thenAccept(pinned -> _cache.unpin(pinned, _reader));
+		Assert.assertEquals(2 * BYTES, _reader.getUsedMemory());
+		BlockEntryTestAccess.setDataUnsafe(reading[0], "payload");
+		read.complete(reading[0]);
+
+		BlockEntry pinned = first.get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+		Assert.assertEquals(key, pinned.getKey());
+		Assert.assertSame(pinned, second.get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS));
+		Assert.assertEquals("payload", pinned.getData());
+		Assert.assertEquals(1, pinned.getPinCount());
+		Assert.assertEquals(BYTES, _reader.getUsedMemory());
+		await(_cache.unpin(pinned, _reader), WAIT_TIMEOUT_SEC);
+		Assert.assertEquals(0, pinned.getPinCount());
+		Assert.assertEquals(0, _reader.getUsedMemory());
+		Assert.assertNull(BlockEntryTestAccess.getDataUnsafe(pinned));
+		_cache.dereference(pinned);
 		Assert.assertEquals(0, _cache.getMetadataSize());
 	}
 

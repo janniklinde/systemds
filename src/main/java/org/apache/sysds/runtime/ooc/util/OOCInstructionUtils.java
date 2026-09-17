@@ -63,6 +63,7 @@ import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.BroadcastStreamingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.CartesianOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.CtableOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.CorrelatedScanOOCPrimitive;
@@ -289,6 +290,13 @@ public final class OOCInstructionUtils {
 		BiFunction<IndexedMatrixValue, IndexedMatrixValue, IndexedMatrixValue> operation, StreamContext context) {
 		output.assignPrimitive(
 			new BroadcastOOCPrimitive(streamed, broadcast, output, lookupRow, lookupCol, liveness, operation, context));
+	}
+
+	public static void bandStreamingBroadcast(OOCStreamable<IndexedMatrixValue> matrix,
+		OOCStreamable<IndexedMatrixValue> summaries, OOCStream<IndexedMatrixValue> output, boolean row,
+		BiFunction<IndexedMatrixValue, IndexedMatrixValue, IndexedMatrixValue> operation, StreamContext context) {
+		output.assignPrimitive(new BroadcastStreamingOOCPrimitive(matrix, summaries, output, row, operation,
+			context));
 	}
 
 	/**

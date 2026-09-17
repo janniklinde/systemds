@@ -175,6 +175,12 @@ public class InMemoryQueueCallback<T> implements OOCStream.QueueCallback<T> {
 		return _handle.isParked();
 	}
 
+	public BlockEntry pinnedEntry() {
+		synchronized(_handle) {
+			return _handle._parkEntry;
+		}
+	}
+
 	@Override
 	public boolean isFailure() {
 		return _handle._failure != null;

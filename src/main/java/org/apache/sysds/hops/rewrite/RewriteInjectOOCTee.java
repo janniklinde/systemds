@@ -181,7 +181,33 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 
 		for(Hop hop : shared)
 			teeSharedHop(hop);
+		injectBandFanouts(roots);
 		return !shared.isEmpty();
+	}
+
+	public static void injectBandFanouts(ArrayList<Hop> roots) {
+		Hop.resetVisitStatus(roots);
+		for(Hop root : roots)
+			injectBandFanouts(root);
+		Hop.resetVisitStatus(roots);
+	}
+
+	private static void injectBandFanouts(Hop hop) {
+		if(hop.isVisited())
+			return;
+		hop.setVisited();
+		for(Hop input : new ArrayList<>(hop.getInput()))
+			injectBandFanouts(input);
+		if(!HopRewriteUtils.isData(hop, OpOpData.TEE))
+			return;
+		for(Types.Direction direction : new Types.Direction[] {Types.Direction.Row, Types.Direction.Col}) {
+			List<Hop> consumers = HopRewriteUtils.getBandFanoutConsumers(hop, direction);
+			if(consumers.isEmpty() || consumers.size() == hop.getParent().size())
+				continue;
+			Hop group = HopRewriteUtils.createDataOp("fanout_" + hop.getName(), hop, OpOpData.TEE);
+			for(Hop consumer : consumers)
+				HopRewriteUtils.replaceChildReference(consumer, hop, group);
+		}
 	}
 
 	private static void collectUnteedSharedHops(Hop hop, List<Hop> shared) {
@@ -257,6 +283,8 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 		}
 
 		removeRedundantTeeChains(sb);
+		if(sb.getHops() != null)
+			injectBandFanouts(sb.getHops());
 
 		return List.of(sb);
 	}
@@ -280,8 +308,11 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 			}
 		}
 
-		for (StatementBlock sb : sbs)
+		for (StatementBlock sb : sbs) {
 			removeRedundantTeeChains(sb);
+			if(sb.getHops() != null)
+				injectBandFanouts(sb.getHops());
+		}
 
 		return sbs;
 	}
@@ -328,7 +359,8 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 
 		if (HopRewriteUtils.isData(hop, OpOpData.TEE) && hop.getInput().size() == 1) {
 			Hop teeInput = hop.getInput().get(0);
-			if (HopRewriteUtils.isData(teeInput, OpOpData.TEE)) {
+			if (HopRewriteUtils.isData(teeInput, OpOpData.TEE)
+				&& HopRewriteUtils.getBandFanoutDirection(hop) == null) {
 				if (LOG.isDebugEnabled()) {
 					LOG.debug("Remove redundant tee hop " + hop.getHopID()
 						+ " (" + hop.getName() + ") -> " + teeInput.getHopID()

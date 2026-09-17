@@ -20,6 +20,7 @@
 package org.apache.sysds.lops;
 
 import org.apache.sysds.common.Types.ExecType;
+import org.apache.sysds.common.Types.Direction;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
 
 import java.util.ArrayList;
@@ -38,6 +39,11 @@ public class Binary extends Lop
 	private OpOp2 operation;
 	private final int _numThreads;
 	private final boolean inplace;
+	private Direction _bandStreaming;
+
+	public void setBandStreaming(Direction direction) {
+		_bandStreaming = direction;
+	}
 	
 	/**
 	 * Constructor to perform a binary operation.
@@ -114,6 +120,8 @@ public class Binary extends Lop
 
 		if (getExecType() == ExecType.CP && inplace)
 			ret = InstructionUtils.concatOperands(ret, "InPlace");
+		if(getExecType() == ExecType.OOC && _bandStreaming != null)
+			ret = InstructionUtils.concatOperands(ret, "band=" + _bandStreaming.name());
 
 		return ret;
 	}

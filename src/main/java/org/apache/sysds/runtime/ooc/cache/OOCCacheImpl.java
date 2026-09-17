@@ -570,6 +570,14 @@ public class OOCCacheImpl implements OOCCache {
 							throw new IllegalStateException(
 								"Backing read left no data for entry: " + meta.entry.getKey());
 						completion = pinResident(meta);
+						if(meta.readWaiters > 0 && !meta.readGuard) {
+							meta.entry.pin();
+								meta.readGuard = true;
+						}
+						else if(meta.readWaiters == 0 && meta.readGuard) {
+							meta.entry.unpin();
+							meta.readGuard = false;
+						}
 						Statistics.incrementOOCEvictionGet();
 						pinned = meta.entry;
 					}
@@ -1025,6 +1033,7 @@ public class OOCCacheImpl implements OOCCache {
 		private boolean backed;
 		private OOCFuture<BlockEntry> readFuture;
 		private int readWaiters;
+		private boolean readGuard;
 		private int pendingPins;
 		private CacheUnpinHandle deferredUnpin;
 
