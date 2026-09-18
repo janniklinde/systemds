@@ -86,6 +86,7 @@ final class SpillStore {
 	private final int _maxPooledReaders;
 	private final ConcurrentHashMap<Integer, ConcurrentLinkedDeque<DirectRangeReader>> _directReaderPool = new ConcurrentHashMap<>();
 	private final AtomicInteger _pooledDirectReaders = new AtomicInteger();
+	private volatile boolean _shutdown;
 
 	@SuppressWarnings("unchecked")
 	SpillStore() {
@@ -142,7 +143,7 @@ final class SpillStore {
 		if(_direct && readAheadBudget <= 0)
 			return readDirect(partitionId, offset, size, block);
 
-		try(InputStream stream = openInput(partitionId, offset)) {
+		try(InputStream stream = openInput(partitionId, offset, size)) {
 			int bufferSize = _direct ? (size + 7) / 8 * 8 : _readBufferBytes;
 			OOCBufferedDataInputStream in = new OOCBufferedDataInputStream(stream, bufferSize, offset);
 			StreamTrace.spillRead(block.getKey().getStreamId(), block.getSize());
@@ -228,9 +229,10 @@ final class SpillStore {
 		}
 	}
 
-	private InputStream openInput(int partitionId, long offset) throws IOException {
+	private InputStream openInput(int partitionId, long offset, int size) throws IOException {
 		if(_direct) {
-			OOCDirectInputStream in = new OOCDirectInputStream(Paths.get(partitionPath(partitionId)), _readBufferBytes);
+			OOCDirectInputStream in = new OOCDirectInputStream(Paths.get(partitionPath(partitionId)),
+				Math.min(_readBufferBytes, size + 4096));
 			in.seek(offset);
 			return in;
 		}
@@ -289,6 +291,7 @@ final class SpillStore {
 	}
 
 	void shutdown() {
+		_shutdown = true;
 		boolean started = _started.get();
 		if(started) {
 			try {
@@ -336,7 +339,13 @@ final class SpillStore {
 			ConcurrentLinkedDeque<Tuple3<Long, Long, OOCFuture<Void>>> waitingForFlush = null;
 
 			try {
-				fos = new FileOutputStream(filename);
+				fos = new FileOutputStream(filename) {
+					@Override
+					public void flush() throws IOException {
+						if(_direct && !_shutdown)
+							getChannel().force(false);
+					}
+				};
 				dos = new OOCBufferedDataOutputStream(fos, _writeBufferBytes);
 
 				Tuple2<BlockEntry, OOCFuture<Void>> tpl;
@@ -389,7 +398,7 @@ final class SpillStore {
 					}
 				}
 			}
-			catch(InterruptedException ex) {
+			catch(InterruptedException | ClosedByInterruptException ex) {
 				// writers are interrupted by a normal shutdown, so this is termination rather than a failure
 				Thread.currentThread().interrupt();
 				return;
@@ -401,7 +410,8 @@ final class SpillStore {
 			catch(Exception ignored) {
 			}
 			finally {
-				IOUtilFunctions.closeSilently(dos);
+				if(!_shutdown)
+					IOUtilFunctions.closeSilently(dos);
 				IOUtilFunctions.closeSilently(fos);
 				if(waitingForFlush != null)
 					flushQueue(Long.MAX_VALUE, waitingForFlush);
@@ -441,6 +451,9 @@ final class SpillStore {
 			delete(entry);
 			return offsetAfter - offsetBefore;
 		}
+		// Flush a readable batch before publishing it to direct readers, not each serialization buffer.
+		if(_direct && !flushQueue.isEmpty() && flushQueue.peek()._2() <= dos.getFlushedPosition())
+			dos.flush();
 		flushQueue(dos.getFlushedPosition(), flushQueue);
 
 		return offsetAfter - offsetBefore;

@@ -36,6 +36,8 @@ import org.apache.sysds.runtime.instructions.cp.FunctionCallCPInstruction;
 import org.apache.sysds.runtime.instructions.spark.SPInstruction;
 import org.apache.sysds.runtime.lineage.LineageCacheConfig.ReuseCacheType;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.lineage.LineageCacheStatistics;
 import org.apache.sysds.runtime.lineage.LineageItem;
 import org.apache.sysds.runtime.lineage.LineageItemUtils;
@@ -618,6 +620,8 @@ public class Statistics
 			(oocLoadFromDiskBytesSize.longValue() + oocSourceScanBytesSize.longValue()) / 1e9));
 		sb.append(String.format(Locale.US, "  evict writes:\t\t%d (time %.3f sec, %.3f GB)\n",
 			oocEvictionWriteCalls.longValue(), oocEvictionWriteTimeNanos.longValue() / 1e9, oocEvictionWriteBytesSize.longValue() / 1e9));
+		if(OOCCacheManager.getGlobalCacheIfInitialized() instanceof OOCCacheImpl cache)
+			sb.append(cache.displayEvictionSelectionStats());
 		sb.append(String.format(Locale.US, "  reclaim runs:\t\t%d (time %.3f sec, %.3f GB)\n",
 			oocMemoryReclaimRuns.longValue(), oocMemoryReclaimTime.longValue() / 1e9,
 			oocMemoryReclaimBytes.longValue() / 1e9));

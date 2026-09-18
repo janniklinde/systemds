@@ -26,6 +26,7 @@ import org.apache.sysds.conf.DMLConfig;
 import java.io.File;
 import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
@@ -34,6 +35,7 @@ import org.apache.sysds.runtime.io.MatrixWriterFactory;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.BlockState;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerImpl;
 import org.apache.sysds.test.AutomatedTestBase;
@@ -41,7 +43,10 @@ import org.apache.sysds.test.TestConfiguration;
 import org.apache.sysds.test.TestUtils;
 import org.apache.sysds.utils.Statistics;
 import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -64,6 +69,7 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 		previousConfig = ConfigurationManager.getDMLConfig();
 		DMLConfig config = new DMLConfig();
 		config.setTextValue(DMLConfig.OOC_IO_DIRECT, Boolean.toString(direct));
+		config.setTextValue(DMLConfig.OOC_SPARSE_COO, "false");
 		if(new File("../data_dir").isDirectory())
 			config.setTextValue(DMLConfig.LOCAL_TMP_DIR, "../data_dir");
 		ConfigurationManager.setLocalConfig(config);
@@ -163,6 +169,7 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 		direct = true;
 		DMLConfig config = new DMLConfig();
 		config.setTextValue(DMLConfig.OOC_IO_DIRECT, "true");
+		config.setTextValue(DMLConfig.OOC_SPARSE_COO, "false");
 		if(new File("../data_dir").isDirectory())
 			config.setTextValue(DMLConfig.LOCAL_TMP_DIR, "../data_dir");
 		ConfigurationManager.setLocalConfig(config);
@@ -185,6 +192,44 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 			MatrixBlock actual = (MatrixBlock) ((IndexedMatrixValue) BlockEntryTestAccess.getDataUnsafe(entry))
 				.getValue();
 			TestUtils.compareMatrices(block, actual, 0);
+		}
+	}
+
+	@Test
+	public void testDirectSpillWithReadAhead() throws Exception {
+		handler.shutdown();
+		DMLConfig config = new DMLConfig();
+		config.setTextValue(DMLConfig.OOC_IO_DIRECT, "true");
+		if(new File("../data_dir").isDirectory())
+			config.setTextValue(DMLConfig.LOCAL_TMP_DIR, "../data_dir");
+		ConfigurationManager.setLocalConfig(config);
+		handler = new OOCIOHandlerImpl();
+		OOCCacheImpl cache = new OOCCacheImpl(handler, 16 * 1024 * 1024, 12 * 1024 * 1024);
+		try {
+			for(double sparsity : new double[] {1.0, 0.001}) {
+				MatrixBlock block = MatrixBlock.randOperations(1000, 16, sparsity, -1, 1, "uniform", 17);
+				List<BlockEntry> entries = new ArrayList<>();
+				List<OOCFuture<Void>> writes = new ArrayList<>();
+				for(int i = 0; i < 32; i++) {
+					IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(i + 1, 1), block);
+					BlockEntry entry = BlockEntryTestAccess.newBlockEntry(new BlockKey(9, i), value.size(), value);
+					entries.add(entry);
+					writes.add(handler.scheduleEviction(entry));
+				}
+				for(OOCFuture<Void> write : writes)
+					write.get(10, TimeUnit.SECONDS);
+				for(int i = 0; i < entries.size(); i++) {
+					BlockEntry entry = entries.get(i);
+					BlockEntryTestAccess.setDataUnsafe(entry, null);
+					handler.scheduleRead(entry).get(10, TimeUnit.SECONDS);
+					IndexedMatrixValue read = (IndexedMatrixValue) BlockEntryTestAccess.getDataUnsafe(entry);
+					Assert.assertEquals(new MatrixIndexes(i + 1, 1), read.getIndexes());
+					TestUtils.compareMatrices(block, (MatrixBlock) read.getValue(), 0);
+				}
+			}
+		}
+		finally {
+			cache.shutdown();
 		}
 	}
 

@@ -32,6 +32,7 @@ import org.apache.sysds.utils.Statistics;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.PriorityQueue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
@@ -142,7 +143,7 @@ public class OOCCacheImpl implements OOCCache {
 			entry.setDataUnsafe(data);
 			entry.setState(meta.backed ? BlockState.WARM : BlockState.HOT);
 			setLive(entry);
-			_ownedBytes += entry.getSize();
+			updateOwnedBytes(entry, entry.getSize());
 			_ownedEntries++;
 			scheduleEvictionIfNeeded();
 		}
@@ -336,12 +337,23 @@ public class OOCCacheImpl implements OOCCache {
 		return _metadataBytes;
 	}
 
+	public String displayEvictionSelectionStats() {
+		long evicted = _evEvicted.sum();
+		long scanned = _evScanned.sum();
+		return String.format(Locale.US,
+			"  eviction selection:\t%d passes, %d scanned, %d evicted (scan %.3f sec, %.2f scanned/evicted)\n"
+				+ "  eviction commit:\t%.3f sec (including cache-lock wait)\n",
+			_evPasses.sum(), scanned, evicted, _evScanNanos.sum() / 1e9,
+			evicted == 0 ? 0 : (double) scanned / evicted, _evLockNanos.sum() / 1e9);
+	}
+
 	@Override
 	public synchronized void shutdown() {
 		StreamTrace.dump();
 		_running = false;
 		_blocks.clear();
 		_coldBlocks.clear();
+		_evictControllers.clear();
 		_deferredUnpins.clear();
 		_ownedBytes = 0;
 		_metadataBytes = 0;
@@ -611,7 +623,7 @@ public class OOCCacheImpl implements OOCCache {
 	private DeferredCompletion pinResident(EntryMeta meta) {
 		BlockEntry entry = meta.entry;
 		if(isCacheOwned(entry)) {
-			_ownedBytes -= entry.getSize();
+			updateOwnedBytes(entry, -entry.getSize());
 			_ownedEntries--;
 			if(entry.getState() == BlockState.EVICTING)
 				_evictingBytes -= entry.getSize();
@@ -641,7 +653,7 @@ public class OOCCacheImpl implements OOCCache {
 		}
 		entry.setState(meta.backed ? BlockState.WARM : BlockState.HOT);
 		setLive(entry);
-		_ownedBytes += entry.getSize();
+		updateOwnedBytes(entry, entry.getSize());
 		_ownedEntries++;
 		scheduleEvictionIfNeeded();
 		return CacheUnpinHandle.committed(entry, allowance, entry.getSize());
@@ -682,7 +694,7 @@ public class OOCCacheImpl implements OOCCache {
 			else {
 				entry.setState(meta.backed ? BlockState.WARM : BlockState.HOT);
 				setLive(entry);
-				_ownedBytes += entry.getSize();
+				updateOwnedBytes(entry, entry.getSize());
 				_ownedEntries++;
 			}
 			if(completions == null)
@@ -766,7 +778,7 @@ public class OOCCacheImpl implements OOCCache {
 							entry.clearAndDetach();
 							entry.setState(BlockState.COLD);
 							clearLive(entry);
-							_ownedBytes -= entry.getSize();
+							updateOwnedBytes(entry, -entry.getSize());
 							_ownedEntries--;
 							compactCold(meta);
 							_evEvicted.increment();
@@ -826,7 +838,7 @@ public class OOCCacheImpl implements OOCCache {
 				return;
 			entry.clear();
 			entry.setState(BlockState.COLD);
-			_ownedBytes -= entry.getSize();
+			updateOwnedBytes(entry, -entry.getSize());
 			_ownedEntries--;
 			_evictingBytes -= entry.getSize();
 			removeIfUnused(meta);
@@ -883,7 +895,7 @@ public class OOCCacheImpl implements OOCCache {
 			return;
 		BlockEntry entry = meta.entry;
 		if(isCacheOwned(entry)) {
-			_ownedBytes -= entry.getSize();
+			updateOwnedBytes(entry, -entry.getSize());
 			_ownedEntries--;
 		}
 		if(entry.getState() == BlockState.EVICTING)
@@ -894,6 +906,11 @@ public class OOCCacheImpl implements OOCCache {
 		entry.setCacheMeta(null);
 		if(meta.backed)
 			_ioHandler.scheduleDeletion(entry);
+	}
+
+	private void updateOwnedBytes(BlockEntry entry, long bytes) {
+		_ownedBytes += bytes;
+		getOrCreateEvictController(entry.getKey().getStreamId()).updateResidentBytes(bytes, blockIndex(entry.getKey()));
 	}
 
 	private boolean isCacheOwned(BlockEntry entry) {

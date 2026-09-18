@@ -19,9 +19,9 @@
 
 package org.apache.sysds.runtime.ooc.cache.eviction;
 
-public record IndexedObjectPair<T>(long idx, T obj) implements Comparable<IndexedObjectPair<?>> {
+public record IndexedObjectPair<T>(double idx, T obj) implements Comparable<IndexedObjectPair<?>> {
 	@Override
 	public int compareTo(IndexedObjectPair indexedObjectPair) {
-		return Long.compare(idx, indexedObjectPair.idx);
+		return Double.compare(idx, indexedObjectPair.idx);
 	}
 }

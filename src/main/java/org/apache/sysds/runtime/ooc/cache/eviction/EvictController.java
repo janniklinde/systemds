@@ -30,6 +30,13 @@ import java.util.function.LongUnaryOperator;
 
 public class EvictController {
 	private final CopyOnWriteArrayList<LongUnaryOperator> _op = new CopyOnWriteArrayList<>();
+	private volatile long _residentBytes;
+	private volatile long _indexRange;
+
+	public void updateResidentBytes(long bytes, int index) {
+		_residentBytes += bytes;
+		_indexRange = Math.max(_indexRange, (long) index + 1);
+	}
 
 	public void addEvictionPolicy(LongUnaryOperator op) {
 		if(op == null)
@@ -41,9 +48,14 @@ public class EvictController {
 	public long findEvictionCandidates(MaskedOnceArrayList<BlockEntry> list,
 		PriorityQueue<IndexedObjectPair<BlockEntry>> candidates, int k, long estimatedReuseTimestamp) {
 		long[] visited = new long[1];
+		long residentBytes = _residentBytes;
+		long indexRange = _indexRange;
+		double factor = indexRange > 0 ? (double) residentBytes / indexRange : 0;
+		double protectedFactor = 1d / Math.max(1, indexRange) / Math.max(1, residentBytes);
 		IndexedObjectPredicate<BlockEntry> visit = (idx, b) -> {
 			visited[0]++;
-			long score = score(idx, estimatedReuseTimestamp);
+			long rawScore = score(idx, estimatedReuseTimestamp);
+			double score = rawScore < 0 ? rawScore * protectedFactor : rawScore * factor;
 			if(_op.isEmpty() && candidates.size() >= k && score <= candidates.peek().idx())
 				return false;
 			if(!isEvictionCandidate(b))

@@ -21,12 +21,17 @@ package org.apache.sysds.test.component.ooc.cache;
 
 import static org.apache.sysds.test.component.ooc.cache.OOCCacheTestUtils.await;
 
+import java.util.PriorityQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
+import org.apache.sysds.runtime.ooc.cache.BlockState;
+import org.apache.sysds.runtime.ooc.cache.collections.MaskedOnceArrayList;
+import org.apache.sysds.runtime.ooc.cache.eviction.EvictController;
+import org.apache.sysds.runtime.ooc.cache.eviction.IndexedObjectPair;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
@@ -78,6 +83,95 @@ public class OOCCacheImplTest {
 		Assert.assertNull(_cache.pinIfLive(STREAM_ID, BLOCK_ID, _reader));
 		Assert.assertEquals(0, _reader.getUsedMemory());
 		Assert.assertEquals(0, _io.readCount());
+	}
+
+	@Test
+	public void testResidentWeightedEvictionPreservesIndexOrder() {
+		MaskedOnceArrayList<BlockEntry> large = new MaskedOnceArrayList<>();
+		MaskedOnceArrayList<BlockEntry> small = new MaskedOnceArrayList<>();
+		BlockEntry first = new BlockEntry(new BlockKey(1, 3998), 8000, "first", BlockState.HOT);
+		BlockEntry last = new BlockEntry(new BlockKey(1, 3999), 8000, "last", BlockState.HOT);
+		BlockEntry tiny = new BlockEntry(new BlockKey(2, 15999), 128, "tiny", BlockState.HOT);
+		large.put(3998, first);
+		large.put(3999, last);
+		small.put(15999, tiny);
+		EvictController largeController = new EvictController();
+		EvictController smallController = new EvictController();
+		largeController.updateResidentBytes(8_000_000, 3999);
+		smallController.updateResidentBytes(512_000, 15999);
+		PriorityQueue<IndexedObjectPair<BlockEntry>> candidates = new PriorityQueue<>();
+		smallController.findEvictionCandidates(small, candidates, 1, 0);
+		Assert.assertEquals(2, largeController.findEvictionCandidates(large, candidates, 1, 0));
+		Assert.assertSame(last, candidates.peek().obj());
+		Assert.assertEquals(7_998_000, candidates.peek().idx(), 0);
+		largeController.updateResidentBytes(-7_999_000, 3999);
+		candidates.clear();
+		largeController.findEvictionCandidates(large, candidates, 1, 0);
+		smallController.findEvictionCandidates(small, candidates, 1, 0);
+		Assert.assertSame(tiny, candidates.peek().obj());
+		largeController.addEvictionPolicy(index -> index - 4000);
+		smallController.addEvictionPolicy(index -> index - 16000);
+		candidates.clear();
+		largeController.findEvictionCandidates(large, candidates, 1, 0);
+		smallController.findEvictionCandidates(small, candidates, 1, 0);
+		Assert.assertSame(tiny, candidates.peek().obj());
+		Assert.assertEquals(-1d / 16000 / 512000, candidates.peek().idx(), 0);
+	}
+
+	@Test
+	public void testProtectedSmallStreamSurvivesLargeContributor() {
+		MaskedOnceArrayList<BlockEntry> large = new MaskedOnceArrayList<>();
+		MaskedOnceArrayList<BlockEntry> small = new MaskedOnceArrayList<>();
+		BlockEntry big = new BlockEntry(new BlockKey(1, 3000), 8000, "large", BlockState.HOT);
+		BlockEntry tiny = new BlockEntry(new BlockKey(2, 3999), 128, "small", BlockState.HOT);
+		large.put(3000, big);
+		small.put(3999, tiny);
+		EvictController largeController = new EvictController();
+		EvictController smallController = new EvictController();
+		largeController.updateResidentBytes(2_000_000_000, 3999);
+		smallController.updateResidentBytes(128, 3999);
+		largeController.addEvictionPolicy(index -> index - 4000);
+		smallController.addEvictionPolicy(index -> index - 4000);
+		PriorityQueue<IndexedObjectPair<BlockEntry>> candidates = new PriorityQueue<>();
+		largeController.findEvictionCandidates(large, candidates, 1, 0);
+		smallController.findEvictionCandidates(small, candidates, 1, 0);
+		Assert.assertSame(big, candidates.peek().obj());
+		Assert.assertEquals(-1000d / 4000 / 2_000_000_000, candidates.peek().idx(), 0);
+	}
+
+	@Test
+	public void testEvictionSelectionStatsWithoutEvictions() {
+		String stats = _cache.displayEvictionSelectionStats();
+		Assert.assertTrue(stats.contains("0 passes, 0 scanned, 0 evicted (scan 0.000 sec, 0.00 scanned/evicted)"));
+		Assert.assertTrue(stats.contains("eviction commit:\t0.000 sec (including cache-lock wait)"));
+	}
+
+	@Test
+	public void testWeightedCacheSpillsLargeStreamBeforeSmallHighIndexTile() throws Exception {
+		_cache.updateLimits(10 * BYTES, 10 * BYTES);
+		_producer.reserveBlocking(3 * BYTES);
+		BlockEntry large = _cache.putPinned(new BlockKey(1, 3999), "large", 3 * BYTES, _producer);
+		await(_cache.unpin(large, _producer), WAIT_TIMEOUT_SEC);
+		_producer.reserveBlocking(128);
+		BlockEntry small = _cache.putPinned(new BlockKey(2, 15999), "small", 128, _producer);
+		await(_cache.unpin(small, _producer), WAIT_TIMEOUT_SEC);
+		_cache.updateLimits(10 * BYTES, 2 * BYTES);
+		await(() -> _io.evictionCount() == 1 && BlockEntryTestAccess.getDataUnsafe(large) == null,
+			WAIT_TIMEOUT_SEC);
+		Assert.assertEquals(128, _cache.getOwnedCacheSize());
+		String stats = _cache.displayEvictionSelectionStats();
+		Assert.assertTrue(stats, stats.contains("1 passes, 2 scanned, 1 evicted"));
+		Assert.assertTrue(stats, stats.contains("2.00 scanned/evicted"));
+		BlockEntry pinned = _cache.pin(small.getKey(), _reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+		Assert.assertEquals("small", pinned.getData());
+		Assert.assertEquals(0, _io.readCount());
+		await(_cache.unpin(pinned, _reader), WAIT_TIMEOUT_SEC);
+		pinned = _cache.pin(large.getKey(), _reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+		Assert.assertEquals("large", pinned.getData());
+		Assert.assertEquals(1, _io.readCount());
+		_cache.dereference(pinned);
+		await(_cache.unpin(pinned, _reader), WAIT_TIMEOUT_SEC);
+		Assert.assertEquals(128, _cache.getOwnedCacheSize());
 	}
 
 	@Test
