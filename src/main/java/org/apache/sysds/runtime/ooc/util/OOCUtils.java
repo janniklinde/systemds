@@ -183,7 +183,9 @@ public class OOCUtils {
 
 	public static long estimateFullTileBytes(DataCharacteristics dc) {
 		int blocksize = dc != null && dc.getBlocksize() > 0 ? dc.getBlocksize() : 1000;
-		return estimateMatrixBlockBytes(blocksize, blocksize);
+		long rows = dc != null && dc.getRows() > 0 ? Math.min(blocksize, dc.getRows()) : blocksize;
+		long cols = dc != null && dc.getCols() > 0 ? Math.min(blocksize, dc.getCols()) : blocksize;
+		return estimateMatrixBlockBytes(rows, cols);
 	}
 
 	private static long estimateMatrixBlockBytes(long rows, long cols) {

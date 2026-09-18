@@ -66,6 +66,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastStreamingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GeneralMMultOOCPrimitive;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.runtime.ooc.primitives.FanoutOOCPrimitive;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
@@ -366,6 +367,20 @@ public class OOCInstructionUtilsTest {
 			owner.destroy();
 			OOCCacheManager.reset();
 		}
+	}
+
+	@Test
+	public void testShapeAwareTileUpperBound() {
+		long[][] shapes = {{1, 2}, {2, 1000}, {1000, 2}, {2000, 2000}, {-1, 2}, {-1, -1}};
+		for(long[] shape : shapes) {
+			long rows = shape[0] > 0 ? Math.min(1000, shape[0]) : 1000;
+			long cols = shape[1] > 0 ? Math.min(1000, shape[1]) : 1000;
+			long expected = Math.max(MatrixBlock.estimateSizeDenseInMemory(rows, cols),
+				MatrixBlock.estimateSizeSparseInMemory(rows, cols, 1.0));
+			Assert.assertEquals(expected, OOCUtils.estimateFullTileBytes(new MatrixCharacteristics(shape[0], shape[1], 1000)));
+		}
+		Assert.assertTrue(OOCUtils.estimateFullTileBytes(new MatrixCharacteristics(1000, 2, 1000)) <
+			OOCUtils.estimateFullTileBytes(new MatrixCharacteristics(1000, 1000, 1000)) / 10);
 	}
 
 	@Test(timeout = 20000)
