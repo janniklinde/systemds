@@ -205,34 +205,40 @@ public final class OOCInstructionUtils {
 			return value -> Math.toIntExact(
 				(value.getIndexes().getRowIndex() - 1) * columnBlocks + value.getIndexes().getColumnIndex() - 1);
 		Map<MatrixIndexes, Integer> keys = new HashMap<>();
-		return value -> keys.computeIfAbsent(new MatrixIndexes(value.getIndexes()), ignored -> keys.size());
+		return value -> {
+			synchronized(keys) {
+				return keys.computeIfAbsent(new MatrixIndexes(value.getIndexes()), ignored -> keys.size());
+			}
+		};
 	}
 
 	public static void equiJoin(OOCStreamable<IndexedMatrixValue> left, OOCStreamable<IndexedMatrixValue> right,
 		OOCStream<IndexedMatrixValue> output, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> operation,
 		StreamContext context) {
-		long cols = right.getDataCharacteristics().getNumColBlocks();
+		long cols = right.getDataCharacteristics().colsKnown() ? right.getDataCharacteristics().getNumColBlocks() : -1;
 		long inputBytes = Math.max(OOCUtils.estimateOutputTileBytes(left.getDataCharacteristics()),
 			OOCUtils.estimateOutputTileBytes(right.getDataCharacteristics()));
 		long outputBytes = OOCUtils.estimateOutputTileBytes(output.getDataCharacteristics());
 		ToIntFunction<IndexedMatrixValue> key = matrixIndexKey(cols);
-		keyedJoin(left, right, output, key, key, OOCUtils::memoryCharge,
+		output.assignPrimitive(new JoinOOCPrimitive<>(left, right, output, key, key, OOCUtils::memoryCharge,
 			(leftValue, rightValue) -> new IndexedMatrixValue(leftValue.getIndexes(),
 				operation.apply((MatrixBlock) leftValue.getValue(), (MatrixBlock) rightValue.getValue())),
-			inputBytes + OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + outputBytes, context);
+			2 * OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + outputBytes,
+			cols > 0 && left.getDataCharacteristics().dimsKnown() && right.getDataCharacteristics().dimsKnown(), context));
 	}
 
 	public static <O> void equiJoinIndexed(OOCStreamable<IndexedMatrixValue> left,
 		OOCStreamable<IndexedMatrixValue> right, OOCStream<O> output,
 		BiFunction<IndexedMatrixValue, IndexedMatrixValue, O> operation, ToLongFunction<O> outputSize,
 		StreamContext context) {
-		long cols = left.getDataCharacteristics().getNumColBlocks();
+		long cols = left.getDataCharacteristics().colsKnown() ? left.getDataCharacteristics().getNumColBlocks() : -1;
 		long inputBytes = Math.max(OOCUtils.estimateOutputTileBytes(left.getDataCharacteristics()),
 			OOCUtils.estimateOutputTileBytes(right.getDataCharacteristics()));
 		long outputBytes = OOCUtils.estimateOutputTileBytes(output.getDataCharacteristics());
 		ToIntFunction<IndexedMatrixValue> key = matrixIndexKey(cols);
-		keyedJoin(left, right, output, key, key, outputSize, operation,
-			inputBytes + OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + outputBytes, context);
+		output.assignPrimitive(new JoinOOCPrimitive<>(left, right, output, key, key, outputSize, operation,
+			2 * OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + outputBytes,
+			cols > 0 && left.getDataCharacteristics().dimsKnown() && right.getDataCharacteristics().dimsKnown(), context));
 	}
 
 	public static <L extends SpillableObject, R extends SpillableObject, O> void keyedJoin(OOCStreamable<L> left,

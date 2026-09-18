@@ -64,6 +64,7 @@ import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
 import org.apache.sysds.runtime.functionobjects.Multiply;
 import org.apache.sysds.runtime.functionobjects.Plus;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
+import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
@@ -430,6 +431,53 @@ public class RepartitionInstructionSpillTest {
 	}
 
 	@Test(timeout = 20000)
+	public void testStreamingJoinMaterializedViewsSpill() throws InterruptedException {
+		boolean statistics = prepareSpillCache();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			indexedInput(ec, "A", 800, 601, 200);
+			MatrixObject a = ec.getMatrixObject("A");
+			MatrixObject b = input(ec, "B", 800, 601, 200, 4, 4, true, 3);
+			MaterializedStoreStreamable left = new MaterializedStoreStreamable(a.getStreamHandle(), a);
+			MaterializedStoreStreamable right = new MaterializedStoreStreamable(b.getStreamHandle(), b,
+				OOCStoreLayout.COL_MAJOR);
+			// Subscribe to the left after materialization/spilling, but consume the right as it is published.
+			OOCStream<IndexedMatrixValue> prime = left.getReadStream();
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = prime.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					current.get();
+				}
+			waitForSpill();
+			OOCStream<IndexedMatrixValue> result = new SubscribableTaskQueue<>();
+			result.setData(matrixObject(800, 601, 200));
+			OOCInstructionUtils.equiJoin(left, right, result,
+				(l, r) -> l.binaryOperations(InstructionUtils.parseBinaryOperator("+"), r, new MatrixBlock()),
+				new StreamContext());
+			result.start();
+			int blocks = 0;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue value = current.get();
+					MatrixBlock block = (MatrixBlock) value.getValue();
+					int firstRow = (int) (value.getIndexes().getRowIndex() - 1) * 200;
+					int firstCol = (int) (value.getIndexes().getColumnIndex() - 1) * 200;
+					for(int row = 0; row < block.getNumRows(); row++)
+						for(int col = 0; col < block.getNumColumns(); col++)
+							Assert.assertEquals(indexedValue(firstRow + row, firstCol + col) + 3,
+								block.get(row, col), 0);
+					blocks++;
+				}
+			Assert.assertEquals(16, blocks);
+			left.scheduleMaterializedStoreDeletion();
+			right.scheduleMaterializedStoreDeletion();
+		}
+		finally {
+			reset(statistics);
+		}
+	}
+
+	@Test(timeout = 20000)
 	public void testStreamingMMultMaterializedViewsSpill() throws InterruptedException {
 		boolean statistics = DMLScript.OOC_STATISTICS;
 		DMLConfig previous = ConfigurationManager.getDMLConfig();
@@ -553,7 +601,8 @@ public class RepartitionInstructionSpillTest {
 		boolean statistics = prepareSpillCache();
 		try {
 			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
-			MatrixObject first = input(ec, "A", 400, 400, 200, 2, 2, true, 1);
+			indexedInput(ec, "A", 400, 400, 200);
+			MatrixObject first = ec.getMatrixObject("A");
 			MatrixObject second = input(ec, "B", 400, 400, 200, 2, 2, false, 2);
 			first.getDataCharacteristics().set(-1, -1, 200, -1);
 			second.getDataCharacteristics().set(-1, -1, 200, -1);
@@ -569,7 +618,10 @@ public class RepartitionInstructionSpillTest {
 			OOCStream.QueueCallback<IndexedMatrixValue> callback;
 			while((callback = result.dequeueCB()) != null)
 				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
-					Assert.assertEquals(3, current.get().getValue().get(0, 0), 0);
+					IndexedMatrixValue value = current.get();
+					int row = (int) (value.getIndexes().getRowIndex() - 1) * 200;
+					int col = (int) (value.getIndexes().getColumnIndex() - 1) * 200;
+					Assert.assertEquals(indexedValue(row, col) + 2, value.getValue().get(0, 0), 0);
 					blocks++;
 				}
 			Assert.assertEquals(4, blocks);

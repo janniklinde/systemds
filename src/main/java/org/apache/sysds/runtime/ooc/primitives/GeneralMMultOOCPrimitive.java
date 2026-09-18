@@ -105,7 +105,7 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 		double outputBytes = 8d * left.getRows() * right.getCols();
 		double counterpartBytes = 8d * Math.min((double) left.getRows() * left.getCols(),
 			(double) right.getRows() * right.getCols());
-		return outputBytes + counterpartBytes <= GlobalMemoryBroker.get().getAllowedMemory() / 8d;
+			return outputBytes + counterpartBytes <= GlobalMemoryBroker.get().getAllowedMemory() / 4d;
 	}
 
 	@Override

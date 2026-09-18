@@ -49,6 +49,7 @@ import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 import shaded.parquet.it.unimi.dsi.fastutil.ints.IntArrayList;
+import shaded.parquet.it.unimi.dsi.fastutil.ints.Int2IntLinkedOpenHashMap;
 
 public final class MaterializedStoreStreamable implements OOCStreamable<IndexedMatrixValue> {
 	private final int _replayPrefetch;
@@ -59,6 +60,9 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	private final IntArrayList _publications = new IntArrayList();
 	private final List<DeferredReader> _liveReaders = new ArrayList<>();
 	private final List<InputView> _views = new CopyOnWriteArrayList<>();
+	private final AtomicInteger _readingViews = new AtomicInteger();
+	private final Int2IntLinkedOpenHashMap _recentReads = new Int2IntLinkedOpenHashMap();
+	private int _readClock;
 	private boolean _viewPolicyInstalled;
 	private MaterializedStore<IndexedMatrixValue> _store;
 	private DeferredReader _replayDriver;
@@ -184,8 +188,16 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		return new InputView();
 	}
 
+	private long recentReadScore(int slot, long tiles) {
+		synchronized(_recentReads) {
+			long last = _recentReads.get(slot);
+			return last == 0 ? -1 : -Math.max(1, tiles - (_readClock - last));
+		}
+	}
+
 	public final class InputView implements AutoCloseable, MaterializedStore.Liveness {
 		private final BitSet _consumed = new BitSet();
+		private final AtomicBoolean _reading = new AtomicBoolean();
 		private final AtomicInteger _pending = new AtomicInteger(1);
 		private final AtomicBoolean _finished = new AtomicBoolean();
 		private IndexedMaterializedStoreReader<IndexedMatrixValue> _reader;
@@ -231,7 +243,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 							int slot = layout.linearize(row, col, dc);
 							for(InputView view : views)
 								if(view.needs(slot))
-									return slot - tiles;
+									return _readingViews.get() > 1 ? recentReadScore(slot, tiles) : slot - tiles;
 							return slot;
 						});
 					}
@@ -254,6 +266,16 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		}
 
 		public OOCFuture<StoreLease<IndexedMatrixValue>> acquire(long row, long col, MemoryAllowance allowance) {
+			if(_reading.compareAndSet(false, true))
+				_readingViews.incrementAndGet();
+			if(_views.size() > 1)
+				synchronized(_recentReads) {
+					if(_readClock == Integer.MAX_VALUE) {
+						_recentReads.clear();
+						_readClock = 0;
+					}
+					_recentReads.put(_layout.linearize(row, col, getDataCharacteristics()), ++_readClock);
+				}
 			return _store.requestPublished(row, col, allowance);
 		}
 
@@ -306,7 +328,14 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 				if(_closed)
 					return;
 				_closed = true;
+				if(_reading.compareAndSet(true, false))
+					_readingViews.decrementAndGet();
 				_views.remove(this);
+				if(_views.size() < 2)
+					synchronized(_recentReads) {
+						_recentReads.clear();
+						_readClock = 0;
+					}
 				if(_active)
 					_activeReaders--;
 				else

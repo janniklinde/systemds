@@ -19,27 +19,30 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
-import java.util.concurrent.CompletableFuture;
+import java.util.BitSet;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.function.ToIntFunction;
 import java.util.function.ToLongFunction;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
-import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
-import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
-import org.apache.sysds.runtime.ooc.cache.OOCFuture;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
+import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.store.StateTable;
+import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
+import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable.InputView;
+import org.apache.sysds.runtime.ooc.store.StoreLease;
+import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
-import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.runtime.ooc.util.StateTableUtils;
 
 public class JoinOOCPrimitive<L extends SpillableObject, R extends SpillableObject, O> extends OOCPrimitive {
@@ -49,15 +52,28 @@ public class JoinOOCPrimitive<L extends SpillableObject, R extends SpillableObje
 	private final ToLongFunction<O> _outputSize;
 	private final BiFunction<L, R, O> _operation;
 	private final long _taskBytes;
-	private final AtomicInteger _pending = new AtomicInteger(1);
-	private final AtomicInteger _unmatched = new AtomicInteger();
-	private final CompletableFuture<Void> _pendingCompletion = new CompletableFuture<>();
-	private StateTable<SpillableObject> _table;
+	private final boolean _indexedInputs;
+	private final AtomicInteger _pendingArrivals = new AtomicInteger(2);
+	private final AtomicInteger _pendingMatches = new AtomicInteger(1);
+	private final BitSet _leftArrived = new BitSet();
+	private final BitSet _rightArrived = new BitSet();
+	private StateTable<L> _left;
+	private StateTable<R> _right;
+	private OOCStream<Integer> _matches;
+	private OOCStream<JoinWork> _ready;
 	private OOCStream<O> _outputStream;
+	private InputView _leftView;
+	private InputView _rightView;
 
 	public JoinOOCPrimitive(OOCStreamable<L> left, OOCStreamable<R> right, OOCStreamable<O> output,
 		ToIntFunction<L> leftKey, ToIntFunction<R> rightKey, ToLongFunction<O> outputSize,
 		BiFunction<L, R, O> operation, long taskBytes, StreamContext context) {
+		this(left, right, output, leftKey, rightKey, outputSize, operation, taskBytes, false, context);
+	}
+
+	public JoinOOCPrimitive(OOCStreamable<L> left, OOCStreamable<R> right, OOCStreamable<O> output,
+		ToIntFunction<L> leftKey, ToIntFunction<R> rightKey, ToLongFunction<O> outputSize,
+		BiFunction<L, R, O> operation, long taskBytes, boolean indexedInputs, StreamContext context) {
 		super(context, left, right);
 		_output = output;
 		_leftKey = leftKey;
@@ -65,6 +81,7 @@ public class JoinOOCPrimitive<L extends SpillableObject, R extends SpillableObje
 		_outputSize = outputSize;
 		_operation = operation;
 		_taskBytes = taskBytes;
+		_indexedInputs = indexedInputs;
 	}
 
 	@Override
@@ -86,127 +103,219 @@ public class JoinOOCPrimitive<L extends SpillableObject, R extends SpillableObje
 	}
 
 	@Override
-	protected void startExecution() {
-		OOCStream<L> left = getInputReadStream(0);
-		OOCStream<R> right = getInputReadStream(1);
-		_table = new StateTable<>(OOCCacheManager.getGlobalCache(), CachingStream._streamSeq.getNextID());
-		_outputStream = _output.getWriteStream();
-		OOCStream<JoinWork> matches = new SubscribableTaskQueue<>();
+	protected boolean isStreamingInput(int index) {
+		return true;
+	}
 
-		getContext().addOutStream(_outputStream);
-		CompletableFuture<Void> processing = OOCInstructionUtils.submitCloseableOOCTasks(matches, this::process,
-			getContext());
-		CompletableFuture.allOf(processing, _pendingCompletion).thenRun(() -> {
-			try {
-				_table.close();
-				onComplete();
+	@Override
+	protected long getMaxTaskReservationBytes() {
+		return _taskBytes;
+	}
+
+	@Override
+	protected void startExecution() {
+		_left = new StateTable<>();
+		_right = new StateTable<>();
+		DataCharacteristics dc = _output.getDataCharacteristics();
+		long slots = _indexedInputs && dc != null && dc.dimsKnown() ?
+			dc.getNumRowBlocks() * dc.getNumColBlocks() : 0;
+		_left.addEvictionPolicy(key -> slots > 0 ? key - slots : -1);
+		_right.addEvictionPolicy(key -> slots > 0 ? key - slots : -1);
+		_outputStream = _output.getWriteStream();
+		_matches = new SubscribableTaskQueue<>();
+		_ready = new SubscribableTaskQueue<>();
+		getContext().addOutStream(_outputStream, _ready);
+		OOCInstructionUtils.submitCloseableOOCTasks(_ready, this::process, getContext())
+			.whenComplete((ignored, error) -> {
+				try {
+					if(error != null)
+						fail(error);
+					if(!hasFailed())
+						_outputStream.closeInput();
+				}
+				finally {
+					_left.close();
+					_right.close();
+					if(_leftView != null)
+						_leftView.close();
+					if(_rightView != null)
+						_rightView.close();
+					onComplete();
+				}
+			});
+		AllocatedOOCStream<Integer> admitted = new AllocatedOOCStream<>(_matches, _allowance,
+			key -> _taskBytes, true);
+		getContext().addInStream(_matches, admitted);
+		admitted.setSubscriber(this::match);
+		startInput(0, _left, _leftKey);
+		startInput(1, _right, _rightKey);
+	}
+
+	private <T extends SpillableObject> void startInput(int index, StateTable<T> table, ToIntFunction<T> key) {
+		if(_indexedInputs && getInput(index) instanceof MaterializedStoreStreamable source) {
+			consumeInputHandle(index);
+			InputView view = source.getReservedInputView();
+			if(index == 0)
+				_leftView = view;
+			else
+				_rightView = view;
+			view.start(slot -> {
+				MatrixIndexes indexes = view.indexes(slot);
+				long cols = source.getDataCharacteristics().getNumColBlocks();
+				arrived(Math.toIntExact((indexes.getRowIndex() - 1) * cols + indexes.getColumnIndex() - 1), index == 0);
+			}, error -> {
+				if(error != null)
+					fail(error);
+				finishArrival();
+			});
+		}
+		else {
+			OOCStream<T> input = getInputReadStream(index);
+			getContext().addInStream(input);
+			input.setSubscriber(callback -> accept(callback, table, key, index == 0));
+		}
+	}
+
+	private void arrived(int key, boolean left) {
+		boolean ready;
+		synchronized(_leftArrived) {
+			BitSet own = left ? _leftArrived : _rightArrived;
+			BitSet other = left ? _rightArrived : _leftArrived;
+			ready = other.get(key);
+			if(ready)
+				other.clear(key);
+			else
+				own.set(key);
+		}
+		if(ready)
+			_matches.enqueue(key);
+	}
+
+	private <T extends SpillableObject> void accept(OOCStream.QueueCallback<T> callback, StateTable<T> table,
+		ToIntFunction<T> keyFunction, boolean left) {
+		if(callback.isEos() || callback.isFailure()) {
+			try(callback) {
+				if(callback.isFailure())
+					callback.get();
+			}
+			catch(Throwable error) {
+				fail(error);
 			}
 			finally {
-				_outputStream.closeInput();
+				finishArrival();
 			}
-		});
-
-		OOCInstructionUtils.submitOOCTask(() -> drive(left, right, matches),
-			new StreamContext().addOutStream(_outputStream));
+			return;
+		}
+		_pendingArrivals.incrementAndGet();
+		try(callback) {
+			int key = keyFunction.applyAsInt(callback.get());
+			// Preserve cache references/managed ownership, without pinning an absent counterpart.
+			StateTableUtils.put(table, key, callback, _allowance);
+			arrived(key, left);
+		}
+		catch(Throwable error) {
+			fail(error);
+		}
+		finally {
+			finishArrival();
+		}
 	}
 
-	private void drive(OOCStream<L> leftInput, OOCStream<R> rightInput, OOCStream<JoinWork> matches) {
-		try {
-			while(true) {
-				OOCStream.QueueCallback<L> left = leftInput.dequeueCB();
-				OOCStream.QueueCallback<R> right = rightInput.dequeueCB();
-				boolean leftEos = left == null || left.isEos();
-				boolean rightEos = right == null || right.isEos();
-				if(leftEos || rightEos) {
-					if(left != null)
-						left.close();
-					if(right != null)
-						right.close();
-					if(leftEos != rightEos)
-						throw new DMLRuntimeException("Join inputs contain a different number of blocks");
-					break;
+	private void finishArrival() {
+		if(_pendingArrivals.decrementAndGet() != 0)
+			return;
+		synchronized(_leftArrived) {
+			if(!_leftArrived.isEmpty() || !_rightArrived.isEmpty())
+				fail(new DMLRuntimeException("Join inputs contain unmatched blocks"));
+		}
+		if(!hasFailed())
+			_matches.closeInput();
+	}
+
+	private void match(OOCStream.QueueCallback<Integer> callback) {
+		if(callback.isEos() || callback.isFailure()) {
+			try(callback) {
+				if(callback.isFailure())
+					callback.get();
+			}
+			catch(Throwable error) {
+				fail(error);
+			}
+			finally {
+				finishMatch();
+			}
+			return;
+		}
+		_pendingMatches.incrementAndGet();
+		ReservationBudget budget = AllocatedOOCStream.detachBudget(callback).enableReuse();
+		try(callback) {
+			int key = callback.get();
+			acquire(_leftView, _left, key, 0, budget).whenComplete((left, error) -> {
+				if(error != null || left == null) {
+					fail(error != null ? error : new DMLRuntimeException("Missing left join input"));
+					budget.close();
+					finishMatch();
+					return;
 				}
-				accept(left, true, _leftKey.applyAsInt(left.get()), matches);
-				accept(right, false, _rightKey.applyAsInt(right.get()), matches);
-			}
+				try {
+					acquire(_rightView, _right, key, 1, budget).whenComplete((right, failure) -> {
+						try {
+							if(failure != null)
+								throw DMLRuntimeException.of(failure);
+							if(right == null)
+								throw new DMLRuntimeException("Missing right join input");
+							_ready.enqueue(new JoinWork(left, right, budget, key));
+						}
+						catch(Throwable problem) {
+							left.close();
+							if(right != null)
+								right.close();
+							budget.close();
+							fail(problem);
+						}
+						finally {
+							finishMatch();
+						}
+					});
+				}
+				catch(Throwable failure) {
+					left.close();
+					budget.close();
+					fail(failure);
+					finishMatch();
+				}
+			});
 		}
-		catch(Throwable failure) {
-			fail(failure);
-			throw DMLRuntimeException.of(failure);
+		catch(Throwable error) {
+			budget.close();
+			fail(error);
+			finishMatch();
 		}
-		finally {
-			completePending(matches);
-		}
+	}
+
+	private void finishMatch() {
+		if(_pendingMatches.decrementAndGet() == 0 && !hasFailed())
+			_ready.closeInput();
 	}
 
 	@SuppressWarnings("unchecked")
-	private void accept(OOCStream.QueueCallback<? extends SpillableObject> callback, boolean left, int key,
-		OOCStream<JoinWork> matches) {
-		ReservationBudget budget = null;
-		boolean pending = false;
-		boolean handedOff = false;
-		try {
-			budget = OOCUtils.reserveBudget(_allowance, _taskBytes);
-			_pending.incrementAndGet();
-			pending = true;
-			OOCFuture<StateTableUtils.Match<SpillableObject>> future = StateTableUtils.putOrTake(_table, key,
-				(OOCStream.QueueCallback<SpillableObject>) callback, budget);
-			handedOff = true;
-			ReservationBudget pendingBudget = budget;
-			budget = null;
-			future.whenComplete((match, error) -> matchReady(match, left, pendingBudget, error, matches));
-			pending = false;
-		}
-		finally {
-			if(!handedOff)
-				callback.close();
-			if(pending)
-				completePending(matches);
-			if(budget != null)
-				budget.close();
+	private <T extends SpillableObject> OOCFuture<StoreLease<T>> acquire(InputView view, StateTable<T> table,
+		int key, int input, ReservationBudget budget) {
+		if(view == null)
+			return table.take(key, budget);
+		long cols = getInput(input).getDataCharacteristics().getNumColBlocks();
+		return (OOCFuture<StoreLease<T>>) (OOCFuture<?>) view.acquire(key / cols + 1, key % cols + 1, budget);
+	}
+
+	private void consumed(InputView view, int key, int input) {
+		if(view != null) {
+			long cols = getInput(input).getDataCharacteristics().getNumColBlocks();
+			view.clear(key / cols + 1, key % cols + 1);
 		}
 	}
 
-	private void matchReady(StateTableUtils.Match<SpillableObject> match, boolean incomingLeft,
-		ReservationBudget budget, Throwable error, OOCStream<JoinWork> matches) {
-		JoinWork work = null;
-		try {
-			if(error != null)
-				throw DMLRuntimeException.of(error);
-			if(match == null) {
-				_unmatched.incrementAndGet();
-				return;
-			}
-			_unmatched.decrementAndGet();
-			work = new JoinWork(match.left(), match.right(), incomingLeft, budget);
-			match = null;
-			budget = null;
-			matches.enqueue(work);
-			work = null;
-		}
-		catch(Throwable failure) {
-			fail(failure);
-		}
-		finally {
-			if(work != null)
-				work.close();
-			if(match != null) {
-				match.left().close();
-				match.right().close();
-			}
-			if(budget != null)
-				budget.close();
-			completePending(matches);
-		}
-	}
-
-	@SuppressWarnings("unchecked")
 	private void process(JoinWork work) {
-		SpillableObject incoming = work._incoming.get();
-		SpillableObject existing = work._existing.get();
-		L left = (L) (work._incomingLeft ? incoming : existing);
-		R right = (R) (work._incomingLeft ? existing : incoming);
-		O value = _operation.apply(left, right);
+		O value = _operation.apply(work._left.value(), work._right.value());
 		long bytes = _outputSize.applyAsLong(value);
 		work._budget.reserveBlocking(bytes);
 		OOCStream.QueueCallback<O> callback = new InMemoryQueueCallback<>(value, null, work._budget, bytes);
@@ -220,45 +329,26 @@ public class JoinOOCPrimitive<L extends SpillableObject, R extends SpillableObje
 		}
 	}
 
-	private void completePending(OOCStream<JoinWork> matches) {
-		if(_pending.decrementAndGet() != 0)
-			return;
-		try {
-			int unmatched = _unmatched.get();
-			if(unmatched != 0)
-				fail(new DMLRuntimeException("Join inputs contain " + unmatched + " unmatched blocks"));
-			else {
-				try {
-					matches.closeInput();
-				}
-				catch(Exception ignored) {
-				}
-			}
-		}
-		finally {
-			_pendingCompletion.complete(null);
-		}
-	}
-
 	private final class JoinWork implements AutoCloseable {
-		private final OOCStream.QueueCallback<SpillableObject> _incoming;
-		private final OOCStream.QueueCallback<SpillableObject> _existing;
-		private final boolean _incomingLeft;
+		private final StoreLease<L> _left;
+		private final StoreLease<R> _right;
 		private final ReservationBudget _budget;
+		private final int _key;
 
-		private JoinWork(OOCStream.QueueCallback<SpillableObject> incoming,
-			OOCStream.QueueCallback<SpillableObject> existing, boolean incomingLeft, ReservationBudget budget) {
-			_incoming = incoming;
-			_existing = existing;
-			_incomingLeft = incomingLeft;
+		private JoinWork(StoreLease<L> left, StoreLease<R> right, ReservationBudget budget, int key) {
+			_left = left;
+			_right = right;
 			_budget = budget;
+			_key = key;
 		}
 
 		@Override
 		public void close() {
 			try {
-				_incoming.close();
-				_existing.close();
+				consumed(_leftView, _key, 0);
+				consumed(_rightView, _key, 1);
+				_left.close();
+				_right.close();
 			}
 			finally {
 				_budget.close();
