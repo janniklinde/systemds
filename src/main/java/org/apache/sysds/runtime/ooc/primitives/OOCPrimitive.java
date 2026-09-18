@@ -169,7 +169,13 @@ public abstract class OOCPrimitive {
 	@SuppressWarnings("unchecked")
 	protected final <T> OOCStream<T> getInputReadStream(int index) {
 		consumeInputHandle(index);
-		return (OOCStream<T>) _inputs.get(index)._source.getReservedReadStream();
+		OOCStreamable<?> source = _inputs.get(index)._source;
+		return (OOCStream<T>) (isStreamingInput(index) ? source.getReservedReadStream(_pattern, true)
+			: source.getReservedReadStream());
+	}
+
+	protected boolean isStreamingInput(int index) {
+		return false;
 	}
 
 	protected final OOCFuture<MaterializedStore<IndexedMatrixValue>> getMaterializedInput(int index) {

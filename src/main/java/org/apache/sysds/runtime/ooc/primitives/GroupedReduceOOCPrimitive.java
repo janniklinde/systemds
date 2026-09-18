@@ -131,6 +131,11 @@ public final class GroupedReduceOOCPrimitive extends OOCPrimitive {
 			child.requestPattern(_pattern);
 	}
 
+	@Override
+	protected boolean isStreamingInput(int index) {
+		return true;
+	}
+
 	private OOCAccessPattern groupingPattern() {
 		return _grouping == Grouping.COL_BLOCKS ? OOCAccessPattern.COL_MAJOR : OOCAccessPattern.ROW_MAJOR;
 	}

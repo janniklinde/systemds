@@ -53,6 +53,13 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 	private MaterializedStore<IndexedMatrixValue> _materializedStore;
 	private int _expectedReaders;
 	private int _consumers;
+	private Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> _publicationListener;
+
+	public synchronized void setPublicationListener(Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> listener) {
+		if(hasStartedExecution())
+			throw new IllegalStateException("Cannot install a publication listener after execution starts.");
+		_publicationListener = listener;
+	}
 
 	public MaterializeOOCPrimitive(OOCStreamable<IndexedMatrixValue> source, OOCStoreLayout layout,
 		StreamContext context) {
@@ -148,7 +155,9 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 					logicalLayout ? characteristics : null);
 				_materializedStore = store;
 				_evictionPolicies.forEach(store::addEvictionPolicy);
-				liveConsumers = List.copyOf(_liveConsumers);
+				liveConsumers = new ArrayList<>(_liveConsumers);
+				if(_publicationListener != null)
+					liveConsumers.add(_publicationListener);
 			}
 			AtomicInteger nextIndex = new AtomicInteger();
 			ToIntFunction<MatrixIndexes> publicationIndex = linearize != null ? linearize : ignored -> nextIndex

@@ -74,6 +74,11 @@ public final class ReduceOOCPrimitive<I, O> extends OOCPrimitive {
 	}
 
 	@Override
+	protected boolean isStreamingInput(int index) {
+		return true;
+	}
+
+	@Override
 	protected void startExecution() {
 		OOCStream<I> input = getInputReadStream(0);
 		OOCStream<O> output = _output.getWriteStream();

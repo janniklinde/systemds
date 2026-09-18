@@ -604,6 +604,9 @@ public class AggBinaryOp extends MultiThreadedHop {
 			setOutputDimensions(matmultCP);
 		}
 
+		if(et == ExecType.OOC && matmultCP instanceof MatMultCP)
+			((MatMultCP) matmultCP).setBandStreaming(
+				HopRewriteUtils.getBandFanoutConsumers(getInput(1), Direction.Row).contains(this));
 		setLineNumbers(matmultCP);
 		setLops(matmultCP);
 	}

@@ -45,6 +45,8 @@ public final class BroadcastStreamingOOCPrimitive extends OOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _matrix;
 	private final OOCStreamable<IndexedMatrixValue> _output;
 	private final boolean _row;
+	private final boolean _transposeSummary;
+	private final OOCStreamable<IndexedMatrixValue> _summaryInput;
 	private final BiFunction<IndexedMatrixValue, IndexedMatrixValue, IndexedMatrixValue> _operation;
 	private final AtomicInteger _pendingArrivals = new AtomicInteger(2);
 	private final AtomicInteger _pendingMatches = new AtomicInteger(1);
@@ -60,16 +62,24 @@ public final class BroadcastStreamingOOCPrimitive extends OOCPrimitive {
 
 	public BroadcastStreamingOOCPrimitive(OOCStreamable<IndexedMatrixValue> matrix,
 		OOCStreamable<IndexedMatrixValue> summaries, OOCStreamable<IndexedMatrixValue> output, boolean row,
+		boolean transposeSummary,
 		BiFunction<IndexedMatrixValue, IndexedMatrixValue, IndexedMatrixValue> operation, StreamContext context) {
 		super(context, matrix, summaries);
 		_matrix = matrix;
 		_output = output;
 		_row = row;
+		_transposeSummary = transposeSummary;
+		_summaryInput = summaries;
 		_operation = operation;
 	}
 
 	public void setPendingListener(BiConsumer<Integer, Long> listener) {
 		_pendingListener = listener;
+	}
+
+	@Override
+	protected boolean isStreamingInput(int index) {
+		return true;
 	}
 
 	@Override
@@ -87,8 +97,10 @@ public final class BroadcastStreamingOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	protected long getMaxTaskReservationBytes() {
-		return 2 * OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(
+		return OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(
 			OOCUtils.estimateOutputTileBytes(_matrix.getDataCharacteristics()))
+			+ OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(
+				OOCUtils.estimateOutputTileBytes(_summaryInput.getDataCharacteristics()))
 			+ 2 * OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics());
 	}
 
@@ -149,7 +161,7 @@ public final class BroadcastStreamingOOCPrimitive extends OOCPrimitive {
 			IndexedMatrixValue value = callback.get();
 			int row = (int) value.getIndexes().getRowIndex() - 1;
 			int col = (int) value.getIndexes().getColumnIndex() - 1;
-			int band = _row ? row : col;
+			int band = summary && _transposeSummary ? (_row ? col : row) : (_row ? row : col);
 			int index = summary ? band : row * _cols + col;
 			long bytes = value.size();
 			StateTableUtils.put(summary ? _summaries : _tiles, index, callback, _allowance);

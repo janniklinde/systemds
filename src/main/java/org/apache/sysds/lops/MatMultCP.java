@@ -30,6 +30,11 @@ public class MatMultCP extends Lop {
 	private boolean isLeftTransposed; // Used for GPU matmult operation
 	private boolean isRightTransposed;
 	private boolean useTranspose;
+	private boolean _bandStreaming;
+
+	public void setBandStreaming(boolean streaming) {
+		_bandStreaming = streaming;
+	}
 
 	public MatMultCP(Lop input1, Lop input2, DataType dt, ValueType vt, ExecType et) {
 		this(input1, input2, dt, vt, et, 1);
@@ -95,6 +100,8 @@ public class MatMultCP extends Lop {
 		
 		if ( getExecType() == ExecType.FED )
 			ret = InstructionUtils.concatOperands(ret, _fedOutput.name());
+		if(getExecType() == ExecType.OOC && _bandStreaming)
+			ret = InstructionUtils.concatOperands(ret, "bandStreaming=Row");
 		
 		return ret;
 	}

@@ -23,6 +23,7 @@ import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 
 public interface OOCStreamable<T> {
 	OOCStream<T> getReadStream();
@@ -64,6 +65,10 @@ public interface OOCStreamable<T> {
 
 	default OOCStream<T> getReservedReadStream() {
 		return getReadStream();
+	}
+
+	default OOCStream<T> getReservedReadStream(OOCAccessPattern pattern, boolean streaming) {
+		return getReservedReadStream();
 	}
 
 	default void reserveLazyHandle() {

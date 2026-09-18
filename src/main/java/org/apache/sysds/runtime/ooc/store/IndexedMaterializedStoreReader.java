@@ -150,9 +150,13 @@ public final class IndexedMaterializedStoreReader<T extends SpillableObject> imp
 
 	private OOCFuture<Boolean> release(int index, BlockEntry entry, MemoryAllowance requestAllowance) {
 		OOCCache.UnpinHandle unpin = _cache.unpin(entry, requestAllowance);
+		consumed(index);
+		return unpin.getCompletionFuture();
+	}
+
+	public void consumed(int index) {
 		_liveness.consumed(index);
 		_afterRelease.accept(index);
-		return unpin.getCompletionFuture();
 	}
 
 	private void reserve(int index) {

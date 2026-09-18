@@ -32,7 +32,6 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.matrix.operators.ScalarOperator;
-import org.apache.sysds.runtime.ooc.store.CountingLiveness;
 import org.apache.sysds.runtime.ooc.util.OOCDimensions;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
@@ -99,38 +98,13 @@ public class BinaryOOCInstruction extends ComputationOOCInstruction {
 		boolean isOuter = !isColBroadcast && !isRowBroadcast && cols1 == 1 && rows2 == 1 &&
 			!(rows1 == rows2 && cols1 == cols2);
 
-		if((_bandStreaming == Direction.Row && isColBroadcast)
-			|| (_bandStreaming == Direction.Col && isRowBroadcast)) {
-			OOCInstructionUtils.bandStreamingBroadcast(m1.getStreamable(), m2.getStreamable(), qOut,
-				_bandStreaming == Direction.Row, (tile, summary) -> new IndexedMatrixValue(tile.getIndexes(),
+		if(isColBroadcast || isRowBroadcast) {
+			boolean requireStreaming = (_bandStreaming == Direction.Row && isColBroadcast)
+				|| (_bandStreaming == Direction.Col && isRowBroadcast);
+			OOCInstructionUtils.broadcastMap(m1.getStreamable(), m2.getStreamable(), qOut,
+				isColBroadcast, false, requireStreaming, (tile, summary) -> new IndexedMatrixValue(tile.getIndexes(),
 					tile.getValue().binaryOperations((BinaryOperator) _optr, summary.getValue(), new MatrixBlock())),
 				getContext());
-			return;
-		}
-
-		if (isColBroadcast && !isRowBroadcast) {
-			int broadcastBlocks = Math.toIntExact(m2.getDataCharacteristics().getNumRowBlocks());
-			int usesPerBlock = Math.toIntExact(m1.getDataCharacteristics().getNumColBlocks());
-			OOCInstructionUtils.indexedBroadcastMap(m1.getStreamable(), m2.getStreamable(), qOut,
-				tmp -> tmp.getIndexes().getRowIndex(), tmp -> 1,
-				() -> new CountingLiveness(broadcastBlocks, usesPerBlock), (tmp, broadcast) -> {
-					IndexedMatrixValue tmpOut = new IndexedMatrixValue();
-					tmpOut.set(tmp.getIndexes(), tmp.getValue().binaryOperations((BinaryOperator) _optr,
-						broadcast.getValue(), tmpOut.getValue()));
-					return tmpOut;
-				}, getContext());
-		}
-		else if (isRowBroadcast && !isColBroadcast) {
-			int broadcastBlocks = Math.toIntExact(m2.getDataCharacteristics().getNumColBlocks());
-			int usesPerBlock = Math.toIntExact(m1.getDataCharacteristics().getNumRowBlocks());
-			OOCInstructionUtils.indexedBroadcastMap(m1.getStreamable(), m2.getStreamable(), qOut, tmp -> 1,
-				tmp -> tmp.getIndexes().getColumnIndex(), () -> new CountingLiveness(broadcastBlocks, usesPerBlock),
-				(tmp, broadcast) -> {
-					IndexedMatrixValue tmpOut = new IndexedMatrixValue();
-					tmpOut.set(tmp.getIndexes(), tmp.getValue().binaryOperations((BinaryOperator) _optr,
-						broadcast.getValue(), tmpOut.getValue()));
-					return tmpOut;
-				}, getContext());
 		}
 		else if(isOuter) {
 			OOCInstructionUtils.cartesianMap(m1.getStreamable(), m2.getStreamable(), qOut, (left, right) -> {

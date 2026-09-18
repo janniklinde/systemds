@@ -19,9 +19,11 @@
 
 package org.apache.sysds.runtime.ooc.store;
 
-import java.util.ArrayDeque;
-import java.util.concurrent.ExecutionException;
+import java.util.ArrayList;
+import java.util.BitSet;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 import org.apache.sysds.conf.ConfigurationManager;
@@ -35,24 +37,31 @@ import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
-import org.apache.sysds.runtime.ooc.cache.BlockEntry;
-import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
+import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
+import shaded.parquet.it.unimi.dsi.fastutil.ints.IntArrayList;
+
 public final class MaterializedStoreStreamable implements OOCStreamable<IndexedMatrixValue> {
 	private final int _replayPrefetch;
 	private final long _replayMemory;
+	private final OOCStoreLayout _layout;
 	private final MaterializeOOCPrimitive _primitive;
 	private final OOCFuture<DataCharacteristics> _dimensions;
+	private final IntArrayList _publications = new IntArrayList();
+	private final List<DeferredReader> _liveReaders = new ArrayList<>();
 	private MaterializedStore<IndexedMatrixValue> _store;
+	private DeferredReader _replayDriver;
 	private CacheableData<?> _data;
+	private boolean _publicationDone;
+	private DMLRuntimeException _publicationFailure;
 	private boolean _deleteScheduled;
 	private boolean _materializationDone;
-	private boolean _readersSealed;
+	private boolean _sealingReaders;
 	private boolean _closed;
 	private int _reservedReaders;
 	private int _pendingReaders;
@@ -67,12 +76,14 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		if(source == null)
 			throw new IllegalArgumentException("Materialized stream requires a source.");
 		DMLConfig conf = ConfigurationManager.getDMLConfig();
-		_replayPrefetch = conf.getIntValue(DMLConfig.OOC_REPLAY_PREFETCH);
+		_replayPrefetch = Math.max(1, conf.getIntValue(DMLConfig.OOC_REPLAY_PREFETCH));
 		_replayMemory = Math.min(conf.getLongValue(DMLConfig.OOC_REPLAY_MEMORY),
 			GlobalMemoryBroker.getSource().getAllowedMemory() / 2);
+		_layout = layout;
 		_data = data;
 		_dimensions = new OOCFuture<>();
 		_primitive = MaterializeOOCPrimitive.reusable(source, layout);
+		_primitive.setPublicationListener(this::acceptPublication);
 		_primitive.store().whenComplete((store, error) -> {
 			if(error != null) {
 				_dimensions.completeExceptionally(error);
@@ -90,156 +101,191 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 
 	@Override
 	public OOCStream<IndexedMatrixValue> getReadStream() {
-		return createReader(false);
+		return createReader(false, OOCAccessPattern.ANY, false);
 	}
 
 	@Override
 	public OOCStream<IndexedMatrixValue> getReservedReadStream() {
-		return createReader(true);
+		return createReader(true, OOCAccessPattern.ANY, false);
 	}
 
-	private synchronized OOCStream<IndexedMatrixValue> createReader(boolean reserved) {
+	@Override
+	public OOCStream<IndexedMatrixValue> getReservedReadStream(OOCAccessPattern pattern, boolean streaming) {
+		return createReader(true, pattern, streaming);
+	}
+
+	private synchronized OOCStream<IndexedMatrixValue> createReader(boolean reserved, OOCAccessPattern pattern,
+		boolean streaming) {
 		if(reserved && _reservedReaders > 0)
 			_reservedReaders--;
 		else if(_deleteScheduled)
 			throw new DMLRuntimeException("Cannot open a reader on a materialized stream scheduled for deletion.");
 		_pendingReaders++;
-		DeferredReader stream = new DeferredReader(this);
+		_primitive.registerRequest(1, null);
+		DeferredReader stream = new DeferredReader(pattern, streaming);
 		stream.setData(_data);
 		stream.assignPrimitive(_primitive);
-		boolean live = _primitive.registerRequest(1, stream::acceptLive);
-		stream.setLive(live);
-		if(live) {
-			_pendingReaders--;
-			_activeReaders++;
-		}
 		return stream;
 	}
 
-	private synchronized MaterializedStore<IndexedMatrixValue> storeIfPresent() {
-		return _store;
+	private void acceptPublication(OOCStream.QueueCallback<IndexedMatrixValue> callback) {
+		if(callback.isEos() || callback.isFailure()) {
+			DMLRuntimeException failure = null;
+			if(callback.isFailure()) {
+				try {
+					callback.get();
+				}
+				catch(Throwable error) {
+					failure = DMLRuntimeException.of(error);
+				}
+			}
+			List<DeferredReader> readers;
+			synchronized(this) {
+				_publicationDone = true;
+				_publicationFailure = failure;
+				readers = List.copyOf(_liveReaders);
+				_liveReaders.clear();
+			}
+			for(DeferredReader reader : readers)
+				reader.finishLive(failure);
+			return;
+		}
+		int index = ((MaterializedCallback<?>) callback).publishedIndex();
+		List<DeferredReader> readers;
+		synchronized(this) {
+			_publications.add(index);
+			readers = List.copyOf(_liveReaders);
+			readers.forEach(reader -> reader._pendingLive.incrementAndGet());
+		}
+		for(DeferredReader reader : readers)
+			reader.acceptLive(callback);
 	}
 
-	private void startMaterialization() {
-		_primitive.startOnDemand();
+	private void openStreamingReader(DeferredReader reader) {
+		_primitive.store().whenComplete((store, error) -> {
+			if(error != null) {
+				reader.fail(error);
+				return;
+			}
+			DMLRuntimeException failure;
+			synchronized(this) {
+				reader._livenessReader = store.openLiveIndexedReader(reader);
+				_pendingReaders--;
+				_activeReaders++;
+				reader._active = true;
+				failure = _publicationFailure;
+				if(_publicationDone && _replayDriver != null && !_replayDriver._finished.get()
+					&& reader._pattern.fused(_replayDriver._pattern).isPlannable()) {
+					reader._replayLog = _replayDriver._delivered;
+					reader._replayEnd = reader._replayLog.size();
+					_replayDriver._followers.add(reader);
+				}
+				else {
+					reader._replayLog = _publications;
+					reader._replayEnd = _publications.size();
+					reader._liveDone = _publicationDone;
+					if(!_publicationDone)
+						_liveReaders.add(reader);
+					else {
+						reader._driver = true;
+						if(_replayDriver == null)
+							_replayDriver = reader;
+					}
+				}
+			}
+			tryFinalize();
+			if(failure != null)
+				reader.fail(failure);
+			else
+				reader.pumpReplay();
+		});
+	}
+
+	private void forwardReplay(DeferredReader driver, OOCStream.QueueCallback<IndexedMatrixValue> callback) {
+		List<DeferredReader> followers;
+		synchronized(this) {
+			driver._delivered.add(((MaterializedCallback<?>) callback).publishedIndex());
+			followers = List.copyOf(driver._followers);
+			followers.forEach(reader -> reader._pendingLive.incrementAndGet());
+		}
+		try {
+			driver.enqueueShared(callback);
+		}
+		finally {
+			for(DeferredReader reader : followers)
+				reader.acceptLive(callback);
+		}
 	}
 
 	private void openReader(DeferredReader output) {
 		_primitive.store().whenComplete((store, storeError) -> {
 			if(storeError != null) {
-				failPendingReader(output, storeError);
+				output.fail(storeError);
 				return;
 			}
 			store.completion().whenComplete((ignored, completionError) -> {
 				if(completionError != null) {
-					failPendingReader(output, completionError);
+					output.fail(completionError);
 					return;
 				}
-				OrderedMaterializedStoreReader<IndexedMatrixValue> reader = null;
-				SyncMemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.getSource(),
-					_replayMemory);
 				try {
-					reader = store.openReader(new SequentialAccessPattern(store.size()), allowance, _replayPrefetch);
-					output.setAllowance(allowance);
+					output._allowance = new SyncMemoryAllowance(GlobalMemoryBroker.getSource(), _replayMemory);
+					OrderedMaterializedStoreReader<IndexedMatrixValue> reader = store.openReader(
+						new SequentialAccessPattern(store.size()), output._allowance, _replayPrefetch);
 					synchronized(this) {
 						_pendingReaders--;
 						_activeReaders++;
+						output._active = true;
 					}
 					tryFinalize();
-					drive(output, reader);
+					StoreBackedStream<IndexedMatrixValue> replay = new StoreBackedStream<>(reader);
+					replay.setData(_data);
+					replay.setSubscriber(callback -> {
+						try(callback) {
+							if(callback.isFailure())
+								callback.get();
+							if(callback.isEos())
+								output.complete();
+							else
+								output.enqueueShared(callback);
+						}
+						catch(Throwable failure) {
+							reader.close();
+							output.fail(failure);
+						}
+					});
 				}
 				catch(Throwable failure) {
-					if(reader == null) {
-						allowance.shutdown();
-						failPendingReader(output, failure);
-					}
-					else {
-						reader.close();
-						try {
-							output.propagateFailure(DMLRuntimeException.of(failure));
-						}
-						finally {
-							finishReader(output);
-						}
-					}
+					output.fail(failure);
 				}
 			});
 		});
 	}
 
-	private void drive(DeferredReader output, OrderedMaterializedStoreReader<IndexedMatrixValue> reader) {
-		StoreBackedStream<IndexedMatrixValue> replay = new StoreBackedStream<>(reader);
-		replay.setData(_data);
-		replay.setSubscriber(callback -> {
-			if(callback.isFailure()) {
-				DMLRuntimeException failure;
-				try {
-					callback.get();
-					failure = new DMLRuntimeException("Materialized replay failed.");
-				}
-				catch(Throwable error) {
-					failure = DMLRuntimeException.of(error);
-				}
-				try {
-					output.propagateFailure(failure);
-				}
-				finally {
-					finishReader(output);
-				}
-			}
-			else if(callback.isEos()) {
-				try {
-					output.closeInput();
-				}
-				finally {
-					finishReader(output);
-				}
-			}
-			else {
-				OOCStream.QueueCallback<IndexedMatrixValue> retained = callback.keepOpen();
-				try {
-					output.enqueue(retained);
-				}
-				catch(Throwable failure) {
-					retained.close();
-					throw DMLRuntimeException.of(failure);
-				}
-			}
-		});
-	}
-
-	private void failPendingReader(DeferredReader output, Throwable error) {
-		if(!output.finish())
-			return;
+	private void finishReader(DeferredReader reader, DMLRuntimeException failure) {
+		List<DeferredReader> followers;
 		synchronized(this) {
-			_pendingReaders--;
+			if(reader._active)
+				_activeReaders--;
+			else
+				_pendingReaders--;
+			_liveReaders.remove(reader);
+			if(_replayDriver == reader)
+				_replayDriver = null;
+			followers = List.copyOf(reader._followers);
+			reader._followers.clear();
 		}
-		try {
-			output.propagateFailure(DMLRuntimeException.of(error));
-		}
-		finally {
-			output.shutdownAllowance();
-			releaseConsumer();
-			tryFinalize();
-		}
-	}
-
-	private void finishReader(DeferredReader output) {
-		if(!output.finish())
-			return;
-		synchronized(this) {
-			_activeReaders--;
-		}
-		output.shutdownAllowance();
-		releaseConsumer();
-		tryFinalize();
-	}
-
-	private void releaseConsumer() {
+		for(DeferredReader follower : followers)
+			follower.finishLive(failure);
+		if(reader._livenessReader != null)
+			reader._livenessReader.close();
+		if(reader._allowance != null)
+			reader._allowance.shutdown();
 		_primitive.store().whenComplete((store, error) -> {
 			if(store != null)
 				store.close();
 		});
+		tryFinalize();
 	}
 
 	private void markMaterializationDone() {
@@ -280,20 +326,24 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		boolean close = false;
 		synchronized(this) {
 			store = _store;
-			if(!_deleteScheduled || _reservedReaders != 0 || _pendingReaders != 0)
+			if(!_deleteScheduled || _reservedReaders != 0 || _pendingReaders != 0 || _closed || store == null)
 				return;
-			if(store != null && !_readersSealed) {
-				_readersSealed = true;
+			if(!store.readersSealed().isDone()) {
+				if(_sealingReaders)
+					return;
+				_sealingReaders = true;
 				seal = true;
 			}
-			if(_materializationDone && _activeReaders == 0 && !_closed) {
+			else if(_materializationDone && _activeReaders == 0) {
 				_closed = true;
-				close = store != null;
+				close = true;
 			}
 		}
-		if(seal)
+		if(seal) {
+			store.readersSealed().whenComplete((ignored, error) -> tryFinalize());
 			store.sealReaders();
-		if(close)
+		}
+		else if(close)
 			store.close();
 	}
 
@@ -363,24 +413,47 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		return _primitive;
 	}
 
-	private static final class DeferredReader extends SubscribableTaskQueue<IndexedMatrixValue> {
-		private final MaterializedStoreStreamable _owner;
-		private final AtomicBoolean _activated;
-		private final AtomicBoolean _finished;
-		private final ArrayDeque<Integer> _liveIndices;
-		private final ArrayDeque<LiveRequest> _liveInFlight;
-		private final AtomicBoolean _livePumping;
-		private volatile boolean _live;
-		private volatile boolean _liveSourceDone;
-		private volatile SyncMemoryAllowance _allowance;
+	private final class DeferredReader extends SubscribableTaskQueue<IndexedMatrixValue>
+		implements MaterializedStore.Liveness {
+		private final OOCAccessPattern _pattern;
+		private final boolean _streaming;
+		private final AtomicBoolean _activated = new AtomicBoolean();
+		private final AtomicBoolean _finished = new AtomicBoolean();
+		private final AtomicBoolean _pumping = new AtomicBoolean();
+		private final AtomicInteger _pendingReplay = new AtomicInteger();
+		private final AtomicInteger _pendingLive = new AtomicInteger();
+		private final IntArrayList _delivered = new IntArrayList();
+		private final List<DeferredReader> _followers = new ArrayList<>();
+		private final BitSet _consumed = new BitSet();
+		private IndexedMaterializedStoreReader<IndexedMatrixValue> _livenessReader;
+		private IntArrayList _replayLog;
+		private int _replayPosition;
+		private int _replayEnd;
+		private boolean _active;
+		private boolean _driver;
+		private volatile boolean _liveDone;
+		private SyncMemoryAllowance _allowance;
 
-		private DeferredReader(MaterializedStoreStreamable owner) {
-			_owner = owner;
-			_activated = new AtomicBoolean();
-			_finished = new AtomicBoolean();
-			_liveIndices = new ArrayDeque<>();
-			_liveInFlight = new ArrayDeque<>();
-			_livePumping = new AtomicBoolean();
+		private DeferredReader(OOCAccessPattern pattern, boolean streaming) {
+			CacheableData<?> data = MaterializedStoreStreamable.this._data;
+			DataCharacteristics dc = data == null ? null : data.getDataCharacteristics();
+			boolean singleBand = dc != null && dc.dimsKnown()
+				&& (dc.getNumRowBlocks() == 1 || dc.getNumColBlocks() == 1);
+			_pattern = singleBand && (pattern == OOCAccessPattern.ROW_MAJOR || pattern == OOCAccessPattern.COL_MAJOR)
+				? OOCAccessPattern.ANY : pattern;
+			_streaming = streaming && (_pattern == OOCAccessPattern.ANY
+				|| _pattern == (_layout == OOCStoreLayout.ROW_MAJOR ? OOCAccessPattern.ROW_MAJOR
+					: OOCAccessPattern.COL_MAJOR));
+		}
+
+		@Override
+		public synchronized boolean needs(int index) {
+			return index >= 0 && !_consumed.get(index);
+		}
+
+		@Override
+		public synchronized void consumed(int index) {
+			_consumed.set(index);
 		}
 
 		@Override
@@ -401,265 +474,126 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			return super.dequeueCB();
 		}
 
-		private void setLive(boolean live) {
-			_live = live;
-		}
-
-		private synchronized void setAllowance(SyncMemoryAllowance allowance) {
-			_allowance = allowance;
-		}
-
-		private synchronized void shutdownAllowance() {
-			if(_allowance != null) {
-				_allowance.shutdown();
-				_allowance = null;
-			}
+		private void activate() {
+			if(!_activated.compareAndSet(false, true))
+				return;
+			if(_streaming)
+				openStreamingReader(this);
+			else
+				openReader(this);
+			_primitive.startOnDemand();
 		}
 
 		private void acceptLive(QueueCallback<IndexedMatrixValue> callback) {
-			if(callback.isFailure()) {
-				DMLRuntimeException failure;
-				try(callback) {
-					callback.get();
-					failure = new DMLRuntimeException("Live source materialization failed.");
+			try {
+				if(!_finished.get())
+					enqueueShared(callback);
+			}
+			catch(Throwable error) {
+				fail(error);
+			}
+			finally {
+				_pendingLive.decrementAndGet();
+				pumpReplay();
+			}
+		}
+
+		private void enqueueShared(QueueCallback<IndexedMatrixValue> callback) {
+			QueueCallback<IndexedMatrixValue> retained = callback.keepOpen();
+			try {
+				enqueue(retained);
+			}
+			catch(Throwable error) {
+				retained.close();
+				throw error;
+			}
+			if(_livenessReader != null)
+				_livenessReader.consumed(((MaterializedCallback<?>) callback).publishedIndex());
+		}
+
+		private void finishLive(DMLRuntimeException failure) {
+			if(failure != null)
+				fail(failure);
+			else {
+				_liveDone = true;
+				pumpReplay();
+			}
+		}
+
+		private void pumpReplay() {
+			do {
+				if(!_pumping.compareAndSet(false, true))
+					return;
+				try {
+					if(_allowance == null && _replayPosition < _replayEnd)
+						_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.getSource(), _replayMemory);
+					while(!_finished.get() && _pendingReplay.get() < _replayPrefetch && _replayPosition < _replayEnd) {
+						int index;
+						synchronized(MaterializedStoreStreamable.this) {
+							index = _replayLog.getInt(_replayPosition++);
+						}
+						_pendingReplay.incrementAndGet();
+						try {
+							_store.requestPublished(index, _allowance).whenComplete((lease, error) -> {
+								try {
+									if(error != null)
+										throw DMLRuntimeException.of(error);
+									try(QueueCallback<IndexedMatrixValue> callback = new MaterializedCallback<>(lease, index, _store)) {
+										if(!_finished.get()) {
+											if(_driver)
+												forwardReplay(this, callback);
+											else
+												enqueueShared(callback);
+										}
+									}
+								}
+								catch(Throwable failure) {
+									fail(failure);
+								}
+								finally {
+									_pendingReplay.decrementAndGet();
+									pumpReplay();
+								}
+							});
+						}
+						catch(Throwable failure) {
+							_pendingReplay.decrementAndGet();
+							fail(failure);
+						}
+					}
+					if(!_finished.get() && _liveDone && _replayPosition == _replayEnd
+						&& _pendingReplay.get() == 0 && _pendingLive.get() == 0)
+						complete();
 				}
-				catch(Throwable error) {
-					failure = DMLRuntimeException.of(error);
+				finally {
+					_pumping.set(false);
 				}
+			}
+			while(!_finished.get() && (_pendingReplay.get() < _replayPrefetch && _replayPosition < _replayEnd
+				|| _liveDone && _pendingReplay.get() == 0 && _pendingLive.get() == 0));
+		}
+
+		private void complete() {
+			if(_finished.compareAndSet(false, true)) {
+				try {
+					closeInput();
+				}
+				finally {
+					finishReader(this, null);
+				}
+			}
+		}
+
+		private void fail(Throwable error) {
+			if(_finished.compareAndSet(false, true)) {
+				DMLRuntimeException failure = DMLRuntimeException.of(error);
 				try {
 					propagateFailure(failure);
 				}
 				finally {
-					_owner.finishReader(this);
-				}
-				return;
-			}
-			if(callback.isEos()) {
-				callback.close();
-				_liveSourceDone = true;
-				pumpLive();
-				return;
-			}
-			MaterializedCallback<?> published = callback instanceof MaterializedCallback<?> mc ? mc : null;
-			int index = published != null ? published.publishedIndex() : -1;
-			MaterializedStore<IndexedMatrixValue> store = _owner.storeIfPresent();
-			BlockEntry entry = published != null ? published.pinnedEntry() : null;
-			if(index < 0 || store == null || entry == null) {
-				QueueCallback<IndexedMatrixValue> retained = callback.keepOpen();
-				try {
-					enqueue(retained);
-					retained = null;
-				}
-				finally {
-					if(retained != null)
-						retained.close();
-				}
-				return;
-			}
-			store.cache().reference(entry);
-			synchronized(_liveIndices) {
-				_liveIndices.addLast(index);
-			}
-			pumpLive();
-		}
-
-		private Integer pollLive() {
-			synchronized(_liveIndices) {
-				return _liveIndices.pollFirst();
-			}
-		}
-
-		private int inFlightSize() {
-			synchronized(_liveInFlight) {
-				return _liveInFlight.size();
-			}
-		}
-
-		private boolean liveHeadReady() {
-			synchronized(_liveInFlight) {
-				LiveRequest head = _liveInFlight.peekFirst();
-				return head != null && head.future.isDone();
-			}
-		}
-
-		private boolean liveIndicesEmpty() {
-			synchronized(_liveIndices) {
-				return _liveIndices.isEmpty();
-			}
-		}
-
-		private void pumpLive() {
-			do {
-				if(!_livePumping.compareAndSet(false, true))
-					return;
-				try {
-					drainLive();
-				}
-				finally {
-					_livePumping.set(false);
+					finishReader(this, failure);
 				}
 			}
-			while(hasLiveWork());
-		}
-
-		private boolean hasLiveWork() {
-			return (_activated.get() && (liveHeadReady()
-				|| (inFlightSize() < _owner._replayPrefetch && !liveIndicesEmpty()))) || liveFinished();
-		}
-
-		private boolean liveFinished() {
-			return _liveSourceDone && liveIndicesEmpty() && inFlightSize() == 0 && !_finished.get();
-		}
-
-		private void drainLive() {
-			MaterializedStore<IndexedMatrixValue> store = _owner.storeIfPresent();
-			if(store != null && _activated.get()) {
-				ensureAllowance();
-				deliverLive(store);
-				while(inFlightSize() < _owner._replayPrefetch) {
-					Integer index = pollLive();
-					if(index == null)
-						break;
-					if(!issueLive(store, index))
-						return;
-				}
-				deliverLive(store);
-			}
-			if(liveFinished())
-				closeLive();
-		}
-
-		private boolean issueLive(MaterializedStore<IndexedMatrixValue> store, int index) {
-			OOCFuture<StoreLease<IndexedMatrixValue>> future;
-			try {
-				StoreLease<IndexedMatrixValue> resident = store.requestPublishedIfResident(index, _allowance);
-				future = resident != null ? OOCFuture.completed(resident)
-					: store.requestPublished(index, _allowance);
-			}
-			catch(Throwable failure) {
-				store.cache().dereference(new BlockKey(store.streamId(), index));
-				failLive(failure);
-				return false;
-			}
-			synchronized(_liveInFlight) {
-				_liveInFlight.addLast(new LiveRequest(index, future));
-			}
-			future.whenComplete((ignored, error) -> pumpLive());
-			return true;
-		}
-
-		private void deliverLive(MaterializedStore<IndexedMatrixValue> store) {
-			while(true) {
-				LiveRequest head;
-				synchronized(_liveInFlight) {
-					head = _liveInFlight.peekFirst();
-					if(head == null || !head.future.isDone())
-						return;
-					_liveInFlight.pollFirst();
-				}
-				try {
-					StoreLease<IndexedMatrixValue> lease = head.future.get();
-					if(lease == null)
-						throw new DMLRuntimeException(
-							"Live block " + head.index + " vanished before it was read.");
-					enqueueLive(lease, head.index);
-				}
-				catch(InterruptedException interrupted) {
-					Thread.currentThread().interrupt();
-					abandonLive(store, interrupted);
-					return;
-				}
-				catch(ExecutionException failure) {
-					abandonLive(store, failure.getCause());
-					return;
-				}
-				catch(Throwable failure) {
-					abandonLive(store, failure);
-					return;
-				}
-				finally {
-					store.cache().dereference(new BlockKey(store.streamId(), head.index));
-				}
-			}
-		}
-
-		/** Releases everything still queued for this reader before failing it, so a failed query drops its pins. */
-		private void abandonLive(MaterializedStore<IndexedMatrixValue> store, Throwable error) {
-			ArrayDeque<LiveRequest> pending = new ArrayDeque<>();
-			synchronized(_liveInFlight) {
-				pending.addAll(_liveInFlight);
-				_liveInFlight.clear();
-			}
-			for(LiveRequest request : pending)
-				request.future.whenComplete((lease, ignored) -> {
-					if(lease != null)
-						lease.close();
-					store.cache().dereference(new BlockKey(store.streamId(), request.index));
-				});
-			Integer index;
-			while((index = pollLive()) != null)
-				store.cache().dereference(new BlockKey(store.streamId(), index));
-			failLive(error);
-		}
-
-		private static final class LiveRequest {
-			private final int index;
-			private final OOCFuture<StoreLease<IndexedMatrixValue>> future;
-
-			private LiveRequest(int index, OOCFuture<StoreLease<IndexedMatrixValue>> future) {
-				this.index = index;
-				this.future = future;
-			}
-		}
-
-		private void enqueueLive(StoreLease<IndexedMatrixValue> lease, int index) {
-			QueueCallback<IndexedMatrixValue> callback = new MaterializedCallback<>(lease, index,
-				_owner.storeIfPresent());
-			try {
-				enqueue(callback);
-				callback = null;
-			}
-			finally {
-				if(callback != null)
-					callback.close();
-			}
-		}
-
-		private synchronized void ensureAllowance() {
-			if(_allowance == null)
-				_allowance = new SyncMemoryAllowance(GlobalMemoryBroker.getSource(), _owner._replayMemory);
-		}
-
-		private void closeLive() {
-			try {
-				closeInput();
-			}
-			finally {
-				_owner.finishReader(this);
-			}
-		}
-
-		private void failLive(Throwable error) {
-			try {
-				propagateFailure(DMLRuntimeException.of(error));
-			}
-			finally {
-				_owner.finishReader(this);
-			}
-		}
-
-		private void activate() {
-			if(!_activated.compareAndSet(false, true))
-				return;
-			if(!_live)
-				_owner.openReader(this);
-			else
-				pumpLive();
-			_owner.startMaterialization();
-		}
-
-		private boolean finish() {
-			return _finished.compareAndSet(false, true);
 		}
 	}
 }

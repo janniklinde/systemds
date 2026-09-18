@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
+import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
@@ -83,6 +84,55 @@ public class MaterializedStoreTest {
 		_producer.destroy();
 		_materializerAllowance.destroy();
 		_readerAllowance.destroy();
+	}
+
+	@Test
+	public void testClosingLiveReaderReclaimsPublishedPrefix() {
+		AtomicReference<MaterializedCallback<IndexedMatrixValue>> published = new AtomicReference<>();
+		OOCStreamMaterializer materializer = new OOCStreamMaterializer(_store,
+			indexes -> (int) indexes.getRowIndex() - 1, _materializerAllowance, List.of(callback -> {
+				if(!callback.isEos()) {
+					@SuppressWarnings("unchecked")
+					MaterializedCallback<IndexedMatrixValue> retained =
+						(MaterializedCallback<IndexedMatrixValue>) callback.keepOpen();
+					published.set(retained);
+				}
+			}));
+		IndexedMaterializedStoreReader<IndexedMatrixValue> reader =
+			_store.openLiveIndexedReader(new CountingLiveness(1, 1));
+		_store.sealReaders();
+		try {
+			materializer.accept(new OOCStream.SimpleQueueCallback<>(tile(0, 7d), null));
+			Assert.assertEquals(1, published.get().pinnedEntry().getReferenceCount());
+			reader.close();
+			Assert.assertEquals(0, published.get().pinnedEntry().getReferenceCount());
+			Assert.assertEquals(7d, published.get().get().getValue().get(0, 0), 0);
+		}
+		finally {
+			if(published.get() != null)
+				published.get().close();
+			reader.close();
+		}
+		materializer.accept(OOCStream.eos(null));
+	}
+
+	@Test
+	public void testClosedLiveReaderReclaimsOutOfOrderPublications() {
+		AtomicReference<BlockEntry> latest = new AtomicReference<>();
+		OOCStreamMaterializer materializer = new OOCStreamMaterializer(_store,
+			indexes -> (int) indexes.getRowIndex() - 1, _materializerAllowance, List.of(callback -> {
+				if(!callback.isEos())
+					latest.set(((MaterializedCallback<?>) callback).pinnedEntry());
+			}));
+		IndexedMaterializedStoreReader<IndexedMatrixValue> reader =
+			_store.openLiveIndexedReader(new CountingLiveness(2, 1));
+		_store.sealReaders();
+		materializer.accept(new OOCStream.SimpleQueueCallback<>(tile(1, 7d), null));
+		reader.close();
+		Assert.assertEquals(0, latest.get().getReferenceCount());
+		materializer.accept(new OOCStream.SimpleQueueCallback<>(tile(0, 9d), null));
+		Assert.assertEquals(0, latest.get().getReferenceCount());
+		materializer.accept(OOCStream.eos(null));
 	}
 
 	@Test

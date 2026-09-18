@@ -102,8 +102,30 @@ public class HopRewriteUtils {
 
 	public static List<Hop> getBandFanoutConsumers(Hop tee, Direction direction) {
 		List<Hop> consumers = new ArrayList<>();
+		if(direction == Direction.Row && tee.getParent().size() == 2
+			&& tee.getParent().stream().anyMatch(HopRewriteUtils::isTransposeOperation)
+			&& tee.getParent().stream().anyMatch(parent -> parent instanceof AggUnaryOp
+				&& ((AggUnaryOp) parent).getDirection() == Direction.Col
+				&& ((AggUnaryOp) parent).getOp() == AggOp.SUM))
+			consumers.addAll(tee.getParent());
 		for(Hop parent : tee.getParent()) {
-			if(!isBinary(parent, OpOp2.MULT, OpOp2.DIV, OpOp2.PLUS, OpOp2.MINUS)
+			if(direction == Direction.Row && isMatrixMultiply(parent) && parent.getInput(1) == tee) {
+				Hop left = parent.getInput(0);
+				while(isData(left, OpOpData.TEE))
+					left = left.getInput(0);
+				if(isTransposeOperation(left) && left.dimsKnown() && tee.dimsKnown()
+					&& left.getDim1() <= tee.getBlocksize()) {
+					List<Hop> aligned = new ArrayList<>();
+					if(collectRowBandConsumers(left.getInput(0), tee, aligned) && !aligned.isEmpty()) {
+						for(Hop consumer : aligned)
+							if(!consumers.contains(consumer))
+								consumers.add(consumer);
+						if(!consumers.contains(parent))
+							consumers.add(parent);
+					}
+				}
+			}
+			if(!isBinary(parent, OpOp2.MULT, OpOp2.DIV, OpOp2.PLUS, OpOp2.MINUS, OpOp2.LESSEQUAL, OpOp2.GREATEREQUAL)
 				|| parent.getInput(0) != tee)
 				continue;
 			Hop summary = parent.getInput(1);
@@ -118,12 +140,51 @@ public class HopRewriteUtils {
 				}
 				if(source != tee || !tee.getParent().contains(consumer))
 					continue;
-				consumers.add(parent);
+				if(!consumers.contains(parent))
+					consumers.add(parent);
 				if(!consumers.contains(consumer))
 					consumers.add(consumer);
 			}
 		}
 		return consumers;
+	}
+
+	private static boolean collectRowBandConsumers(Hop hop, Hop source, List<Hop> consumers) {
+		if(isData(hop, OpOpData.TEE))
+			return collectRowBandConsumers(hop.getInput(0), source, consumers);
+		if(!hop.dimsKnown() || hop.getDim1() != source.getDim1())
+			return false;
+		if(isMatrixMultiply(hop)) {
+			Hop right = hop.getInput(1);
+			if(!right.dimsKnown() || right.getDim2() > source.getBlocksize()
+				|| containsInput(right, source))
+				return false;
+		}
+		else if(hop instanceof AggUnaryOp) {
+			if(((AggUnaryOp) hop).getDirection() != Direction.Row)
+				return false;
+		}
+		else if(!isBinary(hop, OpOp2.MULT, OpOp2.DIV, OpOp2.PLUS, OpOp2.MINUS, OpOp2.LESSEQUAL,
+			OpOp2.GREATEREQUAL) && !isUnary(hop, OpOp1.POW2))
+			return false;
+		boolean derived = false;
+		for(int i = 0; i < hop.getInput().size(); i++) {
+			Hop input = hop.getInput(i);
+			if(input == source) {
+				if(!consumers.contains(hop))
+					consumers.add(hop);
+				derived = true;
+			}
+			else if(containsInput(input, source)) {
+				if(!collectRowBandConsumers(input, source, consumers))
+					return false;
+				derived = true;
+			}
+			else if(!isMatrixMultiply(hop) && input.getDataType() == DataType.MATRIX
+				&& (!input.dimsKnown() || input.getDim1() != 1))
+				return false;
+		}
+		return derived;
 	}
 
 	public static Direction getBandStreamingDirection(Hop left, Hop right) {
@@ -138,7 +199,8 @@ public class HopRewriteUtils {
 		Direction direction = aggregate.getDirection();
 		while(source != null && source != left)
 			source = getBandStreamingInput(source, direction);
-		return source == left && (aggregate.getOp() == AggOp.SUM || aggregate.getOp() == AggOp.SUM_SQ)
+		return source == left && (aggregate.getOp() == AggOp.SUM || aggregate.getOp() == AggOp.SUM_SQ
+			|| aggregate.getOp() == AggOp.MIN || aggregate.getOp() == AggOp.MAX)
 			&& (direction == Direction.Row || direction == Direction.Col) ? direction : null;
 	}
 

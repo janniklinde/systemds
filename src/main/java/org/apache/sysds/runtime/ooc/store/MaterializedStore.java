@@ -48,6 +48,7 @@ public final class MaterializedStore<T extends SpillableObject> {
 	private final long _streamId;
 	private final ArrayList<StoreReader> _registeredReaders;
 	private final BitSet _forgotten;
+	private final BitSet _publishedIndexes;
 	private final AtomicInteger _published;
 	private final AtomicInteger _publishedCount;
 	private final OOCFuture<Void> _completion;
@@ -84,6 +85,7 @@ public final class MaterializedStore<T extends SpillableObject> {
 		_streamId = streamId;
 		_registeredReaders = new ArrayList<>();
 		_forgotten = new BitSet();
+		_publishedIndexes = new BitSet();
 		_published = new AtomicInteger();
 		_publishedCount = new AtomicInteger();
 		_completion = new OOCFuture<>();
@@ -133,6 +135,9 @@ public final class MaterializedStore<T extends SpillableObject> {
 			throw new IllegalStateException("Store no longer accepts published items");
 		if(index < 0 || index == Integer.MAX_VALUE)
 			throw new IndexOutOfBoundsException("Invalid index: " + index);
+		synchronized(this) {
+			_publishedIndexes.set(index);
+		}
 		_publishedCount.incrementAndGet();
 		updatePublished(index + 1);
 		return StoreLease.createAsync(entry, () -> {
@@ -424,7 +429,7 @@ public final class MaterializedStore<T extends SpillableObject> {
 	}
 
 	private synchronized boolean markForgotten(int index) {
-		if(_forgotten.get(index))
+		if(!_publishedIndexes.get(index) || _forgotten.get(index))
 			return false;
 		_forgotten.set(index);
 		return true;
@@ -433,7 +438,7 @@ public final class MaterializedStore<T extends SpillableObject> {
 	private void forgetAfterReaderClose() {
 		if(_closed || !_readersSealed)
 			return;
-		for(int i = 0; i < _completedSize; i++)
+		for(int i = 0; i < size(); i++)
 			tryForget(i);
 	}
 

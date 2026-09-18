@@ -35,9 +35,11 @@ import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.store.CountingLiveness;
+import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class MMultOOCInstruction extends ComputationOOCInstruction {
+	private boolean _bandStreaming;
 
 
 	protected MMultOOCInstruction(OOCType type, Operator op, CPOperand in1, CPOperand in2, CPOperand out, String opcode, String istr) {
@@ -46,7 +48,7 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 
 	public static MMultOOCInstruction parseInstruction(String str) {
 		String[] parts = InstructionUtils.getInstructionPartsWithValueType(str);
-		InstructionUtils.checkNumFields(parts, 4);
+		InstructionUtils.checkNumFields(parts, parts.length == 6 ? 5 : 4);
 		String opcode = parts[0];
 		CPOperand in1 = new CPOperand(parts[1]); // the larget matrix (streamed)
 		CPOperand in2 = new CPOperand(parts[2]); // the small vector (in-memory)
@@ -55,7 +57,9 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 		AggregateOperator agg = new AggregateOperator(0, Plus.getPlusFnObject());
 		AggregateBinaryOperator ba = new AggregateBinaryOperator(Multiply.getMultiplyFnObject(), agg);
 
-		return new MMultOOCInstruction(OOCType.MAPMM, ba, in1, in2, out, opcode, str);
+		MMultOOCInstruction instruction = new MMultOOCInstruction(OOCType.MAPMM, ba, in1, in2, out, opcode, str);
+		instruction._bandStreaming = parts.length == 6 && parts[5].equals("bandStreaming=Row");
+		return instruction;
 	}
 
 	@Override
@@ -76,6 +80,22 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 			if(vin.getDataCharacteristics().getCols() == 1 && mdc.getNonZeros() >= 0 &&
 				MatrixBlock.evalSparseFormatInMemory(mdc)) {
 				OOCInstructionUtils.sparseMatrixVectorMultiply(min.getStreamable(), vin.getStreamable(), out,
+					getContext());
+			}
+			else if(_bandStreaming && mdc.getNumRowBlocks() == 1 && vdc.getCols() > 1) {
+				OOCStream<IndexedMatrixValue> partials = createWritableStream();
+				partials.setData(vin);
+				OOCInstructionUtils.broadcastMap(vin.getStreamable(), min.getStreamable(), partials,
+					true, true, true, (right, left) -> {
+						MatrixBlock leftBlock = (MatrixBlock) left.getValue();
+						MatrixBlock rightBlock = (MatrixBlock) right.getValue();
+						MatrixBlock partial = leftBlock.aggregateBinaryOperations(leftBlock, rightBlock,
+							new MatrixBlock(), (AggregateBinaryOperator) _optr);
+						return new IndexedMatrixValue(right.getIndexes(), partial);
+					}, getContext());
+				OOCInstructionUtils.groupedReduceIndexed(partials, out,
+					GroupedReduceOOCPrimitive.Grouping.COL_BLOCKS, value -> (MatrixBlock) value.getValue(),
+					(left, right) -> left.binaryOperations(plus, right, new MatrixBlock()), value -> value,
 					getContext());
 			}
 			else if(vin.getDataCharacteristics().getNumColBlocks() == 1) {

@@ -181,7 +181,6 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 
 		for(Hop hop : shared)
 			teeSharedHop(hop);
-		injectBandFanouts(roots);
 		return !shared.isEmpty();
 	}
 
@@ -283,8 +282,6 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 		}
 
 		removeRedundantTeeChains(sb);
-		if(sb.getHops() != null)
-			injectBandFanouts(sb.getHops());
 
 		return List.of(sb);
 	}
@@ -310,8 +307,6 @@ public class RewriteInjectOOCTee extends StatementBlockRewriteRule {
 
 		for (StatementBlock sb : sbs) {
 			removeRedundantTeeChains(sb);
-			if(sb.getHops() != null)
-				injectBandFanouts(sb.getHops());
 		}
 
 		return sbs;

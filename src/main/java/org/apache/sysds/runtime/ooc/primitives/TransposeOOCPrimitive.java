@@ -42,6 +42,11 @@ public class TransposeOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	protected boolean isStreamingInput(int index) {
+		return true;
+	}
+
+	@Override
 	protected void inferPatternsInternal() {
 		OOCPrimitive dependency = getInputDependency(0);
 		_pattern = (dependency == null ? OOCAccessPattern.ANY : dependency.getAccessPattern()).transposed();

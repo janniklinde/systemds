@@ -62,6 +62,7 @@ import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
+import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastStreamingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.FanoutOOCPrimitive;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
@@ -78,6 +79,31 @@ import org.junit.Test;
 import org.mockito.Mockito;
 
 public class OOCInstructionUtilsTest {
+	@Test
+	public void testBandFanoutForRowLocalCentroidUpdate() {
+		Hop x = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
+			40000, 200, -1, 100);
+		Hop tee = HopRewriteUtils.createDataOp("tee", x, OpOpData.TEE);
+		Hop c = new DataOp("Ct", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
+			200, 10, -1, 100);
+		Hop d = HopRewriteUtils.createMatrixMultiply(tee, c);
+		Hop mins = HopRewriteUtils.createAggUnaryOp(d, AggOp.MIN, Direction.Row);
+		Hop p = HopRewriteUtils.createBinary(d, mins, OpOp2.LESSEQUAL);
+		Hop normalized = HopRewriteUtils.createBinary(p,
+			HopRewriteUtils.createAggUnaryOp(p, AggOp.SUM, Direction.Row), OpOp2.DIV);
+		Hop assignments = HopRewriteUtils.createDataOp("P", normalized, OpOpData.TEE);
+		Hop transposed = HopRewriteUtils.createTranspose(assignments);
+		HopRewriteUtils.createAggUnaryOp(assignments, AggOp.SUM, Direction.Col);
+		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandFanoutDirection(assignments));
+		Hop update = HopRewriteUtils.createMatrixMultiply(transposed, tee);
+		Assert.assertEquals(List.of(d, update), HopRewriteUtils.getBandFanoutConsumers(tee, Direction.Row));
+		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandFanoutDirection(tee));
+		Hop global = HopRewriteUtils.createAggUnaryOp(d, AggOp.SUM, Direction.Col);
+		Hop invalid = HopRewriteUtils.createBinary(d, global, OpOp2.MULT);
+		HopRewriteUtils.createMatrixMultiply(HopRewriteUtils.createTranspose(invalid), tee);
+		Assert.assertEquals(List.of(d, update), HopRewriteUtils.getBandFanoutConsumers(tee, Direction.Row));
+	}
+
 	@Test
 	public void testBandFanoutThroughSkinnyMatmulAndSquare() {
 		Hop x = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
@@ -341,6 +367,28 @@ public class OOCInstructionUtilsTest {
 	}
 
 	@Test
+	public void testBroadcastSelectsStreamingWhenRequired() {
+		for(boolean row : new boolean[] {true, false}) {
+			for(boolean requireStreaming : new boolean[] {true, false}) {
+				ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+				MatrixObject matrix = matrixObject(4, 4, 2);
+				MatrixObject summary = matrixObject(row ? 4 : 1, row ? 1 : 4, 2);
+				MatrixObject output = matrixObject(4, 4, 2);
+				matrix.setStreamHandle(new SubscribableTaskQueue<>());
+				summary.setStreamHandle(new SubscribableTaskQueue<>());
+				ec.setVariable("X", matrix);
+				ec.setVariable("S", summary);
+				ec.setVariable("Y", output);
+				String streaming = requireStreaming ? "°band=" + (row ? "Row" : "Col") : "";
+				BinaryOOCInstruction.parseInstruction("OOC°*°X·MATRIX·FP64°S·MATRIX·FP64°Y·MATRIX·FP64" + streaming)
+					.processInstruction(ec);
+				Assert.assertEquals(requireStreaming ? BroadcastStreamingOOCPrimitive.class : BroadcastOOCPrimitive.class,
+					output.getStreamHandle().getPrimitive().getClass());
+			}
+		}
+	}
+
+	@Test
 	public void testStreamingBroadcastEmitsBeforeInputCompletion() throws Exception {
 		OOCCacheManager.reset();
 		SyncMemoryAllowance parkedOwner = new SyncMemoryAllowance(GlobalMemoryBroker.get());
@@ -436,7 +484,7 @@ public class OOCInstructionUtilsTest {
 			HopRewriteUtils.createAggUnaryOp(x, AggOp.SUM, Direction.Col)));
 		Assert.assertNull(HopRewriteUtils.getBandStreamingDirection(x,
 			HopRewriteUtils.createAggUnaryOp(x, AggOp.SUM, Direction.RowCol)));
-		Assert.assertNull(HopRewriteUtils.getBandStreamingDirection(x,
+		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandStreamingDirection(x,
 			HopRewriteUtils.createAggUnaryOp(x, AggOp.MIN, Direction.Row)));
 		Hop other = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
 			40000, 200, -1, 100);

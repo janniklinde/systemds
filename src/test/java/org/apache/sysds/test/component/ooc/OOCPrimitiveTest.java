@@ -20,12 +20,14 @@
 package org.apache.sysds.test.component.ooc;
 
 import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.common.Types.FileFormat;
@@ -47,6 +49,7 @@ import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
+import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
@@ -55,6 +58,7 @@ import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.store.CountingLiveness;
 import org.apache.sysds.runtime.ooc.store.IndexedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
+import org.apache.sysds.runtime.ooc.store.MaterializedCallback;
 import org.apache.sysds.runtime.ooc.stream.FilteredOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
@@ -64,6 +68,205 @@ import org.junit.Assert;
 import org.junit.Test;
 
 public class OOCPrimitiveTest {
+	@Test(timeout = 20000)
+	public void testLateStreamingMaterializedReader() {
+		OOCCacheManager.reset();
+		try {
+			MatrixObject data = new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(3, 1, 1), FileFormat.BINARY));
+			SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
+			source.setData(data);
+			MaterializedStoreStreamable handle = new MaterializedStoreStreamable(source, data);
+			for(int i = 0; i < 3; i++)
+				handle.reserveLazyHandle();
+			List<Double> first = new ArrayList<>();
+			List<Double> late = new ArrayList<>();
+			List<Double> independent = new ArrayList<>();
+			CountDownLatch done = new CountDownLatch(3);
+			OOCStream<IndexedMatrixValue> a = handle.getReservedReadStream(OOCAccessPattern.ROW_MAJOR, true);
+			a.setSubscriber(callback -> collectValues(callback, first, done));
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(3, 1), new MatrixBlock(1, 1, 3d)));
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(1, 1, 1d)));
+			Assert.assertEquals(List.of(3d, 1d), first);
+			OOCStream<IndexedMatrixValue> b = handle.getReservedReadStream(OOCAccessPattern.COL_MAJOR, true);
+			b.setSubscriber(callback -> collectValues(callback, late, done));
+			OOCStream<IndexedMatrixValue> c = handle.getReservedReadStream(OOCAccessPattern.ROW_MAJOR, false);
+			c.setSubscriber(callback -> collectValues(callback, independent, done));
+			Assert.assertTrue(independent.isEmpty());
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(2, 1), new MatrixBlock(1, 1, 2d)));
+			source.closeInput();
+			try {
+				Assert.assertTrue(done.await(10, TimeUnit.SECONDS));
+			}
+			catch(InterruptedException error) {
+				throw new RuntimeException(error);
+			}
+			for(List<Double> values : List.of(first, late, independent)) {
+				Assert.assertEquals(3, values.size());
+				Assert.assertEquals(Set.of(1d, 2d, 3d), Set.copyOf(values));
+			}
+			handle.scheduleMaterializedStoreDeletion();
+		}
+		finally {
+			OOCCacheManager.reset();
+		}
+	}
+
+	@Test(timeout = 20000)
+	public void testLateStreamingReaderJoinsCompletedScan() throws InterruptedException {
+		OOCCacheManager.reset();
+		try {
+			MatrixObject data = new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(4, 1, 1), FileFormat.BINARY));
+			SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
+			source.setData(data);
+			MaterializedStoreStreamable handle = new MaterializedStoreStreamable(source, data);
+			for(int i = 0; i < 3; i++)
+				handle.reserveLazyHandle();
+			OOCStream<IndexedMatrixValue> initial = handle.getReservedReadStream(OOCAccessPattern.ROW_MAJOR, true);
+			CountDownLatch initialDone = new CountDownLatch(1);
+			initial.setSubscriber(callback -> collectValues(callback, new ArrayList<>(), initialDone));
+			for(int i = 1; i <= 4; i++)
+				source.enqueue(new IndexedMatrixValue(new MatrixIndexes(i, 1), new MatrixBlock(1, 1, (double) i)));
+			source.closeInput();
+			Assert.assertTrue(initialDone.await(5, TimeUnit.SECONDS));
+			CountDownLatch started = new CountDownLatch(1);
+			CountDownLatch resume = new CountDownLatch(1);
+			CountDownLatch done = new CountDownLatch(2);
+			List<Double> first = new ArrayList<>();
+			List<Double> late = new ArrayList<>();
+			OOCStream<IndexedMatrixValue> a = handle.getReservedReadStream(OOCAccessPattern.ROW_MAJOR, true);
+			Thread driver = new Thread(() -> a.setSubscriber(callback -> {
+				if(!callback.isEos() && !callback.isFailure() && first.isEmpty()) {
+					started.countDown();
+					try {
+						Assert.assertTrue(resume.await(5, TimeUnit.SECONDS));
+					}
+					catch(InterruptedException error) {
+						throw new RuntimeException(error);
+					}
+				}
+				collectValues(callback, first, done);
+			}));
+			driver.start();
+			Assert.assertTrue(started.await(5, TimeUnit.SECONDS));
+			OOCStream<IndexedMatrixValue> b = handle.getReservedReadStream(OOCAccessPattern.ROW_MAJOR, true);
+			b.setSubscriber(callback -> collectValues(callback, late, done));
+			resume.countDown();
+			Assert.assertTrue(done.await(10, TimeUnit.SECONDS));
+			driver.join(5000);
+			for(List<Double> values : List.of(first, late)) {
+				Assert.assertEquals(4, values.size());
+				Assert.assertEquals(Set.of(1d, 2d, 3d, 4d), Set.copyOf(values));
+			}
+			handle.scheduleMaterializedStoreDeletion();
+		}
+		finally {
+			OOCCacheManager.reset();
+		}
+	}
+
+	@Test(timeout = 20000)
+	public void testStreamingReaderReclaimsConsumedTilesBeforeEos() throws Exception {
+		OOCCacheManager.reset();
+		AtomicReference<OOCStream.QueueCallback<IndexedMatrixValue>> retained = new AtomicReference<>();
+		try {
+			MatrixObject data = new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(3, 1, 1), FileFormat.BINARY));
+			SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
+			source.setData(data);
+			MaterializedStoreStreamable handle = new MaterializedStoreStreamable(source, data);
+			handle.reserveLazyHandle();
+			handle.reserveLazyHandle();
+			CountDownLatch done = new CountDownLatch(2);
+			List<Double> first = new ArrayList<>();
+			List<Double> late = new ArrayList<>();
+			AtomicReference<BlockEntry> entry = new AtomicReference<>();
+			OOCStream<IndexedMatrixValue> a = handle.getReservedReadStream(OOCAccessPattern.ROW_MAJOR, true);
+			a.setSubscriber(callback -> {
+				if(!callback.isEos() && !callback.isFailure() && retained.get() == null) {
+					entry.set(((MaterializedCallback<?>) callback).pinnedEntry());
+					retained.set(callback.keepOpen());
+				}
+				collectValues(callback, first, done);
+			});
+			handle.scheduleMaterializedStoreDeletion();
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(3, 1), new MatrixBlock(1, 1, 3d)));
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(1, 1, 1d)));
+			Assert.assertEquals(1, entry.get().getReferenceCount());
+			OOCStream<IndexedMatrixValue> b = handle.getReservedReadStream(OOCAccessPattern.ROW_MAJOR, true);
+			Assert.assertEquals("An unstarted reader still needs the prefix", 1, entry.get().getReferenceCount());
+			b.setSubscriber(callback -> collectValues(callback, late, done));
+			for(int attempt = 0; attempt < 500 && entry.get().getReferenceCount() != 0; attempt++)
+				Thread.sleep(10);
+			Assert.assertEquals("Consumed history must be reclaimed before source EOS", 0,
+				entry.get().getReferenceCount());
+			Assert.assertTrue("Transferred callback ownership still pins the tile", entry.get().isPinned());
+			Assert.assertEquals(3d, retained.get().get().getValue().get(0, 0), 0);
+			retained.getAndSet(null).close();
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(2, 1), new MatrixBlock(1, 1, 2d)));
+			source.closeInput();
+			Assert.assertTrue(done.await(10, TimeUnit.SECONDS));
+			for(List<Double> values : List.of(first, late)) {
+				Assert.assertEquals(3, values.size());
+				Assert.assertEquals(Set.of(1d, 2d, 3d), Set.copyOf(values));
+			}
+		}
+		finally {
+			if(retained.get() != null)
+				retained.get().close();
+			OOCCacheManager.reset();
+		}
+	}
+
+	@Test(timeout = 20000)
+	public void testDiscardedReaderAllowsLiveTileReclamation() {
+		OOCCacheManager.reset();
+		try {
+			MatrixObject data = new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(1, 1, 1), FileFormat.BINARY));
+			SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
+			source.setData(data);
+			MaterializedStoreStreamable handle = new MaterializedStoreStreamable(source, data);
+			handle.reserveLazyHandle();
+			handle.reserveLazyHandle();
+			AtomicReference<BlockEntry> entry = new AtomicReference<>();
+			OOCStream<IndexedMatrixValue> reader = handle.getReservedReadStream(OOCAccessPattern.ROW_MAJOR, true);
+			reader.setSubscriber(callback -> {
+				try(callback) {
+					if(!callback.isEos()) {
+						entry.set(((MaterializedCallback<?>) callback).pinnedEntry());
+						Assert.assertEquals(1d, callback.get().getValue().get(0, 0), 0);
+					}
+				}
+			});
+			handle.scheduleMaterializedStoreDeletion();
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(1, 1, 1d)));
+			Assert.assertEquals(1, entry.get().getReferenceCount());
+			handle.discardHandle();
+			Assert.assertEquals(0, entry.get().getReferenceCount());
+			source.closeInput();
+		}
+		finally {
+			OOCCacheManager.reset();
+		}
+	}
+
+	private static void collectValues(OOCStream.QueueCallback<IndexedMatrixValue> callback,
+		List<Double> values, CountDownLatch done) {
+		try(callback) {
+			if(callback.isFailure())
+				callback.get();
+			if(callback.isEos())
+				done.countDown();
+			else {
+				synchronized(values) {
+					values.add(callback.get().getValue().get(0, 0));
+				}
+			}
+		}
+	}
+
 	@Test
 	public void testOutputTileEstimateUsesDenseUpperBound() {
 		MatrixCharacteristics dc = new MatrixCharacteristics(67_108_864, 1, 1_200_000, -1);

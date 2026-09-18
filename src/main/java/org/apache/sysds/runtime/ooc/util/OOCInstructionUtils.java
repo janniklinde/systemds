@@ -85,6 +85,7 @@ import org.apache.sysds.runtime.ooc.primitives.TSMMOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TransposeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.UncoordinatedDataGenOOCPrimitive;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
+import org.apache.sysds.runtime.ooc.store.CountingLiveness;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 import org.apache.sysds.runtime.ooc.store.PartitionedStoreStreamable;
@@ -292,11 +293,25 @@ public final class OOCInstructionUtils {
 			new BroadcastOOCPrimitive(streamed, broadcast, output, lookupRow, lookupCol, liveness, operation, context));
 	}
 
-	public static void bandStreamingBroadcast(OOCStreamable<IndexedMatrixValue> matrix,
+	public static void broadcastMap(OOCStreamable<IndexedMatrixValue> matrix,
 		OOCStreamable<IndexedMatrixValue> summaries, OOCStream<IndexedMatrixValue> output, boolean row,
+		boolean transposeSummary, boolean requireStreaming,
 		BiFunction<IndexedMatrixValue, IndexedMatrixValue, IndexedMatrixValue> operation, StreamContext context) {
-		output.assignPrimitive(new BroadcastStreamingOOCPrimitive(matrix, summaries, output, row, operation,
-			context));
+		if(requireStreaming) {
+			output.assignPrimitive(new BroadcastStreamingOOCPrimitive(matrix, summaries, output, row, transposeSummary,
+				operation, context));
+		}
+		else {
+			int blocks = Math.toIntExact(row ? matrix.getDataCharacteristics().getNumRowBlocks() :
+				matrix.getDataCharacteristics().getNumColBlocks());
+			int uses = Math.toIntExact(row ? matrix.getDataCharacteristics().getNumColBlocks() :
+				matrix.getDataCharacteristics().getNumRowBlocks());
+			ToLongFunction<IndexedMatrixValue> index = tile -> row ? tile.getIndexes().getRowIndex() :
+				tile.getIndexes().getColumnIndex();
+			indexedBroadcastMap(matrix, summaries, output, row != transposeSummary ? index : tile -> 1,
+				row != transposeSummary ? tile -> 1 : index, () -> new CountingLiveness(blocks, uses), operation,
+				context);
+		}
 	}
 
 	/**

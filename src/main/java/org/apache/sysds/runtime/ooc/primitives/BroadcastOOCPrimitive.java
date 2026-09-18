@@ -124,6 +124,11 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	protected boolean isStreamingInput(int index) {
+		return index == 0;
+	}
+
+	@Override
 	public List<OOCMaterializedInputRequest> requiredMaterializedInputs() {
 		List<OOCMaterializedInputRequest> requests = new ArrayList<>(_broadcasts.length);
 		for(int i = 0; i < _broadcasts.length; i++)
