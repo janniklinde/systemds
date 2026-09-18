@@ -36,6 +36,7 @@ import org.apache.sysds.runtime.matrix.operators.Operator;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.store.CountingLiveness;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.GeneralMMultOOCPrimitive;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 
 public class MMultOOCInstruction extends ComputationOOCInstruction {
@@ -81,6 +82,10 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 				MatrixBlock.evalSparseFormatInMemory(mdc)) {
 				OOCInstructionUtils.sparseMatrixVectorMultiply(min.getStreamable(), vin.getStreamable(), out,
 					getContext());
+			}
+			else if(GeneralMMultOOCPrimitive.shouldStream(mdc, vdc)) {
+				OOCInstructionUtils.matrixMultiply(min.getStreamable(), vin.getStreamable(), out,
+					(AggregateBinaryOperator) _optr, plus, getContext());
 			}
 			else if(_bandStreaming && mdc.getNumRowBlocks() == 1 && vdc.getCols() > 1) {
 				OOCStream<IndexedMatrixValue> partials = createWritableStream();

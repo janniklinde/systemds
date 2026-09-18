@@ -270,7 +270,8 @@ public final class OOCInstructionUtils {
 	public static void matrixMultiply(OOCStreamable<IndexedMatrixValue> left, OOCStreamable<IndexedMatrixValue> right,
 		OOCStream<IndexedMatrixValue> output, AggregateBinaryOperator multiply, BinaryOperator plus,
 		StreamContext context) {
-		output.assignPrimitive(new GeneralMMultOOCPrimitive(left, right, output, multiply, plus, context));
+		output.assignPrimitive(new GeneralMMultOOCPrimitive(left, right, output, multiply, plus,
+			GeneralMMultOOCPrimitive.shouldStream(left.getDataCharacteristics(), right.getDataCharacteristics()), context));
 	}
 
 	public static void sparseMatrixVectorMultiply(OOCStreamable<IndexedMatrixValue> matrix,

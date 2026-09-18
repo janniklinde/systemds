@@ -48,6 +48,7 @@ import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.ooc.AppendOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.BinaryOOCInstruction;
+import org.apache.sysds.runtime.instructions.ooc.MMultOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.CtableOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.DataGenOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
@@ -64,6 +65,7 @@ import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastStreamingOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.GeneralMMultOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.FanoutOOCPrimitive;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
@@ -364,6 +366,77 @@ public class OOCInstructionUtilsTest {
 			owner.destroy();
 			OOCCacheManager.reset();
 		}
+	}
+
+	@Test(timeout = 20000)
+	public void testStreamingMatmulCompletesTilesBeforeEos() throws Exception {
+		OOCCacheManager.reset();
+		try {
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			SubscribableTaskQueue<IndexedMatrixValue> left = new SubscribableTaskQueue<>();
+			SubscribableTaskQueue<IndexedMatrixValue> right = new SubscribableTaskQueue<>();
+			MatrixObject a = matrixObject(3, 5, 2);
+			MatrixObject b = matrixObject(5, 3, 2);
+			MatrixObject output = matrixObject(3, 3, 2);
+			a.setStreamHandle(left);
+			b.setStreamHandle(right);
+			ec.setVariable("A", a);
+			ec.setVariable("B", b);
+			ec.setVariable("Y", output);
+			MMultOOCInstruction.parseInstruction("OOC°ba+*°A·MATRIX·FP64°B·MATRIX·FP64°Y·MATRIX·FP64°1")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = output.getStreamHandle();
+			Assert.assertTrue(result.getPrimitive().requiredMaterializedInputs().isEmpty());
+			CountDownLatch emitted = new CountDownLatch(4);
+			CompletableFuture<Void> complete = new CompletableFuture<>();
+			result.setSubscriber(callback -> {
+				try(callback) {
+					if(callback.isFailure())
+						callback.get();
+					else if(callback.isEos())
+						complete.complete(null);
+					else {
+						MatrixBlock block = (MatrixBlock) callback.get().getValue();
+						for(int row = 0; row < block.getNumRows(); row++)
+							for(int col = 0; col < block.getNumColumns(); col++)
+								Assert.assertEquals(30, block.get(row, col), 0);
+						emitted.countDown();
+					}
+				}
+				catch(Throwable failure) {
+					complete.completeExceptionally(failure);
+				}
+			});
+			result.start();
+			for(int row = 1; row <= 2; row++)
+				for(int inner = 1; inner <= 3; inner++)
+					left.enqueue(new IndexedMatrixValue(new MatrixIndexes(row, inner),
+						new MatrixBlock(row == 2 ? 1 : 2, inner == 3 ? 1 : 2, 2d)));
+			for(int col = 2; col >= 1; col--)
+				for(int inner = 3; inner >= 1; inner--)
+					right.enqueue(new IndexedMatrixValue(new MatrixIndexes(inner, col),
+						new MatrixBlock(inner == 3 ? 1 : 2, col == 2 ? 1 : 2, 3d)));
+			Assert.assertTrue("Output waited for input EOS", emitted.await(10, TimeUnit.SECONDS));
+			Assert.assertFalse(complete.isDone());
+			left.closeInput();
+			right.closeInput();
+			complete.get(10, TimeUnit.SECONDS);
+		}
+		finally {
+			OOCCacheManager.reset();
+		}
+	}
+
+	@Test
+	public void testStreamingMatmulSizeSelection() {
+		Assert.assertTrue(GeneralMMultOOCPrimitive.shouldStream(new MatrixCharacteristics(5, 10000, 2),
+			new MatrixCharacteristics(10000, 7, 2)));
+		Assert.assertFalse(GeneralMMultOOCPrimitive.shouldStream(new MatrixCharacteristics(5, 100000000, 500),
+			new MatrixCharacteristics(100000000, 7, 500)));
+		Assert.assertFalse(GeneralMMultOOCPrimitive.shouldStream(new MatrixCharacteristics(1000000, 1000, 500),
+			new MatrixCharacteristics(1000, 1000000, 500)));
+		Assert.assertFalse(GeneralMMultOOCPrimitive.shouldStream(new MatrixCharacteristics(-1, 1000, 500),
+			new MatrixCharacteristics(1000, 10, 500)));
 	}
 
 	@Test

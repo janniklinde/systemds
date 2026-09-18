@@ -19,10 +19,12 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
+import java.util.BitSet;
 import java.util.List;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
@@ -36,22 +38,39 @@ import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.store.CountingLiveness;
 import org.apache.sysds.runtime.ooc.store.IndexedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
+import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
+import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable.InputView;
 import org.apache.sysds.runtime.ooc.store.StateTable;
 import org.apache.sysds.runtime.ooc.store.StoreLease;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
+import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
+import org.apache.sysds.runtime.ooc.util.StateTableUtils;
 
 public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _output;
 	private final AggregateBinaryOperator _multiply;
 	private final BinaryOperator _plus;
+	private final boolean _streaming;
+	private final Object _arrivalLock = new Object();
+	private final BitSet _leftArrived = new BitSet();
+	private final BitSet _rightArrived = new BitSet();
+	private final AtomicInteger _arrivals = new AtomicInteger(2);
+	private StateTable<IndexedMatrixValue> _leftTiles;
+	private StateTable<IndexedMatrixValue> _rightTiles;
+	private InputView _leftView;
+	private InputView _rightView;
+	private AtomicIntegerArray _leftUses;
+	private AtomicIntegerArray _rightUses;
+	private OOCStream<Integer> _matches;
 	private final AtomicBoolean _sourceComplete = new AtomicBoolean();
 	private final AtomicInteger _active = new AtomicInteger(1);
 	private MaterializedStore<IndexedMatrixValue> _leftStore;
@@ -70,15 +89,34 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 
 	public GeneralMMultOOCPrimitive(OOCStreamable<IndexedMatrixValue> left, OOCStreamable<IndexedMatrixValue> right,
 		OOCStreamable<IndexedMatrixValue> output, AggregateBinaryOperator multiply, BinaryOperator plus,
-		StreamContext context) {
+		boolean requireStreaming, StreamContext context) {
 		super(context, left, right);
 		_output = output;
 		_multiply = multiply;
 		_plus = plus;
+		_streaming = requireStreaming;
+	}
+
+	public static boolean shouldStream(DataCharacteristics left, DataCharacteristics right) {
+		if(!left.dimsKnown() || !right.dimsKnown() || left.getRows() <= 0 || left.getCols() <= 0 ||
+			right.getCols() <= 0 || left.getCols() != right.getRows() || left.getBlocksize() <= 0 ||
+			left.getBlocksize() != right.getBlocksize())
+			return false;
+		double outputBytes = 8d * left.getRows() * right.getCols();
+		double counterpartBytes = 8d * Math.min((double) left.getRows() * left.getCols(),
+			(double) right.getRows() * right.getCols());
+		return outputBytes + counterpartBytes <= GlobalMemoryBroker.get().getAllowedMemory() / 8d;
+	}
+
+	@Override
+	protected boolean isStreamingInput(int index) {
+		return _streaming;
 	}
 
 	@Override
 	public List<OOCMaterializedInputRequest> requiredMaterializedInputs() {
+		if(_streaming)
+			return List.of();
 		long innerBlocks = OOCUtils.getNumColBlocks(getInput(0).getDataCharacteristics());
 		return List.of(new OOCMaterializedInputRequest(0, OOCStoreLayout.ROW_MAJOR, 1,
 			(row, col) -> (row - 1) * innerBlocks + col - 1),
@@ -98,9 +136,9 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 		OOCPrimitive left = getInputDependency(0);
 		OOCPrimitive right = getInputDependency(1);
 		if(left != null)
-			left.requestPattern(OOCAccessPattern.ROW_MAJOR);
+			left.requestPattern(_streaming ? _pattern : OOCAccessPattern.ROW_MAJOR);
 		if(right != null)
-			right.requestPattern(OOCAccessPattern.COL_MAJOR);
+			right.requestPattern(_streaming ? _pattern : OOCAccessPattern.COL_MAJOR);
 	}
 
 	@Override
@@ -139,8 +177,144 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 				}
 			});
 
-		OOCFuture.allOf(List.of(getMaterializedInput(0), getMaterializedInput(1)), MaterializedStore::close)
-			.whenComplete(this::storesReady);
+		if(_streaming) {
+			_leftTiles = new StateTable<>();
+			_rightTiles = new StateTable<>();
+			_leftUses = new AtomicIntegerArray(_rowBlocks * _innerBlocks);
+			_rightUses = new AtomicIntegerArray(_innerBlocks * _colBlocks);
+			_matches = new SubscribableTaskQueue<>();
+			AllocatedOOCStream<Integer> admitted = new AllocatedOOCStream<>(_matches, _allowance,
+				index -> _taskBytes, true);
+			getContext().addInStream(_matches, admitted);
+			admitted.setSubscriber(this::admitMatch);
+			for(int input = 0; input < 2; input++) {
+				boolean isLeft = input == 0;
+				if(getInput(input) instanceof MaterializedStoreStreamable materialized) {
+					consumeInputHandle(input);
+					InputView view = materialized.getReservedInputView();
+					if(isLeft)
+						_leftView = view;
+					else
+						_rightView = view;
+					view.start(index -> {
+						MatrixIndexes indexes = view.indexes(index);
+						match((int) indexes.getRowIndex() - 1, (int) indexes.getColumnIndex() - 1, isLeft);
+					}, error -> {
+						if(error != null)
+							fail(error);
+						if(_arrivals.decrementAndGet() == 0)
+							_matches.closeInput();
+					});
+				}
+				else {
+					OOCStream<IndexedMatrixValue> stream = getInputReadStream(input);
+					getContext().addInStream(stream);
+					stream.setSubscriber(callback -> accept(callback, isLeft));
+				}
+			}
+		}
+		else {
+			OOCFuture.allOf(List.of(getMaterializedInput(0), getMaterializedInput(1)), MaterializedStore::close)
+				.whenComplete(this::storesReady);
+		}
+	}
+
+	private void accept(OOCStream.QueueCallback<IndexedMatrixValue> callback, boolean left) {
+		if(callback.isEos() || callback.isFailure()) {
+			try(callback) {
+				if(callback.isFailure())
+					callback.get();
+			}
+			catch(Throwable error) {
+				fail(error);
+			}
+			finally {
+				if(_arrivals.decrementAndGet() == 0)
+					_matches.closeInput();
+			}
+			return;
+		}
+		_arrivals.incrementAndGet();
+		try(callback) {
+			IndexedMatrixValue tile = callback.get();
+			int row = (int) tile.getIndexes().getRowIndex() - 1;
+			int col = (int) tile.getIndexes().getColumnIndex() - 1;
+			int slot = left ? row * _innerBlocks + col : row * _colBlocks + col;
+			StateTableUtils.put(left ? _leftTiles : _rightTiles, slot, callback, _allowance);
+			match(row, col, left);
+		}
+		catch(Throwable error) {
+			fail(error);
+		}
+		finally {
+			if(_arrivals.decrementAndGet() == 0)
+				_matches.closeInput();
+		}
+	}
+
+	private void match(int row, int col, boolean left) {
+		synchronized(_arrivalLock) {
+			(left ? _leftArrived : _rightArrived).set(left ? row * _innerBlocks + col : row * _colBlocks + col);
+			if(left) {
+				for(int j = 0; j < _colBlocks; j++)
+					if(_rightArrived.get(col * _colBlocks + j))
+						_matches.enqueue((row * _colBlocks + j) * _innerBlocks + col);
+			}
+			else {
+				for(int i = 0; i < _rowBlocks; i++)
+					if(_leftArrived.get(i * _innerBlocks + row))
+						_matches.enqueue((i * _colBlocks + col) * _innerBlocks + row);
+			}
+		}
+	}
+
+	private void admitMatch(OOCStream.QueueCallback<Integer> callback) {
+		if(callback.isEos() || callback.isFailure()) {
+			try(callback) {
+				if(callback.isFailure())
+					callback.get();
+			}
+			catch(Throwable error) {
+				fail(error);
+			}
+			finally {
+				finishSource();
+			}
+			return;
+		}
+		ReservationBudget budget = AllocatedOOCStream.detachBudget(callback).enableReuse();
+		_active.incrementAndGet();
+		try(callback) {
+			int task = callback.get();
+			int inner = task % _innerBlocks;
+			int outputSlot = task / _innerBlocks;
+			int row = outputSlot / _colBlocks;
+			int col = outputSlot % _colBlocks;
+			OOCFuture.allOf(List.of(_leftView == null ? _leftTiles.acquire(row * _innerBlocks + inner, budget)
+				: _leftView.acquire(row + 1L, inner + 1L, budget),
+				_rightView == null ? _rightTiles.acquire(inner * _colBlocks + col, budget)
+				: _rightView.acquire(inner + 1L, col + 1L, budget)), StoreLease::close)
+				.whenComplete((inputs, error) -> {
+					try {
+						if(error != null)
+							throw new CompletionException(error);
+						_ready.enqueue(new MultiplyWork(inputs.get(0), inputs.get(1), outputSlot, budget,
+							row * _innerBlocks + inner, inner * _colBlocks + col));
+					}
+					catch(Throwable failure) {
+						if(inputs != null)
+							inputs.forEach(StoreLease::close);
+						budget.close();
+						fail(failure);
+						completeOne();
+					}
+				});
+		}
+		catch(Throwable error) {
+			budget.close();
+			fail(error);
+			completeOne();
+		}
 	}
 
 	private void storesReady(List<MaterializedStore<IndexedMatrixValue>> stores, Throwable error) {
@@ -234,7 +408,7 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 						return;
 					}
 					try {
-						_ready.enqueue(new MultiplyWork(inputs.get(0), inputs.get(1), outputSlot, budget));
+						_ready.enqueue(new MultiplyWork(inputs.get(0), inputs.get(1), outputSlot, budget, -1, -1));
 					}
 					catch(Throwable failure) {
 						inputs.forEach(StoreLease::close);
@@ -265,6 +439,20 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 			MatrixBlock left = (MatrixBlock) work._left.value().getValue();
 			MatrixBlock right = (MatrixBlock) work._right.value().getValue();
 			MatrixBlock block = left.aggregateBinaryOperations(left, right, new MatrixBlock(), _multiply);
+			if(_streaming) {
+				if(_leftUses.incrementAndGet(work._leftSlot) == _colBlocks) {
+					if(_leftView == null)
+						_leftTiles.clear(work._leftSlot);
+					else
+						_leftView.clear(work._leftSlot / _innerBlocks + 1L, work._leftSlot % _innerBlocks + 1L);
+				}
+				if(_rightUses.incrementAndGet(work._rightSlot) == _rowBlocks) {
+					if(_rightView == null)
+						_rightTiles.clear(work._rightSlot);
+					else
+						_rightView.clear(work._rightSlot / _colBlocks + 1L, work._rightSlot % _colBlocks + 1L);
+				}
+			}
 			partial = payload(work._outputSlot, 1, block, budget);
 			OOCFuture<List<Void>> released = work.releaseInputsAsync();
 			ManagedPayload<IndexedMatrixValue> result = partial;
@@ -408,6 +596,14 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 	}
 
 	private void cleanup() {
+		if(_leftView != null)
+			_leftView.close();
+		if(_rightView != null)
+			_rightView.close();
+		if(_leftTiles != null)
+			_leftTiles.close();
+		if(_rightTiles != null)
+			_rightTiles.close();
 		if(_accumulators != null)
 			_accumulators.close();
 		if(_leftReader != null)
@@ -423,16 +619,20 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 
 	private static final class MultiplyWork implements AutoCloseable {
 		private final int _outputSlot;
+		private final int _leftSlot;
+		private final int _rightSlot;
 		private StoreLease<IndexedMatrixValue> _left;
 		private StoreLease<IndexedMatrixValue> _right;
 		private ReservationBudget _budget;
 
 		private MultiplyWork(StoreLease<IndexedMatrixValue> left, StoreLease<IndexedMatrixValue> right, int outputSlot,
-			ReservationBudget budget) {
+			ReservationBudget budget, int leftSlot, int rightSlot) {
 			_left = left;
 			_right = right;
 			_outputSlot = outputSlot;
 			_budget = budget;
+			_leftSlot = leftSlot;
+			_rightSlot = rightSlot;
 		}
 
 		private ReservationBudget takeBudget() {

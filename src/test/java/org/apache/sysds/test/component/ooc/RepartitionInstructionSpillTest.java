@@ -54,15 +54,24 @@ import org.apache.sysds.runtime.instructions.ooc.QuaternaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.ooc.TSMMOOCInstruction;
 import org.apache.sysds.runtime.instructions.ooc.TernaryOOCInstruction;
+import org.apache.sysds.runtime.instructions.InstructionUtils;
 import org.apache.sysds.runtime.instructions.ooc.UnaryOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.matrix.operators.AggregateBinaryOperator;
+import org.apache.sysds.runtime.matrix.operators.AggregateOperator;
+import org.apache.sysds.runtime.functionobjects.Multiply;
+import org.apache.sysds.runtime.functionobjects.Plus;
+import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.primitives.MappingOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.GeneralMMultOOCPrimitive;
+import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
+import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.UncoordinatedDataGenOOCPrimitive;
 import org.apache.sysds.utils.Statistics;
@@ -330,6 +339,144 @@ public class RepartitionInstructionSpillTest {
 				input(ec, "v", 800, 1, 50, 16, 1, false, 3);
 			}
 			x.getStreamable().scheduleMaterializedStoreDeletion();
+		}
+		finally {
+			ConfigurationManager.setGlobalConfig(previous);
+			reset(statistics);
+		}
+	}
+
+	@Test(timeout = 20000)
+	public void testMaterializedMMultSpill() throws InterruptedException {
+		DMLConfig previous = ConfigurationManager.getDMLConfig();
+		boolean statistics = DMLScript.OOC_STATISTICS;
+		try {
+			ConfigurationManager.setGlobalConfig(DMLConfig.parseDMLConfig("<root>"
+				+ "<sysds.localtmpdir>../data_dir/streaming-mm-test-tmp</sysds.localtmpdir>"
+				+ "<sysds.scratch>../data_dir/streaming-mm-test-scratch</sysds.scratch></root>"));
+			prepareSpillCache();
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			MatrixObject a = input(ec, "A", 800, 800, 200, 4, 4, false, 2);
+			MatrixObject b = input(ec, "B", 800, 800, 200, 4, 4, true, 3);
+			MatrixObject out = matrixObject(800, 800, 200);
+			OOCStream<IndexedMatrixValue> result = new SubscribableTaskQueue<>();
+			result.setData(out);
+			result.assignPrimitive(new GeneralMMultOOCPrimitive(a.getStreamable(), b.getStreamable(), result,
+				new AggregateBinaryOperator(Multiply.getMultiplyFnObject(), new AggregateOperator(0, Plus.getPlusFnObject())),
+				InstructionUtils.parseBinaryOperator("+"), false, new StreamContext()));
+			Assert.assertEquals(2, result.getPrimitive().requiredMaterializedInputs().size());
+			result.start();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null) {
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					MatrixBlock block = (MatrixBlock) current.get().getValue();
+					for(int row = 0; row < block.getNumRows(); row++)
+						for(int col = 0; col < block.getNumColumns(); col++)
+							Assert.assertEquals(4800, block.get(row, col), 0);
+					blocks++;
+				}
+			}
+			Assert.assertEquals(16, blocks);
+			waitForSpill();
+		}
+		finally {
+			ConfigurationManager.setGlobalConfig(previous);
+			reset(statistics);
+		}
+	}
+
+	@Test(timeout = 20000)
+	public void testStreamingMMultSpill() throws InterruptedException {
+		boolean statistics = DMLScript.OOC_STATISTICS;
+		DMLConfig previous = ConfigurationManager.getDMLConfig();
+		try {
+			ConfigurationManager.setGlobalConfig(DMLConfig.parseDMLConfig("<root>"
+				+ "<sysds.localtmpdir>../data_dir/streaming-mm-test-tmp</sysds.localtmpdir>"
+				+ "<sysds.scratch>../data_dir/streaming-mm-test-scratch</sysds.scratch></root>"));
+			prepareSpillCache();
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			indexedInput(ec, "X", 800, 601, 200);
+			input(ec, "B", 601, 405, 200, 4, 3, true, 3);
+			MatrixObject out = matrixObject(800, 405, 200);
+			ec.setVariable("R", out);
+			MMultOOCInstruction.parseInstruction("OOC°ba+*°X·MATRIX·FP64°B·MATRIX·FP64°R·MATRIX·FP64°1")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			Assert.assertTrue(result.getPrimitive() instanceof GeneralMMultOOCPrimitive);
+			Assert.assertTrue(result.getPrimitive().requiredMaterializedInputs().isEmpty());
+			result.start();
+			waitForSpill();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null) {
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue value = current.get();
+					MatrixBlock block = (MatrixBlock) value.getValue();
+					int firstRow = (int) (value.getIndexes().getRowIndex() - 1) * 200;
+					for(int row = 0; row < block.getNumRows(); row++)
+						for(int col = 0; col < block.getNumColumns(); col++)
+							Assert.assertEquals(3 * (601d * (firstRow + row) * 1000 + 601d * 602 / 2),
+								block.get(row, col), 0);
+					blocks++;
+				}
+			}
+			Assert.assertEquals(12, blocks);
+		}
+		finally {
+			ConfigurationManager.setGlobalConfig(previous);
+			reset(statistics);
+		}
+	}
+
+	@Test(timeout = 20000)
+	public void testStreamingMMultMaterializedViewsSpill() throws InterruptedException {
+		boolean statistics = DMLScript.OOC_STATISTICS;
+		DMLConfig previous = ConfigurationManager.getDMLConfig();
+		try {
+			ConfigurationManager.setGlobalConfig(DMLConfig.parseDMLConfig("<root>"
+				+ "<sysds.localtmpdir>../data_dir/streaming-mm-test-tmp</sysds.localtmpdir>"
+				+ "<sysds.scratch>../data_dir/streaming-mm-test-scratch</sysds.scratch></root>"));
+			prepareSpillCache();
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			indexedInput(ec, "A", 800, 601, 200);
+			MatrixObject a = ec.getMatrixObject("A");
+			MatrixObject b = input(ec, "B", 601, 405, 200, 4, 3, true, 3);
+			MaterializedStoreStreamable left = new MaterializedStoreStreamable(a.getStreamHandle(), a);
+			MaterializedStoreStreamable right = new MaterializedStoreStreamable(b.getStreamHandle(), b,
+				OOCStoreLayout.COL_MAJOR);
+			OOCStream<IndexedMatrixValue> prime = left.getReadStream();
+			OOCStream.QueueCallback<IndexedMatrixValue> primed;
+			while((primed = prime.dequeueCB()) != null) {
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = primed) {
+					current.get();
+				}
+			}
+			MatrixObject out = matrixObject(800, 405, 200);
+			OOCStream<IndexedMatrixValue> result = new SubscribableTaskQueue<>();
+			result.setData(out);
+			result.assignPrimitive(new GeneralMMultOOCPrimitive(left, right, result,
+				new AggregateBinaryOperator(Multiply.getMultiplyFnObject(), new AggregateOperator(0, Plus.getPlusFnObject())),
+				InstructionUtils.parseBinaryOperator("+"), true, new StreamContext()));
+			result.start();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null) {
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue value = current.get();
+					MatrixBlock block = (MatrixBlock) value.getValue();
+					int firstRow = (int) (value.getIndexes().getRowIndex() - 1) * 200;
+					for(int row = 0; row < block.getNumRows(); row++)
+						for(int col = 0; col < block.getNumColumns(); col++)
+							Assert.assertEquals(3 * (601d * (firstRow + row) * 1000 + 601d * 602 / 2),
+								block.get(row, col), 0);
+					blocks++;
+				}
+			}
+			Assert.assertEquals(12, blocks);
+			waitForSpill();
+			left.scheduleMaterializedStoreDeletion();
+			right.scheduleMaterializedStoreDeletion();
 		}
 		finally {
 			ConfigurationManager.setGlobalConfig(previous);

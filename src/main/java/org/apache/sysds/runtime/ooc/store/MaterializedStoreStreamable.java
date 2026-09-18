@@ -22,9 +22,11 @@ package org.apache.sysds.runtime.ooc.store;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import java.util.function.IntConsumer;
 
 import org.apache.sysds.conf.ConfigurationManager;
 import org.apache.sysds.conf.DMLConfig;
@@ -36,8 +38,10 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
+import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
@@ -54,6 +58,8 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 	private final OOCFuture<DataCharacteristics> _dimensions;
 	private final IntArrayList _publications = new IntArrayList();
 	private final List<DeferredReader> _liveReaders = new ArrayList<>();
+	private final List<InputView> _views = new CopyOnWriteArrayList<>();
+	private boolean _viewPolicyInstalled;
 	private MaterializedStore<IndexedMatrixValue> _store;
 	private DeferredReader _replayDriver;
 	private CacheableData<?> _data;
@@ -148,17 +154,172 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			}
 			for(DeferredReader reader : readers)
 				reader.finishLive(failure);
+			for(InputView view : _views)
+				view.finishPublications(failure);
 			return;
 		}
 		int index = ((MaterializedCallback<?>) callback).publishedIndex();
 		List<DeferredReader> readers;
+		List<InputView> views;
 		synchronized(this) {
 			_publications.add(index);
 			readers = List.copyOf(_liveReaders);
 			readers.forEach(reader -> reader._pendingLive.incrementAndGet());
+			views = List.copyOf(_views);
+			views.forEach(view -> view._pending.incrementAndGet());
 		}
 		for(DeferredReader reader : readers)
 			reader.acceptLive(callback);
+		for(InputView view : views)
+			view.publish(index);
+	}
+
+	public synchronized InputView getReservedInputView() {
+		if(_reservedReaders > 0)
+			_reservedReaders--;
+		else if(_deleteScheduled)
+			throw new DMLRuntimeException("Cannot open a view on a deleted materialized stream.");
+		_pendingReaders++;
+		_primitive.registerRequest(1, null);
+		return new InputView();
+	}
+
+	public final class InputView implements AutoCloseable, MaterializedStore.Liveness {
+		private final BitSet _consumed = new BitSet();
+		private final AtomicInteger _pending = new AtomicInteger(1);
+		private final AtomicBoolean _finished = new AtomicBoolean();
+		private IndexedMaterializedStoreReader<IndexedMatrixValue> _reader;
+		private IntConsumer _publication;
+		private Consumer<Throwable> _completion;
+		private volatile boolean _liveDone;
+		private volatile boolean _closed;
+		private boolean _active;
+		private Throwable _error;
+
+		public void start(IntConsumer publication, Consumer<Throwable> completion) {
+			_publication = publication;
+			_completion = completion;
+			_primitive.store().whenComplete((store, error) -> {
+				if(error != null) {
+					finishPublications(error);
+					releasePublication();
+					return;
+				}
+				try {
+					int[] prefix;
+					boolean installPolicy;
+					synchronized(MaterializedStoreStreamable.this) {
+						if(_closed)
+							return;
+						_reader = store.openLiveIndexedReader(this);
+						_pendingReaders--;
+						_activeReaders++;
+						_active = true;
+						_views.add(this);
+						prefix = _publications.toIntArray();
+						_liveDone = _publicationDone;
+						_error = _publicationFailure;
+						installPolicy = !_viewPolicyInstalled;
+						_viewPolicyInstalled = true;
+					}
+					if(installPolicy) {
+						DataCharacteristics dc = getDataCharacteristics();
+						OOCStoreLayout layout = _layout;
+						List<InputView> views = _views;
+						long tiles = dc.getNumRowBlocks() * dc.getNumColBlocks();
+						store.addEvictionPolicy((row, col) -> {
+							int slot = layout.linearize(row, col, dc);
+							for(InputView view : views)
+								if(view.needs(slot))
+									return slot - tiles;
+							return slot;
+						});
+					}
+					for(int index : prefix)
+						_publication.accept(index);
+				}
+				catch(Throwable failure) {
+					finishPublications(failure);
+				}
+				finally {
+					releasePublication();
+					tryFinalize();
+				}
+			});
+			_primitive.startOnDemand();
+		}
+
+		public MatrixIndexes indexes(int index) {
+			return _layout.delinearize(index, getDataCharacteristics());
+		}
+
+		public OOCFuture<StoreLease<IndexedMatrixValue>> acquire(long row, long col, MemoryAllowance allowance) {
+			return _store.requestPublished(row, col, allowance);
+		}
+
+		public StoreLease<IndexedMatrixValue> tryAcquireResident(long row, long col, MemoryAllowance allowance) {
+			return _store.requestPublishedIfResident(_layout.linearize(row, col, getDataCharacteristics()), allowance);
+		}
+
+		public void clear(long row, long col) {
+			_reader.consumed(_layout.linearize(row, col, getDataCharacteristics()));
+		}
+
+		@Override
+		public synchronized boolean needs(int index) {
+			return !_closed && !_consumed.get(index);
+		}
+
+		@Override
+		public synchronized void consumed(int index) {
+			_consumed.set(index);
+		}
+
+		private void publish(int index) {
+			try {
+				if(!_closed)
+					_publication.accept(index);
+			}
+			catch(Throwable error) {
+				finishPublications(error);
+			}
+			finally {
+				releasePublication();
+			}
+		}
+
+		private void finishPublications(Throwable error) {
+			_error = error;
+			_liveDone = true;
+			if(_pending.get() == 0 && _finished.compareAndSet(false, true))
+				_completion.accept(_error);
+		}
+
+		private void releasePublication() {
+			if(_pending.decrementAndGet() == 0 && _liveDone && _finished.compareAndSet(false, true))
+				_completion.accept(_error);
+		}
+
+		@Override
+		public void close() {
+			synchronized(MaterializedStoreStreamable.this) {
+				if(_closed)
+					return;
+				_closed = true;
+				_views.remove(this);
+				if(_active)
+					_activeReaders--;
+				else
+					_pendingReaders--;
+			}
+			if(_reader != null)
+				_reader.close();
+			_primitive.store().whenComplete((store, error) -> {
+				if(store != null)
+					store.close();
+			});
+			tryFinalize();
+		}
 	}
 
 	private void openStreamingReader(DeferredReader reader) {

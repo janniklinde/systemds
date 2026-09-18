@@ -50,6 +50,8 @@ import org.apache.sysds.runtime.meta.MatrixCharacteristics;
 import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
+import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
+import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.GroupedReduceOOCPrimitive;
@@ -59,6 +61,8 @@ import org.apache.sysds.runtime.ooc.store.CountingLiveness;
 import org.apache.sysds.runtime.ooc.store.IndexedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 import org.apache.sysds.runtime.ooc.store.MaterializedCallback;
+import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable.InputView;
+import org.apache.sysds.runtime.ooc.store.StoreLease;
 import org.apache.sysds.runtime.ooc.stream.FilteredOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
@@ -68,6 +72,59 @@ import org.junit.Assert;
 import org.junit.Test;
 
 public class OOCPrimitiveTest {
+	@Test(timeout = 20000)
+	public void testMaterializedInputViewLateSubscription() throws Exception {
+		OOCCacheManager.reset();
+		try {
+			MatrixObject data = new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(3, 1, 1), FileFormat.BINARY));
+			SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
+			source.setData(data);
+			MaterializedStoreStreamable handle = new MaterializedStoreStreamable(source, data);
+			handle.reserveLazyHandle();
+			InputView first = handle.getReservedInputView();
+			List<Integer> firstIndexes = new ArrayList<>();
+			List<Integer> lateIndexes = new ArrayList<>();
+			CountDownLatch done = new CountDownLatch(2);
+			first.start(firstIndexes::add, error -> {
+				Assert.assertNull(error);
+				done.countDown();
+			});
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(3, 1), new MatrixBlock(1, 1, 3d)));
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(1, 1, 1d)));
+			Assert.assertEquals(List.of(2, 0), firstIndexes);
+			handle.reserveLazyHandle();
+			InputView late = handle.getReservedInputView();
+			late.start(lateIndexes::add, error -> {
+				Assert.assertNull(error);
+				done.countDown();
+			});
+			Assert.assertEquals(List.of(2, 0), lateIndexes);
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(2, 1), new MatrixBlock(1, 1, 2d)));
+			source.closeInput();
+			Assert.assertTrue(done.await(10, TimeUnit.SECONDS));
+			Assert.assertEquals(List.of(2, 0, 1), lateIndexes);
+			SyncMemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.get());
+			try(StoreLease<IndexedMatrixValue> lease = late.tryAcquireResident(3, 1, allowance)) {
+				Assert.assertNotNull(lease);
+				Assert.assertEquals(3, lease.value().getValue().get(0, 0), 0);
+			}
+			late.clear(3, 1);
+			Assert.assertFalse(late.needs(2));
+			Assert.assertTrue(first.needs(2));
+			try(StoreLease<IndexedMatrixValue> lease = first.acquire(3, 1, allowance).get(10, TimeUnit.SECONDS)) {
+				Assert.assertEquals(3, lease.value().getValue().get(0, 0), 0);
+			}
+			first.close();
+			late.close();
+			handle.scheduleMaterializedStoreDeletion();
+			allowance.destroy();
+		}
+		finally {
+			OOCCacheManager.reset();
+		}
+	}
+
 	@Test(timeout = 20000)
 	public void testLateStreamingMaterializedReader() {
 		OOCCacheManager.reset();
