@@ -46,7 +46,7 @@ import java.util.concurrent.TimeUnit;
  */
 public final class OOCWatchdog {
 	public static final boolean WATCH = false;
-	public static final boolean WATCH_PRIMITIVES = false;
+	public static final boolean WATCH_PRIMITIVES =false;
 	private static final double PINNED_NEAR_LIMIT_RATIO = 0.9;
 	private static final int TOP_PINNED_STREAMS = 5;
 	private static final ConcurrentHashMap<String, Entry> OPEN = new ConcurrentHashMap<>();
@@ -98,6 +98,8 @@ public final class OOCWatchdog {
 			.append(" incomplete primitive(s); ").append(describeMemory()).append('\n')
 			.append('\n')
 			.append("   broker grants: ").append(GlobalMemoryBroker.get().describeAllowances()).append(':');
+		System.err.println(sb);
+		sb.setLength(0);
 		for(Map.Entry<OOCPrimitive, Long> entry : pending) {
 			OOCPrimitive primitive = entry.getKey();
 			sb.append("\n   age=").append(now - entry.getValue()).append("ms ").append(primitive.debugState());

@@ -631,6 +631,11 @@ public class OOCCacheImpl implements OOCCache {
 		}
 		entry.setState(BlockState.REMOVED);
 		entry.pin();
+		// A resident reader may arrive before the backing-read continuations acquire their pins.
+		if(meta.readWaiters > 0 && !meta.readGuard) {
+			entry.pin();
+			meta.readGuard = true;
+		}
 		CacheUnpinHandle handle = meta.deferredUnpin;
 		if(handle == null)
 			return null;

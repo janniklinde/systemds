@@ -268,14 +268,18 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		public OOCFuture<StoreLease<IndexedMatrixValue>> acquire(long row, long col, MemoryAllowance allowance) {
 			if(_reading.compareAndSet(false, true))
 				_readingViews.incrementAndGet();
-			if(_views.size() > 1)
+			if(_views.size() > 1) {
+				// close() locks the streamable before recentReads. Resolve dimensions
+				// before taking recentReads to preserve that lock order here as well.
+				int index = _layout.linearize(row, col, getDataCharacteristics());
 				synchronized(_recentReads) {
 					if(_readClock == Integer.MAX_VALUE) {
 						_recentReads.clear();
 						_readClock = 0;
 					}
-					_recentReads.put(_layout.linearize(row, col, getDataCharacteristics()), ++_readClock);
+					_recentReads.put(index, ++_readClock);
 				}
+			}
 			return _store.requestPublished(row, col, allowance);
 		}
 

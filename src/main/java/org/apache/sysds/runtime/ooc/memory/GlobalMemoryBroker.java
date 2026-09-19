@@ -35,7 +35,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class GlobalMemoryBroker implements MemoryBroker {
 	private static final long RECLAIM_RETRY_DELAY_MS = 2;
-	private static final double RECLAIM_PRESSURE = 0.85;
 	/**
 	 * Fraction of the broker budget above which buffered callbacks are force-parked into the cache. Matches the onset
 	 * of {@link BrokerMode#STRICT} (see {@link #updateMode()}): strict mode is the engine's own definition of "memory
@@ -262,6 +261,8 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		finally {
 			Statistics.accumulateOOCMemoryReclaimTime(System.nanoTime() - nanos);
 			if(shouldRetryReclaim())
+				schedulePurge();
+			if(shouldRetryReclaim())
 				RECLAIM_EXECUTOR.schedule(this::runReclaim, RECLAIM_RETRY_DELAY_MS, TimeUnit.MILLISECONDS);
 			else {
 				_reclaimRunning.set(false);
@@ -282,7 +283,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	}
 
 	private synchronized boolean hasReclaimPressure() {
-		return _usedBytes >= _allowedBytes * RECLAIM_PRESSURE;
+		return _brokerMode == BrokerMode.STRICT;
 	}
 
 	private boolean updateMode() {

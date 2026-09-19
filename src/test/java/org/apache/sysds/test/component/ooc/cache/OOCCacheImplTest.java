@@ -75,6 +75,35 @@ public class OOCCacheImplTest {
 	}
 
 	@Test
+	public void testResidentPinCannotClearAnUnfinishedBackingRead() throws Exception {
+		_cache.shutdown();
+		_io = new RecordingOOCIOHandler() {
+			@Override
+			public OOCFuture<BlockEntry> scheduleRead(BlockEntry block) {
+				OOCFuture<BlockEntry> read = super.scheduleRead(block);
+				BlockEntry other = _cache.pin(block.getKey(), _producer).getNow(null);
+				Assert.assertSame(block, other);
+				_cache.unpin(other, _producer);
+				return read;
+			}
+		};
+		_cache = new OOCCacheImpl(_io, 0, 0);
+		BlockKey key = new BlockKey(STREAM_ID, BLOCK_ID);
+		_producer.reserveBlocking(BYTES);
+		BlockEntry entry = _cache.putPinned(key, "pending-read", BYTES, _producer);
+		_io.scheduleEviction(entry).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+		_cache.markBacked(entry);
+		await(_cache.unpin(entry, _producer), WAIT_TIMEOUT_SEC);
+		Assert.assertNull(BlockEntryTestAccess.getDataUnsafe(entry));
+		BlockEntry pinned = _cache.pin(key, _reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+		Assert.assertEquals("pending-read", pinned.getData());
+		Assert.assertEquals(1, pinned.getPinCount());
+		await(_cache.unpin(pinned, _reader), WAIT_TIMEOUT_SEC);
+		Assert.assertEquals(0, _reader.getUsedMemory());
+		Assert.assertEquals(0, _producer.getUsedMemory());
+	}
+
+	@Test
 	public void testPinMissingEntryReturnsNullWithoutReservation() throws Exception {
 		BlockEntry pinned = _cache.pin(new BlockKey(STREAM_ID, BLOCK_ID), _reader).get(WAIT_TIMEOUT_SEC,
 			TimeUnit.SECONDS);

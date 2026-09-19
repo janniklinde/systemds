@@ -83,6 +83,75 @@ import org.mockito.Mockito;
 
 public class OOCInstructionUtilsTest {
 	@Test
+	public void testSubscriberDoesNotRunUnderQueueMonitor() {
+		SubscribableTaskQueue<Integer> queue = new SubscribableTaskQueue<>();
+		AtomicInteger delivered = new AtomicInteger();
+		queue.setSubscriber(callback -> {
+			try(callback) {
+				Assert.assertFalse("A subscriber must not block purge by holding its queue monitor",
+					Thread.holdsLock(queue));
+				delivered.incrementAndGet();
+			}
+		});
+		queue.enqueueTask(new OOCStream.SimpleQueueCallback<>(1, null));
+		queue.closeInput();
+		Assert.assertEquals(2, delivered.get());
+	}
+
+	@Test(timeout = 10000)
+	public void testSpillableQueueDoesNotBlockAtLegacyItemLimit() throws Exception {
+		SubscribableTaskQueue<Integer> queue = new SubscribableTaskQueue<>();
+		AtomicReference<Throwable> failure = new AtomicReference<>();
+		Thread producer = new Thread(() -> {
+			try {
+				for(int i = 0; i < 100005; i++)
+					queue.enqueue(i);
+				queue.closeInput();
+			}
+			catch(Throwable error) {
+				failure.set(error);
+			}
+		});
+		producer.setDaemon(true);
+		producer.start();
+		producer.join(5000);
+		Assert.assertFalse("OOC producers must not block at the in-memory queue item limit", producer.isAlive());
+		Assert.assertNull(failure.get());
+		AtomicInteger delivered = new AtomicInteger();
+		AtomicInteger terminals = new AtomicInteger();
+		queue.setSubscriber(callback -> {
+			try(callback) {
+				if(callback.isEos())
+					terminals.incrementAndGet();
+				else
+					Assert.assertEquals(delivered.getAndIncrement(), callback.get().intValue());
+			}
+		});
+		Assert.assertEquals(100005, delivered.get());
+		Assert.assertEquals(1, terminals.get());
+	}
+
+	@Test
+	public void testSubscriberDrainKeepsBacklogPurgeVisible() {
+		class InspectableQueue extends SubscribableTaskQueue<Integer> {
+			synchronized int buffered() {
+				return _data.size();
+			}
+		}
+		InspectableQueue queue = new InspectableQueue();
+		queue.enqueue(1);
+		queue.enqueue(2);
+		queue.closeInput();
+		queue.setSubscriber(callback -> {
+			try(callback) {
+				if(!callback.isEos() && callback.get() == 1)
+					Assert.assertEquals("Undelivered callbacks must remain visible to purge", 1, queue.buffered());
+			}
+		});
+		Assert.assertEquals(0, queue.buffered());
+	}
+
+	@Test
 	public void testBandFanoutForRowLocalCentroidUpdate() {
 		Hop x = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
 			40000, 200, -1, 100);

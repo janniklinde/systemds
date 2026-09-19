@@ -50,13 +50,84 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 public class OOCMemoryAllowanceTest {
 	private static final int TILES = 20000;
+
+	@Test
+	public void testAllocatedStreamInstallsConsumerBeforeStartingInput() {
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
+		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);
+		AtomicInteger delivered = new AtomicInteger();
+		SubscribableTaskQueue<Integer> source = new SubscribableTaskQueue<>() {
+			@Override
+			public void setSubscriber(Consumer<OOCStream.QueueCallback<Integer>> subscriber) {
+				super.setSubscriber(subscriber);
+				enqueue(1);
+				Assert.assertEquals("Input started before the admitted stream could drain", 1, delivered.get());
+				enqueue(2);
+				closeInput();
+			}
+		};
+		try {
+			AllocatedOOCStream<Integer> allocated = new AllocatedOOCStream<>(source, allowance, value -> 60);
+			Assert.assertEquals(0, delivered.get());
+			allocated.setSubscriber(callback -> {
+				try(callback) {
+					if(!callback.isEos()) {
+						delivered.incrementAndGet();
+						AllocatedOOCStream.detachBudget(callback).close();
+					}
+				}
+			});
+			Assert.assertEquals(2, delivered.get());
+			Assert.assertEquals(0, allowance.getUsedMemory());
+		}
+		finally {
+			allowance.destroy();
+		}
+	}
+
+	@Test
+	public void testReclaimRetriesAcrossStrictModeThreshold() throws Exception {
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
+		CountDownLatch firstPass = new CountDownLatch(1);
+		SyncMemoryAllowance holder = new SyncMemoryAllowance(broker) {
+			@Override
+			public long reclaimUnused() {
+				long reclaimed = super.reclaimUnused();
+				firstPass.countDown();
+				return reclaimed;
+			}
+		};
+		SyncMemoryAllowance waiter = new SyncMemoryAllowance(broker);
+		try {
+			holder.setTargetMemory(21);
+			waiter.setTargetMemory(61);
+			holder.reserveBlocking(21);
+			waiter.reserveBlocking(61);
+			Assert.assertEquals(82, broker.getUsedMemory());
+			Assert.assertTrue(broker.isStrictMode());
+			waiter.setTargetMemory(62);
+			OOCFuture<Void> reservation = waiter.reserveAsync(1);
+			Assert.assertTrue(firstPass.await(5, TimeUnit.SECONDS));
+			holder.release(12);
+			reservation.get(5, TimeUnit.SECONDS);
+			Assert.assertEquals(62, waiter.getUsedMemory());
+		}
+		finally {
+			holder.release(holder.getUsedMemory());
+			waiter.release(waiter.getUsedMemory());
+			holder.destroy();
+			waiter.destroy();
+		}
+	}
 
 	@Test
 	public void testOptimal() {
@@ -305,7 +376,14 @@ public class OOCMemoryAllowanceTest {
 		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
 		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);
 		SubscribableTaskQueue<Integer> source = new SubscribableTaskQueue<>();
-		new AllocatedOOCStream<>(source, allowance, value -> 60);
+		AllocatedOOCStream<Integer> allocated = new AllocatedOOCStream<>(source, allowance, value -> 60);
+		allocated.setSubscriber(callback -> {
+			try(callback) {
+				ReservationBudget budget = AllocatedOOCStream.detachBudget(callback);
+				if(budget != null)
+					budget.close();
+			}
+		});
 		try {
 			allowance.reserveBlocking(100);
 			source.enqueue(1);

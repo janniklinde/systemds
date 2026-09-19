@@ -32,7 +32,6 @@ import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 import java.lang.ref.WeakReference;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -114,12 +113,10 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 			// Re-check that subscriber is really null to avoid race conditions
 			if(_subscriber == null) {
 				registerForPurge();
-				try {
-					super.enqueueTask(cb);
-				}
-				catch(InterruptedException e) {
-					throw new DMLRuntimeException(e);
-				}
+				if(_failure != null)
+					throw _failure;
+				_data.addLast(cb);
+				notifyAll();
 				return;
 			}
 			// Otherwise do not insert and re-schedule subscriber invocation
@@ -147,7 +144,7 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 	}
 
 	@Override
-	public synchronized void enqueueTask(OOCStream.QueueCallback<T> t) {
+	public void enqueueTask(OOCStream.QueueCallback<T> t) {
 		enqueue(t);
 	}
 
@@ -198,12 +195,12 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 	}
 
 	@Override
-	public synchronized OOCStream.QueueCallback<T> dequeueTask() {
+	public OOCStream.QueueCallback<T> dequeueTask() {
 		return dequeueCB();
 	}
 
 	@Override
-	public synchronized void closeInput() {
+	public void closeInput() {
 		if(_closed.compareAndSet(false, true)) {
 			super.closeInput();
 			onDeliveryFinished();
@@ -229,7 +226,6 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 		if(subscriber == null)
 			throw new IllegalArgumentException("Cannot set subscriber to null");
 
-		LinkedList<QueueCallback<T>> data;
 		boolean needsEos;
 
 		synchronized(this) {
@@ -238,16 +234,22 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 			_subscriber = subscriber;
 			if(_failure != null)
 				throw _failure;
-			data = _data;
-			_data = new LinkedList<>();
 			// If this stream was already closed with no buffered data, no further
 			// onDeliveryFinished() call will happen, so emit EOS immediately.
-			needsEos = _closed.get() && data.isEmpty() && _availableCtr.get() == 0;
+			needsEos = _closed.get() && _data.isEmpty() && _availableCtr.get() == 0;
 			if(needsEos)
 				_availableCtr.incrementAndGet(); // route terminal emission via onDeliveryFinished
 		}
 
-		for(QueueCallback<T> t : data) {
+		// Keep the undelivered backlog visible to purge while a subscriber is
+		// processing a callback (which may itself need a memory reservation).
+		while(true) {
+			QueueCallback<T> t;
+			synchronized(this) {
+				t = _data.pollFirst();
+				if(t == null)
+					break;
+			}
 			subscriber.accept(t);
 			onDeliveryFinished();
 		}
