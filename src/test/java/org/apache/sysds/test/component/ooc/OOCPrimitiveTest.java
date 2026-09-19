@@ -791,6 +791,15 @@ public class OOCPrimitiveTest {
 
 	@Test
 	public void testJoinOutOfOrder() {
+		testJoinOutOfOrder(true);
+	}
+
+	@Test
+	public void testBackpressuredJoinOutOfOrder() {
+		testJoinOutOfOrder(false);
+	}
+
+	private void testJoinOutOfOrder(boolean streaming) {
 		SubscribableTaskQueue<IndexedMatrixValue> left = new SubscribableTaskQueue<>();
 		SubscribableTaskQueue<IndexedMatrixValue> right = new SubscribableTaskQueue<>();
 		SubscribableTaskQueue<IndexedMatrixValue> joined = new SubscribableTaskQueue<>();
@@ -810,9 +819,9 @@ public class OOCPrimitiveTest {
 		right.closeInput();
 		addends.closeInput();
 		OOCInstructionUtils.equiJoin(cachedLeft, right, joined,
-			(l, r) -> new MatrixBlock(1, 1, l.get(0, 0) + r.get(0, 0)), new StreamContext());
+			(l, r) -> new MatrixBlock(1, 1, l.get(0, 0) + r.get(0, 0)), streaming, new StreamContext());
 		OOCInstructionUtils.equiJoin(joined, addends, output,
-			(l, r) -> new MatrixBlock(1, 1, l.get(0, 0) + r.get(0, 0)), new StreamContext());
+			(l, r) -> new MatrixBlock(1, 1, l.get(0, 0) + r.get(0, 0)), streaming, new StreamContext());
 
 		output.start();
 		Map<Long, Double> values = new HashMap<>();

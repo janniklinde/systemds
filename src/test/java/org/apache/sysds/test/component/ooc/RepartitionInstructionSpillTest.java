@@ -432,6 +432,15 @@ public class RepartitionInstructionSpillTest {
 
 	@Test(timeout = 20000)
 	public void testStreamingJoinMaterializedViewsSpill() throws InterruptedException {
+		testJoinMaterializedViewsSpill(true);
+	}
+
+	@Test(timeout = 20000)
+	public void testBackpressuredJoinMaterializedViewsSpill() throws InterruptedException {
+		testJoinMaterializedViewsSpill(false);
+	}
+
+	private void testJoinMaterializedViewsSpill(boolean streaming) throws InterruptedException {
 		boolean statistics = prepareSpillCache();
 		try {
 			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
@@ -441,7 +450,6 @@ public class RepartitionInstructionSpillTest {
 			MaterializedStoreStreamable left = new MaterializedStoreStreamable(a.getStreamHandle(), a);
 			MaterializedStoreStreamable right = new MaterializedStoreStreamable(b.getStreamHandle(), b,
 				OOCStoreLayout.COL_MAJOR);
-			// Subscribe to the left after materialization/spilling, but consume the right as it is published.
 			OOCStream<IndexedMatrixValue> prime = left.getReadStream();
 			OOCStream.QueueCallback<IndexedMatrixValue> callback;
 			while((callback = prime.dequeueCB()) != null)
@@ -453,7 +461,7 @@ public class RepartitionInstructionSpillTest {
 			result.setData(matrixObject(800, 601, 200));
 			OOCInstructionUtils.equiJoin(left, right, result,
 				(l, r) -> l.binaryOperations(InstructionUtils.parseBinaryOperator("+"), r, new MatrixBlock()),
-				new StreamContext());
+				streaming, new StreamContext());
 			result.start();
 			int blocks = 0;
 			while((callback = result.dequeueCB()) != null)
