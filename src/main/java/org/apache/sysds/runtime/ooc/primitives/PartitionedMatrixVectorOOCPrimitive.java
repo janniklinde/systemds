@@ -20,8 +20,11 @@
 package org.apache.sysds.runtime.ooc.primitives;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -42,6 +45,7 @@ import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.store.CountingLiveness;
 import org.apache.sysds.runtime.ooc.store.IndexedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
+import org.apache.sysds.runtime.ooc.store.MaterializedCallback;
 import org.apache.sysds.runtime.ooc.store.PartitionedStoreStreamable;
 import org.apache.sysds.runtime.ooc.store.StoreLease;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
@@ -54,11 +58,15 @@ public final class PartitionedMatrixVectorOOCPrimitive extends OOCPrimitive {
 	private final AtomicBoolean _cleaned = new AtomicBoolean();
 	private final AtomicInteger _next = new AtomicInteger();
 	private final AtomicInteger _active = new AtomicInteger();
+	private final AtomicBoolean _sourceDone = new AtomicBoolean();
+	private final List<OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>>> _vectorBlocks;
+	private final Semaphore _packSlots = new Semaphore(Math.max(2, 2 * InfrastructureAnalyzer.getLocalParallelism()));
+	private volatile boolean _liveVector;
+	private boolean _liveMatrix;
 	private MaterializedStore<PackedBlock> _matrixStore;
 	private MaterializedStore<IndexedMatrixValue> _vectorStore;
 	private IndexedMaterializedStoreReader<PackedBlock> _matrixReader;
 	private IndexedMaterializedStoreReader<IndexedMatrixValue> _vectorReader;
-	private List<StoreLease<IndexedMatrixValue>> _vector;
 	private MatrixBlock[] _accumulators;
 	private ReservationBudget _outputBudget;
 	private OOCStream<StoreLease<PackedBlock>> _ready;
@@ -68,11 +76,15 @@ public final class PartitionedMatrixVectorOOCPrimitive extends OOCPrimitive {
 		OOCStreamable<IndexedMatrixValue> vector, OOCStreamable<IndexedMatrixValue> output, StreamContext context) {
 		super(context, matrix, vector);
 		_output = output;
+		_vectorBlocks = new ArrayList<>((int) matrix.getDataCharacteristics().getNumColBlocks());
+		for(int col = 0; col < matrix.getDataCharacteristics().getNumColBlocks(); col++)
+			_vectorBlocks.add(new OOCFuture<>());
 	}
 
 	@Override
 	public List<OOCMaterializedInputRequest> requiredMaterializedInputs() {
-		return List.of(new OOCMaterializedInputRequest(1, OOCStoreLayout.ROW_MAJOR, 1));
+		return List.of(new OOCMaterializedInputRequest(1, OOCStoreLayout.ROW_MAJOR, 1,
+			this::acceptVector, live -> _liveVector = live));
 	}
 
 	@Override
@@ -102,32 +114,20 @@ public final class PartitionedMatrixVectorOOCPrimitive extends OOCPrimitive {
 					fail(error);
 				cleanup();
 			});
-		consumeInputHandle(0);
-		((PartitionedStoreStreamable) getInput(0)).acquirePartitions().whenComplete((store, error) -> {
+		getMaterializedInput(1).whenComplete((store, error) -> {
 			if(error != null) {
 				fail(error);
-				_ready.closeInput();
-				return;
+				completeVector(error);
 			}
-			_matrixStore = store;
-			getMaterializedInput(1).whenComplete((vectorStore, vectorError) -> {
-				if(vectorError != null) {
-					fail(vectorError);
-					_ready.closeInput();
-					return;
-				}
-				_vectorStore = vectorStore;
-				vectorStore.completion().whenComplete((ignored, completionError) -> prepare(completionError));
-			});
+			else {
+				_vectorStore = store;
+				store.completion().whenComplete((ignored, completionError) -> completeVector(completionError));
+			}
 		});
+		prepare();
 	}
 
-	private void prepare(Throwable error) {
-		if(error != null) {
-			fail(error);
-			_ready.closeInput();
-			return;
-		}
+	private void prepare() {
 		DataCharacteristics dc = getInput(0).getDataCharacteristics();
 		long bytes = MatrixBlock.estimateSizeDenseInMemory(dc.getBlocksize(), 1) * dc.getNumRowBlocks();
 		_allowance.reserveAsync(bytes).whenComplete((ignored, reservationError) -> {
@@ -144,24 +144,29 @@ public final class PartitionedMatrixVectorOOCPrimitive extends OOCPrimitive {
 					_accumulators[i] = new MatrixBlock(rows, 1, false);
 					_accumulators[i].allocateDenseBlock();
 				}
-				_vectorReader = _vectorStore.openIndexedReader(new CountingLiveness(_vectorStore.size(), 1));
-				List<OOCFuture<StoreLease<IndexedMatrixValue>>> futures = new ArrayList<>();
-				for(int col = 0; col < dc.getNumColBlocks(); col++)
-					futures.add(_vectorReader.request(col + 1L, 1, _allowance));
-				OOCFuture.allOf(futures, StoreLease::close).whenComplete((vector, vectorError) -> {
-					if(vectorError != null) {
-						fail(vectorError);
+				consumeInputHandle(0);
+				PartitionedStoreStreamable matrix = (PartitionedStoreStreamable) getInput(0);
+				_liveMatrix = matrix.registerLiveConsumer(this::receivePack);
+				matrix.acquirePartitions().whenComplete((store, error) -> {
+					if(error != null) {
+						fail(error);
 						_ready.closeInput();
 						return;
 					}
-					_vector = vector;
-					_matrixReader = _matrixStore.openIndexedReader(new CountingLiveness(_matrixStore.size(), 1));
-					int parallel = Math.min(_matrixStore.size(), InfrastructureAnalyzer.getLocalParallelism());
-					_active.set(parallel);
-					if(parallel == 0)
-						emit();
-					for(int i = 0; i < parallel; i++)
-						next();
+					_matrixStore = store;
+					store.completion().whenComplete((completed, completionError) -> {
+						if(completionError != null)
+							fail(completionError);
+						if(_liveMatrix) {
+							_sourceDone.set(true);
+							if(_active.get() == 0)
+								emit();
+						}
+						else if(completionError == null)
+							startReplay();
+						else
+							_ready.closeInput();
+					});
 				});
 			}
 			catch(Throwable failure) {
@@ -169,6 +174,107 @@ public final class PartitionedMatrixVectorOOCPrimitive extends OOCPrimitive {
 				_ready.closeInput();
 			}
 		});
+	}
+
+	private void acceptVector(OOCStream.QueueCallback<IndexedMatrixValue> callback) {
+		try(callback) {
+			if(callback.isFailure()) {
+				callback.get();
+				return;
+			}
+			if(callback.isEos())
+				return;
+			if(_cleaned.get())
+				return;
+			int col = (int) callback.get().getIndexes().getRowIndex() - 1;
+			OOCStream.QueueCallback<IndexedMatrixValue> held = callback.keepOpen();
+			if(!_vectorBlocks.get(col).complete(held))
+				held.close();
+		}
+		catch(Throwable error) {
+			fail(error);
+			completeVector(error);
+		}
+	}
+
+	private void completeVector(Throwable error) {
+		if(_cleaned.get())
+			return;
+		if(error != null) {
+			fail(error);
+			for(OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> future : _vectorBlocks)
+				future.completeExceptionally(error);
+			return;
+		}
+		if(_liveVector) {
+			for(OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> future : _vectorBlocks)
+				future.complete(null);
+			return;
+		}
+		_vectorReader = _vectorStore.openIndexedReader(new CountingLiveness(_vectorStore.size(), 1));
+		for(int col = 0; col < _vectorBlocks.size(); col++) {
+			int index = col;
+			_vectorReader.request(col + 1L, 1, _allowance).whenComplete((lease, readError) -> {
+				if(readError != null) {
+					fail(readError);
+					_vectorBlocks.get(index).completeExceptionally(readError);
+				}
+				else
+					_vectorBlocks.get(index).complete(lease == null ? null : new MaterializedCallback<>(lease));
+			});
+		}
+	}
+
+	private void receivePack(StoreLease<PackedBlock> lease) {
+		if(hasFailed()) {
+			lease.close();
+			return;
+		}
+		_packSlots.acquireUninterruptibly();
+		if(hasFailed()) {
+			_packSlots.release();
+			lease.close();
+			return;
+		}
+		_active.incrementAndGet();
+		schedulePack(lease);
+	}
+
+	private void schedulePack(StoreLease<PackedBlock> lease) {
+		try {
+			Set<Integer> columns = new HashSet<>();
+			PackedBlock pack = lease.value();
+			for(int i = 0; i < pack.count(); i++)
+				columns.add((int) ((IndexedMatrixValue) pack.value(i)).getIndexes().getColumnIndex() - 1);
+			List<OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>>> required = new ArrayList<>();
+			for(int col : columns)
+				required.add(_vectorBlocks.get(col));
+			OOCFuture.allOf(required).whenComplete((ignored, error) -> {
+				if(error != null || hasFailed()) {
+					if(error != null)
+						fail(error);
+					lease.close();
+					completePack();
+				}
+				else
+					_ready.enqueue(lease);
+			});
+		}
+		catch(Throwable error) {
+			fail(error);
+			lease.close();
+			completePack();
+		}
+	}
+
+	private void startReplay() {
+		_matrixReader = _matrixStore.openIndexedReader(new CountingLiveness(_matrixStore.size(), 1));
+		int parallel = Math.min(_matrixStore.size(), InfrastructureAnalyzer.getLocalParallelism());
+		_active.set(parallel);
+		if(parallel == 0)
+			emit();
+		for(int i = 0; i < parallel; i++)
+			next();
 	}
 
 	private void next() {
@@ -184,7 +290,7 @@ public final class PartitionedMatrixVectorOOCPrimitive extends OOCPrimitive {
 				next();
 			}
 			else
-				_ready.enqueue(lease);
+				schedulePack(lease);
 		});
 	}
 
@@ -196,11 +302,11 @@ public final class PartitionedMatrixVectorOOCPrimitive extends OOCPrimitive {
 				MatrixBlock matrix = (MatrixBlock) indexed.getValue();
 				if(matrix.isEmptyBlock(false))
 					continue;
-				StoreLease<IndexedMatrixValue> rightLease = _vector
-					.get((int) indexed.getIndexes().getColumnIndex() - 1);
-				if(rightLease == null)
+				OOCStream.QueueCallback<IndexedMatrixValue> rightCallback = _vectorBlocks
+					.get((int) indexed.getIndexes().getColumnIndex() - 1).getNow(null);
+				if(rightCallback == null)
 					continue;
-				MatrixBlock right = (MatrixBlock) rightLease.value().getValue();
+				MatrixBlock right = (MatrixBlock) rightCallback.get().getValue();
 				MatrixBlock accumulator = _accumulators[(int) indexed.getIndexes().getRowIndex() - 1];
 				synchronized(accumulator) {
 					double[] out = accumulator.getDenseBlockValues();
@@ -226,9 +332,19 @@ public final class PartitionedMatrixVectorOOCPrimitive extends OOCPrimitive {
 			lease.closeAsync().whenComplete((ignored, error) -> {
 				if(error != null)
 					fail(error);
-				next();
+				completePack();
 			});
 		}
+	}
+
+	private void completePack() {
+		if(_liveMatrix) {
+			_packSlots.release();
+			if(_active.decrementAndGet() == 0 && _sourceDone.get())
+				emit();
+		}
+		else
+			next();
 	}
 
 	private void emit() {
@@ -254,10 +370,12 @@ public final class PartitionedMatrixVectorOOCPrimitive extends OOCPrimitive {
 	private void cleanup() {
 		if(!_cleaned.compareAndSet(false, true))
 			return;
-		if(_vector != null)
-			for(StoreLease<IndexedMatrixValue> vector : _vector)
+		for(OOCFuture<OOCStream.QueueCallback<IndexedMatrixValue>> future : _vectorBlocks) {
+			future.whenComplete((vector, error) -> {
 				if(vector != null)
 					vector.close();
+			});
+		}
 		if(_vectorReader != null)
 			_vectorReader.close();
 		if(_matrixReader != null)

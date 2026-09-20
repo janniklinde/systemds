@@ -45,6 +45,7 @@ import org.apache.sysds.runtime.ooc.cache.collections.SegmentedStreamTableList;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.stats.StreamTrace;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.runtime.util.HDFSTool;
 import org.apache.sysds.utils.Statistics;
 
@@ -491,6 +492,14 @@ final class SourceStore {
 		MatrixIndexes key = new MatrixIndexes();
 		String sourcePath = path.toString();
 		BlockLayoutIndex layout = _layouts.computeIfAbsent(sourcePath, p -> new BlockLayoutIndex());
+		long configuredGroupBytes = ConfigurationManager.getDMLConfig()
+			.getLongValue(DMLConfig.OOC_MATERIALIZED_PARTITION_BYTES);
+		long groupLimit = request.target instanceof SourceOOCStream && configuredGroupBytes > 0 && request.rows > 1 &&
+			request.cols > 1 && request.estNnz >= 0 &&
+			request.estNnz / (double) request.rows / request.cols < 0.1 ? configuredGroupBytes : 0;
+		List<IndexedMatrixValue> groupValues = groupLimit > 0 ? new ArrayList<>() : null;
+		List<OOCIOHandler.SourceBlockDescriptor> groupDescriptors = groupLimit > 0 ? new ArrayList<>() : null;
+		long groupBytes = 0;
 
 		try(SequenceFile.Reader reader = openReader(job, path);
 			FSDataInputStream headers = !reader.isCompressed() && byteLimit != Long.MAX_VALUE ?
@@ -569,7 +578,26 @@ final class SourceStore {
 				OOCIOHandler.SourceBlockDescriptor descriptor = new OOCIOHandler.SourceBlockDescriptor(sourcePath,
 					request.format, outIdx, recordStart, (int) (recordEnd - recordStart), blockSize);
 
-				emitSourceValue(request, imv, descriptor);
+				if(groupLimit > 0) {
+					long valueBytes = OOCUtils.memoryCharge(imv);
+					if(!groupValues.isEmpty() && groupBytes + valueBytes > groupLimit) {
+						emitSourceGroup(request, groupValues, groupDescriptors);
+						groupValues.clear();
+						groupDescriptors.clear();
+						groupBytes = 0;
+					}
+					groupValues.add(imv);
+					groupDescriptors.add(descriptor);
+					groupBytes += valueBytes;
+					if(groupBytes >= groupLimit) {
+						emitSourceGroup(request, groupValues, groupDescriptors);
+						groupValues.clear();
+						groupDescriptors.clear();
+						groupBytes = 0;
+					}
+				}
+				else
+					emitSourceValue(request, imv, descriptor);
 				descriptors.add(descriptor);
 				filePositions.set(fileIdx, reader.getPosition());
 
@@ -579,6 +607,8 @@ final class SourceStore {
 					ioStart = currTime;
 				}
 			}
+			if(groupLimit > 0 && !groupValues.isEmpty())
+				emitSourceGroup(request, groupValues, groupDescriptors);
 
 			if(DMLScript.OOC_STATISTICS)
 				Statistics.incrementOOCSourceScan(scanBlocks, scanNanos, scanBytes);
@@ -586,6 +616,23 @@ final class SourceStore {
 			if(!stop.get())
 				completed.set(fileIdx, 1);
 		}
+	}
+
+	private static void emitSourceGroup(OOCIOHandler.SourceReadRequest request, List<IndexedMatrixValue> values,
+		List<OOCIOHandler.SourceBlockDescriptor> descriptors) {
+		if(values.size() == 1) {
+			emitSourceValue(request, values.get(0), descriptors.get(0));
+			return;
+		}
+		OOCIOHandler.SourceBlockDescriptor first = descriptors.get(0);
+		OOCIOHandler.SourceBlockDescriptor last = descriptors.get(descriptors.size() - 1);
+		long serialized = 0;
+		for(OOCIOHandler.SourceBlockDescriptor descriptor : descriptors)
+			serialized += descriptor.serializedSize;
+		OOCIOHandler.GroupSourceBlockDescriptor group = new OOCIOHandler.GroupSourceBlockDescriptor(first.path,
+			first.format, first.indexes, first.offset, (int) (last.offset + last.recordLength - first.offset), serialized,
+			descriptors);
+		((SourceOOCStream) request.target).enqueueGroup(List.copyOf(values), group);
 	}
 
 	private static void emitSourceValue(OOCIOHandler.SourceReadRequest request, IndexedMatrixValue value,

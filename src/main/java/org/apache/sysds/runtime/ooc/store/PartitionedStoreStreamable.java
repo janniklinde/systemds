@@ -47,10 +47,12 @@ public final class PartitionedStoreStreamable implements OOCStreamable<IndexedMa
 	private int _active;
 	private boolean _delete;
 	private boolean _closed;
+	private boolean _materializationDone;
+	private volatile Consumer<StoreLease<PackedBlock>> _liveConsumer;
 
-	public PartitionedStoreStreamable(OOCStream<IndexedMatrixValue> source, CacheableData<?> data, long bytes) {
+	public PartitionedStoreStreamable(OOCStream<IndexedMatrixValue> source, CacheableData<?> data) {
 		_data = data;
-		_primitive = new Materializer(source, bytes);
+		_primitive = new Materializer(source);
 		_store.whenComplete((store, error) -> tryFinalize());
 	}
 
@@ -64,6 +66,13 @@ public final class PartitionedStoreStreamable implements OOCStreamable<IndexedMa
 		_active++;
 		OOCPlanner.compileAndStart(_primitive);
 		return _store;
+	}
+
+	public synchronized boolean registerLiveConsumer(Consumer<StoreLease<PackedBlock>> consumer) {
+		if(_primitive.hasStartedExecution() || _liveConsumer != null)
+			return false;
+		_liveConsumer = consumer;
+		return true;
 	}
 
 	public void releasePartitions() {
@@ -99,7 +108,7 @@ public final class PartitionedStoreStreamable implements OOCStreamable<IndexedMa
 
 	private void tryFinalize() {
 		synchronized(this) {
-			if(!_delete || _reserved != 0 || _active != 0 || _closed || !_store.isDone())
+			if(!_delete || _reserved != 0 || _active != 0 || _closed || !_materializationDone)
 				return;
 			_closed = true;
 		}
@@ -169,11 +178,8 @@ public final class PartitionedStoreStreamable implements OOCStreamable<IndexedMa
 	}
 
 	private final class Materializer extends OOCPrimitive {
-		private final long _bytes;
-
-		private Materializer(OOCStream<IndexedMatrixValue> source, long bytes) {
+		private Materializer(OOCStream<IndexedMatrixValue> source) {
 			super(null, source);
-			_bytes = bytes;
 		}
 
 		@Override
@@ -192,21 +198,25 @@ public final class PartitionedStoreStreamable implements OOCStreamable<IndexedMa
 			MaterializedStore<PackedBlock> store = new MaterializedStore<>(OOCCacheManager.getGlobalCache(),
 				CachingStream._streamSeq.getNextID(), -1, 1, null, getDataCharacteristics());
 			try {
-				PartitionedOOCStreamMaterializer materializer = new PartitionedOOCStreamMaterializer(store, _allowance,
-					getDataCharacteristics(), _bytes);
+				PartitionedOOCStreamMaterializer materializer = new PartitionedOOCStreamMaterializer(store,
+					getDataCharacteristics(), _liveConsumer);
 				materializer.completion().whenComplete((ignored, error) -> {
+					synchronized(PartitionedStoreStreamable.this) {
+						_materializationDone = true;
+					}
 					if(error != null) {
 						_store.completeExceptionally(error);
 						store.close();
 						fail(error);
 					}
-					else
-						_store.complete(store);
-					onComplete();
+						onComplete();
+					tryFinalize();
 				});
+				_store.complete(store);
 				materializer.attach(getInputReadStream(0));
 			}
 			catch(Throwable error) {
+				store.failMaterialization(error);
 				store.close();
 				_store.completeExceptionally(error);
 				fail(error);
@@ -245,31 +255,40 @@ public final class PartitionedStoreStreamable implements OOCStreamable<IndexedMa
 					releasePartitions();
 					return;
 				}
-				SyncMemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.getSource(),
-					GlobalMemoryBroker.getSource().getAllowedMemory() / 2);
-				StoreBackedStream<PackedBlock> stream = new StoreBackedStream<>(
-					store.openReader(new SequentialAccessPattern(store.size()), allowance, 1));
-				stream.setSubscriber(callback -> {
-					if(callback.isFailure() || callback.isEos()) {
-						try {
-							if(callback.isFailure())
-								callback.get();
-							closeInput();
-						}
-						catch(Throwable failure) {
-							propagateFailure(DMLRuntimeException.of(failure));
-						}
-						finally {
-							allowance.shutdown();
-							releasePartitions();
-						}
+				store.completion().whenComplete((ignored, completionError) -> replay(store, completionError));
+			});
+		}
+
+		private void replay(MaterializedStore<PackedBlock> store, Throwable error) {
+			if(error != null) {
+				propagateFailure(DMLRuntimeException.of(error));
+				releasePartitions();
+				return;
+			}
+			SyncMemoryAllowance allowance = new SyncMemoryAllowance(GlobalMemoryBroker.getSource(),
+				GlobalMemoryBroker.getSource().getAllowedMemory() / 2);
+			StoreBackedStream<PackedBlock> stream = new StoreBackedStream<>(
+				store.openReader(new SequentialAccessPattern(store.size()), allowance, 1));
+			stream.setSubscriber(callback -> {
+				if(callback.isFailure() || callback.isEos()) {
+					try {
+						if(callback.isFailure())
+							callback.get();
+						closeInput();
 					}
-					else {
-						PackedBlock pack = callback.get();
-						for(int i = 0; i < pack.count(); i++)
-							enqueue(new TileCallback((IndexedMatrixValue) pack.value(i), callback.keepOpen()));
+					catch(Throwable failure) {
+						propagateFailure(DMLRuntimeException.of(failure));
 					}
-				});
+					finally {
+						allowance.shutdown();
+						releasePartitions();
+					}
+				}
+				else {
+					PackedBlock pack = callback.get();
+					for(int i = 0; i < pack.count(); i++)
+						enqueue(new TileCallback((IndexedMatrixValue) pack.value(i), callback.keepOpen()));
+				}
 			});
 		}
 	}

@@ -302,7 +302,8 @@ public class RepartitionInstructionSpillTest {
 			MatrixBlock matrix = new MatrixBlock(800, 800, true);
 			for(int row = 0; row < 800; row++)
 				for(int col = row % 50; col < 800; col += 50)
-					matrix.set(row, col, row % 7 + 1);
+					if((col / 50) % 2 == 0)
+						matrix.set(row, col, row % 7 + 1);
 			matrix.recomputeNonZeros();
 			String path = directory.resolve("X").toString();
 			new WriterBinaryBlock(1).writeMatrixToHDFS(matrix, path, 800, 800, 50, matrix.getNonZeros(), false);
@@ -331,7 +332,7 @@ public class RepartitionInstructionSpillTest {
 						MatrixBlock block = (MatrixBlock) value.getValue();
 						int first = (int) (value.getIndexes().getRowIndex() - 1) * 50;
 						for(int row = 0; row < block.getNumRows(); row++)
-							Assert.assertEquals(48d * ((first + row) % 7 + 1), block.get(row, 0), 0);
+							Assert.assertEquals(24d * ((first + row) % 7 + 1), block.get(row, 0), 0);
 						rows += block.getNumRows();
 					}
 				}
