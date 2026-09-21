@@ -109,7 +109,10 @@ final class PackedPinState {
 		_counts[ix]--;
 		if(_counts[ix] > 0)
 			return PackedUnpinHandle.committed(physicalEntry, allowance, physicalEntry.getSize());
-		PackedUnpinHandle handle = PackedUnpinHandle.delayedPhysicalRelease(physicalEntry, allowance);
+		BlockEntry pinned = _futures[ix].getNow(null);
+		if(pinned == null)
+			throw new IllegalStateException("Cannot unpin a pack before its physical pin completes.");
+		PackedUnpinHandle handle = PackedUnpinHandle.delayedPhysicalRelease(pinned, allowance);
 		_releaseHandles[ix] = handle;
 		_releaseDueNanos[ix] = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0, releaseDelayMs));
 		owner.enqueueRelease(this);
@@ -207,7 +210,7 @@ final class PackedPinState {
 	}
 
 	private void releasePhysicalPin(OOCCacheImpl physical, MemoryAllowance allowance, PackedUnpinHandle handle) {
-		OOCCache.UnpinHandle physicalHandle = physical.unpin(physicalEntry, allowance);
+		OOCCache.UnpinHandle physicalHandle = physical.unpin(handle.entry(), allowance);
 		if(physicalHandle.isCommitted()) {
 			handle.complete(true);
 			return;

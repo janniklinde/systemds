@@ -157,7 +157,7 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 	private void publishSourceGroup(SourceBackedGroupCallback.SourceGroup source, ReservationBudget ownership) {
 		List<IndexedMatrixValue> values = source.values();
 		if(values.size() > 1 && (!(source.descriptor() instanceof OOCIOHandler.GroupSourceBlockDescriptor group) ||
-			!group.packed || group.count != values.size()))
+			group.count != values.size()))
 			throw new IllegalArgumentException("Source pack values do not match their physical resource descriptor.");
 		long[] tileIds = new long[values.size()];
 		Object[] packedValues = new Object[values.size()];
@@ -190,8 +190,10 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 				physical = packed.physicalEntry();
 				entries = packed.logicalEntries();
 			}
-			cache.getIOHandler().registerSourceLocation(physical.getKey(), source.descriptor());
-			cache.markBacked(physical);
+			if(values.size() == 1 || ((OOCIOHandler.GroupSourceBlockDescriptor) source.descriptor()).packed) {
+				cache.getIOHandler().registerSourceLocation(physical.getKey(), source.descriptor());
+				cache.markBacked(physical);
+			}
 			for(int i = 0; i < entries.length; i++)
 				leases.add(_store.publishPinnedEntryLive(Math.toIntExact(tileIds[i]), entries[i], ownership));
 			ownership.close();

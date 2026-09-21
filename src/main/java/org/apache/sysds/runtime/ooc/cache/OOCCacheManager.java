@@ -29,6 +29,7 @@ import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerImpl;
+import org.apache.sysds.runtime.ooc.cache.packed.OOCPackedCache;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCCacheScheduler;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCLRUCacheScheduler;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
@@ -178,7 +179,9 @@ public class OOCCacheManager {
 			OOCCache cache = _globalCache.get();
 			if(cache != null)
 				return cache;
-			cache = new OOCCacheImpl(new OOCIOHandlerImpl(), getHardLimit(), getEvictionLimit());
+			OOCCacheImpl physical = new OOCCacheImpl(new OOCIOHandlerImpl(), getHardLimit(), getEvictionLimit());
+			long packBytes = ConfigurationManager.getDMLConfig().getLongValue(DMLConfig.OOC_CACHE_PACK_BYTES);
+			cache = packBytes > 0 ? new OOCPackedCache(physical, Math.max(1, packBytes / 2), packBytes, 5) : physical;
 			if(_globalCache.compareAndSet(null, cache))
 				return cache;
 			cache.shutdown();

@@ -27,6 +27,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStream;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
+import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
@@ -90,6 +91,13 @@ public final class PartitionedOOCStreamMaterializer implements Consumer<OOCStrea
 			ownership.reserveBlocking(pack.size());
 			StoreLease<PackedBlock> lease = _store.publishPinnedUnpackedLive(_partition++, pack, pack.size(),
 				ownership);
+			OOCIOHandler.SourceBlockDescriptor descriptor = group.descriptor();
+			if(!(descriptor instanceof OOCIOHandler.GroupSourceBlockDescriptor))
+				descriptor = new OOCIOHandler.GroupSourceBlockDescriptor(descriptor.path, descriptor.format,
+					descriptor.indexes, descriptor.offset, descriptor.recordLength, descriptor.serializedSize,
+					List.of(descriptor));
+			_store.cache().getIOHandler().registerSourceLocation(lease.entry().getKey(), descriptor);
+			_store.cache().markBacked(lease.entry());
 			try(lease) {
 				if(_liveConsumer != null) {
 					StoreLease<PackedBlock> live = lease.retain();

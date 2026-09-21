@@ -24,6 +24,7 @@ import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
+import org.apache.sysds.runtime.ooc.cache.packed.OOCPackedCache;
 import org.apache.sysds.runtime.ooc.memory.ManagedPayload;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
@@ -83,6 +84,8 @@ public final class MaterializedStore<T extends SpillableObject> {
 			throw new IllegalArgumentException("Materialized store requires at least one consumer.");
 		_cache = cache;
 		_streamId = streamId;
+		if(cache instanceof OOCPackedCache packed)
+			packed.enablePacking(streamId);
 		_registeredReaders = new ArrayList<>();
 		_forgotten = new BitSet();
 		_publishedIndexes = new BitSet();
@@ -395,6 +398,8 @@ public final class MaterializedStore<T extends SpillableObject> {
 		}
 		for(StoreReader localReader : localReaders)
 			localReader.close();
+		if(_cache instanceof OOCPackedCache packed)
+			packed.disablePacking(_streamId);
 		for(int i = 0; i < size(); i++)
 			if(markForgotten(i))
 				_cache.dereference(new BlockKey(_streamId, i));

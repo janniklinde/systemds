@@ -223,6 +223,7 @@ public class OOCPackedCacheTest {
 			2 * BYTES, 10 * BYTES, -1, 0);
 		try {
 			producer.reserveBlocking(BYTES);
+			cache.enablePacking(STREAM_ID);
 			BlockEntry pending = cache.putPinned(STREAM_ID, 0, value(13.0), BYTES, producer);
 			Assert.assertEquals(3, cache.reference(pending));
 			Assert.assertEquals(2, cache.dereference(pending));
@@ -331,7 +332,7 @@ public class OOCPackedCacheTest {
 		producer.setTargetMemory(1L << 30);
 		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker);
 		reader.setTargetMemory(1L << 30);
-		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(io, 4 * BYTES, 2 * BYTES), 2 * BYTES, 2 * BYTES, -1,
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(io, 5 * BYTES, 3 * BYTES), 2 * BYTES, 2 * BYTES, -1,
 			0);
 		try {
 			cache.addEvictionPolicy(STREAM_ID, tileId -> tileId < 2 ? 100 : 0);
@@ -371,7 +372,7 @@ public class OOCPackedCacheTest {
 		producer.setTargetMemory(1L << 30);
 		SyncMemoryAllowance reader = new SyncMemoryAllowance(broker);
 		reader.setTargetMemory(1L << 30);
-		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(io, 4 * BYTES, 0), 2 * BYTES, 10 * BYTES, -1, 0);
+		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(io, 5 * BYTES, 0), 2 * BYTES, 10 * BYTES, -1, 0);
 		try {
 			BlockEntry[] entries = publishSmallTiles(cache, producer, STREAM_ID, 4);
 			unpinAndFlush(cache, producer, entries);
@@ -399,6 +400,7 @@ public class OOCPackedCacheTest {
 
 	private static BlockEntry[] publishSmallTiles(OOCPackedCache cache, SyncMemoryAllowance producer, long streamId,
 		int count) {
+		cache.enablePacking(streamId);
 		BlockEntry[] entries = new BlockEntry[count];
 		for(int i = 0; i < count; i++) {
 			producer.reserveBlocking(BYTES);

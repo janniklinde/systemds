@@ -33,7 +33,9 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -69,6 +71,7 @@ public final class OOCPackedCache implements OOCCache {
 	private final ScheduledExecutorService _sealExecutor;
 	private final ExecutorService _releaseExecutor;
 	private final ConcurrentLinkedQueue<PackedPinState> _releaseQueue;
+	private final Set<Long> _packingStreams = ConcurrentHashMap.newKeySet();
 	private final AtomicBoolean _releaseRunning;
 	private final AtomicBoolean _packedPolicyInstalled;
 	private final AtomicInteger _nextPackedId;
@@ -169,7 +172,7 @@ public final class OOCPackedCache implements OOCCache {
 
 	@Override
 	public BlockEntry putPinned(long sId, long tId, Object data, long size, MemoryAllowance allowance) {
-		if(size >= _packThresholdBytes)
+		if(size >= _packThresholdBytes || !_packingStreams.contains(sId))
 			return _physical.putPinned(sId, tId, data, size, allowance);
 
 		PackBuilder builder;
@@ -184,6 +187,18 @@ public final class OOCPackedCache implements OOCCache {
 		logical.pin();
 		logical.setCacheMeta(new PendingLogicalPin(builder, slot));
 		return logical;
+	}
+
+	public void enablePacking(long streamId) {
+		_packingStreams.add(streamId);
+	}
+
+	public void disablePacking(long streamId) {
+		_packingStreams.remove(streamId);
+	}
+
+	public static boolean isPackedLogical(BlockEntry entry) {
+		return entry.getCacheMeta() instanceof PendingLogicalPin || entry.getCacheMeta() instanceof PackedLogicalPin;
 	}
 
 	public BlockEntry[] putPackPinned(long sId, long[] tIds, Object[] data, long[] sizes, int off, int len,
@@ -226,7 +241,7 @@ public final class OOCPackedCache implements OOCCache {
 				BlockKey key = new BlockKey(streamId, ids[i]);
 				SealedPackLocation location = new SealedPackLocation(state, i, 2);
 				putLocation(key, location);
-				logicalEntries[i] = createLogicalPin(key, location);
+				logicalEntries[i] = createLogicalPin(key, location, physicalEntry);
 			}
 			return new PrepackedEntries(physicalEntry, logicalEntries);
 		}
@@ -270,7 +285,7 @@ public final class OOCPackedCache implements OOCCache {
 
 	public OOCFuture<PackLease> pinPack(PackGroup group, MemoryAllowance allowance) {
 		return group.state.pin(_physical, allowance, false)
-			.map(entry -> entry == null ? null : new PackLease(this, group, allowance));
+			.map(entry -> entry == null ? null : new PackLease(this, group, entry, allowance));
 	}
 
 	@Override
@@ -314,11 +329,12 @@ public final class OOCPackedCache implements OOCCache {
 		BlockKey key = new BlockKey(sId, tId);
 		packed.retain();
 		try {
-			if(packed.state().pinIfLive(_physical, allowance) == null) {
+			BlockEntry physical = packed.state().pinIfLive(_physical, allowance);
+			if(physical == null) {
 				releaseLocation(key, packed);
 				return null;
 			}
-			return createLogicalPin(key, packed);
+			return createLogicalPin(key, packed, physical);
 		}
 		catch(RuntimeException | Error error) {
 			releaseLocation(key, packed);
@@ -566,7 +582,7 @@ public final class OOCPackedCache implements OOCCache {
 			if(entry == null || error != null)
 				releaseLocation(key, location);
 		});
-		return physical.map(entry -> entry == null ? null : createLogicalPin(key, location));
+		return physical.map(entry -> entry == null ? null : createLogicalPin(key, location, entry));
 	}
 
 	private void releasePendingPin(BlockKey key, PackBuilder builder, int slot) {
@@ -579,8 +595,8 @@ public final class OOCPackedCache implements OOCCache {
 			clearLocation(key);
 	}
 
-	private static BlockEntry createLogicalPin(BlockKey logicalKey, SealedPackLocation location) {
-		PackedBlock block = (PackedBlock) location.state().physicalEntry.getDataUnsafe();
+	private static BlockEntry createLogicalPin(BlockKey logicalKey, SealedPackLocation location, BlockEntry physical) {
+		PackedBlock block = (PackedBlock) physical.getDataUnsafe();
 		Object data = block.values[location.slot()];
 		long size = block.sizes[location.slot()];
 		BlockEntry logical = new BlockEntry(logicalKey, size, data, BlockState.REMOVED);
@@ -816,12 +832,14 @@ public final class OOCPackedCache implements OOCCache {
 	public static final class PackLease implements AutoCloseable {
 		private final OOCPackedCache owner;
 		private final PackGroup group;
+		private final BlockEntry physical;
 		private final MemoryAllowance allowance;
 		private boolean open;
 
-		private PackLease(OOCPackedCache owner, PackGroup group, MemoryAllowance allowance) {
+		private PackLease(OOCPackedCache owner, PackGroup group, BlockEntry physical, MemoryAllowance allowance) {
 			this.owner = owner;
 			this.group = group;
+			this.physical = physical;
 			this.allowance = allowance;
 			open = true;
 		}
@@ -841,7 +859,7 @@ public final class OOCPackedCache implements OOCCache {
 		public Object value(int slot) {
 			if(!open)
 				throw new IllegalStateException("Pack lease is closed");
-			PackedBlock block = (PackedBlock) group.state.physicalEntry.getData();
+			PackedBlock block = (PackedBlock) physical.getData();
 			return block.values[slot];
 		}
 

@@ -29,6 +29,8 @@ import java.nio.file.Paths;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.runtime.util.ByteBufferDataInput;
 
 final class DirectRecordReader implements Closeable {
@@ -44,7 +46,26 @@ final class DirectRecordReader implements Closeable {
 
 	IndexedMatrixValue read(String path, long offset, int sourceRecordLength, MatrixBlock matrix) throws IOException {
 		ByteBuffer buffer = _reader.read(offset, sourceRecordLength);
+		return readRecord(path, offset, buffer, matrix);
+	}
 
+	PackedBlock readGroup(String path, long offset, int sourceRecordLength, int count) throws IOException {
+		ByteBuffer buffer = _reader.read(offset, sourceRecordLength);
+		int start = buffer.position();
+		Object[] values = new Object[count];
+		long[] sizes = new long[count];
+		for(int i = 0; i < count; i++) {
+			IndexedMatrixValue value = readRecord(path, offset + buffer.position() - start, buffer, new MatrixBlock());
+			values[i] = value;
+			sizes[i] = OOCUtils.memoryCharge(value);
+		}
+		if(buffer.hasRemaining())
+			throw new IOException("Unexpected trailing bytes in source group at " + offset + " in " + path);
+		return PackedBlock.fromValues(values, sizes);
+	}
+
+	private static IndexedMatrixValue readRecord(String path, long offset, ByteBuffer buffer, MatrixBlock matrix)
+		throws IOException {
 		int recordLength = buffer.getInt();
 		if(recordLength == SYNC_ESCAPE) {
 			buffer.position(buffer.position() + 16);

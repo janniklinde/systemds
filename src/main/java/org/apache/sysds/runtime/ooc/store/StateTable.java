@@ -260,7 +260,7 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 			throw ex;
 		}
 		try {
-			entry = _cache.putPinned(key.getStreamId(), key.getSequenceNumber(), payload.value(), payload.bytes(),
+			entry = _cache.putUnpackedPinned(key.getStreamId(), key.getSequenceNumber(), payload.value(), payload.bytes(),
 				payload.owner());
 		}
 		catch(RuntimeException ex) {

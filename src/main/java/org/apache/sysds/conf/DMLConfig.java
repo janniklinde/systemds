@@ -165,6 +165,7 @@ public class DMLConfig
 	public static final String OOC_REPLAY_MEMORY = "sysds.ooc.source.replay.memory";       // in bytes
 	public static final String OOC_REPLAY_PREFETCH = "sysds.ooc.source.replay.prefetch";   // in blocks
 	public static final String OOC_MATERIALIZED_PARTITION_BYTES = "sysds.ooc.materialized.partition.bytes";
+	public static final String OOC_CACHE_PACK_BYTES = "sysds.ooc.cache.pack.bytes";
 
 	/** Asynchronous triggering of Spark OPs and operator placement **/
 	public static final String ASYNC_PREFETCH = "sysds.async.prefetch";  // boolean: enable asynchronous prefetching spark/gpu intermediates
@@ -209,6 +210,7 @@ public class DMLConfig
 		_defaultVals.put(OOC_REPLAY_MEMORY, String.valueOf(300L * 1024 * 1024)); // 300MB
 		_defaultVals.put(OOC_REPLAY_PREFETCH, "32");
 		_defaultVals.put(OOC_MATERIALIZED_PARTITION_BYTES, "0");
+		_defaultVals.put(OOC_CACHE_PACK_BYTES, "0");
 		_defaultVals.put(CP_PARALLEL_OPS,        "true" );
 		_defaultVals.put(CP_PARALLEL_IO,         "true" );
 		_defaultVals.put(IO_COMPRESSION_CODEC,   "none");

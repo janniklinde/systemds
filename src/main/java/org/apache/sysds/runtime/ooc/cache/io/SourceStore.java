@@ -42,6 +42,7 @@ import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.collections.MaskedOnceArrayList;
 import org.apache.sysds.runtime.ooc.cache.collections.SegmentedStreamTableList;
+import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
 import org.apache.sysds.runtime.ooc.stats.OOCEventLog;
 import org.apache.sysds.runtime.ooc.stats.StreamTrace;
 import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
@@ -107,10 +108,12 @@ final class SourceStore {
 	}
 
 	void register(BlockKey key, OOCIOHandler.SourceBlockDescriptor descriptor) {
+		int count = descriptor instanceof OOCIOHandler.GroupSourceBlockDescriptor group ? group.count : 1;
+		boolean grouped = descriptor instanceof OOCIOHandler.GroupSourceBlockDescriptor;
 		_locations.getOrCreate(key.getStreamId()).put(Math.toIntExact(key.getSequenceNumber()),
-			new SourceLocation(descriptor.path, descriptor.offset, descriptor.recordLength));
+			new SourceLocation(descriptor.path, descriptor.offset, descriptor.recordLength, count, grouped));
 		BlockLayoutIndex index = _layouts.get(descriptor.path);
-		if(index != null)
+		if(index != null && count == 1)
 			index.setKey(index.slotOf(descriptor.offset), BlockLayoutIndex.packKey(key));
 	}
 
@@ -135,7 +138,7 @@ final class SourceStore {
 			throw new DMLRuntimeException("Failed to load source location for: " + block.getKey());
 		StreamTrace.sourceRead(block.getKey().getStreamId(), block.getSize());
 		long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
-		Object data = readSingle(src, readAheadBudget, cache);
+		Object data = src.grouped ? readGroup(src) : readSingle(src, readAheadBudget, cache);
 		if(DMLScript.OOC_STATISTICS) {
 			Statistics.incrementOOCLoadFromDisk();
 			Statistics.accumulateOOCLoadFromDiskTime(System.nanoTime() - ioStart);
@@ -202,6 +205,57 @@ final class SourceStore {
 				IOUtilFunctions.closeSilently(reader);
 		}
 		return new IndexedMatrixValue(ix, mb);
+	}
+
+	private PackedBlock readGroup(SourceLocation src) {
+		if(_direct)
+			return readGroupDirect(src);
+		Object[] values = new Object[src.count];
+		long[] sizes = new long[src.count];
+		SequenceFile.Reader reader = borrowReader(src.path);
+		boolean reusable = false;
+		try {
+			reader.seek(src.offset);
+			for(int i = 0; i < src.count; i++) {
+				MatrixIndexes indexes = new MatrixIndexes();
+				MatrixBlock block = new MatrixBlock();
+				if(!reader.next(indexes, block))
+					throw new DMLRuntimeException("Failed to read source group at offset " + src.offset + " in " + src.path);
+				IndexedMatrixValue value = new IndexedMatrixValue(indexes, block);
+				values[i] = value;
+				sizes[i] = OOCUtils.memoryCharge(value);
+			}
+			reusable = true;
+		}
+		catch(IOException e) {
+			throw new DMLRuntimeException(e);
+		}
+		finally {
+			if(reusable)
+				returnReader(src.path, reader);
+			else
+				IOUtilFunctions.closeSilently(reader);
+		}
+		return PackedBlock.fromValues(values, sizes);
+	}
+
+	private PackedBlock readGroupDirect(SourceLocation src) {
+		DirectRecordReader reader = borrowDirectReader(src.path);
+		boolean reusable = false;
+		try {
+			PackedBlock block = reader.readGroup(src.path, src.offset, src.recordLength, src.count);
+			reusable = true;
+			return block;
+		}
+		catch(IOException e) {
+			throw new DMLRuntimeException(e);
+		}
+		finally {
+			if(reusable)
+				returnDirectReader(src.path, reader);
+			else
+				IOUtilFunctions.closeSilently(reader);
+		}
 	}
 
 	private Object readSingleDirect(SourceLocation src) {
@@ -346,7 +400,7 @@ final class SourceStore {
 		}
 	}
 
-	private record SourceLocation(String path, long offset, int recordLength) {
+	private record SourceLocation(String path, long offset, int recordLength, int count, boolean grouped) {
 	}
 
 	CompletableFuture<OOCIOHandler.SourceReadResult> scan(OOCIOHandler.SourceReadRequest request,
@@ -492,17 +546,23 @@ final class SourceStore {
 		MatrixIndexes key = new MatrixIndexes();
 		String sourcePath = path.toString();
 		BlockLayoutIndex layout = _layouts.computeIfAbsent(sourcePath, p -> new BlockLayoutIndex());
-		long configuredGroupBytes = ConfigurationManager.getDMLConfig()
+		long partitionBytes = ConfigurationManager.getDMLConfig()
 			.getLongValue(DMLConfig.OOC_MATERIALIZED_PARTITION_BYTES);
-		long groupLimit = request.target instanceof SourceOOCStream && configuredGroupBytes > 0 && request.rows > 1 &&
-			request.cols > 1 && request.estNnz >= 0 &&
-			request.estNnz / (double) request.rows / request.cols < 0.1 ? configuredGroupBytes : 0;
+		long cachePackBytes = ConfigurationManager.getDMLConfig().getLongValue(DMLConfig.OOC_CACHE_PACK_BYTES);
+		boolean sparsePartition = partitionBytes > 0 && request.rows > 1 && request.cols > 1 &&
+			request.estNnz >= 0 && request.estNnz / (double) request.rows / request.cols < 0.1;
+		long groupLimit = request.target instanceof SourceOOCStream ?
+			Math.max(cachePackBytes, sparsePartition ? partitionBytes : 0) : 0;
 		List<IndexedMatrixValue> groupValues = groupLimit > 0 ? new ArrayList<>() : null;
 		List<OOCIOHandler.SourceBlockDescriptor> groupDescriptors = groupLimit > 0 ? new ArrayList<>() : null;
 		long groupBytes = 0;
+		long maxCells = Math.min((long) request.blen, request.rows) *
+			Math.min((long) request.blen, request.cols);
+		boolean preflight = byteLimit != Long.MAX_VALUE &&
+			(maxCells > 65536 || byteLimit < 64L * 1024 * 1024);
 
 		try(SequenceFile.Reader reader = openReader(job, path);
-			FSDataInputStream headers = !reader.isCompressed() && byteLimit != Long.MAX_VALUE ?
+			FSDataInputStream headers = !reader.isCompressed() && preflight ?
 				IOUtilFunctions.getFileSystem(path, job).open(path) : null) {
 			long pos = filePositions.get(fileIdx);
 			if(pos > 0)

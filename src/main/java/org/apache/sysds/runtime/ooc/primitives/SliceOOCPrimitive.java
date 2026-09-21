@@ -29,6 +29,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
@@ -93,7 +94,8 @@ public final class SliceOOCPrimitive extends OOCPrimitive {
 
 	@Override
 	protected long getMaxTaskReservationBytes() {
-		return OOCUtils.estimateOutputTileBytes(_input.getDataCharacteristics());
+		return OOCCacheManager.getGlobalCache()
+			.maxPhysicalPinBytes(OOCUtils.estimateOutputTileBytes(_input.getDataCharacteristics()));
 	}
 
 	@Override
