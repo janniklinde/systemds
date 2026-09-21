@@ -49,6 +49,11 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	public boolean propagatesStreamingProperties(int index) {
+		return true;
+	}
+
+	@Override
 	protected void inferPatternsInternal() {
 		OOCPrimitive dependency = getInputDependency(0);
 		OOCAccessPattern inputPattern = dependency == null ? OOCAccessPattern.ANY : dependency.getAccessPattern();

@@ -123,6 +123,11 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	public boolean drainsInputIndependently(int index) {
+		return true;
+	}
+
+	@Override
 	protected void inferPatternsInternal() {
 		_pattern = OOCAccessPattern.ROW_MAJOR;
 		for(OOCPrimitive child : getChildren())

@@ -55,6 +55,7 @@ public final class OOCPlanner {
 				primitives.get(i).inferPatterns();
 		if(root.getAccessPattern() == OOCAccessPattern.ANY || root.getAccessPattern().isUnset())
 			root.requestPattern(OOCAccessPattern.ROW_MAJOR);
+		configureLiveSharing(root, primitives);
 
 		for(OOCPrimitive primitive : primitives) {
 			if(primitive instanceof MaterializeOOCPrimitive && primitive != root)
@@ -132,6 +133,42 @@ public final class OOCPlanner {
 			if(dependsOn(child, target, visited))
 				return true;
 		return false;
+	}
+
+	private static void configureLiveSharing(OOCPrimitive root, List<OOCPrimitive> primitives) {
+		IdentityHashMap<OOCPrimitive, Boolean> drainage = new IdentityHashMap<>();
+		for(OOCPrimitive primitive : primitives)
+			for(int input = 0; input < primitive.getInputCount(); input++)
+				primitive.setShareLiveHandle(input, drainsInput(primitive, input, root, drainage,
+					Collections.newSetFromMap(new IdentityHashMap<>())));
+	}
+
+	private static boolean drainsInput(OOCPrimitive primitive, int input, OOCPrimitive root,
+		IdentityHashMap<OOCPrimitive, Boolean> drainage, Set<OOCPrimitive> visiting) {
+		return primitive.drainsInputIndependently(input) || primitive.propagatesStreamingProperties(input)
+			&& outputIsDrained(primitive, root, drainage, visiting);
+	}
+
+	private static boolean outputIsDrained(OOCPrimitive primitive, OOCPrimitive root,
+		IdentityHashMap<OOCPrimitive, Boolean> drainage, Set<OOCPrimitive> visiting) {
+		if(primitive == root)
+			return true;
+		Boolean known = drainage.get(primitive);
+		if(known != null)
+			return known;
+		if(!visiting.add(primitive))
+			return false;
+		boolean drained = !primitive.getParents().isEmpty();
+		for(OOCPrimitive parent : primitive.getParents()) {
+			boolean parentDrains = false;
+			for(int input = 0; input < parent.getInputCount(); input++)
+				if(parent.getInputDependency(input) == primitive)
+					parentDrains |= drainsInput(parent, input, root, drainage, visiting);
+			drained &= parentDrains;
+		}
+		visiting.remove(primitive);
+		drainage.put(primitive, drained);
+		return drained;
 	}
 
 	@SuppressWarnings("unchecked")

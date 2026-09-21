@@ -108,6 +108,11 @@ public class JoinStreamingOOCPrimitive<L extends SpillableObject, R extends Spil
 	}
 
 	@Override
+	public boolean propagatesStreamingProperties(int index) {
+		return true;
+	}
+
+	@Override
 	protected long getMaxTaskReservationBytes() {
 		return _taskBytes;
 	}

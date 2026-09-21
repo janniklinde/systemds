@@ -71,6 +71,11 @@ public interface OOCStreamable<T> {
 		return getReservedReadStream();
 	}
 
+	default OOCStream<T> getReservedReadStream(OOCAccessPattern pattern, boolean streaming,
+		boolean shareLiveHandle) {
+		return getReservedReadStream(pattern, streaming);
+	}
+
 	default void reserveLazyHandle() {
 	}
 

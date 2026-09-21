@@ -111,28 +111,34 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 
 	@Override
 	public OOCStream<IndexedMatrixValue> getReadStream() {
-		return createReader(false, OOCAccessPattern.ANY, false);
+		return createReader(false, OOCAccessPattern.ANY, false, false);
 	}
 
 	@Override
 	public OOCStream<IndexedMatrixValue> getReservedReadStream() {
-		return createReader(true, OOCAccessPattern.ANY, false);
+		return createReader(true, OOCAccessPattern.ANY, false, false);
 	}
 
 	@Override
 	public OOCStream<IndexedMatrixValue> getReservedReadStream(OOCAccessPattern pattern, boolean streaming) {
-		return createReader(true, pattern, streaming);
+		return createReader(true, pattern, streaming, true);
+	}
+
+	@Override
+	public OOCStream<IndexedMatrixValue> getReservedReadStream(OOCAccessPattern pattern, boolean streaming,
+		boolean shareLiveHandle) {
+		return createReader(true, pattern, streaming, shareLiveHandle);
 	}
 
 	private synchronized OOCStream<IndexedMatrixValue> createReader(boolean reserved, OOCAccessPattern pattern,
-		boolean streaming) {
+		boolean streaming, boolean shareLiveHandle) {
 		if(reserved && _reservedReaders > 0)
 			_reservedReaders--;
 		else if(_deleteScheduled)
 			throw new DMLRuntimeException("Cannot open a reader on a materialized stream scheduled for deletion.");
 		_pendingReaders++;
 		_primitive.registerRequest(1, null);
-		DeferredReader stream = new DeferredReader(pattern, streaming);
+		DeferredReader stream = new DeferredReader(pattern, streaming, shareLiveHandle);
 		stream.setData(_data);
 		stream.assignPrimitive(_primitive);
 		return stream;
@@ -172,8 +178,12 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			views = List.copyOf(_views);
 			views.forEach(view -> view._pending.incrementAndGet());
 		}
-		for(DeferredReader reader : readers)
-			reader.acceptLive(callback);
+		for(DeferredReader reader : readers) {
+			if(reader._shareLiveHandle)
+				reader.acceptLive(callback);
+			else
+				reader.acceptLiveIndex();
+		}
 		for(InputView view : views)
 			view.publish(index);
 	}
@@ -368,7 +378,8 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 				_activeReaders++;
 				reader._active = true;
 				failure = _publicationFailure;
-				if(_publicationDone && _replayDriver != null && !_replayDriver._finished.get()
+				if(reader._shareLiveHandle && _publicationDone && _replayDriver != null
+					&& _replayDriver._shareLiveHandle && !_replayDriver._finished.get()
 					&& reader._pattern.fused(_replayDriver._pattern).isPlannable()) {
 					reader._replayLog = _replayDriver._delivered;
 					reader._replayEnd = reader._replayLog.size();
@@ -611,6 +622,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		implements MaterializedStore.Liveness {
 		private final OOCAccessPattern _pattern;
 		private final boolean _streaming;
+		private final boolean _shareLiveHandle;
 		private final AtomicBoolean _activated = new AtomicBoolean();
 		private final AtomicBoolean _finished = new AtomicBoolean();
 		private final AtomicBoolean _pumping = new AtomicBoolean();
@@ -628,7 +640,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		private volatile boolean _liveDone;
 		private SyncMemoryAllowance _allowance;
 
-		private DeferredReader(OOCAccessPattern pattern, boolean streaming) {
+		private DeferredReader(OOCAccessPattern pattern, boolean streaming, boolean shareLiveHandle) {
 			CacheableData<?> data = MaterializedStoreStreamable.this._data;
 			DataCharacteristics dc = data == null ? null : data.getDataCharacteristics();
 			boolean singleBand = dc != null && dc.dimsKnown()
@@ -638,6 +650,7 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			_streaming = streaming && (_pattern == OOCAccessPattern.ANY
 				|| _pattern == (_layout == OOCStoreLayout.ROW_MAJOR ? OOCAccessPattern.ROW_MAJOR
 					: OOCAccessPattern.COL_MAJOR));
+			_shareLiveHandle = shareLiveHandle;
 		}
 
 		@Override
@@ -685,6 +698,18 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 			}
 			catch(Throwable error) {
 				fail(error);
+			}
+			finally {
+				_pendingLive.decrementAndGet();
+				pumpReplay();
+			}
+		}
+
+		private void acceptLiveIndex() {
+			try {
+				synchronized(MaterializedStoreStreamable.this) {
+					_replayEnd = _publications.size();
+				}
 			}
 			finally {
 				_pendingLive.decrementAndGet();

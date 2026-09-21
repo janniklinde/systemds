@@ -72,6 +72,32 @@ import org.junit.Assert;
 import org.junit.Test;
 
 public class OOCPrimitiveTest {
+	@Test
+	public void testStreamingPropertyPropagationIsOptIn() {
+		Assert.assertFalse(new TestPrimitive(List.of()).propagatesStreamingProperties(0));
+	}
+
+	@Test
+	public void testPlannerSharesHandlesOnlyThroughDrainableChains() {
+		SubscribableTaskQueue<IndexedMatrixValue> unsafeSource = new SubscribableTaskQueue<>();
+		unsafeSource.assignPrimitive(new TestPrimitive(List.of()));
+		SubscribableTaskQueue<IndexedMatrixValue> intermediate = new SubscribableTaskQueue<>();
+		DrainageTestPrimitive flow = new DrainageTestPrimitive(unsafeSource, true);
+		intermediate.assignPrimitive(flow);
+		SubscribableTaskQueue<IndexedMatrixValue> unsafeOutput = new SubscribableTaskQueue<>();
+		unsafeOutput.assignPrimitive(new DrainageTestPrimitive(intermediate, false));
+		unsafeOutput.start();
+		Assert.assertFalse(flow.sharesLiveHandle(0));
+
+		SubscribableTaskQueue<IndexedMatrixValue> safeSource = new SubscribableTaskQueue<>();
+		safeSource.assignPrimitive(new TestPrimitive(List.of()));
+		SubscribableTaskQueue<IndexedMatrixValue> safeOutput = new SubscribableTaskQueue<>();
+		DrainageTestPrimitive root = new DrainageTestPrimitive(safeSource, true);
+		safeOutput.assignPrimitive(root);
+		safeOutput.start();
+		Assert.assertTrue(root.sharesLiveHandle(0));
+	}
+
 	@Test(timeout = 20000)
 	public void testMaterializedInputViewLateSubscription() throws Exception {
 		OOCCacheManager.reset();
@@ -162,6 +188,42 @@ public class OOCPrimitiveTest {
 				Assert.assertEquals(3, values.size());
 				Assert.assertEquals(Set.of(1d, 2d, 3d), Set.copyOf(values));
 			}
+			handle.scheduleMaterializedStoreDeletion();
+		}
+		finally {
+			OOCCacheManager.reset();
+		}
+	}
+
+	@Test(timeout = 20000)
+	public void testStreamingReaderReacquiresPublishedIndexes() throws InterruptedException {
+		OOCCacheManager.reset();
+		try {
+			MatrixObject data = new MatrixObject(ValueType.FP64, "/dev/null",
+				new MetaDataFormat(new MatrixCharacteristics(3, 1, 1), FileFormat.BINARY));
+			SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
+			source.setData(data);
+			MaterializedStoreStreamable handle = new MaterializedStoreStreamable(source, data);
+			handle.reserveLazyHandle();
+			List<Double> values = new ArrayList<>();
+			CountDownLatch first = new CountDownLatch(1);
+			CountDownLatch done = new CountDownLatch(1);
+			OOCStream<IndexedMatrixValue> reader = handle.getReservedReadStream(OOCAccessPattern.ROW_MAJOR, true,
+				false);
+			reader.setSubscriber(callback -> {
+				boolean value = !callback.isEos() && !callback.isFailure();
+				collectValues(callback, values, done);
+				if(value)
+					first.countDown();
+			});
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(1, 1, 1d)));
+			Assert.assertTrue("Index-backed reader did not consume a live publication",
+				first.await(5, TimeUnit.SECONDS));
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(2, 1), new MatrixBlock(1, 1, 2d)));
+			source.enqueue(new IndexedMatrixValue(new MatrixIndexes(3, 1), new MatrixBlock(1, 1, 3d)));
+			source.closeInput();
+			Assert.assertTrue(done.await(10, TimeUnit.SECONDS));
+			Assert.assertEquals(List.of(1d, 2d, 3d), values);
 			handle.scheduleMaterializedStoreDeletion();
 		}
 		finally {
@@ -892,6 +954,41 @@ public class OOCPrimitiveTest {
 		@Override
 		protected void startExecution() {
 			_executions++;
+			onComplete();
+		}
+
+		@Override
+		protected void inferPatternsInternal() {
+			_pattern = OOCAccessPattern.ANY;
+			inferParentPatterns();
+		}
+
+		@Override
+		protected void requestPatternInternal(OOCAccessPattern accessPattern) {
+			_pattern = accessPattern;
+		}
+	}
+
+	private static final class DrainageTestPrimitive extends OOCPrimitive {
+		private final boolean _flowThrough;
+
+		private DrainageTestPrimitive(OOCStreamable<IndexedMatrixValue> input, boolean flowThrough) {
+			super(null, input);
+			_flowThrough = flowThrough;
+		}
+
+		@Override
+		protected boolean isStreamingInput(int index) {
+			return true;
+		}
+
+		@Override
+		public boolean propagatesStreamingProperties(int index) {
+			return _flowThrough;
+		}
+
+		@Override
+		protected void startExecution() {
 			onComplete();
 		}
 

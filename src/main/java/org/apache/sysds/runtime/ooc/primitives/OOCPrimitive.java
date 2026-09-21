@@ -139,6 +139,10 @@ public abstract class OOCPrimitive {
 		return _inputs.get(index)._dependency;
 	}
 
+	public final int getInputCount() {
+		return _inputs.size();
+	}
+
 	public final void installMaterializedInput(int index, MaterializeOOCPrimitive boundary) {
 		if(hasStartedExecution())
 			throw new IllegalStateException("Cannot replace an input after primitive execution started.");
@@ -169,13 +173,33 @@ public abstract class OOCPrimitive {
 	@SuppressWarnings("unchecked")
 	protected final <T> OOCStream<T> getInputReadStream(int index) {
 		consumeInputHandle(index);
-		OOCStreamable<?> source = _inputs.get(index)._source;
-		return (OOCStream<T>) (isStreamingInput(index) ? source.getReservedReadStream(_pattern, true)
+		InputSlot input = _inputs.get(index);
+		OOCStreamable<?> source = input._source;
+		return (OOCStream<T>) (isStreamingInput(index) ?
+			source.getReservedReadStream(_pattern, true, input._shareLiveHandle)
 			: source.getReservedReadStream());
 	}
 
 	protected boolean isStreamingInput(int index) {
 		return false;
+	}
+
+	public boolean propagatesStreamingProperties(int index) {
+		return false;
+	}
+
+	public boolean drainsInputIndependently(int index) {
+		return false;
+	}
+
+	public final void setShareLiveHandle(int index, boolean share) {
+		if(hasStartedExecution())
+			throw new IllegalStateException("Cannot change input sharing after primitive execution started.");
+		_inputs.get(index)._shareLiveHandle = share;
+	}
+
+	public final boolean sharesLiveHandle(int index) {
+		return _inputs.get(index)._shareLiveHandle;
 	}
 
 	protected final OOCFuture<MaterializedStore<IndexedMatrixValue>> getMaterializedInput(int index) {
@@ -297,7 +321,8 @@ public abstract class OOCPrimitive {
 		for(int i = 0; i < _inputs.size(); i++) {
 			InputSlot input = _inputs.get(i);
 			sb.append("\n      in[").append(i).append("] ").append(input._source.debugState())
-				.append(" handleReserved=").append(input._handleReserved).append(" producer=")
+				.append(" handleReserved=").append(input._handleReserved).append(" shareLive=")
+				.append(input._shareLiveHandle).append(" producer=")
 				.append(describeProducer(input._dependency));
 		}
 		return sb.toString();
@@ -344,6 +369,7 @@ public abstract class OOCPrimitive {
 		private final OOCStreamable<?> _source;
 		private OOCPrimitive _dependency;
 		private boolean _handleReserved;
+		private boolean _shareLiveHandle;
 
 		private InputSlot(OOCStreamable<?> source) {
 			_source = source;

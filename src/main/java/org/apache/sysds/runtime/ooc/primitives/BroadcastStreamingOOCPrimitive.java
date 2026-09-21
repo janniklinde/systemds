@@ -83,6 +83,11 @@ public final class BroadcastStreamingOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	public boolean propagatesStreamingProperties(int index) {
+		return true;
+	}
+
+	@Override
 	protected void inferPatternsInternal() {
 		requestPatternInternal(_row ? OOCAccessPattern.ROW_MAJOR : OOCAccessPattern.COL_MAJOR);
 		inferParentPatterns();

@@ -347,21 +347,6 @@ public final class OOCInstructionUtils {
 		}
 	}
 
-	/**
-	 * Pairs every tile of the streamed input with one indexed tile from each of several secondary inputs. The
-	 * secondary inputs are read through indexed store readers, so they need not fit in memory; a side that does not
-	 * fit degrades to disk-backed random access driven by its liveness counts.
-	 *
-	 * @param streamed   the driving input
-	 * @param broadcasts the indexed inputs, one lookup and liveness each
-	 * @param output     output stream
-	 * @param lookupRows per-side row index of the tile required by a streamed tile
-	 * @param lookupCols per-side column index of the first tile required by a streamed tile
-	 * @param bandWidths per-side number of consecutive column tiles making up one band
-	 * @param liveness   per-side liveness, i.e. how often each tile is consumed
-	 * @param operation  applied to the streamed tile and the per-side bands of looked-up tiles
-	 * @param context    stream context
-	 */
 	public static void multiIndexedBroadcastMap(OOCStreamable<IndexedMatrixValue> streamed,
 		List<OOCStreamable<IndexedMatrixValue>> broadcasts, OOCStream<IndexedMatrixValue> output,
 		List<ToLongFunction<IndexedMatrixValue>> lookupRows, List<ToLongFunction<IndexedMatrixValue>> lookupCols,
@@ -371,19 +356,6 @@ public final class OOCInstructionUtils {
 			bandWidths, liveness, operation, context));
 	}
 
-	/**
-	 * Computes a matrix-multiplication chain in one traversal of the streamed matrix; see {@link MMChainOOCPrimitive}.
-	 *
-	 * @param x        the streamed matrix
-	 * @param v        the vector of {@code X %*% v}, or null for a chain that has none
-	 * @param w        the weight, or null for an unweighted chain
-	 * @param output   one partial per column tile per block row, indexed by (column tile, block row)
-	 * @param type     chain variant
-	 * @param multiply operator forming {@code X_ij %*% v_j}
-	 * @param plus     operator summing those partials across the column tiles of a block row
-	 * @param weight   operator combining {@code X %*% v} with the weight, or null when there is none
-	 * @param context  stream context
-	 */
 	public static void mmChain(OOCStreamable<IndexedMatrixValue> x, OOCStreamable<IndexedMatrixValue> v,
 		OOCStreamable<IndexedMatrixValue> w, OOCStream<IndexedMatrixValue> output, ChainType type,
 		AggregateBinaryOperator multiply, BinaryOperator plus, BinaryOperator weight, StreamContext context) {
@@ -403,17 +375,6 @@ public final class OOCInstructionUtils {
 		output.assignPrimitive(new GroupedReduceOOCPrimitive(input, output, grouping, partial, merge, finish, context));
 	}
 
-	/**
-	 * Folds aligned input streams cell-wise, one reduction group per block index. Unlike an n-ary join this keeps a
-	 * single accumulator per block index instead of buffering the unmatched tiles of every stream, so the state and the
-	 * peak pinned memory do not grow with the number of inputs.
-	 *
-	 * @param inputs  aligned streams, all with the same block geometry
-	 * @param output  merged stream
-	 * @param merge   associative and commutative combiner
-	 * @param finish  applied once to each completed accumulator
-	 * @param context stream context
-	 */
 	public static void naryEquiReduce(List<OOCStreamable<IndexedMatrixValue>> inputs,
 		OOCStream<IndexedMatrixValue> output, BiFunction<MatrixBlock, MatrixBlock, MatrixBlock> merge,
 		Function<MatrixBlock, MatrixBlock> finish, StreamContext context) {

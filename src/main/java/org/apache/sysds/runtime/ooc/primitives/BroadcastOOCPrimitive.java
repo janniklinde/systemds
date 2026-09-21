@@ -129,6 +129,11 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	public boolean propagatesStreamingProperties(int index) {
+		return false;
+	}
+
+	@Override
 	public List<OOCMaterializedInputRequest> requiredMaterializedInputs() {
 		List<OOCMaterializedInputRequest> requests = new ArrayList<>(_broadcasts.length);
 		for(int i = 0; i < _broadcasts.length; i++)

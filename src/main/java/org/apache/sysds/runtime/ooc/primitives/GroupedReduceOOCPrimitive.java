@@ -136,6 +136,11 @@ public final class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		return true;
 	}
 
+	@Override
+	public boolean propagatesStreamingProperties(int index) {
+		return true;
+	}
+
 	private OOCAccessPattern groupingPattern() {
 		return _grouping == Grouping.COL_BLOCKS ? OOCAccessPattern.COL_MAJOR : OOCAccessPattern.ROW_MAJOR;
 	}

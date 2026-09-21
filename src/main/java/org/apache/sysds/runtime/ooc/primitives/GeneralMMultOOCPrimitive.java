@@ -114,6 +114,11 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 	}
 
 	@Override
+	public boolean propagatesStreamingProperties(int index) {
+		return _streaming;
+	}
+
+	@Override
 	public List<OOCMaterializedInputRequest> requiredMaterializedInputs() {
 		if(_streaming)
 			return List.of();
