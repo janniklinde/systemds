@@ -55,6 +55,7 @@ public final class SourceReadOOCPrimitive extends OOCPrimitive {
 	private final SourceOOCStream _ioOutput;
 	private final AtomicReference<ReservationBudget> _activeBudget;
 	private final AtomicBoolean _finished;
+	private volatile long _groupBytes;
 	private OOCIOHandler.SourceReadContinuation _continuation;
 	private OOCStream<IndexedMatrixValue> _outputStream;
 
@@ -72,6 +73,13 @@ public final class SourceReadOOCPrimitive extends OOCPrimitive {
 		_ioOutput = new SourceOOCStream(false);
 		_activeBudget = new AtomicReference<>();
 		_finished = new AtomicBoolean();
+	}
+
+	public synchronized boolean requestSourceGroups(long groupBytes) {
+		if(groupBytes <= 0 || hasStartedExecution())
+			return false;
+		_groupBytes = Math.max(_groupBytes, groupBytes);
+		return true;
 	}
 
 	@Override
@@ -121,7 +129,8 @@ public final class SourceReadOOCPrimitive extends OOCPrimitive {
 			OOCIOHandler.SourceReadResult result;
 			if(_continuation == null) {
 				OOCIOHandler.SourceReadRequest request = new OOCIOHandler.SourceReadRequest(_path,
-					Types.FileFormat.BINARY, _rows, _cols, _blocksize, _nonZeros, _productionLimit, true, _ioOutput);
+					Types.FileFormat.BINARY, _rows, _cols, _blocksize, _nonZeros, _productionLimit, _groupBytes, true,
+					_ioOutput);
 				result = io.scheduleSourceRead(request).get();
 			}
 			else

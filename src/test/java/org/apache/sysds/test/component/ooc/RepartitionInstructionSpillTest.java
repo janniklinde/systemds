@@ -30,7 +30,7 @@ import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.conf.ConfigurationManager;
 import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.runtime.io.WriterBinaryBlock;
-import org.apache.sysds.runtime.ooc.primitives.PartitionedMatrixVectorOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.SparseMatrixVectorOOCPrimitive;
 import org.apache.sysds.runtime.instructions.ooc.ReblockOOCInstruction;
 import org.apache.sysds.runtime.ooc.store.PartitionedStoreStreamable;
 import org.apache.sysds.runtime.controlprogram.LocalVariableMap;
@@ -75,6 +75,7 @@ import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.UncoordinatedDataGenOOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.UnpartitionOOCPrimitive;
 import org.apache.sysds.utils.Statistics;
 import org.junit.Assert;
 import org.junit.Test;
@@ -322,8 +323,9 @@ public class RepartitionInstructionSpillTest {
 				MMultOOCInstruction.parseInstruction("OOC°ba+*°X·MATRIX·FP64°v·MATRIX·FP64°R·MATRIX·FP64°1")
 					.processInstruction(ec);
 				OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
-				Assert.assertTrue(result.getPrimitive() instanceof PartitionedMatrixVectorOOCPrimitive);
+				Assert.assertTrue(result.getPrimitive() instanceof SparseMatrixVectorOOCPrimitive);
 				result.start();
+				Assert.assertTrue(((PartitionedStoreStreamable) x.getStreamable()).isPartitioned());
 				int rows = 0;
 				OOCStream.QueueCallback<IndexedMatrixValue> callback;
 				while((callback = result.dequeueCB()) != null) {
@@ -337,9 +339,244 @@ public class RepartitionInstructionSpillTest {
 					}
 				}
 				Assert.assertEquals(800, rows);
-				waitForSpill();
+				if(repeat == 0)
+					OOCCacheManager.getGlobalCache().updateLimits(100_000, 50_000);
 				input(ec, "v", 800, 1, 50, 16, 1, false, 3);
 			}
+			Assert.assertTrue("Second matvec did not reload evicted source partitions",
+				Statistics.getOOCLoadFromDiskCount() > 0);
+			x.getStreamable().scheduleMaterializedStoreDeletion();
+		}
+		finally {
+			ConfigurationManager.setGlobalConfig(previous);
+			reset(statistics);
+		}
+	}
+
+	@Test(timeout = 20000)
+	public void testPartitionConfigurationDoesNotForceOrdinarySourceConsumer() throws Exception {
+		boolean statistics = prepareSpillCache();
+		DMLConfig previous = ConfigurationManager.getDMLConfig();
+		Path directory = Files.createTempDirectory(Path.of("../data_dir"), "partition-gated-source-");
+		try {
+			ConfigurationManager.setGlobalConfig(DMLConfig.parseDMLConfig(
+				"<root><sysds.ooc.materialized.partition.bytes>8192</sysds.ooc.materialized.partition.bytes>"
+					+ "<sysds.localtmpdir>../data_dir/partition-test-tmp</sysds.localtmpdir>"
+					+ "<sysds.scratch>../data_dir/partition-test-scratch</sysds.scratch></root>"));
+			MatrixBlock matrix = new MatrixBlock(400, 400, 3d);
+			String path = directory.resolve("X").toString();
+			new WriterBinaryBlock(1).writeMatrixToHDFS(matrix, path, 400, 400, 50, matrix.getNonZeros(), false);
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			MatrixObject disk = matrixObject(400, 400, 50, path, FileFormat.BINARY);
+			disk.getDataCharacteristics().setNonZeros(matrix.getNonZeros());
+			ec.setVariable("disk", disk);
+			MatrixObject x = matrixObject(400, 400, 50);
+			ec.setVariable("X", x);
+			ReblockOOCInstruction.parseInstruction("OOC°rblk°disk·MATRIX·FP64°X·MATRIX·FP64°50")
+				.processInstruction(ec);
+			Assert.assertTrue(x.getStreamable() instanceof PartitionedStoreStreamable);
+			PartitionedStoreStreamable source = (PartitionedStoreStreamable) x.getStreamable();
+			OOCStream<IndexedMatrixValue> replay = source.getReadStream();
+			replay.start();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = replay.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					Assert.assertEquals(3, current.get().getValue().get(0, 0), 0);
+					blocks++;
+				}
+			Assert.assertEquals(64, blocks);
+			Assert.assertFalse("Configuration alone selected physical partitions", source.isPartitioned());
+			source.scheduleMaterializedStoreDeletion();
+		}
+		finally {
+			ConfigurationManager.setGlobalConfig(previous);
+			reset(statistics);
+		}
+	}
+
+	@Test(timeout = 20000)
+	public void testLateTileConsumerUsesMemoizedUnpartitionView() throws Exception {
+		boolean statistics = prepareSpillCache();
+		DMLConfig previous = ConfigurationManager.getDMLConfig();
+		Path directory = Files.createTempDirectory(Path.of("../data_dir"), "late-unpartition-");
+		try {
+			ConfigurationManager.setGlobalConfig(DMLConfig.parseDMLConfig(
+				"<root><sysds.ooc.materialized.partition.bytes>8192</sysds.ooc.materialized.partition.bytes>"
+					+ "<sysds.localtmpdir>../data_dir/partition-test-tmp</sysds.localtmpdir>"
+					+ "<sysds.scratch>../data_dir/partition-test-scratch</sysds.scratch></root>"));
+			MatrixBlock matrix = new MatrixBlock(400, 400, true);
+			for(int row = 0; row < 400; row++)
+				matrix.set(row, row, row + 1);
+			matrix.recomputeNonZeros();
+			String path = directory.resolve("X").toString();
+			new WriterBinaryBlock(1).writeMatrixToHDFS(matrix, path, 400, 400, 50, matrix.getNonZeros(), false);
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			MatrixObject disk = matrixObject(400, 400, 50, path, FileFormat.BINARY);
+			disk.getDataCharacteristics().setNonZeros(matrix.getNonZeros());
+			ec.setVariable("disk", disk);
+			MatrixObject x = matrixObject(400, 400, 50);
+			ec.setVariable("X", x);
+			ReblockOOCInstruction.parseInstruction("OOC°rblk°disk·MATRIX·FP64°X·MATRIX·FP64°50")
+				.processInstruction(ec);
+
+			input(ec, "v", 400, 1, 50, 8, 1, false, 1);
+			MatrixObject product = matrixObject(400, 1, 50);
+			ec.setVariable("P", product);
+			MMultOOCInstruction.parseInstruction("OOC°ba+*°X·MATRIX·FP64°v·MATRIX·FP64°P·MATRIX·FP64°1")
+				.processInstruction(ec);
+			drain(product.getStreamHandle());
+			PartitionedStoreStreamable source = (PartitionedStoreStreamable) x.getStreamable();
+			Assert.assertTrue(source.isPartitioned());
+
+			MatrixObject mapped = matrixObject(400, 400, 50);
+			ec.setVariable("R", mapped);
+			UnaryOOCInstruction.parseInstruction("OOC°abs°X·MATRIX·FP64°R·MATRIX·FP64")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = mapped.getStreamHandle();
+			result.start();
+			Assert.assertTrue(result.getPrimitive().getInput(0) instanceof MaterializedStoreStreamable);
+			Assert.assertTrue(result.getPrimitive().getInput(0).getPrimitive() instanceof UnpartitionOOCPrimitive);
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null)
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					IndexedMatrixValue value = current.get();
+					MatrixBlock block = (MatrixBlock) value.getValue();
+					long first = (value.getIndexes().getRowIndex() - 1) * 50;
+					if(value.getIndexes().getRowIndex() == value.getIndexes().getColumnIndex())
+						Assert.assertEquals(first + 1, block.get(0, 0), 0);
+					else
+						Assert.assertTrue(block.isEmptyBlock(false));
+					blocks++;
+				}
+			Assert.assertEquals(64, blocks);
+
+			input(ec, "v2", 400, 1, 50, 8, 1, false, 1);
+			MatrixObject secondProduct = matrixObject(400, 1, 50);
+			ec.setVariable("P2", secondProduct);
+			MMultOOCInstruction.parseInstruction("OOC°ba+*°X·MATRIX·FP64°v2·MATRIX·FP64°P2·MATRIX·FP64°1")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> second = secondProduct.getStreamHandle();
+			second.start();
+			Assert.assertTrue(second.getPrimitive().getInput(0) instanceof MaterializedStoreStreamable);
+			drainStarted(second);
+		}
+		finally {
+			ConfigurationManager.setGlobalConfig(previous);
+			reset(statistics);
+		}
+	}
+
+	@Test(timeout = 20000)
+	public void testSmallMatrixMultiplyDoesNotEnableSourcePartitions() throws Exception {
+		boolean statistics = prepareSpillCache();
+		DMLConfig previous = ConfigurationManager.getDMLConfig();
+		Path directory = Files.createTempDirectory(Path.of("../data_dir"), "partition-small-matrix-");
+		try {
+			ConfigurationManager.setGlobalConfig(DMLConfig.parseDMLConfig(
+				"<root><sysds.ooc.materialized.partition.bytes>8192</sysds.ooc.materialized.partition.bytes>"
+					+ "<sysds.localtmpdir>../data_dir/partition-test-tmp</sysds.localtmpdir>"
+					+ "<sysds.scratch>../data_dir/partition-test-scratch</sysds.scratch></root>"));
+			MatrixBlock matrix = new MatrixBlock(15000, 20, 2d);
+			String path = directory.resolve("X").toString();
+			new WriterBinaryBlock(1).writeMatrixToHDFS(matrix, path, 15000, 20, 50, matrix.getNonZeros(), false);
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			MatrixObject disk = matrixObject(15000, 20, 50, path, FileFormat.BINARY);
+			disk.getDataCharacteristics().setNonZeros(matrix.getNonZeros());
+			ec.setVariable("disk", disk);
+			MatrixObject x = matrixObject(15000, 20, 50);
+			ec.setVariable("X", x);
+			ReblockOOCInstruction.parseInstruction("OOC°rblk°disk·MATRIX·FP64°X·MATRIX·FP64°50")
+				.processInstruction(ec);
+			Assert.assertTrue(x.getStreamable() instanceof PartitionedStoreStreamable);
+			input(ec, "B", 20, 8, 50, 1, 1, false, 3);
+			MatrixObject out = matrixObject(15000, 8, 50);
+			ec.setVariable("R", out);
+			MMultOOCInstruction.parseInstruction("OOC°ba+*°X·MATRIX·FP64°B·MATRIX·FP64°R·MATRIX·FP64°1")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			Assert.assertTrue(result.getPrimitive() instanceof GeneralMMultOOCPrimitive);
+			result.start();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = result.dequeueCB()) != null) {
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					if(current instanceof OOCStream.GroupQueueCallback<?>) {
+						@SuppressWarnings("unchecked")
+						OOCStream.GroupQueueCallback<IndexedMatrixValue> group =
+							(OOCStream.GroupQueueCallback<IndexedMatrixValue>) current;
+						for(int i = 0; i < group.size(); i++) {
+							try(OOCStream.QueueCallback<IndexedMatrixValue> item = group.getCallback(i)) {
+								MatrixBlock block = (MatrixBlock) item.get().getValue();
+								Assert.assertEquals(120, block.get(0, 0), 0);
+								Assert.assertEquals(120, block.get(block.getNumRows() - 1, 7), 0);
+								blocks++;
+							}
+						}
+					}
+					else {
+						MatrixBlock block = (MatrixBlock) current.get().getValue();
+						Assert.assertEquals(120, block.get(0, 0), 0);
+						Assert.assertEquals(120, block.get(block.getNumRows() - 1, 7), 0);
+						blocks++;
+					}
+				}
+			}
+			Assert.assertEquals(300, blocks);
+			Assert.assertFalse(((PartitionedStoreStreamable) x.getStreamable()).isPartitioned());
+			x.getStreamable().scheduleMaterializedStoreDeletion();
+		}
+		finally {
+			ConfigurationManager.setGlobalConfig(previous);
+			reset(statistics);
+		}
+	}
+
+	@Test(timeout = 20000)
+	public void testMappingDoesNotEnableSourcePartitions() throws Exception {
+		boolean statistics = prepareSpillCache();
+		DMLConfig previous = ConfigurationManager.getDMLConfig();
+		Path directory = Files.createTempDirectory(Path.of("../data_dir"), "partition-map-");
+		try {
+			ConfigurationManager.setGlobalConfig(DMLConfig.parseDMLConfig(
+				"<root><sysds.ooc.materialized.partition.bytes>8192</sysds.ooc.materialized.partition.bytes>"
+					+ "<sysds.localtmpdir>../data_dir/partition-test-tmp</sysds.localtmpdir>"
+					+ "<sysds.scratch>../data_dir/partition-test-scratch</sysds.scratch></root>"));
+			MatrixBlock matrix = new MatrixBlock(20000, 20, -2d);
+			String path = directory.resolve("X").toString();
+			new WriterBinaryBlock(1).writeMatrixToHDFS(matrix, path, 20000, 20, 50, matrix.getNonZeros(), false);
+			ExecutionContext ec = new ExecutionContext(new LocalVariableMap());
+			MatrixObject disk = matrixObject(20000, 20, 50, path, FileFormat.BINARY);
+			disk.getDataCharacteristics().setNonZeros(matrix.getNonZeros());
+			ec.setVariable("disk", disk);
+			MatrixObject x = matrixObject(20000, 20, 50);
+			ec.setVariable("X", x);
+			ReblockOOCInstruction.parseInstruction("OOC°rblk°disk·MATRIX·FP64°X·MATRIX·FP64°50")
+				.processInstruction(ec);
+			MatrixObject out = matrixObject(20000, 20, 50);
+			ec.setVariable("R", out);
+			UnaryOOCInstruction.parseInstruction("OOC°abs°X·MATRIX·FP64°R·MATRIX·FP64")
+				.processInstruction(ec);
+			OOCStream<IndexedMatrixValue> result = out.getStreamHandle();
+			Assert.assertTrue(result.getPrimitive() instanceof MappingOOCPrimitive);
+			MaterializedStoreStreamable materialized = new MaterializedStoreStreamable(result, out);
+			OOCStream<IndexedMatrixValue> replay = materialized.getReadStream();
+			replay.start();
+			int blocks = 0;
+			OOCStream.QueueCallback<IndexedMatrixValue> callback;
+			while((callback = replay.dequeueCB()) != null) {
+				try(OOCStream.QueueCallback<IndexedMatrixValue> current = callback) {
+					MatrixBlock block = (MatrixBlock) current.get().getValue();
+					Assert.assertEquals(2, block.get(0, 0), 0);
+					Assert.assertEquals(2, block.get(block.getNumRows() - 1, 19), 0);
+					blocks++;
+				}
+			}
+			Assert.assertEquals(400, blocks);
+			Assert.assertFalse(((PartitionedStoreStreamable) x.getStreamable()).isPartitioned());
+			waitForSpill();
+			materialized.scheduleMaterializedStoreDeletion();
 			x.getStreamable().scheduleMaterializedStoreDeletion();
 		}
 		finally {
@@ -1208,6 +1445,17 @@ public class RepartitionInstructionSpillTest {
 		for(int attempt = 0; attempt < 100 && Statistics.getOOCEvictionWriteCount() == 0; attempt++)
 			Thread.sleep(10);
 		Assert.assertTrue("Expected instruction state to spill", Statistics.getOOCEvictionWriteCount() > 0);
+	}
+
+	private static void drain(OOCStream<IndexedMatrixValue> stream) {
+		stream.start();
+		drainStarted(stream);
+	}
+
+	private static void drainStarted(OOCStream<IndexedMatrixValue> stream) {
+		OOCStream.QueueCallback<IndexedMatrixValue> callback;
+		while((callback = stream.dequeueCB()) != null)
+			callback.close();
 	}
 
 	private static IndexedMatrixValue tile(long row, long col, int rows, int cols, double value) {

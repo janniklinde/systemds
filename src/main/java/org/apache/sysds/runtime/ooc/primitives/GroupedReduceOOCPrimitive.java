@@ -211,6 +211,16 @@ public final class GroupedReduceOOCPrimitive extends OOCPrimitive {
 	}
 
 	private void accept(int source, OOCStream.QueueCallback<IndexedMatrixValue> callback) {
+		if(callback instanceof OOCStream.GroupQueueCallback<?>) {
+			@SuppressWarnings("unchecked")
+			OOCStream.GroupQueueCallback<IndexedMatrixValue> group =
+				(OOCStream.GroupQueueCallback<IndexedMatrixValue>) callback;
+			try(group) {
+				for(int i = 0; i < group.size(); i++)
+					accept(source, group.getCallback(i));
+			}
+			return;
+		}
 		if(callback.isEos() || callback.isFailure()) {
 			try(callback) {
 				if(callback.isFailure())

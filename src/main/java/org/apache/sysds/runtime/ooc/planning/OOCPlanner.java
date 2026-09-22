@@ -32,6 +32,8 @@ import org.apache.sysds.runtime.meta.DataCharacteristics;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.store.PartitionedStoreStreamable;
+import org.apache.sysds.runtime.ooc.store.MaterializedStoreStreamable;
 
 public final class OOCPlanner {
 	public static synchronized void compile(OOCPrimitive root) {
@@ -46,6 +48,7 @@ public final class OOCPlanner {
 	}
 
 	private static void compile(OOCPrimitive root, boolean startRoot) {
+		configurePartitionedInputs(root);
 		injectMaterializations(root, Collections.newSetFromMap(new IdentityHashMap<>()), new IdentityHashMap<>());
 		List<OOCPrimitive> primitives = new ArrayList<>();
 		collect(root, Collections.newSetFromMap(new IdentityHashMap<>()), primitives);
@@ -67,6 +70,50 @@ public final class OOCPlanner {
 			root.tryStartExecution();
 		for(OOCPrimitive primitive : primitives)
 			primitive.onPlanStarted();
+	}
+
+	private static void configurePartitionedInputs(OOCPrimitive root) {
+		List<OOCPrimitive> primitives = new ArrayList<>();
+		collectInputs(root, Collections.newSetFromMap(new IdentityHashMap<>()), primitives);
+		IdentityHashMap<PartitionedStoreStreamable, List<PartitionUse>> uses = new IdentityHashMap<>();
+		for(OOCPrimitive primitive : primitives)
+			for(int input = 0; input < primitive.getInputCount(); input++)
+				if(primitive.getInput(input) instanceof PartitionedStoreStreamable source)
+					uses.computeIfAbsent(source, ignored -> new ArrayList<>())
+						.add(new PartitionUse(primitive, input));
+
+		for(var entry : uses.entrySet()) {
+			PartitionedStoreStreamable source = entry.getKey();
+			List<PartitionUse> consumers = entry.getValue();
+			MaterializedStoreStreamable existingTiles = source.existingUnpartitionedView();
+			if(existingTiles != null) {
+				for(PartitionUse use : consumers)
+					use.primitive().replaceInput(use.input(), existingTiles);
+				continue;
+			}
+			boolean allNative = consumers.stream()
+				.allMatch(use -> use.primitive().supportsPartitionedInput(use.input()));
+			if(!source.partitionsSelected() && allNative)
+				source.requestPartitions();
+			if(source.partitionsSelected() && !allNative) {
+				MaterializedStoreStreamable tiles = source.unpartitionedView();
+				for(PartitionUse use : consumers)
+					if(!use.primitive().supportsPartitionedInput(use.input()))
+						use.primitive().replaceInput(use.input(), tiles);
+			}
+		}
+	}
+
+	private static void collectInputs(OOCPrimitive primitive, Set<OOCPrimitive> visited,
+		List<OOCPrimitive> result) {
+		if(!visited.add(primitive))
+			return;
+		result.add(primitive);
+		for(OOCPrimitive child : primitive.getChildren())
+			collectInputs(child, visited, result);
+	}
+
+	private record PartitionUse(OOCPrimitive primitive, int input) {
 	}
 
 	/**

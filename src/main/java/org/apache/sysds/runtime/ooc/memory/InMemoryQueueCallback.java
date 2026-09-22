@@ -342,6 +342,14 @@ public class InMemoryQueueCallback<T> implements OOCStream.QueueCallback<T> {
 		return _handle.takeManagedResultForHandover();
 	}
 
+	public synchronized boolean canExtractManagedPayload() {
+		CallbackHandle<T> handle = _handle;
+		synchronized(handle) {
+			return !_closed && handle._failure == null && handle.isExclusiveToRoot() && handle._cacheIdx < 0 &&
+				handle._result != null;
+		}
+	}
+
 	public synchronized ManagedPayload<T> extractManagedPayload() {
 		if(_closed)
 			throw new IllegalStateException("Cannot extract a managed payload from a closed callback.");

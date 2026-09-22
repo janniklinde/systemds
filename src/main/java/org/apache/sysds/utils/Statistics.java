@@ -519,6 +519,14 @@ public class Statistics
 		return oocEvictionWriteCalls.longValue();
 	}
 
+	public static long getOOCLoadFromDiskCount() {
+		return oocLoadFromDiskCalls.longValue();
+	}
+
+	public static long getOOCLoadFromDiskBytes() {
+		return oocLoadFromDiskBytesSize.longValue();
+	}
+
 	public static void accumulateOOCLoadFromDiskTime(long nanos) {
 		oocLoadFromDiskTimeNanos.add(nanos);
 	}

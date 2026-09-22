@@ -47,6 +47,7 @@ import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
 import org.apache.sysds.runtime.ooc.primitives.MaterializeOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.primitives.UnpartitionOOCPrimitive;
 
 import shaded.parquet.it.unimi.dsi.fastutil.ints.IntArrayList;
 import shaded.parquet.it.unimi.dsi.fastutil.ints.Int2IntLinkedOpenHashMap;
@@ -83,6 +84,16 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 
 	public MaterializedStoreStreamable(OOCStream<IndexedMatrixValue> source, CacheableData<?> data,
 		OOCStoreLayout layout) {
+		this(source, data, layout, false);
+	}
+
+	public static MaterializedStoreStreamable unpartitioned(OOCStream<IndexedMatrixValue> source,
+		CacheableData<?> data, OOCStoreLayout layout) {
+		return new MaterializedStoreStreamable(source, data, layout, true);
+	}
+
+	private MaterializedStoreStreamable(OOCStream<IndexedMatrixValue> source, CacheableData<?> data,
+		OOCStoreLayout layout, boolean unpartition) {
 		if(source == null)
 			throw new IllegalArgumentException("Materialized stream requires a source.");
 		DMLConfig conf = ConfigurationManager.getDMLConfig();
@@ -92,7 +103,8 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		_layout = layout;
 		_data = data;
 		_dimensions = new OOCFuture<>();
-		_primitive = MaterializeOOCPrimitive.reusable(source, layout);
+		_primitive = unpartition ? new UnpartitionOOCPrimitive(source, layout) :
+			MaterializeOOCPrimitive.reusable(source, layout);
 		_primitive.setPublicationListener(this::acceptPublication);
 		_primitive.store().whenComplete((store, error) -> {
 			if(error != null) {

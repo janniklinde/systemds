@@ -81,7 +81,6 @@ import org.apache.sysds.runtime.ooc.primitives.ReduceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.RepartitionOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.SliceOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.SparseMatrixVectorOOCPrimitive;
-import org.apache.sysds.runtime.ooc.primitives.PartitionedMatrixVectorOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.SourceReadOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TSMMOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.TransposeOOCPrimitive;
@@ -174,8 +173,8 @@ public final class OOCInstructionUtils {
 			productionLimit, context));
 		long partitionBytes = ConfigurationManager.getDMLConfig()
 			.getLongValue(DMLConfig.OOC_MATERIALIZED_PARTITION_BYTES);
-		if(partitionBytes > 0 && rows > 1 && cols > 1 && nonZeros >= 0 && nonZeros / (double) rows / cols < 0.1)
-			return new PartitionedStoreStreamable(output, data);
+		if(partitionBytes > 0 && rows > 1 && cols > 1)
+			return new PartitionedStoreStreamable(output, data, partitionBytes);
 		return new MaterializedStoreStreamable(output, data);
 	}
 
@@ -306,9 +305,7 @@ public final class OOCInstructionUtils {
 
 	public static void sparseMatrixVectorMultiply(OOCStreamable<IndexedMatrixValue> matrix,
 		OOCStreamable<IndexedMatrixValue> vector, OOCStream<IndexedMatrixValue> output, StreamContext context) {
-		output.assignPrimitive(matrix instanceof PartitionedStoreStreamable ?
-			new PartitionedMatrixVectorOOCPrimitive(matrix, vector, output, context) :
-			new SparseMatrixVectorOOCPrimitive(matrix, vector, output, context));
+		output.assignPrimitive(new SparseMatrixVectorOOCPrimitive(matrix, vector, output, context));
 	}
 
 	public static void cartesianMap(OOCStreamable<IndexedMatrixValue> left,
@@ -581,7 +578,18 @@ public final class OOCInstructionUtils {
 						try(pinned) {
 							for(int index = 0; index < pinned.size(); index++) {
 								try(OOCStream.QueueCallback<T> item = pinned.getCallback(index)) {
-									process.accept(item);
+									if(item.isFailure())
+										item.get();
+									else if(predicate != null && !predicate.apply(streamIndex, item)) {
+										if(onNotProcessed != null)
+											onNotProcessed.accept(streamIndex, item);
+									}
+									else if(future.isDone()) {
+										if(onNotProcessed != null)
+											onNotProcessed.accept(streamIndex, item);
+									}
+									else
+										consumer.accept(streamIndex, item);
 								}
 							}
 							if(activeTaskCounter.decrementAndGet() == 0)

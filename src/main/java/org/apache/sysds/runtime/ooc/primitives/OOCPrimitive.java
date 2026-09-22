@@ -192,6 +192,33 @@ public abstract class OOCPrimitive {
 		return false;
 	}
 
+	/**
+	 * Declares that this primitive natively consumes physical source partitions on the given input. The default is
+	 * deliberately conservative; accepting an ordinary tile replay does not count as native partition support.
+	 */
+	public boolean supportsPartitionedInput(int index) {
+		return false;
+	}
+
+	public final void replaceInput(int index, OOCStreamable<?> source) {
+		if(hasStartedExecution())
+			throw new IllegalStateException("Cannot replace an input after primitive execution started.");
+		OOCStreamable<?> previous;
+		synchronized(this) {
+			InputSlot input = _inputs.get(index);
+			previous = input._source;
+			if(previous == source)
+				return;
+			if(input._handleReserved)
+				previous.discardHandle();
+			input._source = source;
+			input._dependency = source.getPrimitive();
+			input._handleReserved = true;
+			source.reserveLazyHandle();
+		}
+		rebuildInputChildren();
+	}
+
 	public final void setShareLiveHandle(int index, boolean share) {
 		if(hasStartedExecution())
 			throw new IllegalStateException("Cannot change input sharing after primitive execution started.");
@@ -366,7 +393,7 @@ public abstract class OOCPrimitive {
 	protected abstract void requestPatternInternal(OOCAccessPattern accessPattern);
 
 	private static final class InputSlot {
-		private final OOCStreamable<?> _source;
+		private OOCStreamable<?> _source;
 		private OOCPrimitive _dependency;
 		private boolean _handleReserved;
 		private boolean _shareLiveHandle;

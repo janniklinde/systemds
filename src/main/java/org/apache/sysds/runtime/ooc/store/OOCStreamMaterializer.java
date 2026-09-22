@@ -227,7 +227,8 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 		observe(value);
 		int index = _linearize.applyAsInt(value.getIndexes());
 		StoreLease<IndexedMatrixValue> lease;
-		if(callback instanceof InMemoryQueueCallback<IndexedMatrixValue> managed && managed.getManagedBytes() > 0) {
+		if(callback instanceof InMemoryQueueCallback<IndexedMatrixValue> managed && managed.getManagedBytes() > 0 &&
+			managed.canExtractManagedPayload()) {
 			lease = _store.publishPinnedLive(index, managed.extractManagedPayload());
 		}
 		else {

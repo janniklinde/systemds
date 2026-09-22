@@ -42,7 +42,7 @@ import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 
-public final class MaterializeOOCPrimitive extends OOCPrimitive {
+public class MaterializeOOCPrimitive extends OOCPrimitive {
 	private final OOCStreamable<IndexedMatrixValue> _source;
 	private final OOCStoreLayout _layout;
 	private final OOCFuture<MaterializedStore<IndexedMatrixValue>> _store;
@@ -66,7 +66,7 @@ public final class MaterializeOOCPrimitive extends OOCPrimitive {
 		this(source, layout, context, false);
 	}
 
-	private MaterializeOOCPrimitive(OOCStreamable<IndexedMatrixValue> source, OOCStoreLayout layout,
+	protected MaterializeOOCPrimitive(OOCStreamable<IndexedMatrixValue> source, OOCStoreLayout layout,
 		StreamContext context, boolean reusable) {
 		super(context, source);
 		_source = source;

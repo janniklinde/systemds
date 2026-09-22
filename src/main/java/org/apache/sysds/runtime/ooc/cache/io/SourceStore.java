@@ -543,16 +543,11 @@ final class SourceStore {
 		AtomicLongArray filePositions, AtomicIntegerArray completed, AtomicBoolean stop, AtomicBoolean budgetHit,
 		AtomicLong bytesRead, long byteLimit, Object budgetLock,
 		ConcurrentLinkedDeque<OOCIOHandler.SourceBlockDescriptor> descriptors) throws IOException {
-		MatrixIndexes key = new MatrixIndexes();
 		String sourcePath = path.toString();
 		BlockLayoutIndex layout = _layouts.computeIfAbsent(sourcePath, p -> new BlockLayoutIndex());
-		long partitionBytes = ConfigurationManager.getDMLConfig()
-			.getLongValue(DMLConfig.OOC_MATERIALIZED_PARTITION_BYTES);
 		long cachePackBytes = ConfigurationManager.getDMLConfig().getLongValue(DMLConfig.OOC_CACHE_PACK_BYTES);
-		boolean sparsePartition = partitionBytes > 0 && request.rows > 1 && request.cols > 1 &&
-			request.estNnz >= 0 && request.estNnz / (double) request.rows / request.cols < 0.1;
 		long groupLimit = request.target instanceof SourceOOCStream ?
-			Math.max(cachePackBytes, sparsePartition ? partitionBytes : 0) : 0;
+			Math.max(cachePackBytes, request.groupBytes) : 0;
 		List<IndexedMatrixValue> groupValues = groupLimit > 0 ? new ArrayList<>() : null;
 		List<OOCIOHandler.SourceBlockDescriptor> groupDescriptors = groupLimit > 0 ? new ArrayList<>() : null;
 		long groupBytes = 0;
@@ -571,6 +566,8 @@ final class SourceStore {
 			long ioStart = DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
 			long scanBlocks = 0, scanBytes = 0, scanNanos = 0;
 			while(!stop.get()) {
+				MatrixIndexes key = new MatrixIndexes();
+				MatrixBlock value = new MatrixBlock();
 				long recordStart = reader.getPosition();
 				if(headers != null) {
 					headers.seek(recordStart);
@@ -601,7 +598,6 @@ final class SourceStore {
 						bytesRead.addAndGet(valueSize);
 					}
 				}
-				MatrixBlock value = new MatrixBlock();
 				long readStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 				if(!reader.next(key, value))
 					break;
@@ -680,10 +676,6 @@ final class SourceStore {
 
 	private static void emitSourceGroup(OOCIOHandler.SourceReadRequest request, List<IndexedMatrixValue> values,
 		List<OOCIOHandler.SourceBlockDescriptor> descriptors) {
-		if(values.size() == 1) {
-			emitSourceValue(request, values.get(0), descriptors.get(0));
-			return;
-		}
 		OOCIOHandler.SourceBlockDescriptor first = descriptors.get(0);
 		OOCIOHandler.SourceBlockDescriptor last = descriptors.get(descriptors.size() - 1);
 		long serialized = 0;

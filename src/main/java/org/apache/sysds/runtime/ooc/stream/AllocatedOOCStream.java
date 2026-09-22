@@ -108,7 +108,22 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 			return;
 		}
 		try(callback) {
-			long bytes = _reservationSize.applyAsLong(callback.get());
+			long[] groupBytes = null;
+			long bytes;
+			if(callback instanceof OOCStream.GroupQueueCallback<?>) {
+				@SuppressWarnings("unchecked")
+				OOCStream.GroupQueueCallback<T> group = (OOCStream.GroupQueueCallback<T>) callback;
+				groupBytes = new long[group.size()];
+				bytes = 0;
+				for(int i = 0; i < group.size(); i++) {
+					try(OOCStream.QueueCallback<T> item = group.getCallback(i)) {
+						groupBytes[i] = _reservationSize.applyAsLong(item.get());
+						bytes = Math.max(bytes, groupBytes[i]);
+					}
+				}
+			}
+			else
+				bytes = _reservationSize.applyAsLong(callback.get());
 			if(bytes < 0)
 				throw new IllegalArgumentException("Cannot reserve negative bytes: " + bytes);
 			if(bytes == 0) {
@@ -117,17 +132,17 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 			}
 			boolean reserved = _limitPassiveOutput ? _allowance.tryReserveTask(bytes) : _allowance.tryReserve(bytes);
 			if(reserved) {
-				enqueueOwned(callback.keepOpen(), new ReservationBudget(_allowance, bytes));
+				enqueueOwned(callback.keepOpen(), new ReservationBudget(_allowance, bytes), groupBytes);
 				return;
 			}
-			retainUntilAllocated(callback, bytes);
+			retainUntilAllocated(callback, bytes, groupBytes);
 		}
 		catch(RuntimeException error) {
 			fail(DMLRuntimeException.of(error));
 		}
 	}
 
-	private void retainUntilAllocated(OOCStream.QueueCallback<T> callback, long bytes) {
+	private void retainUntilAllocated(OOCStream.QueueCallback<T> callback, long bytes, long[] groupBytes) {
 		OOCStream.QueueCallback<T> retained = callback.keepOpen();
 		OOCFuture<Void> reservation;
 		synchronized(this) {
@@ -156,7 +171,7 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 					retained.close();
 				}
 				else
-					enqueueOwned(retained, new ReservationBudget(_allowance, bytes));
+					enqueueOwned(retained, new ReservationBudget(_allowance, bytes), groupBytes);
 			}
 			catch(RuntimeException completionError) {
 				fail(DMLRuntimeException.of(completionError));
@@ -168,13 +183,116 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 	}
 
 	private void enqueueOwned(OOCStream.QueueCallback<T> callback, ReservationBudget budget) {
-		OOCStream.QueueCallback<T> output = budget == null ? callback : new BudgetedQueueCallback<>(callback, budget);
+		enqueueOwned(callback, budget, null);
+	}
+
+	private void enqueueOwned(OOCStream.QueueCallback<T> callback, ReservationBudget budget, long[] groupBytes) {
+		OOCStream.QueueCallback<T> output = budget == null ? callback : groupBytes == null ?
+			new BudgetedQueueCallback<>(callback, budget) :
+			new BudgetedGroupQueueCallback<>((OOCStream.GroupQueueCallback<T>) callback, budget, groupBytes);
 		try {
 			enqueue(output);
 		}
 		catch(RuntimeException error) {
 			output.close();
 			throw error;
+		}
+	}
+
+	private static final class BudgetedGroupQueueCallback<T> implements OOCStream.GroupQueueCallback<T> {
+		private final OOCStream.GroupQueueCallback<T> _callback;
+		private final SharedGroupBudget _budget;
+		private final long[] _sizes;
+		private boolean _closed;
+
+		private BudgetedGroupQueueCallback(OOCStream.GroupQueueCallback<T> callback, ReservationBudget budget,
+			long[] sizes) {
+			this(callback, new SharedGroupBudget(budget), sizes);
+		}
+
+		private BudgetedGroupQueueCallback(OOCStream.GroupQueueCallback<T> callback, SharedGroupBudget budget,
+			long[] sizes) {
+			_callback = callback;
+			_budget = budget;
+			_sizes = sizes;
+		}
+
+		@Override
+		public int size() {
+			return _sizes.length;
+		}
+
+		@Override
+		public OOCStream.QueueCallback<T> getCallback(int index) {
+			if(_closed)
+				throw new IllegalStateException("Cannot open an item from a closed group callback");
+			long bytes = _sizes[index];
+			_budget.budget.reserveBlocking(bytes);
+			return new BudgetedQueueCallback<>(_callback.getCallback(index),
+				new ReservationBudget(_budget.budget, bytes));
+		}
+
+		@Override
+		public T get() {
+			return _callback.get();
+		}
+
+		@Override
+		public synchronized OOCStream.QueueCallback<T> keepOpen() {
+			if(_closed)
+				throw new IllegalStateException("Cannot keep open a closed group callback");
+			synchronized(_budget) {
+				_budget.references++;
+			}
+			@SuppressWarnings("unchecked")
+			OOCStream.GroupQueueCallback<T> retained =
+				(OOCStream.GroupQueueCallback<T>) _callback.keepOpen();
+			return new BudgetedGroupQueueCallback<>(retained, _budget, _sizes);
+		}
+
+		@Override
+		public void close() {
+			synchronized(this) {
+				if(_closed)
+					return;
+				_closed = true;
+			}
+			try {
+				_callback.close();
+			}
+			finally {
+				ReservationBudget close = null;
+				synchronized(_budget) {
+					if(--_budget.references == 0)
+						close = _budget.budget;
+				}
+				if(close != null)
+					close.close();
+			}
+		}
+
+		@Override
+		public void fail(DMLRuntimeException failure) {
+			_callback.fail(failure);
+		}
+
+		@Override
+		public boolean isEos() {
+			return _callback.isEos();
+		}
+
+		@Override
+		public boolean isFailure() {
+			return _callback.isFailure();
+		}
+
+		private static final class SharedGroupBudget {
+			private final ReservationBudget budget;
+			private int references = 1;
+
+			private SharedGroupBudget(ReservationBudget budget) {
+				this.budget = budget;
+			}
 		}
 	}
 

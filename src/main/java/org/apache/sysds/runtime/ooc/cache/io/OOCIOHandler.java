@@ -74,11 +74,18 @@ public interface OOCIOHandler {
 		public final int blen;
 		public final long estNnz;
 		public final long maxBytesInFlight;
+		public final long groupBytes;
 		public final boolean keepOpenOnLimit;
 		public final OOCStream<IndexedMatrixValue> target;
 
 		public SourceReadRequest(String path, Types.FileFormat format, long rows, long cols, int blen, long estNnz,
 			long maxBytesInFlight, boolean keepOpenOnLimit, OOCStream<IndexedMatrixValue> target) {
+			this(path, format, rows, cols, blen, estNnz, maxBytesInFlight, 0, keepOpenOnLimit, target);
+		}
+
+		public SourceReadRequest(String path, Types.FileFormat format, long rows, long cols, int blen, long estNnz,
+			long maxBytesInFlight, long groupBytes, boolean keepOpenOnLimit,
+			OOCStream<IndexedMatrixValue> target) {
 			this.path = path;
 			this.format = format;
 			this.rows = rows;
@@ -86,6 +93,7 @@ public interface OOCIOHandler {
 			this.blen = blen;
 			this.estNnz = estNnz;
 			this.maxBytesInFlight = maxBytesInFlight;
+			this.groupBytes = groupBytes;
 			this.keepOpenOnLimit = keepOpenOnLimit;
 			this.target = target;
 		}
