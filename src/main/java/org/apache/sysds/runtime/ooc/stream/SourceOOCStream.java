@@ -62,14 +62,7 @@ public class SourceOOCStream extends SubscribableTaskQueue<IndexedMatrixValue> {
 		if (values == null || values.isEmpty())
 			return;
 		waitForBackpressure();
-		boolean delivered = tryDeliverCallback(new SourceGroupCallback(values, descriptor), values.size());
-		if (!delivered) {
-			// Fallback to individual enqueues if no subscriber yet
-			for (int i = 0; i < values.size(); i++) {
-				OOCIOHandler.SourceBlockDescriptor d = descriptor.blocks.get(i);
-				enqueue(values.get(i), d);
-			}
-		}
+		super.enqueue(new SourceGroupCallback(values, descriptor));
 	}
 
 	@Override

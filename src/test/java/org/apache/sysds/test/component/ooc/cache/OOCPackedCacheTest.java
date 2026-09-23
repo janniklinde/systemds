@@ -68,11 +68,11 @@ public class OOCPackedCacheTest {
 			BlockEntry second = cache.pin(STREAM_ID, 1, reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 			Assert.assertEquals(1.0, scalar(first), 0.0);
 			Assert.assertEquals(2.0, scalar(second), 0.0);
-			Assert.assertEquals("Multiple logical pins in one pack should charge the physical pack once.", 3 * BYTES,
+			Assert.assertEquals("Multiple logical pins in one pack should charge the physical pack once.", packedBytes(3),
 				reader.getUsedMemory());
 
 			await(cache.unpin(first, reader), WAIT_TIMEOUT_SEC);
-			Assert.assertEquals("The physical pack stays pinned while another logical pin remains.", 3 * BYTES,
+			Assert.assertEquals("The physical pack stays pinned while another logical pin remains.", packedBytes(3),
 				reader.getUsedMemory());
 			await(cache.unpin(second, reader), WAIT_TIMEOUT_SEC);
 			awaitUsedMemory(reader, 0, WAIT_TIMEOUT_SEC);
@@ -114,7 +114,7 @@ public class OOCPackedCacheTest {
 			BlockEntry large = cache.pin(STREAM_ID, 1, reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 			Assert.assertEquals(5.0, scalar(packed), 0.0);
 			Assert.assertEquals(9.0, scalar(large), 0.0);
-			Assert.assertEquals(2 * BYTES + largeBytes, reader.getUsedMemory());
+			Assert.assertEquals(packedBytes(2) + largeBytes, reader.getUsedMemory());
 
 			await(cache.unpin(packed, reader), WAIT_TIMEOUT_SEC);
 			await(cache.unpin(large, reader), WAIT_TIMEOUT_SEC);
@@ -137,7 +137,7 @@ public class OOCPackedCacheTest {
 		OOCPackedCache cache = new OOCPackedCache(new OOCCacheImpl(new OOCIOHandlerImpl(), 1L << 30, 1L << 30),
 			2 * BYTES, 10 * BYTES, -1, 0);
 		try {
-			producer.reserveBlocking(4 * BYTES);
+			producer.reserveBlocking(4 * BYTES + PackedBlock.memoryOverhead(2));
 			BlockEntry first = cache.putUnpackedPinned(STREAM_ID, 0, value(1), BYTES, producer);
 			OOCPackedCache.PrepackedEntries packed = cache.putPrepackedPinned(STREAM_ID, new long[] {1, 2},
 				PackedBlock.fromValues(new Object[] {value(2), value(3)}, new long[] {BYTES, BYTES}), producer);
@@ -188,11 +188,11 @@ public class OOCPackedCacheTest {
 			BlockEntry first = cache.pinAdmitted(STREAM_ID, 0, reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 			Assert.assertNotNull(first);
 			Assert.assertEquals(1.0, scalar(first), 0.0);
-			Assert.assertEquals(2 * BYTES, reader.getUsedMemory());
+			Assert.assertEquals(packedBytes(2), reader.getUsedMemory());
 
 			OOCCache.UnpinHandle delayed = cache.unpin(first, reader);
 			Assert.assertFalse(delayed.isCommitted());
-			Assert.assertEquals("Delayed packed release keeps the physical pack charged.", 2 * BYTES,
+			Assert.assertEquals("Delayed packed release keeps the physical pack charged.", packedBytes(2),
 				reader.getUsedMemory());
 
 			BlockEntry second = cache.pinAdmitted(STREAM_ID, 1, reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
@@ -200,7 +200,7 @@ public class OOCPackedCacheTest {
 			Assert.assertEquals(2.0, scalar(second), 0.0);
 			Assert.assertFalse("Re-pinning with the same allowance should cancel the pending physical release.",
 				delayed.getCompletionFuture().get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS));
-			Assert.assertEquals(2 * BYTES, reader.getUsedMemory());
+			Assert.assertEquals(packedBytes(2), reader.getUsedMemory());
 
 			await(cache.unpin(second, reader), WAIT_TIMEOUT_SEC);
 			awaitUsedMemory(reader, 0, WAIT_TIMEOUT_SEC);
@@ -313,7 +313,7 @@ public class OOCPackedCacheTest {
 			try(lease) {
 				Assert.assertEquals(7.0, scalar((IndexedMatrixValue) lease.value(0)), 0.0);
 				Assert.assertEquals(11.0, scalar((IndexedMatrixValue) lease.value(1)), 0.0);
-				Assert.assertEquals(2 * BYTES, reader.getUsedMemory());
+				Assert.assertEquals(packedBytes(2), reader.getUsedMemory());
 			}
 			awaitUsedMemory(reader, 0, WAIT_TIMEOUT_SEC);
 		}
@@ -339,7 +339,7 @@ public class OOCPackedCacheTest {
 			BlockEntry[] entries = publishSmallTiles(cache, producer, STREAM_ID, 4);
 			unpinAndFlush(cache, producer, entries);
 			awaitUsedMemory(producer, 0, WAIT_TIMEOUT_SEC);
-			await(() -> io.evictionCount() == 1 && cache.getOwnedCacheSize() == 2 * BYTES, WAIT_TIMEOUT_SEC);
+			await(() -> io.evictionCount() == 1 && cache.getOwnedCacheSize() == packedBytes(2), WAIT_TIMEOUT_SEC);
 
 			int readsBefore = io.readCount();
 			BlockEntry retained = cache.pin(STREAM_ID, 2, reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
@@ -386,7 +386,7 @@ public class OOCPackedCacheTest {
 			Assert.assertEquals(4.0, scalar(pinned), 0.0);
 			Assert.assertTrue("Pinning an evicted logical tile should read the physical pack.",
 				io.readCount() > readsBefore);
-			Assert.assertEquals(4 * BYTES, reader.getUsedMemory());
+			Assert.assertEquals(packedBytes(4), reader.getUsedMemory());
 
 			await(cache.unpin(pinned, reader), WAIT_TIMEOUT_SEC);
 			awaitUsedMemory(reader, 0, WAIT_TIMEOUT_SEC);
@@ -407,6 +407,10 @@ public class OOCPackedCacheTest {
 			entries[i] = cache.putPinned(streamId, i, value(i + 1.0), BYTES, producer);
 		}
 		return entries;
+	}
+
+	private static long packedBytes(int count) {
+		return count * BYTES + PackedBlock.memoryOverhead(count);
 	}
 
 	private static void unpinAndFlush(OOCPackedCache cache, SyncMemoryAllowance producer, BlockEntry[] entries)

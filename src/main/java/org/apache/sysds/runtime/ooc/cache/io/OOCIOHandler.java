@@ -135,20 +135,20 @@ public interface OOCIOHandler {
 	}
 
 	class GroupSourceBlockDescriptor extends SourceBlockDescriptor {
-		public final List<SourceBlockDescriptor> blocks;
 		public final int count;
 		public final boolean packed;
 
 		public GroupSourceBlockDescriptor(String path, Types.FileFormat format, MatrixIndexes indexes, long offset,
-			int recordLength, long serializedSize, List<SourceBlockDescriptor> blocks) {
-			this(path, format, indexes, offset, recordLength, serializedSize, blocks, false);
+			int recordLength, long serializedSize, int count) {
+			this(path, format, indexes, offset, recordLength, serializedSize, count, false);
 		}
 
 		public GroupSourceBlockDescriptor(String path, Types.FileFormat format, MatrixIndexes indexes, long offset,
-			int recordLength, long serializedSize, List<SourceBlockDescriptor> blocks, boolean packed) {
+			int recordLength, long serializedSize, int count, boolean packed) {
 			super(path, format, indexes, offset, recordLength, serializedSize);
-			this.blocks = List.copyOf(blocks);
-			this.count = blocks.size();
+			if(count <= 0)
+				throw new IllegalArgumentException("Source group must contain at least one block.");
+			this.count = count;
 			this.packed = packed;
 		}
 	}

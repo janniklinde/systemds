@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.function.BooleanSupplier;
 
 public class OOCUtils {
+	private static final long INDEXED_MATRIX_VALUE_BYTES = 64;
 	/**
 	 * Memory charge for a block held resident by the OOC memory system, be it in a reservation, a queue callback, a
 	 * state table or the cache. The serialized size alone is what the block costs on disk, not while it is live: a
@@ -53,7 +54,7 @@ public class OOCUtils {
 	}
 
 	public static long memoryCharge(IndexedMatrixValue value) {
-		return memoryCharge((MatrixBlock) value.getValue());
+		return Math.addExact(memoryCharge((MatrixBlock) value.getValue()), INDEXED_MATRIX_VALUE_BYTES);
 	}
 
 	public static OOCFuture<BlockEntry> pinAdmitted(OOCCache cache, long streamId, long sequenceNumber,
@@ -175,10 +176,11 @@ public class OOCUtils {
 	public static long estimateOutputTileBytes(DataCharacteristics dc) {
 		if(dc == null || dc.getBlocksize() <= 0 || !dc.dimsKnown()) {
 			int blocksize = dc != null && dc.getBlocksize() > 0 ? dc.getBlocksize() : 1000;
-			return MatrixBlock.estimateSizeDenseInMemory(blocksize, blocksize);
+			return Math.addExact(MatrixBlock.estimateSizeDenseInMemory(blocksize, blocksize),
+				INDEXED_MATRIX_VALUE_BYTES);
 		}
-		return MatrixBlock.estimateSizeDenseInMemory(Math.min(dc.getBlocksize(), dc.getRows()),
-			Math.min(dc.getBlocksize(), dc.getCols()));
+		return Math.addExact(MatrixBlock.estimateSizeDenseInMemory(Math.min(dc.getBlocksize(), dc.getRows()),
+			Math.min(dc.getBlocksize(), dc.getCols())), INDEXED_MATRIX_VALUE_BYTES);
 	}
 
 	public static long estimateFullTileBytes(DataCharacteristics dc) {
@@ -189,8 +191,8 @@ public class OOCUtils {
 	}
 
 	private static long estimateMatrixBlockBytes(long rows, long cols) {
-		return Math.max(MatrixBlock.estimateSizeDenseInMemory(rows, cols),
-			MatrixBlock.estimateSizeSparseInMemory(rows, cols, 1.0));
+		return Math.addExact(Math.max(MatrixBlock.estimateSizeDenseInMemory(rows, cols),
+			MatrixBlock.estimateSizeSparseInMemory(rows, cols, 1.0)), INDEXED_MATRIX_VALUE_BYTES);
 	}
 
 	public static <T extends SpillableObject> void enqueueExact(OOCStream<T> out, T value, ReservationBudget budget) {

@@ -92,7 +92,7 @@ final class PackBuilder {
 	}
 
 	PackedBlock createBlock() {
-		return new PackedBlock(Arrays.copyOf(values, count), Arrays.copyOf(sizes, count), bytes);
+		return PackedBlock.fromOwnedArrays(Arrays.copyOf(values, count), Arrays.copyOf(sizes, count));
 	}
 
 	PackedUnpinHandle unpinProducer(BlockEntry entry, int slot, MemoryAllowance owner) {

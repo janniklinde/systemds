@@ -249,20 +249,19 @@ public final class OOCPackedCache implements OOCCache {
 
 	public BlockEntry putSealedPackPinned(long sId, long[] tIds, Object[] data, long[] sizes, int off, int len,
 		MemoryAllowance allowance) {
-		long totalSize = 0;
 		Object[] packedData = new Object[len];
 		long[] packedSizes = new long[len];
 		for(int i = 0; i < len; i++) {
 			int p = off + i;
 			packedData[i] = data[p];
 			packedSizes[i] = sizes[p];
-			totalSize += sizes[p];
 		}
+		PackedBlock block = PackedBlock.fromOwnedArrays(packedData, packedSizes);
+		allowance.reserveBlocking(PackedBlock.memoryOverhead(len));
 
 		synchronized(this) {
 			checkRunning();
-			BlockEntry physicalEntry = putSealedBlockPinned(new PackedBlock(packedData, packedSizes, totalSize),
-				allowance);
+			BlockEntry physicalEntry = putSealedBlockPinned(block, allowance);
 			PackedPinState state = new PackedPinState(physicalEntry, sId,
 				Arrays.stream(tIds).mapToInt(Math::toIntExact).toArray(), off, len, len);
 			registerPackedState(state);
@@ -681,6 +680,7 @@ public final class OOCPackedCache implements OOCCache {
 		if(builder.streamSlot >= 0 && builder.streamSlot < _builders.length && _builders[builder.streamSlot] == builder)
 			_builders[builder.streamSlot] = null;
 
+		builder.allowance.reserveBlocking(PackedBlock.memoryOverhead(builder.count));
 		PackedBlock block = builder.createBlock();
 		BlockEntry physicalEntry = putSealedBlockPinned(block, builder.allowance);
 		int liveSlots = builder.countLiveSlots();

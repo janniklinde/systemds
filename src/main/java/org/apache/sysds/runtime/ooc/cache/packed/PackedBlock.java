@@ -26,7 +26,10 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 
+import org.apache.sysds.utils.MemoryEstimates;
+
 public final class PackedBlock implements SpillableObject {
+	private static final long BASE_BYTES = 40;
 	Object[] values;
 	long[] sizes;
 	long totalSize;
@@ -37,7 +40,7 @@ public final class PackedBlock implements SpillableObject {
 		totalSize = 0;
 	}
 
-	PackedBlock(Object[] values, long[] sizes, long totalSize) {
+	private PackedBlock(Object[] values, long[] sizes, long totalSize) {
 		this.values = values;
 		this.sizes = sizes;
 		this.totalSize = totalSize;
@@ -49,7 +52,22 @@ public final class PackedBlock implements SpillableObject {
 		long totalSize = 0;
 		for(long size : sizes)
 			totalSize = Math.addExact(totalSize, size);
+		totalSize = Math.addExact(totalSize, memoryOverhead(values.length));
 		return new PackedBlock(values.clone(), sizes.clone(), totalSize);
+	}
+
+	static PackedBlock fromOwnedArrays(Object[] values, long[] sizes) {
+		if(values.length != sizes.length || values.length == 0)
+			throw new IllegalArgumentException("Packed values and sizes must have the same positive length.");
+		long totalSize = memoryOverhead(values.length);
+		for(long size : sizes)
+			totalSize = Math.addExact(totalSize, size);
+		return new PackedBlock(values, sizes, totalSize);
+	}
+
+	public static long memoryOverhead(int count) {
+		return BASE_BYTES + (long) MemoryEstimates.objectArrayCost(count) - 8 +
+			(long) MemoryEstimates.longArrayCost(count) - 8;
 	}
 
 	public int count() {
@@ -90,5 +108,6 @@ public final class PackedBlock implements SpillableObject {
 			values[i] = SpillableObjectRegistry.read(in);
 			totalSize += sizes[i];
 		}
+		totalSize += memoryOverhead(count);
 	}
 }

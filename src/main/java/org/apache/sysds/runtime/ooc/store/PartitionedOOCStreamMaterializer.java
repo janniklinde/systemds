@@ -95,7 +95,7 @@ public final class PartitionedOOCStreamMaterializer implements Consumer<OOCStrea
 			if(!(descriptor instanceof OOCIOHandler.GroupSourceBlockDescriptor))
 				descriptor = new OOCIOHandler.GroupSourceBlockDescriptor(descriptor.path, descriptor.format,
 					descriptor.indexes, descriptor.offset, descriptor.recordLength, descriptor.serializedSize,
-					List.of(descriptor));
+					1);
 			_store.cache().getIOHandler().registerSourceLocation(lease.entry().getKey(), descriptor);
 			_store.cache().markBacked(lease.entry());
 			try(lease) {

@@ -35,14 +35,20 @@ import org.apache.hadoop.util.CleanerUtil;
 final class OOCDirectInputStream extends FSInputStream {
 	private static final int ALIGNMENT = 4096;
 	private final FileChannel _channel;
+	private final int _readAheadBytes;
 	private ByteBuffer _buffer;
 	private ByteBuffer _allocation;
 	private long _bufferStart;
 	private long _position;
 
 	OOCDirectInputStream(Path path, int bufferSize) throws IOException {
+		this(path, bufferSize, false);
+	}
+
+	OOCDirectInputStream(Path path, int bufferSize, boolean readAhead) throws IOException {
 		if(bufferSize <= 0)
 			throw new IllegalArgumentException("Direct read buffer size must be positive");
+		_readAheadBytes = readAhead ? bufferSize : 0;
 		if(!CleanerUtil.UNMAP_SUPPORTED)
 			throw new IOException("OOC direct buffer cleanup unavailable: " + CleanerUtil.UNMAP_NOT_SUPPORTED_REASON);
 		try {
@@ -78,6 +84,7 @@ final class OOCDirectInputStream extends FSInputStream {
 			int skip = (int) (_position - start);
 			int size = (int) Math.min((long) length + skip, Integer.MAX_VALUE - 2L * ALIGNMENT);
 			size = (size + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT;
+			size = Math.max(size, _readAheadBytes);
 			if(size > _buffer.capacity())
 				allocateBuffer(size);
 			_buffer.clear();

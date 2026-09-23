@@ -43,6 +43,7 @@ import org.apache.sysds.runtime.ooc.store.StoreLease;
 import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.runtime.ooc.stream.StreamContext;
 import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.runtime.ooc.util.StateTableUtils;
 
 public class JoinStreamingOOCPrimitive<L extends SpillableObject, R extends SpillableObject, O> extends OOCPrimitive {
@@ -53,6 +54,7 @@ public class JoinStreamingOOCPrimitive<L extends SpillableObject, R extends Spil
 	private final BiFunction<L, R, O> _operation;
 	private final long _taskBytes;
 	private final boolean _indexedInputs;
+	private final boolean _deriveTaskBytes;
 	private final AtomicInteger _pendingArrivals = new AtomicInteger(2);
 	private final AtomicInteger _pendingMatches = new AtomicInteger(1);
 	private final BitSet _leftArrived = new BitSet();
@@ -68,12 +70,19 @@ public class JoinStreamingOOCPrimitive<L extends SpillableObject, R extends Spil
 	public JoinStreamingOOCPrimitive(OOCStreamable<L> left, OOCStreamable<R> right, OOCStreamable<O> output,
 		ToIntFunction<L> leftKey, ToIntFunction<R> rightKey, ToLongFunction<O> outputSize,
 		BiFunction<L, R, O> operation, long taskBytes, StreamContext context) {
-		this(left, right, output, leftKey, rightKey, outputSize, operation, taskBytes, false, context);
+		this(left, right, output, leftKey, rightKey, outputSize, operation, taskBytes, false, false, context);
 	}
 
 	public JoinStreamingOOCPrimitive(OOCStreamable<L> left, OOCStreamable<R> right, OOCStreamable<O> output,
 		ToIntFunction<L> leftKey, ToIntFunction<R> rightKey, ToLongFunction<O> outputSize,
 		BiFunction<L, R, O> operation, long taskBytes, boolean indexedInputs, StreamContext context) {
+		this(left, right, output, leftKey, rightKey, outputSize, operation, taskBytes, indexedInputs, false, context);
+	}
+
+	public JoinStreamingOOCPrimitive(OOCStreamable<L> left, OOCStreamable<R> right, OOCStreamable<O> output,
+		ToIntFunction<L> leftKey, ToIntFunction<R> rightKey, ToLongFunction<O> outputSize,
+		BiFunction<L, R, O> operation, long taskBytes, boolean indexedInputs, boolean deriveTaskBytes,
+		StreamContext context) {
 		super(context, left, right);
 		_output = output;
 		_leftKey = leftKey;
@@ -82,6 +91,7 @@ public class JoinStreamingOOCPrimitive<L extends SpillableObject, R extends Spil
 		_operation = operation;
 		_taskBytes = taskBytes;
 		_indexedInputs = indexedInputs;
+		_deriveTaskBytes = deriveTaskBytes;
 	}
 
 	@Override
@@ -114,11 +124,23 @@ public class JoinStreamingOOCPrimitive<L extends SpillableObject, R extends Spil
 
 	@Override
 	protected long getMaxTaskReservationBytes() {
-		return _taskBytes;
+		return taskBytes();
+	}
+
+	private long taskBytes() {
+		if(!_deriveTaskBytes)
+			return _taskBytes;
+		long left = getInput(0).maxPhysicalReadBytes(
+			OOCUtils.estimateOutputTileBytes(getInput(0).getDataCharacteristics()));
+		long right = getInput(1).maxPhysicalReadBytes(
+			OOCUtils.estimateOutputTileBytes(getInput(1).getDataCharacteristics()));
+		long output = OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics());
+		return Math.addExact(Math.addExact(left, right), output);
 	}
 
 	@Override
 	protected void startExecution() {
+		long taskBytes = taskBytes();
 		_left = new StateTable<>();
 		_right = new StateTable<>();
 		DataCharacteristics dc = _output.getDataCharacteristics();
@@ -149,7 +171,7 @@ public class JoinStreamingOOCPrimitive<L extends SpillableObject, R extends Spil
 				}
 			});
 		AllocatedOOCStream<Integer> admitted = new AllocatedOOCStream<>(_matches, _allowance,
-			key -> _taskBytes, true);
+			key -> taskBytes, true);
 		getContext().addInStream(_matches, admitted);
 		admitted.setSubscriber(this::match);
 		startInput(0, _left, _leftKey);
@@ -321,7 +343,8 @@ public class JoinStreamingOOCPrimitive<L extends SpillableObject, R extends Spil
 	private void process(JoinWork work) {
 		O value = _operation.apply(work._left.value(), work._right.value());
 		long bytes = _outputSize.applyAsLong(value);
-		work._budget.reserveBlocking(bytes);
+		if(!work._budget.tryReserve(bytes))
+			throw new DMLRuntimeException("Join task admission underestimated its output by " + bytes + " bytes");
 		OOCStream.QueueCallback<O> callback = new InMemoryQueueCallback<>(value, null, work._budget, bytes);
 		try {
 			_outputStream.enqueue(callback);

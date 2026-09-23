@@ -249,7 +249,7 @@ public final class OOCInstructionUtils {
 		if(streaming)
 			output.assignPrimitive(new JoinStreamingOOCPrimitive<>(left, right, output, key, key, outputSize,
 				operation, taskBytes, cols > 0 && left.getDataCharacteristics().dimsKnown() &&
-					right.getDataCharacteristics().dimsKnown(), context));
+					right.getDataCharacteristics().dimsKnown(), true, context));
 		else
 			output.assignPrimitive(new JoinOOCPrimitive<>(left, right, output, key, key, outputSize, operation,
 				taskBytes, context));

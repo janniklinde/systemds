@@ -162,15 +162,15 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 		long[] tileIds = new long[values.size()];
 		Object[] packedValues = new Object[values.size()];
 		long[] sizes = new long[values.size()];
-		long totalBytes = 0;
 		for(int i = 0; i < values.size(); i++) {
 			IndexedMatrixValue value = values.get(i);
 			observe(value);
 			tileIds[i] = _linearize.applyAsInt(value.getIndexes());
 			packedValues[i] = value;
 			sizes[i] = OOCUtils.memoryCharge(value);
-			totalBytes = Math.addExact(totalBytes, sizes[i]);
 		}
+		PackedBlock packedBlock = values.size() > 1 ? PackedBlock.fromValues(packedValues, sizes) : null;
+		long totalBytes = packedBlock != null ? packedBlock.size() : sizes[0];
 
 		BlockEntry[] entries = null;
 		List<StoreLease<IndexedMatrixValue>> leases = new ArrayList<>(values.size());
@@ -186,7 +186,7 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 				if(!(cache instanceof OOCPackedCache packedCache))
 					throw new IllegalStateException("Source packs require the packed OOC cache.");
 				OOCPackedCache.PrepackedEntries packed = packedCache.putPrepackedPinned(_store.streamId(), tileIds,
-					PackedBlock.fromValues(packedValues, sizes), ownership);
+					packedBlock, ownership);
 				physical = packed.physicalEntry();
 				entries = packed.logicalEntries();
 			}

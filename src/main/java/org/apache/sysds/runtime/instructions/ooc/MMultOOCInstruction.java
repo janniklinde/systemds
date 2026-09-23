@@ -89,7 +89,7 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 			}
 			else if(_bandStreaming && mdc.getNumRowBlocks() == 1 && vdc.getCols() > 1) {
 				OOCStream<IndexedMatrixValue> partials = createWritableStream();
-				partials.setData(vin);
+				partials.setData(mdc.getNumColBlocks() == 1 ? ec.getMatrixObject(output) : vin);
 				OOCInstructionUtils.broadcastMap(vin.getStreamable(), min.getStreamable(), partials,
 					true, true, true, (right, left) -> {
 						MatrixBlock leftBlock = (MatrixBlock) left.getValue();
@@ -105,7 +105,7 @@ public class MMultOOCInstruction extends ComputationOOCInstruction {
 			}
 			else if(vin.getDataCharacteristics().getNumColBlocks() == 1) {
 				OOCStream<IndexedMatrixValue> partials = createWritableStream();
-				partials.setData(min);
+				partials.setData(mdc.getNumColBlocks() == 1 ? ec.getMatrixObject(output) : min);
 				OOCInstructionUtils.indexedBroadcastMap(min.getStreamable(), vin.getStreamable(), partials,
 					left -> left.getIndexes().getColumnIndex(), left -> 1,
 					() -> new CountingLiveness(Math.toIntExact(vin.getDataCharacteristics().getNumRowBlocks()),

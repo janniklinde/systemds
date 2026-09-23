@@ -21,6 +21,7 @@ package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.controlprogram.caching.CacheableData;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
@@ -36,6 +37,10 @@ public interface OOCStreamable<T> {
 
 	default boolean hasMaterializedStore() {
 		return false;
+	}
+
+	default long maxPhysicalReadBytes(long logicalBytes) {
+		return OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(logicalBytes);
 	}
 
 	default void scheduleMaterializedStoreDeletion() {

@@ -322,12 +322,16 @@ final class SourceStore {
 	}
 
 	private SequenceFile.Reader openReader(JobConf job, Path path) throws IOException {
+		return openReader(job, path, false);
+	}
+
+	private SequenceFile.Reader openReader(JobConf job, Path path, boolean readAhead) throws IOException {
 		FileSystem fs = IOUtilFunctions.getFileSystem(path, job);
 		if(!_direct || !(fs instanceof LocalFileSystem || fs instanceof RawLocalFileSystem))
 			return new SequenceFile.Reader(job, SequenceFile.Reader.file(path),
 				SequenceFile.Reader.bufferSize(_readBufferBytes));
 		FSDataInputStream in = new FSDataInputStream(
-			new OOCDirectInputStream(Paths.get(fs.makeQualified(path).toUri()), _readBufferBytes));
+			new OOCDirectInputStream(Paths.get(fs.makeQualified(path).toUri()), _readBufferBytes, readAhead));
 		try {
 			return new SequenceFile.Reader(job, SequenceFile.Reader.stream(in),
 				SequenceFile.Reader.length(fs.getFileStatus(path).getLen()));
@@ -428,8 +432,6 @@ final class SourceStore {
 		final AtomicReference<Throwable> error = new AtomicReference<>();
 		final Object budgetLock = new Object();
 		final CompletableFuture<OOCIOHandler.SourceReadResult> result = new CompletableFuture<>();
-		final ConcurrentLinkedDeque<OOCIOHandler.SourceBlockDescriptor> descriptors = new ConcurrentLinkedDeque<>();
-
 		JobConf job = readConf();
 		Path path = new Path(request.path);
 
@@ -457,6 +459,10 @@ final class SourceStore {
 			throw new DMLRuntimeException(e);
 		}
 
+		final List<List<OOCIOHandler.SourceBlockDescriptor>> descriptors = new ArrayList<>(files.length);
+		for(int i = 0; i < files.length; i++)
+			descriptors.add(new ArrayList<>());
+
 		int activeTasks = 0;
 		for(int i = 0; i < files.length; i++)
 			if(completed.get(i) == 0)
@@ -473,7 +479,7 @@ final class SourceStore {
 				_scanExec.submit(() -> {
 					try {
 						readSequenceFile(job, files[fileIdx], request, fileIdx, filePositions, completed, stop,
-							budgetHit, bytesRead, byteLimit, budgetLock, descriptors);
+							budgetHit, bytesRead, byteLimit, budgetLock, descriptors.get(fileIdx));
 					}
 					catch(Throwable t) {
 						error.compareAndSet(null, t);
@@ -512,7 +518,7 @@ final class SourceStore {
 	private void completeResult(CompletableFuture<OOCIOHandler.SourceReadResult> future, AtomicLong bytesRead,
 		AtomicBoolean budgetHit, AtomicReference<Throwable> error, OOCIOHandler.SourceReadRequest request, Path[] files,
 		AtomicLongArray filePositions, AtomicIntegerArray completed,
-		ConcurrentLinkedDeque<OOCIOHandler.SourceBlockDescriptor> descriptors) {
+		List<List<OOCIOHandler.SourceBlockDescriptor>> descriptors) {
 		Throwable err = error.get();
 		if(err != null) {
 			future.completeExceptionally(err instanceof Exception ? err : new Exception(err));
@@ -520,19 +526,21 @@ final class SourceStore {
 		}
 
 		try {
+			List<OOCIOHandler.SourceBlockDescriptor> completedDescriptors = new ArrayList<>();
+			for(List<OOCIOHandler.SourceBlockDescriptor> fileDescriptors : descriptors)
+				completedDescriptors.addAll(fileDescriptors);
 			if(budgetHit.get()) {
 				if(!request.keepOpenOnLimit)
 					closeTarget(request.target, false);
 				OOCIOHandler.SourceReadContinuation cont = new SourceReadState(request, files, filePositions,
 					completed);
-				future.complete(
-					new OOCIOHandler.SourceReadResult(bytesRead.get(), false, cont, new ArrayList<>(descriptors)));
+				future.complete(new OOCIOHandler.SourceReadResult(bytesRead.get(), false, cont,
+					completedDescriptors));
 				return;
 			}
 
 			closeTarget(request.target, true);
-			future
-				.complete(new OOCIOHandler.SourceReadResult(bytesRead.get(), true, null, new ArrayList<>(descriptors)));
+			future.complete(new OOCIOHandler.SourceReadResult(bytesRead.get(), true, null, completedDescriptors));
 		}
 		catch(DMLRuntimeException e) {
 			future.completeExceptionally(e);
@@ -542,21 +550,26 @@ final class SourceStore {
 	private void readSequenceFile(JobConf job, Path path, OOCIOHandler.SourceReadRequest request, int fileIdx,
 		AtomicLongArray filePositions, AtomicIntegerArray completed, AtomicBoolean stop, AtomicBoolean budgetHit,
 		AtomicLong bytesRead, long byteLimit, Object budgetLock,
-		ConcurrentLinkedDeque<OOCIOHandler.SourceBlockDescriptor> descriptors) throws IOException {
+		List<OOCIOHandler.SourceBlockDescriptor> descriptors) throws IOException {
 		String sourcePath = path.toString();
-		BlockLayoutIndex layout = _layouts.computeIfAbsent(sourcePath, p -> new BlockLayoutIndex());
 		long cachePackBytes = ConfigurationManager.getDMLConfig().getLongValue(DMLConfig.OOC_CACHE_PACK_BYTES);
 		long groupLimit = request.target instanceof SourceOOCStream ?
 			Math.max(cachePackBytes, request.groupBytes) : 0;
 		List<IndexedMatrixValue> groupValues = groupLimit > 0 ? new ArrayList<>() : null;
-		List<OOCIOHandler.SourceBlockDescriptor> groupDescriptors = groupLimit > 0 ? new ArrayList<>() : null;
-		long groupBytes = 0;
+		long groupValueBytes = 0;
+		MatrixIndexes groupIndexes = null;
+		long groupOffset = 0;
+		long groupEnd = 0;
+		long groupSerialized = 0;
+		int groupCount = 0;
 		long maxCells = Math.min((long) request.blen, request.rows) *
 			Math.min((long) request.blen, request.cols);
-		boolean preflight = byteLimit != Long.MAX_VALUE &&
+		boolean groupedScan = groupLimit > 0;
+		BlockLayoutIndex layout = groupedScan ? null : _layouts.computeIfAbsent(sourcePath, p -> new BlockLayoutIndex());
+		boolean preflight = !groupedScan && byteLimit != Long.MAX_VALUE &&
 			(maxCells > 65536 || byteLimit < 64L * 1024 * 1024);
 
-		try(SequenceFile.Reader reader = openReader(job, path);
+		try(SequenceFile.Reader reader = openReader(job, path, groupedScan);
 			FSDataInputStream headers = !reader.isCompressed() && preflight ?
 				IOUtilFunctions.getFileSystem(path, job).open(path) : null) {
 			long pos = filePositions.get(fileIdx);
@@ -627,34 +640,48 @@ final class SourceStore {
 				if(shouldBreak)
 					break;
 
-				layout.append(recordStart, recordEnd, BlockLayoutIndex.NO_KEY);
-
 				MatrixIndexes outIdx = new MatrixIndexes(key);
 				IndexedMatrixValue imv = new IndexedMatrixValue(outIdx, value);
-				OOCIOHandler.SourceBlockDescriptor descriptor = new OOCIOHandler.SourceBlockDescriptor(sourcePath,
-					request.format, outIdx, recordStart, (int) (recordEnd - recordStart), blockSize);
 
 				if(groupLimit > 0) {
 					long valueBytes = OOCUtils.memoryCharge(imv);
-					if(!groupValues.isEmpty() && groupBytes + valueBytes > groupLimit) {
-						emitSourceGroup(request, groupValues, groupDescriptors);
+					long nextGroupBytes = Math.addExact(Math.addExact(groupValueBytes, valueBytes),
+						PackedBlock.memoryOverhead(groupCount + 1));
+					if(groupCount > 0 && nextGroupBytes > groupLimit) {
+						descriptors.add(emitSourceGroup(request, groupValues, sourcePath, request.format,
+							groupIndexes, groupOffset, groupEnd, groupSerialized, groupCount));
 						groupValues.clear();
-						groupDescriptors.clear();
-						groupBytes = 0;
+						groupValueBytes = 0;
+						groupIndexes = null;
+						groupSerialized = 0;
+						groupCount = 0;
+					}
+					if(groupCount == 0) {
+						groupIndexes = new MatrixIndexes(outIdx);
+						groupOffset = recordStart;
 					}
 					groupValues.add(imv);
-					groupDescriptors.add(descriptor);
-					groupBytes += valueBytes;
-					if(groupBytes >= groupLimit) {
-						emitSourceGroup(request, groupValues, groupDescriptors);
+					groupValueBytes = Math.addExact(groupValueBytes, valueBytes);
+					groupEnd = recordEnd;
+					groupSerialized = Math.addExact(groupSerialized, blockSize);
+					groupCount++;
+					if(Math.addExact(groupValueBytes, PackedBlock.memoryOverhead(groupCount)) >= groupLimit) {
+						descriptors.add(emitSourceGroup(request, groupValues, sourcePath, request.format,
+							groupIndexes, groupOffset, groupEnd, groupSerialized, groupCount));
 						groupValues.clear();
-						groupDescriptors.clear();
-						groupBytes = 0;
+						groupValueBytes = 0;
+						groupIndexes = null;
+						groupSerialized = 0;
+						groupCount = 0;
 					}
 				}
-				else
+				else {
+					layout.append(recordStart, recordEnd, BlockLayoutIndex.NO_KEY);
+					OOCIOHandler.SourceBlockDescriptor descriptor = new OOCIOHandler.SourceBlockDescriptor(sourcePath,
+						request.format, outIdx, recordStart, (int) (recordEnd - recordStart), blockSize);
 					emitSourceValue(request, imv, descriptor);
-				descriptors.add(descriptor);
+					descriptors.add(descriptor);
+				}
 				filePositions.set(fileIdx, reader.getPosition());
 
 				if(DMLScript.OOC_LOG_EVENTS) {
@@ -663,8 +690,9 @@ final class SourceStore {
 					ioStart = currTime;
 				}
 			}
-			if(groupLimit > 0 && !groupValues.isEmpty())
-				emitSourceGroup(request, groupValues, groupDescriptors);
+			if(groupLimit > 0 && groupCount > 0)
+				descriptors.add(emitSourceGroup(request, groupValues, sourcePath, request.format, groupIndexes,
+					groupOffset, groupEnd, groupSerialized, groupCount));
 
 			if(DMLScript.OOC_STATISTICS)
 				Statistics.incrementOOCSourceScan(scanBlocks, scanNanos, scanBytes);
@@ -674,17 +702,13 @@ final class SourceStore {
 		}
 	}
 
-	private static void emitSourceGroup(OOCIOHandler.SourceReadRequest request, List<IndexedMatrixValue> values,
-		List<OOCIOHandler.SourceBlockDescriptor> descriptors) {
-		OOCIOHandler.SourceBlockDescriptor first = descriptors.get(0);
-		OOCIOHandler.SourceBlockDescriptor last = descriptors.get(descriptors.size() - 1);
-		long serialized = 0;
-		for(OOCIOHandler.SourceBlockDescriptor descriptor : descriptors)
-			serialized += descriptor.serializedSize;
-		OOCIOHandler.GroupSourceBlockDescriptor group = new OOCIOHandler.GroupSourceBlockDescriptor(first.path,
-			first.format, first.indexes, first.offset, (int) (last.offset + last.recordLength - first.offset), serialized,
-			descriptors);
+	private static OOCIOHandler.GroupSourceBlockDescriptor emitSourceGroup(
+		OOCIOHandler.SourceReadRequest request, List<IndexedMatrixValue> values, String path, Types.FileFormat format,
+		MatrixIndexes indexes, long offset, long end, long serializedSize, int count) {
+		OOCIOHandler.GroupSourceBlockDescriptor group = new OOCIOHandler.GroupSourceBlockDescriptor(path, format,
+			indexes, offset, Math.toIntExact(end - offset), serializedSize, count);
 		((SourceOOCStream) request.target).enqueueGroup(List.copyOf(values), group);
+		return group;
 	}
 
 	private static void emitSourceValue(OOCIOHandler.SourceReadRequest request, IndexedMatrixValue value,

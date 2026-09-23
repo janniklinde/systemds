@@ -93,6 +93,11 @@ public final class PartitionedStoreStreamable implements OOCStreamable<IndexedMa
 		return _partitionsRequested || isPartitioned();
 	}
 
+	@Override
+	public long maxPhysicalReadBytes(long logicalBytes) {
+		return Math.max(_partitionBytes, OOCStreamable.super.maxPhysicalReadBytes(logicalBytes));
+	}
+
 	public synchronized MaterializedStoreStreamable unpartitionedView() {
 		if(_unpartitioned == null) {
 			_unpartitioned = MaterializedStoreStreamable.unpartitioned(getReadStream(), _data,

@@ -67,6 +67,7 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 					_available -= bytes;
 					return true;
 				}
+				warnInsufficient(bytes, _available);
 				if(!_growable)
 					return false;
 				growth = bytes - _available;
@@ -89,9 +90,8 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 	}
 
 	/**
-	 * Reserves from the budget, topping it up from the parent allowance when the pre-reservation falls short. The
-	 * up-front amount is an estimate from the block geometry, while the charge for the value actually produced is the
-	 * truth. Failing here would abort the plan over an underestimate, so the shortfall is granted separately instead.
+	 * Reserves from the budget, temporarily topping it up from the parent allowance when primitive admission
+	 * underestimated the required memory. The warning identifies a primitive whose up-front reservation must be fixed.
 	 */
 	@Override
 	public void reserveBlocking(long bytes) {
@@ -107,6 +107,7 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 					_available -= bytes;
 					return;
 				}
+				warnInsufficient(bytes, _available);
 				shortfall = bytes - _available;
 			}
 			_parent.reserveBlocking(shortfall);
@@ -138,6 +139,7 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 				_available -= bytes;
 				return OOCFuture.completed(null);
 			}
+			warnInsufficient(bytes, _available);
 			shortfall = bytes - _available;
 		}
 
@@ -168,6 +170,12 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 			});
 		});
 		return result;
+	}
+
+	private void warnInsufficient(long requested, long available) {
+		System.err.println("WARNING: OOC task budget underestimated: requested " + requested + " bytes with " + available
+			+ " bytes remaining (shortfall " + (requested - available)
+			+ "). Primitive admission must reserve sufficient memory before execution.");
 	}
 
 	@Override
