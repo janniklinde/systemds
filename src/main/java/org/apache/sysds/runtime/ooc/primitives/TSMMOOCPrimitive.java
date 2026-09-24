@@ -424,13 +424,13 @@ public final class TSMMOOCPrimitive extends OOCPrimitive {
 			int col = slot % _width;
 			MatrixBlock block = (MatrixBlock) payload.value().getValue();
 			payload.release();
-			long upperBytes = block.getExactSerializedSize();
+			long upperBytes = OOCUtils.memoryCharge(block);
 			budget.reserveBlocking(upperBytes);
 			upper = new InMemoryQueueCallback<>(new IndexedMatrixValue(new MatrixIndexes(row + 1L, col + 1L), block),
 				null, budget, upperBytes);
 			if(row != col) {
 				MatrixBlock mirror = LibMatrixReorg.transpose(block);
-				long lowerBytes = mirror.getExactSerializedSize();
+				long lowerBytes = OOCUtils.memoryCharge(mirror);
 				budget.reserveBlocking(lowerBytes);
 				lower = new InMemoryQueueCallback<>(
 					new IndexedMatrixValue(new MatrixIndexes(col + 1L, row + 1L), mirror), null, budget, lowerBytes);

@@ -51,6 +51,7 @@ import org.apache.sysds.runtime.meta.MetaDataFormat;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
+import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.planning.OOCStoreLayout;
@@ -786,6 +787,8 @@ public class OOCPrimitiveTest {
 			new BinaryOperator(Plus.getPlusFnObject()), new StreamContext());
 
 		Map<String, Double> values = new ConcurrentHashMap<>();
+		Map<String, Long> expectedCharges = new ConcurrentHashMap<>();
+		Map<String, Long> managedCharges = new ConcurrentHashMap<>();
 		CountDownLatch blocks = new CountDownLatch(4);
 		CountDownLatch complete = new CountDownLatch(1);
 		output.setSubscriber(callback -> {
@@ -795,8 +798,11 @@ public class OOCPrimitiveTest {
 					return;
 				}
 				IndexedMatrixValue value = callback.get();
-				values.put(value.getIndexes().getRowIndex() + "," + value.getIndexes().getColumnIndex(),
-					value.getValue().get(0, 0));
+				String key = value.getIndexes().getRowIndex() + "," + value.getIndexes().getColumnIndex();
+				expectedCharges.put(key, OOCUtils.memoryCharge((MatrixBlock) value.getValue()));
+				managedCharges.put(key, callback instanceof InMemoryQueueCallback<?> memory ?
+					memory.getManagedBytes() : -1L);
+				values.put(key, value.getValue().get(0, 0));
 				blocks.countDown();
 			}
 		});
@@ -807,6 +813,7 @@ public class OOCPrimitiveTest {
 			input.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 2), new MatrixBlock(1, 1, 2d)));
 			Assert.assertTrue("TSMM waited for materialization completion", blocks.await(10, TimeUnit.SECONDS));
 			Assert.assertEquals(Map.of("1,1", 1d, "1,2", 2d, "2,1", 2d, "2,2", 4d), values);
+			Assert.assertEquals(expectedCharges, managedCharges);
 		}
 		finally {
 			input.closeInput();
