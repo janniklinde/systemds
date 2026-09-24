@@ -19,7 +19,6 @@
 
 package org.apache.sysds.runtime.ooc.primitives;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -31,7 +30,6 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
-import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
@@ -160,32 +158,29 @@ public final class SourceReadOOCPrimitive extends OOCPrimitive {
 			ReservationBudget phase = _activeBudget.get();
 			if(phase == null)
 				throw new IllegalStateException("Source value emitted outside an admitted read phase.");
-			List<IndexedMatrixValue> values = new ArrayList<>();
+			List<IndexedMatrixValue> values;
+			long[] sizes;
+			long bytes;
 			OOCIOHandler.SourceBlockDescriptor descriptor;
 			if(callback instanceof SourceOOCStream.SourceGroupCallback group) {
 				descriptor = group.getDescriptor();
-				for(int i = 0; i < group.size(); i++)
-					try(OOCStream.QueueCallback<IndexedMatrixValue> item = group.getCallback(i)) {
-						values.add(item.get());
-					}
+				values = group.getValues();
+				sizes = group.getSizes();
+				bytes = group.getMemoryBytes();
 			}
 			else {
 				IndexedMatrixValue value = callback.get();
-				values.add(value);
+				values = List.of(value);
+				bytes = OOCUtils.memoryCharge(value);
+				sizes = new long[] {bytes};
 				descriptor = _ioOutput.getDescriptor(value.getIndexes());
 			}
-			long bytes = 0;
-			for(IndexedMatrixValue value : values)
-				bytes = Math.addExact(bytes, OOCUtils.memoryCharge(value));
-			// Partition materialization wraps even a single source tile in a PackedBlock.
-			if(callback instanceof SourceOOCStream.SourceGroupCallback)
-				bytes = Math.addExact(bytes, PackedBlock.memoryOverhead(values.size()));
 			phase.reserveBlocking(bytes);
 			ReservationBudget ownership = new ReservationBudget(phase, bytes);
 			OOCStream.QueueCallback<IndexedMatrixValue> source = null;
 			boolean handedOff = false;
 			try {
-				source = OOCStreamMaterializer.sourceBackedCallback(values, descriptor, ownership);
+				source = OOCStreamMaterializer.sourceBackedCallback(values, sizes, descriptor, ownership);
 				_outputStream.enqueue(source);
 				handedOff = true;
 			}

@@ -23,6 +23,7 @@ import org.apache.sysds.common.Types;
 import org.apache.sysds.api.DMLScript;
 import org.apache.sysds.conf.ConfigurationManager;
 import org.apache.sysds.conf.DMLConfig;
+import org.apache.sysds.runtime.DMLRuntimeException;
 import java.io.File;
 import org.apache.sysds.runtime.data.SparseBlock;
 import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
@@ -87,6 +88,22 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 	}
 
 	@Test
+	public void testGroupedSourceFailureIsPreserved() {
+		SourceOOCStream target = new SourceOOCStream(false);
+		DMLRuntimeException failure = new DMLRuntimeException("source group failed");
+		target.setSubscriber(callback -> {
+			SourceOOCStream.SourceGroupCallback group = (SourceOOCStream.SourceGroupCallback) callback;
+			group.fail(failure);
+			Assert.assertSame(failure, Assert.assertThrows(DMLRuntimeException.class, group::getValues));
+		});
+		IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(1, 1, 1.0));
+		long size = OOCUtils.memoryCharge(value);
+		target.enqueueGroup(List.of(value), new long[] {size}, size + PackedBlock.memoryOverhead(1),
+			new OOCIOHandler.GroupSourceBlockDescriptor("source", Types.FileFormat.BINARY,
+				value.getIndexes(), 0, 1, 1, 1));
+	}
+
+	@Test
 	public void testGroupedPhaseCreditsRespectLimitAndProgress() throws Exception {
 		getAndLoadTestConfiguration(TEST_NAME);
 		MatrixBlock src = MatrixBlock.randOperations(635, 639, 0.001, -1, 1, "uniform", 17);
@@ -109,16 +126,21 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 				long charged = 0, serialized = 0;
 				int count = 0;
 				for(SourceOOCStream.SourceGroupCallback group : groups) {
+					long groupBytes = PackedBlock.memoryOverhead(group.size());
+					Assert.assertEquals(group.size(), group.getSizes().length);
 					charged += PackedBlock.memoryOverhead(group.size());
 					for(int i = 0; i < group.size(); i++) {
 						IndexedMatrixValue value = group.getCallback(i).get();
 						charged += OOCUtils.memoryCharge(value);
+						Assert.assertEquals(OOCUtils.memoryCharge(value), group.getSizes()[i]);
+						groupBytes += group.getSizes()[i];
 						serialized += ((MatrixBlock) value.getValue()).getExactSerializedSize();
 						count++;
 						Assert.assertTrue(indexes.add(value.getIndexes().toString()));
 						TestUtils.compareMatrices(expectedBlock(src, value.getIndexes(), 319),
 							(MatrixBlock) value.getValue(), 0);
 					}
+					Assert.assertEquals(groupBytes, group.getMemoryBytes());
 				}
 				Assert.assertEquals(serialized, result.bytesRead);
 				Assert.assertTrue("Phase exceeded memory limit", charged <= limit || count == 1);

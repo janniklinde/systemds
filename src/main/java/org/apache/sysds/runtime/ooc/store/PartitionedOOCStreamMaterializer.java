@@ -20,6 +20,8 @@
 package org.apache.sysds.runtime.ooc.store;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
@@ -30,15 +32,14 @@ import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
-import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 public final class PartitionedOOCStreamMaterializer implements Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> {
 	private final MaterializedStore<PackedBlock> _store;
 	private final DataCharacteristics _characteristics;
 	private final OOCFuture<Void> _completion = new OOCFuture<>();
 	private final Consumer<StoreLease<PackedBlock>> _liveConsumer;
-	private int _partition;
-	private boolean _done;
+	private final AtomicInteger _partition = new AtomicInteger();
+	private final AtomicBoolean _done = new AtomicBoolean();
 
 	public PartitionedOOCStreamMaterializer(MaterializedStore<PackedBlock> store,
 		DataCharacteristics characteristics, Consumer<StoreLease<PackedBlock>> liveConsumer) {
@@ -56,16 +57,17 @@ public final class PartitionedOOCStreamMaterializer implements Consumer<OOCStrea
 	}
 
 	@Override
-	public synchronized void accept(OOCStream.QueueCallback<IndexedMatrixValue> callback) {
+	public void accept(OOCStream.QueueCallback<IndexedMatrixValue> callback) {
 		try(callback) {
-			if(_done)
+			if(_done.get())
 				return;
 			if(callback.isFailure()) {
 				callback.get();
 				throw new DMLRuntimeException("Source partition materialization failed");
 			}
 			if(callback.isEos()) {
-				_done = true;
+				if(!_done.compareAndSet(false, true))
+					return;
 				_store.complete(_characteristics);
 				_completion.complete(null);
 				return;
@@ -84,21 +86,18 @@ public final class PartitionedOOCStreamMaterializer implements Consumer<OOCStrea
 		List<IndexedMatrixValue> values = group.values();
 		ReservationBudget ownership = group.ownership();
 		try {
-			long[] sizes = new long[values.size()];
-			for(int i = 0; i < sizes.length; i++)
-				sizes[i] = OOCUtils.memoryCharge(values.get(i));
-			PackedBlock pack = PackedBlock.fromValues(values.toArray(), sizes);
+			PackedBlock pack = PackedBlock.fromValues(values.toArray(), group.sizes());
 			ownership.reserveBlocking(pack.size());
-			StoreLease<PackedBlock> lease = _store.publishPinnedUnpackedLive(_partition++, pack, pack.size(),
+			StoreLease<PackedBlock> lease = _store.publishPinnedUnpackedLive(_partition.getAndIncrement(), pack, pack.size(),
 				ownership);
-			OOCIOHandler.SourceBlockDescriptor descriptor = group.descriptor();
-			if(!(descriptor instanceof OOCIOHandler.GroupSourceBlockDescriptor))
-				descriptor = new OOCIOHandler.GroupSourceBlockDescriptor(descriptor.path, descriptor.format,
-					descriptor.indexes, descriptor.offset, descriptor.recordLength, descriptor.serializedSize,
-					1);
-			_store.cache().getIOHandler().registerSourceLocation(lease.entry().getKey(), descriptor);
-			_store.cache().markBacked(lease.entry());
 			try(lease) {
+				OOCIOHandler.SourceBlockDescriptor descriptor = group.descriptor();
+				if(!(descriptor instanceof OOCIOHandler.GroupSourceBlockDescriptor))
+					descriptor = new OOCIOHandler.GroupSourceBlockDescriptor(descriptor.path, descriptor.format,
+						descriptor.indexes, descriptor.offset, descriptor.recordLength, descriptor.serializedSize,
+						1);
+				_store.cache().getIOHandler().registerSourceLocation(lease.entry().getKey(), descriptor);
+				_store.cache().markBacked(lease.entry());
 				if(_liveConsumer != null) {
 					StoreLease<PackedBlock> live = lease.retain();
 					try {
@@ -117,9 +116,7 @@ public final class PartitionedOOCStreamMaterializer implements Consumer<OOCStrea
 	}
 
 	private void fail(Throwable error) {
-		if(_done)
-			return;
-		_done = true;
+		_done.set(true);
 		_store.failMaterialization(error);
 		_completion.completeExceptionally(error);
 	}

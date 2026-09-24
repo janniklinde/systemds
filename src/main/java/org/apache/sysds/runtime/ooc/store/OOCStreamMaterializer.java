@@ -83,8 +83,8 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 	}
 
 	public static OOCStream.QueueCallback<IndexedMatrixValue> sourceBackedCallback(List<IndexedMatrixValue> values,
-		OOCIOHandler.SourceBlockDescriptor descriptor, ReservationBudget ownership) {
-		return new SourceBackedGroupCallback(values, descriptor, ownership);
+		long[] sizes, OOCIOHandler.SourceBlockDescriptor descriptor, ReservationBudget ownership) {
+		return new SourceBackedGroupCallback(values, sizes, descriptor, ownership);
 	}
 
 	public void attach(OOCStream<IndexedMatrixValue> source) {
@@ -161,13 +161,12 @@ public final class OOCStreamMaterializer implements Consumer<OOCStream.QueueCall
 			throw new IllegalArgumentException("Source pack values do not match their physical resource descriptor.");
 		long[] tileIds = new long[values.size()];
 		Object[] packedValues = new Object[values.size()];
-		long[] sizes = new long[values.size()];
+		long[] sizes = source.sizes();
 		for(int i = 0; i < values.size(); i++) {
 			IndexedMatrixValue value = values.get(i);
 			observe(value);
 			tileIds[i] = _linearize.applyAsInt(value.getIndexes());
 			packedValues[i] = value;
-			sizes[i] = OOCUtils.memoryCharge(value);
 		}
 		PackedBlock packedBlock = values.size() > 1 ? PackedBlock.fromValues(packedValues, sizes) : null;
 		long totalBytes = packedBlock != null ? packedBlock.size() : sizes[0];

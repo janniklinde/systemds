@@ -558,6 +558,7 @@ final class SourceStore {
 		long groupLimit = request.target instanceof SourceOOCStream ?
 			Math.max(cachePackBytes, request.groupBytes) : 0;
 		List<IndexedMatrixValue> groupValues = groupLimit > 0 ? new ArrayList<>() : null;
+		long[] groupSizes = groupLimit > 0 ? new long[16] : null;
 		long groupValueBytes = 0;
 		MatrixIndexes groupIndexes = null;
 		long groupOffset = 0;
@@ -691,8 +692,8 @@ final class SourceStore {
 
 				if(groupLimit > 0) {
 					if(flushGroup) {
-						descriptors.add(emitSourceGroup(request, groupValues, sourcePath, request.format,
-							groupIndexes, groupOffset, groupEnd, groupSerialized, groupCount));
+						descriptors.add(emitSourceGroup(request, groupValues, groupSizes, groupValueBytes, sourcePath,
+							request.format, groupIndexes, groupOffset, groupEnd, groupSerialized, groupCount));
 						groupValues.clear();
 						groupValueBytes = 0;
 						groupIndexes = null;
@@ -704,13 +705,16 @@ final class SourceStore {
 						groupOffset = recordStart;
 					}
 					groupValues.add(imv);
+					if(groupCount == groupSizes.length)
+						groupSizes = Arrays.copyOf(groupSizes, groupSizes.length * 2);
+					groupSizes[groupCount] = valueBytes;
 					groupValueBytes = Math.addExact(groupValueBytes, valueBytes);
 					groupEnd = recordEnd;
 					groupSerialized = Math.addExact(groupSerialized, blockSize);
 					groupCount++;
 					if(Math.addExact(groupValueBytes, PackedBlock.memoryOverhead(groupCount)) >= groupLimit) {
-						descriptors.add(emitSourceGroup(request, groupValues, sourcePath, request.format,
-							groupIndexes, groupOffset, groupEnd, groupSerialized, groupCount));
+						descriptors.add(emitSourceGroup(request, groupValues, groupSizes, groupValueBytes, sourcePath,
+							request.format, groupIndexes, groupOffset, groupEnd, groupSerialized, groupCount));
 						groupValues.clear();
 						groupValueBytes = 0;
 						groupIndexes = null;
@@ -733,9 +737,10 @@ final class SourceStore {
 					ioStart = currTime;
 				}
 			}
-			if(groupLimit > 0 && groupCount > 0)
-				descriptors.add(emitSourceGroup(request, groupValues, sourcePath, request.format, groupIndexes,
-					groupOffset, groupEnd, groupSerialized, groupCount));
+			if(groupLimit > 0 && groupCount > 0) {
+				descriptors.add(emitSourceGroup(request, groupValues, groupSizes, groupValueBytes, sourcePath,
+					request.format, groupIndexes, groupOffset, groupEnd, groupSerialized, groupCount));
+			}
 
 			if(DMLScript.OOC_STATISTICS)
 				Statistics.incrementOOCSourceScan(scanBlocks, scanNanos, scanBytes);
@@ -752,11 +757,13 @@ final class SourceStore {
 	}
 
 	private static OOCIOHandler.GroupSourceBlockDescriptor emitSourceGroup(
-		OOCIOHandler.SourceReadRequest request, List<IndexedMatrixValue> values, String path, Types.FileFormat format,
-		MatrixIndexes indexes, long offset, long end, long serializedSize, int count) {
+		OOCIOHandler.SourceReadRequest request, List<IndexedMatrixValue> values, long[] sizes, long valueBytes,
+		String path, Types.FileFormat format, MatrixIndexes indexes, long offset, long end, long serializedSize,
+		int count) {
 		OOCIOHandler.GroupSourceBlockDescriptor group = new OOCIOHandler.GroupSourceBlockDescriptor(path, format,
 			indexes, offset, Math.toIntExact(end - offset), serializedSize, count);
-		((SourceOOCStream) request.target).enqueueGroup(List.copyOf(values), group);
+		((SourceOOCStream) request.target).enqueueGroup(List.copyOf(values), Arrays.copyOf(sizes, count),
+			Math.addExact(valueBytes, PackedBlock.memoryOverhead(count)), group);
 		return group;
 	}
 

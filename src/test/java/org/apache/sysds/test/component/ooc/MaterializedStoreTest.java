@@ -22,26 +22,36 @@ package org.apache.sysds.test.component.ooc;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.common.Types;
 import org.apache.sysds.runtime.instructions.ooc.CachingStream;
 import org.apache.sysds.runtime.instructions.ooc.OOCStream;
+import org.apache.sysds.runtime.instructions.ooc.SubscribableTaskQueue;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.matrix.data.MatrixBlock;
 import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
+import org.apache.sysds.runtime.meta.MatrixCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
+import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
+import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.store.IndexedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.MaterializedCallback;
 import org.apache.sysds.runtime.ooc.store.MaterializedStore;
 import org.apache.sysds.runtime.ooc.store.CountingLiveness;
 import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
+import org.apache.sysds.runtime.ooc.store.PartitionedOOCStreamMaterializer;
 import org.apache.sysds.runtime.ooc.store.OrderedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.SequentialAccessPattern;
 import org.apache.sysds.runtime.ooc.store.StoreBackedStream;
@@ -84,6 +94,114 @@ public class MaterializedStoreTest {
 		_producer.destroy();
 		_materializerAllowance.destroy();
 		_readerAllowance.destroy();
+	}
+
+	@Test
+	public void testOrdinarySourcePublicationReusesSizes() throws Exception {
+		OOCStreamMaterializer materializer = new OOCStreamMaterializer(_store,
+			indexes -> (int) indexes.getRowIndex() - 1, _materializerAllowance);
+		materializer.accept(sourcePartition(1));
+		materializer.accept(OOCStream.eos(null));
+		materializer.completion().get(WAIT_SECONDS, TimeUnit.SECONDS);
+		try(StoreLease<IndexedMatrixValue> lease = _store.requestPublished(0, _readerAllowance)
+			.get(WAIT_SECONDS, TimeUnit.SECONDS)) {
+			Assert.assertEquals(1.0, lease.value().getValue().get(0, 0), 0);
+		}
+		Assert.assertEquals(0, _producer.getUsedMemory());
+	}
+
+	@Test
+	public void testPartitionPublicationConcurrentHandoffAndCompletion() throws Exception {
+		MaterializedStore<PackedBlock> store = new MaterializedStore<>(_cache, CachingStream._streamSeq.getNextID());
+		CountDownLatch firstEntered = new CountDownLatch(1);
+		CountDownLatch releaseFirst = new CountDownLatch(1);
+		CountDownLatch secondDelivered = new CountDownLatch(1);
+		PartitionedOOCStreamMaterializer materializer = new PartitionedOOCStreamMaterializer(store,
+			new MatrixCharacteristics(2, 1, 1), lease -> {
+				try(lease) {
+					IndexedMatrixValue value = (IndexedMatrixValue) lease.value().value(0);
+					if(value.getIndexes().getRowIndex() == 1) {
+						firstEntered.countDown();
+						Assert.assertTrue(releaseFirst.await(WAIT_SECONDS, TimeUnit.SECONDS));
+					}
+					else
+						secondDelivered.countDown();
+				}
+				catch(InterruptedException error) {
+					Thread.currentThread().interrupt();
+					throw new RuntimeException(error);
+				}
+			});
+		SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
+		materializer.attach(source);
+		ExecutorService pool = Executors.newFixedThreadPool(2);
+		try {
+			Future<?> first = pool.submit(() -> source.enqueue(sourcePartition(1)));
+			Assert.assertTrue(firstEntered.await(WAIT_SECONDS, TimeUnit.SECONDS));
+			Future<?> second = pool.submit(() -> source.enqueue(sourcePartition(2)));
+			Assert.assertTrue("A blocked handoff must not serialize publishers",
+				secondDelivered.await(WAIT_SECONDS, TimeUnit.SECONDS));
+			second.get(WAIT_SECONDS, TimeUnit.SECONDS);
+			source.closeInput();
+			Assert.assertFalse(materializer.completion().isDone());
+			releaseFirst.countDown();
+			first.get(WAIT_SECONDS, TimeUnit.SECONDS);
+			materializer.completion().get(WAIT_SECONDS, TimeUnit.SECONDS);
+			Assert.assertEquals(2, store.size());
+			for(int i = 0; i < 2; i++) {
+				try(StoreLease<PackedBlock> lease = store.requestPublished(i, _readerAllowance)
+					.get(WAIT_SECONDS, TimeUnit.SECONDS)) {
+					IndexedMatrixValue value = (IndexedMatrixValue) lease.value().value(0);
+					Assert.assertEquals(value.getIndexes().getRowIndex(), value.getValue().get(0, 0), 0);
+				}
+			}
+			Assert.assertEquals(0, _producer.getUsedMemory());
+		}
+		finally {
+			releaseFirst.countDown();
+			pool.shutdownNow();
+			Assert.assertTrue(pool.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS));
+			store.close();
+		}
+	}
+
+	@Test
+	public void testPartitionHandoffFailureReleasesOwnership() throws Exception {
+		MaterializedStore<PackedBlock> store = new MaterializedStore<>(_cache, CachingStream._streamSeq.getNextID());
+		PartitionedOOCStreamMaterializer materializer = new PartitionedOOCStreamMaterializer(store,
+			new MatrixCharacteristics(2, 1, 1), lease -> {
+				throw new IllegalStateException("handoff failed");
+			});
+		try {
+			materializer.accept(sourcePartition(1));
+			Assert.assertThrows(ExecutionException.class,
+				() -> materializer.completion().get(WAIT_SECONDS, TimeUnit.SECONDS));
+			materializer.accept(sourcePartition(2));
+			materializer.accept(OOCStream.eos(null));
+			Assert.assertEquals(0, _producer.getUsedMemory());
+		}
+		finally {
+			store.close();
+		}
+	}
+
+	private OOCStream.QueueCallback<IndexedMatrixValue> sourcePartition(int row) {
+		MatrixBlock block = new MatrixBlock(1, 1, (double) row) {
+			@Override
+			public long getExactSerializedSize() {
+				throw new AssertionError("Publication must reuse source sizes");
+			}
+			@Override
+			public long getInMemorySize() {
+				throw new AssertionError("Publication must reuse source sizes");
+			}
+		};
+		IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(row, 1), block);
+		long bytes = 1000 + PackedBlock.memoryOverhead(1);
+		_producer.reserveBlocking(bytes);
+		return OOCStreamMaterializer.sourceBackedCallback(List.of(value), new long[] {1000},
+			new OOCIOHandler.GroupSourceBlockDescriptor("source", Types.FileFormat.BINARY,
+				value.getIndexes(), 0, 1, 1, 1), new ReservationBudget(_producer, bytes));
 	}
 
 	@Test

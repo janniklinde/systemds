@@ -29,15 +29,17 @@ import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 
 final class SourceBackedGroupCallback implements OOCStream.GroupQueueCallback<IndexedMatrixValue> {
 	private final List<IndexedMatrixValue> _values;
+	private final long[] _sizes;
 	private final OOCIOHandler.SourceBlockDescriptor _descriptor;
 	private ReservationBudget _ownership;
 	private boolean _transferred;
 
-	SourceBackedGroupCallback(List<IndexedMatrixValue> values, OOCIOHandler.SourceBlockDescriptor descriptor,
+	SourceBackedGroupCallback(List<IndexedMatrixValue> values, long[] sizes, OOCIOHandler.SourceBlockDescriptor descriptor,
 		ReservationBudget ownership) {
 		if(values == null || values.isEmpty())
 			throw new IllegalArgumentException("Source-backed callback requires at least one value.");
 		_values = List.copyOf(values);
+		_sizes = sizes;
 		_descriptor = descriptor;
 		_ownership = ownership;
 	}
@@ -48,7 +50,7 @@ final class SourceBackedGroupCallback implements OOCStream.GroupQueueCallback<In
 		_transferred = true;
 		ReservationBudget ownership = _ownership;
 		_ownership = null;
-		return new SourceGroup(_values, _descriptor, ownership);
+		return new SourceGroup(_values, _sizes, _descriptor, ownership);
 	}
 
 	@Override
@@ -94,7 +96,7 @@ final class SourceBackedGroupCallback implements OOCStream.GroupQueueCallback<In
 		return false;
 	}
 
-	record SourceGroup(List<IndexedMatrixValue> values, OOCIOHandler.SourceBlockDescriptor descriptor,
+	record SourceGroup(List<IndexedMatrixValue> values, long[] sizes, OOCIOHandler.SourceBlockDescriptor descriptor,
 		ReservationBudget ownership) {
 	}
 }

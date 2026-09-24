@@ -56,13 +56,14 @@ public class SourceOOCStream extends SubscribableTaskQueue<IndexedMatrixValue> {
 		super.enqueue(value);
 	}
 
-	public void enqueueGroup(List<IndexedMatrixValue> values, OOCIOHandler.GroupSourceBlockDescriptor descriptor) {
+	public void enqueueGroup(List<IndexedMatrixValue> values, long[] sizes, long memoryBytes,
+		OOCIOHandler.GroupSourceBlockDescriptor descriptor) {
 		if (descriptor == null)
 			throw new IllegalArgumentException("Group source descriptor must not be null");
 		if (values == null || values.isEmpty())
 			return;
 		waitForBackpressure();
-		super.enqueue(new SourceGroupCallback(values, descriptor));
+		super.enqueue(new SourceGroupCallback(values, sizes, memoryBytes, descriptor));
 	}
 
 	@Override
@@ -92,12 +93,31 @@ public class SourceOOCStream extends SubscribableTaskQueue<IndexedMatrixValue> {
 
 	public static class SourceGroupCallback implements OOCStream.GroupQueueCallback<IndexedMatrixValue> {
 		private final List<IndexedMatrixValue> _data;
+		private final long[] _sizes;
+		private final long _memoryBytes;
 		private final OOCIOHandler.GroupSourceBlockDescriptor _descriptor;
 		private DMLRuntimeException _failure;
 
-		SourceGroupCallback(List<IndexedMatrixValue> data, OOCIOHandler.GroupSourceBlockDescriptor descriptor) {
+		SourceGroupCallback(List<IndexedMatrixValue> data, long[] sizes, long memoryBytes,
+			OOCIOHandler.GroupSourceBlockDescriptor descriptor) {
 			_data = data;
+			_sizes = sizes;
+			_memoryBytes = memoryBytes;
 			_descriptor = descriptor;
+		}
+
+		public List<IndexedMatrixValue> getValues() {
+			if(_failure != null)
+				throw _failure;
+			return _data;
+		}
+
+		public long[] getSizes() {
+			return _sizes;
+		}
+
+		public long getMemoryBytes() {
+			return _memoryBytes;
 		}
 
 		public OOCIOHandler.GroupSourceBlockDescriptor getDescriptor() {
