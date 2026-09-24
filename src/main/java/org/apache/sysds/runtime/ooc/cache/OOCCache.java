@@ -33,6 +33,11 @@ public interface OOCCache {
 		return logicalBytes;
 	}
 
+	/**
+	 * The actual number of bytes required to pin the entry.
+	 */
+	long getPinCharge(long sId, long tId);
+
 
 	/**
 	 * Pins an item backed by an allowance. A successful pin transfers memory ownership from the cache to the owner of

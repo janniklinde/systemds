@@ -372,6 +372,36 @@ public class OOCMemoryAllowanceTest {
 	}
 
 	@Test
+	public void testInsufficientBudgetFailsWithoutParentReservation() {
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
+		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);
+		try {
+			allowance.reserveBlocking(20);
+			ReservationBudget budget = new ReservationBudget(allowance, 20);
+			try {
+				budget.reserveBlocking(21);
+				Assert.fail("An admitted task must not grow its budget implicitly");
+			}
+			catch(IllegalStateException expected) {
+				Assert.assertTrue(expected.getMessage().contains("20 bytes available"));
+			}
+			OOCFuture<Void> rejected = budget.reserveAsync(21);
+			Assert.assertTrue(rejected.isDone());
+			rejected.whenComplete((ignored, error) ->
+				Assert.assertTrue(error instanceof IllegalStateException));
+			Assert.assertEquals(20, budget.getGrantedMemory());
+			Assert.assertEquals(20, allowance.getUsedMemory());
+			budget.close();
+			Assert.assertEquals(0, allowance.getUsedMemory());
+		}
+		finally {
+			if(allowance.getUsedMemory() > 0)
+				allowance.release(allowance.getUsedMemory());
+			allowance.destroy();
+		}
+	}
+
+	@Test
 	public void testAllocatedStreamFailure() {
 		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
 		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);

@@ -43,6 +43,7 @@ import java.util.function.BooleanSupplier;
 
 public class OOCUtils {
 	private static final long INDEXED_MATRIX_VALUE_BYTES = 64;
+	private static final long SIZE_ESTIMATE_SAFETY_BYTES = 8;
 	/**
 	 * Memory charge for a block held resident by the OOC memory system, be it in a reservation, a queue callback, a
 	 * state table or the cache. The serialized size alone is what the block costs on disk, not while it is live: a
@@ -190,9 +191,10 @@ public class OOCUtils {
 		return estimateMatrixBlockBytes(rows, cols);
 	}
 
-	private static long estimateMatrixBlockBytes(long rows, long cols) {
+	public static long estimateMatrixBlockBytes(long rows, long cols) {
 		return Math.addExact(Math.max(MatrixBlock.estimateSizeDenseInMemory(rows, cols),
-			MatrixBlock.estimateSizeSparseInMemory(rows, cols, 1.0)), INDEXED_MATRIX_VALUE_BYTES);
+			MatrixBlock.estimateSizeSparseInMemory(rows, cols, 1.0)),
+			INDEXED_MATRIX_VALUE_BYTES + SIZE_ESTIMATE_SAFETY_BYTES);
 	}
 
 	public static <T extends SpillableObject> void enqueueExact(OOCStream<T> out, T value, ReservationBudget budget) {

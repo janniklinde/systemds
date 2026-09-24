@@ -91,10 +91,12 @@ public class OOCCacheImplTest {
 		BlockKey key = new BlockKey(STREAM_ID, BLOCK_ID);
 		_producer.reserveBlocking(BYTES);
 		BlockEntry entry = _cache.putPinned(key, "pending-read", BYTES, _producer);
+		Assert.assertEquals(BYTES, _cache.getPinCharge(STREAM_ID, BLOCK_ID));
 		_io.scheduleEviction(entry).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 		_cache.markBacked(entry);
 		await(_cache.unpin(entry, _producer), WAIT_TIMEOUT_SEC);
 		Assert.assertNull(BlockEntryTestAccess.getDataUnsafe(entry));
+		Assert.assertEquals(BYTES, _cache.getPinCharge(STREAM_ID, BLOCK_ID));
 		BlockEntry pinned = _cache.pin(key, _reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 		Assert.assertEquals("pending-read", pinned.getData());
 		Assert.assertEquals(1, pinned.getPinCount());
@@ -109,6 +111,7 @@ public class OOCCacheImplTest {
 			TimeUnit.SECONDS);
 
 		Assert.assertNull(pinned);
+		Assert.assertEquals(0, _cache.getPinCharge(STREAM_ID, BLOCK_ID));
 		Assert.assertNull(_cache.pinIfLive(STREAM_ID, BLOCK_ID, _reader));
 		Assert.assertEquals(0, _reader.getUsedMemory());
 		Assert.assertEquals(0, _io.readCount());

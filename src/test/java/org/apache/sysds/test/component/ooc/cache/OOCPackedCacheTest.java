@@ -63,6 +63,8 @@ public class OOCPackedCacheTest {
 			OOCPackedCache.PackGroup group = cache.getPackGroup(STREAM_ID, 0);
 			Assert.assertNotNull(group);
 			Assert.assertEquals(3, group.size());
+			Assert.assertEquals(packedBytes(3), cache.getPinCharge(STREAM_ID, 0));
+			Assert.assertEquals(packedBytes(3), cache.getPinCharge(STREAM_ID, 1));
 
 			BlockEntry first = cache.pin(STREAM_ID, 0, reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
 			BlockEntry second = cache.pin(STREAM_ID, 1, reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);

@@ -151,9 +151,11 @@ public final class OOCGroupedAggregate {
 	}
 
 	public long estimateBytes() {
-		// a Kahan pair is two doubles, a central-moment object nine plus its object header
-		long perCell = _sums != null ? 32 : 128;
-		return (long) _groups * (_colHigh - _colLow) * perCell;
+		return estimateBytes(_op, _groups, _colHigh - _colLow);
+	}
+
+	public static long estimateBytes(Operator op, int groups, int columns) {
+		return (long) groups * columns * (op instanceof AggregateOperator ? 32 : 128);
 	}
 
 	private OOCGroupedAggregate widened(int colLow, int colHigh) {

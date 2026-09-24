@@ -170,13 +170,16 @@ public final class GroupedReduceOOCPrimitive extends OOCPrimitive {
 				}
 			});
 
-		long outputBytes = OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics());
+		long outputBytes = OOCUtils.estimateFullTileBytes(_output.getDataCharacteristics());
 		for(int i = 0; i < _inputs.size(); i++) {
 			OOCStream<IndexedMatrixValue> input = getInputReadStream(i);
 			getContext().addInStream(input);
 			AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(input, _allowance,
-				value -> OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(OOCUtils.memoryCharge(value))
-					+ outputBytes * 2);
+				value -> {
+					long inputBytes = OOCUtils.memoryCharge(value);
+					return OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes)
+						+ 3 * Math.max(inputBytes, outputBytes);
+				});
 			getContext().addInStream(admitted);
 			final int source = i;
 			admitted.setSubscriber(callback -> accept(source, callback));

@@ -329,7 +329,8 @@ public class ParameterizedBuiltinOOCInstruction extends ComputationOOCInstructio
 			partial.add(groupIds, tile, colOffset);
 			return partial;
 		}, OOCGroupedAggregate::merge, OOCGroupedAggregate::estimateBytes,
-			() -> new OOCGroupedAggregate(operator, ngroups, 0, cols), getContext());
+			() -> new OOCGroupedAggregate(operator, ngroups, 0, cols),
+			OOCGroupedAggregate.estimateBytes(operator, ngroups, cols), getContext());
 
 		MatrixObject out = ec.getMatrixObject(output);
 		OOCInstructionUtils.propagateDims(ec, output, ngroups, cols, blen, -1);

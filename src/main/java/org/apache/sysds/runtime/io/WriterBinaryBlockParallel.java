@@ -205,7 +205,7 @@ public class WriterBinaryBlockParallel extends WriterBinaryBlock
 			_path = path;
 			_job = job;
 			_stream = stream;
-			_omitEmpty = ConfigurationManager.getDMLConfig().getBooleanValue(DMLConfig.OOC_SPARSE_COO);
+			_omitEmpty = !ConfigurationManager.getDMLConfig().getBooleanValue(DMLConfig.OOC_WRITE_EMPTY_BLOCKS);
 		}
 
 		@Override

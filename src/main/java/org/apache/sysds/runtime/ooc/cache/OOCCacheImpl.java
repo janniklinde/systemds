@@ -165,6 +165,16 @@ public class OOCCacheImpl implements OOCCache {
 	}
 
 	@Override
+	public synchronized long getPinCharge(long sId, long tId) {
+		BlockKey key = new BlockKey(sId, tId);
+		BlockEntry entry = findEntry(key);
+		if(getMeta(entry) != null)
+			return entry.getSize();
+		ColdEntry cold = findCold(key);
+		return cold == null ? 0 : cold.size;
+	}
+
+	@Override
 	public OOCFuture<BlockEntry> pinAdmitted(long sId, long tId, MemoryAllowance allowance) {
 		return pinInternal(new BlockKey(sId, tId), allowance, false, true);
 	}

@@ -38,6 +38,9 @@ import org.apache.sysds.runtime.ooc.cache.BlockState;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerImpl;
+import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
+import org.apache.sysds.runtime.ooc.stream.SourceOOCStream;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 import org.apache.sysds.test.AutomatedTestBase;
 import org.apache.sysds.test.TestConfiguration;
 import org.apache.sysds.test.TestUtils;
@@ -84,6 +87,52 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 	}
 
 	@Test
+	public void testGroupedPhaseCreditsRespectLimitAndProgress() throws Exception {
+		getAndLoadTestConfiguration(TEST_NAME);
+		MatrixBlock src = MatrixBlock.randOperations(635, 639, 0.001, -1, 1, "uniform", 17);
+		String fname = input("grouped_credits");
+		writeBinaryMatrix(src, fname, 319);
+		for(long limit : new long[] {1, 4096, 65536, Long.MAX_VALUE}) {
+			SourceOOCStream target = new SourceOOCStream(false);
+			List<SourceOOCStream.SourceGroupCallback> groups = java.util.Collections.synchronizedList(new ArrayList<>());
+			target.setSubscriber(callback -> {
+				if(!callback.isEos())
+					groups.add((SourceOOCStream.SourceGroupCallback) callback);
+			});
+			OOCIOHandler.SourceReadRequest request = new OOCIOHandler.SourceReadRequest(fname,
+				Types.FileFormat.BINARY, 635, 639, 319, src.getNonZeros(), limit, 16384, true, target);
+			OOCIOHandler.SourceReadResult result = handler.scheduleSourceRead(request).get(10, TimeUnit.SECONDS);
+			Set<String> indexes = new HashSet<>();
+			int phases = 0;
+			while(true) {
+				Assert.assertTrue("Grouped scan must progress, limit=" + limit, ++phases <= 7);
+				long charged = 0, serialized = 0;
+				int count = 0;
+				for(SourceOOCStream.SourceGroupCallback group : groups) {
+					charged += PackedBlock.memoryOverhead(group.size());
+					for(int i = 0; i < group.size(); i++) {
+						IndexedMatrixValue value = group.getCallback(i).get();
+						charged += OOCUtils.memoryCharge(value);
+						serialized += ((MatrixBlock) value.getValue()).getExactSerializedSize();
+						count++;
+						Assert.assertTrue(indexes.add(value.getIndexes().toString()));
+						TestUtils.compareMatrices(expectedBlock(src, value.getIndexes(), 319),
+							(MatrixBlock) value.getValue(), 0);
+					}
+				}
+				Assert.assertEquals(serialized, result.bytesRead);
+				Assert.assertTrue("Phase exceeded memory limit", charged <= limit || count == 1);
+				if(result.eof)
+					break;
+				Assert.assertTrue("Empty continuation", count > 0);
+				groups.clear();
+				result = handler.continueSourceRead(result.continuation, limit).get(10, TimeUnit.SECONDS);
+			}
+			Assert.assertEquals(6, indexes.size());
+		}
+	}
+
+	@Test
 	public void testBoundedSourceScanReadsEachTileOnce() throws Exception {
 		getAndLoadTestConfiguration(TEST_NAME);
 		boolean previousStats = DMLScript.OOC_STATISTICS;
@@ -111,7 +160,10 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 						Set<String> indexes = new HashSet<>();
 						int batches = 0;
 						while(true) {
-							Assert.assertTrue(++batches <= 7);
+							Assert.assertTrue("direct=" + useDirect + ", sparsity=" + sparsity +
+								", limit=" + limit + ", received=" + indexes.size() +
+								", blocks=" + result.blocks.size() + ", eof=" + result.eof,
+								++batches <= 7);
 							Assert.assertTrue(result.bytesRead <= limit || result.blocks.size() == 1);
 							Assert.assertEquals(result.bytesRead,
 								result.blocks.stream().mapToLong(block -> block.serializedSize).sum());
@@ -126,7 +178,10 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 							result = handler.continueSourceRead(result.continuation, limit).get();
 						}
 						Assert.assertEquals(6, indexes.size());
-						Assert.assertTrue(Statistics.displayOOCEvictionStats().matches("(?s).*source scans:\\s+6 \\(.*"));
+						String stats = Statistics.displayOOCEvictionStats();
+						Assert.assertTrue("direct=" + useDirect + ", sparsity=" + sparsity +
+							", limit=" + limit + ": " + stats,
+							stats.matches("(?s).*source scans:\\s+6 \\(.*"));
 					}
 				}
 			}

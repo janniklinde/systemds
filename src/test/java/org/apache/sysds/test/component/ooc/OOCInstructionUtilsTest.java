@@ -446,10 +446,30 @@ public class OOCInstructionUtilsTest {
 			long cols = shape[1] > 0 ? Math.min(1000, shape[1]) : 1000;
 			long expected = Math.max(MatrixBlock.estimateSizeDenseInMemory(rows, cols),
 				MatrixBlock.estimateSizeSparseInMemory(rows, cols, 1.0));
-			Assert.assertEquals(expected, OOCUtils.estimateFullTileBytes(new MatrixCharacteristics(shape[0], shape[1], 1000)));
+			Assert.assertEquals(expected + 72,
+				OOCUtils.estimateFullTileBytes(new MatrixCharacteristics(shape[0], shape[1], 1000)));
 		}
 		Assert.assertTrue(OOCUtils.estimateFullTileBytes(new MatrixCharacteristics(1000, 2, 1000)) <
 			OOCUtils.estimateFullTileBytes(new MatrixCharacteristics(1000, 1000, 1000)) / 10);
+	}
+
+	@Test
+	public void testFullTileEstimateCoversResidentCharge() {
+		int[][] shapes = {{1, 1}, {2, 2}, {3, 3}, {8, 8}, {50, 50}, {100, 100}, {1000, 1},
+			{1, 1000}, {1000, 2}, {2, 1000}, {1000, 1000}};
+		for(int[] shape : shapes) {
+			int rows = shape[0];
+			int cols = shape[1];
+			long bound = OOCUtils.estimateFullTileBytes(new MatrixCharacteristics(rows, cols, 1000));
+			MatrixBlock dense = new MatrixBlock(rows, cols, false);
+			dense.allocateDenseBlock();
+			Assert.assertTrue(bound >= OOCUtils.memoryCharge(new IndexedMatrixValue(new MatrixIndexes(1, 1), dense)));
+			MatrixBlock sparse = new MatrixBlock(rows, cols, true);
+			for(int row = 0; row < rows; row++)
+				sparse.set(row, row % cols, 1);
+			sparse.recomputeNonZeros();
+			Assert.assertTrue(bound >= OOCUtils.memoryCharge(new IndexedMatrixValue(new MatrixIndexes(1, 1), sparse)));
+		}
 	}
 
 	@Test(timeout = 20000)

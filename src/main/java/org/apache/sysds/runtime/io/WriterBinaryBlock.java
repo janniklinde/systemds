@@ -240,7 +240,7 @@ public class WriterBinaryBlock extends MatrixWriter {
 
 	@Override
 	public long writeMatrixFromStream(String fname, OOCStream<IndexedMatrixValue> stream, long rlen, long clen, int blen) throws IOException {
-		boolean omitEmpty = ConfigurationManager.getDMLConfig().getBooleanValue(DMLConfig.OOC_SPARSE_COO);
+		boolean omitEmpty = !ConfigurationManager.getDMLConfig().getBooleanValue(DMLConfig.OOC_WRITE_EMPTY_BLOCKS);
 		Path path = new Path(fname);
 		SequenceFile.Writer writer = null;
 

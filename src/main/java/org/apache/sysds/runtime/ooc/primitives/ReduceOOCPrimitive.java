@@ -44,15 +44,12 @@ public final class ReduceOOCPrimitive<I, O> extends OOCPrimitive {
 	private final BiFunction<O, O, O> _merge;
 	private final ToLongFunction<O> _size;
 	private final Supplier<O> _empty;
+	private final long _maxIntermediateBytes;
 	private ManagedPayload<O> _accumulator;
 
 	public ReduceOOCPrimitive(OOCStreamable<I> input, OOCStreamable<O> output, Function<I, O> partial,
-		BiFunction<O, O, O> merge, ToLongFunction<O> size, StreamContext context) {
-		this(input, output, partial, merge, size, null, context);
-	}
-
-	public ReduceOOCPrimitive(OOCStreamable<I> input, OOCStreamable<O> output, Function<I, O> partial,
-		BiFunction<O, O, O> merge, ToLongFunction<O> size, Supplier<O> empty, StreamContext context) {
+		BiFunction<O, O, O> merge, ToLongFunction<O> size, Supplier<O> empty, long maxIntermediateBytes,
+		StreamContext context) {
 		super(context, input);
 		_input = input;
 		_output = output;
@@ -60,6 +57,7 @@ public final class ReduceOOCPrimitive<I, O> extends OOCPrimitive {
 		_merge = merge;
 		_size = size;
 		_empty = empty;
+		_maxIntermediateBytes = maxIntermediateBytes;
 	}
 
 	@Override
@@ -88,7 +86,8 @@ public final class ReduceOOCPrimitive<I, O> extends OOCPrimitive {
 		OOCStream<I> input = getInputReadStream(0);
 		OOCStream<O> output = _output.getWriteStream();
 		long inputBytes = OOCUtils.estimateOutputTileBytes(_input.getDataCharacteristics());
-		long outputBytes = OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics());
+		long outputBytes = Math.max(_maxIntermediateBytes,
+			OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics()));
 		long taskBytes = OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + 2 * outputBytes;
 		AllocatedOOCStream<I> admitted = new AllocatedOOCStream<>(input, _allowance, ignored -> taskBytes);
 		getContext().addOutStream(output);

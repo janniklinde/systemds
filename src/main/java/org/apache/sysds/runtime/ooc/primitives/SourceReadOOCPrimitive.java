@@ -31,6 +31,7 @@ import org.apache.sysds.runtime.instructions.ooc.OOCStreamable;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
+import org.apache.sysds.runtime.ooc.cache.packed.PackedBlock;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.planning.OOCAccessPattern;
 import org.apache.sysds.runtime.ooc.store.OOCStreamMaterializer;
@@ -176,6 +177,9 @@ public final class SourceReadOOCPrimitive extends OOCPrimitive {
 			long bytes = 0;
 			for(IndexedMatrixValue value : values)
 				bytes = Math.addExact(bytes, OOCUtils.memoryCharge(value));
+			// Partition materialization wraps even a single source tile in a PackedBlock.
+			if(callback instanceof SourceOOCStream.SourceGroupCallback)
+				bytes = Math.addExact(bytes, PackedBlock.memoryOverhead(values.size()));
 			phase.reserveBlocking(bytes);
 			ReservationBudget ownership = new ReservationBudget(phase, bytes);
 			OOCStream.QueueCallback<IndexedMatrixValue> source = null;

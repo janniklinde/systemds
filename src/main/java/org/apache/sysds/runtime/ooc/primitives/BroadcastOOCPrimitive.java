@@ -69,6 +69,7 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 	private final AtomicInteger _pendingStores;
 	private final MaterializedStore<IndexedMatrixValue>[] _stores;
 	private final IndexedMaterializedStoreReader<IndexedMatrixValue>[] _readers;
+	private final long _maxOutputBytes;
 	private OOCStream<BroadcastWork> _ready;
 	private OOCStream<IndexedMatrixValue> _outputStream;
 
@@ -78,7 +79,7 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 		Supplier<MaterializedStore.Liveness> liveness,
 		BiFunction<IndexedMatrixValue, IndexedMatrixValue, IndexedMatrixValue> operation, StreamContext context) {
 		this(streamed, List.of(broadcast), output, List.of(lookupRow), List.of(lookupCol), List.of(1),
-			List.of(liveness), (value, tiles) -> operation.apply(value, tiles[0][0]), context);
+			List.of(liveness), (value, tiles) -> operation.apply(value, tiles[0][0]), 0, context);
 	}
 
 	@SuppressWarnings("unchecked")
@@ -86,7 +87,8 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 		List<OOCStreamable<IndexedMatrixValue>> broadcasts, OOCStreamable<IndexedMatrixValue> output,
 		List<ToLongFunction<IndexedMatrixValue>> lookupRows, List<ToLongFunction<IndexedMatrixValue>> lookupCols,
 		List<Integer> bandWidths, List<Supplier<MaterializedStore.Liveness>> liveness,
-		BiFunction<IndexedMatrixValue, IndexedMatrixValue[][], IndexedMatrixValue> operation, StreamContext context) {
+		BiFunction<IndexedMatrixValue, IndexedMatrixValue[][], IndexedMatrixValue> operation, long maxOutputBytes,
+		StreamContext context) {
 		super(context, inputs(streamed, broadcasts));
 		if(broadcasts.isEmpty())
 			throw new DMLRuntimeException("Broadcast primitive requires at least one indexed input.");
@@ -106,6 +108,7 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 		}
 		_liveness = liveness.toArray(new Supplier[0]);
 		_operation = operation;
+		_maxOutputBytes = maxOutputBytes;
 		_cleaned = new AtomicBoolean();
 		_sourceComplete = new AtomicBoolean();
 		_active = new AtomicInteger(1);
@@ -213,7 +216,8 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 			broadcastPin += OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(logical) * _bandWidths[i];
 		}
 		long pinCharge = broadcastPin;
-		long outputCharge = OOCUtils.estimateFullTileBytes(_output.getDataCharacteristics());
+		long outputCharge = Math.max(_maxOutputBytes,
+			OOCUtils.estimateFullTileBytes(_output.getDataCharacteristics()));
 		OOCStream<IndexedMatrixValue> streamed = getInputReadStream(0);
 		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(streamed, _allowance, value ->
 			pinCharge * 2 + OOCUtils.memoryCharge(value) * 2 + outputCharge, true);

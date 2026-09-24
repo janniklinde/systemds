@@ -240,12 +240,11 @@ public final class OOCInstructionUtils {
 		BiFunction<IndexedMatrixValue, IndexedMatrixValue, O> operation, ToLongFunction<O> outputSize,
 		boolean streaming, StreamContext context) {
 		long cols = left.getDataCharacteristics().colsKnown() ? left.getDataCharacteristics().getNumColBlocks() : -1;
-		long inputBytes = Math.max(OOCUtils.estimateOutputTileBytes(left.getDataCharacteristics()),
-			OOCUtils.estimateOutputTileBytes(right.getDataCharacteristics()));
-		long outputBytes = OOCUtils.estimateOutputTileBytes(output.getDataCharacteristics());
+		long inputBytes = Math.max(OOCUtils.estimateFullTileBytes(left.getDataCharacteristics()),
+			OOCUtils.estimateFullTileBytes(right.getDataCharacteristics()));
+		long outputBytes = OOCUtils.estimateFullTileBytes(output.getDataCharacteristics());
 		ToIntFunction<IndexedMatrixValue> key = matrixIndexKey(cols);
-		long taskBytes = (streaming ? 2 : 1) *
-			OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + outputBytes;
+		long taskBytes = 2 * OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + outputBytes;
 		if(streaming)
 			output.assignPrimitive(new JoinStreamingOOCPrimitive<>(left, right, output, key, key, outputSize,
 				operation, taskBytes, cols > 0 && left.getDataCharacteristics().dimsKnown() &&
@@ -348,9 +347,10 @@ public final class OOCInstructionUtils {
 		List<OOCStreamable<IndexedMatrixValue>> broadcasts, OOCStream<IndexedMatrixValue> output,
 		List<ToLongFunction<IndexedMatrixValue>> lookupRows, List<ToLongFunction<IndexedMatrixValue>> lookupCols,
 		List<Integer> bandWidths, List<Supplier<MaterializedStore.Liveness>> liveness,
-		BiFunction<IndexedMatrixValue, IndexedMatrixValue[][], IndexedMatrixValue> operation, StreamContext context) {
+		BiFunction<IndexedMatrixValue, IndexedMatrixValue[][], IndexedMatrixValue> operation, long maxOutputBytes,
+		StreamContext context) {
 		output.assignPrimitive(new BroadcastOOCPrimitive(streamed, broadcasts, output, lookupRows, lookupCols,
-			bandWidths, liveness, operation, context));
+			bandWidths, liveness, operation, maxOutputBytes, context));
 	}
 
 	public static void mmChain(OOCStreamable<IndexedMatrixValue> x, OOCStreamable<IndexedMatrixValue> v,
@@ -381,12 +381,19 @@ public final class OOCInstructionUtils {
 
 	public static <I, O> void reduce(OOCStreamable<I> input, OOCStream<O> output, Function<I, O> partial,
 		BiFunction<O, O, O> merge, ToLongFunction<O> size, StreamContext context) {
-		output.assignPrimitive(new ReduceOOCPrimitive<>(input, output, partial, merge, size, context));
+		output.assignPrimitive(new ReduceOOCPrimitive<>(input, output, partial, merge, size, null, 0, context));
 	}
 
 	public static <I, O> void reduce(OOCStreamable<I> input, OOCStream<O> output, Function<I, O> partial,
 		BiFunction<O, O, O> merge, ToLongFunction<O> size, Supplier<O> empty, StreamContext context) {
-		output.assignPrimitive(new ReduceOOCPrimitive<>(input, output, partial, merge, size, empty, context));
+		output.assignPrimitive(new ReduceOOCPrimitive<>(input, output, partial, merge, size, empty, 0, context));
+	}
+
+	public static <I, O> void reduce(OOCStreamable<I> input, OOCStream<O> output, Function<I, O> partial,
+		BiFunction<O, O, O> merge, ToLongFunction<O> size, Supplier<O> empty, long maxIntermediateBytes,
+		StreamContext context) {
+		output.assignPrimitive(new ReduceOOCPrimitive<>(input, output, partial, merge, size, empty,
+			maxIntermediateBytes, context));
 	}
 
 	public static int getComputeInFlight() {

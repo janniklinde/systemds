@@ -427,6 +427,8 @@ final class SourceStore {
 		OOCIOHandler.SourceReadRequest request, SourceReadState state, long maxBytesInFlight) {
 		final long byteLimit = maxBytesInFlight > 0 ? maxBytesInFlight : Long.MAX_VALUE;
 		final AtomicLong bytesRead = new AtomicLong(0);
+		// The admitted source phase owns deserialized blocks, which can exceed their serialized byte count.
+		final AtomicLong bytesAdmitted = new AtomicLong(0);
 		final AtomicBoolean stop = new AtomicBoolean(false);
 		final AtomicBoolean budgetHit = new AtomicBoolean(false);
 		final AtomicReference<Throwable> error = new AtomicReference<>();
@@ -479,7 +481,7 @@ final class SourceStore {
 				_scanExec.submit(() -> {
 					try {
 						readSequenceFile(job, files[fileIdx], request, fileIdx, filePositions, completed, stop,
-							budgetHit, bytesRead, byteLimit, budgetLock, descriptors.get(fileIdx));
+							budgetHit, bytesRead, bytesAdmitted, byteLimit, budgetLock, descriptors.get(fileIdx));
 					}
 					catch(Throwable t) {
 						error.compareAndSet(null, t);
@@ -549,7 +551,7 @@ final class SourceStore {
 
 	private void readSequenceFile(JobConf job, Path path, OOCIOHandler.SourceReadRequest request, int fileIdx,
 		AtomicLongArray filePositions, AtomicIntegerArray completed, AtomicBoolean stop, AtomicBoolean budgetHit,
-		AtomicLong bytesRead, long byteLimit, Object budgetLock,
+		AtomicLong bytesRead, AtomicLong bytesAdmitted, long byteLimit, Object budgetLock,
 		List<OOCIOHandler.SourceBlockDescriptor> descriptors) throws IOException {
 		String sourcePath = path.toString();
 		long cachePackBytes = ConfigurationManager.getDMLConfig().getLongValue(DMLConfig.OOC_CACHE_PACK_BYTES);
@@ -565,9 +567,15 @@ final class SourceStore {
 		long maxCells = Math.min((long) request.blen, request.rows) *
 			Math.min((long) request.blen, request.cols);
 		boolean groupedScan = groupLimit > 0;
+		boolean memoryBudget = request.target instanceof SourceOOCStream;
 		BlockLayoutIndex layout = groupedScan ? null : _layouts.computeIfAbsent(sourcePath, p -> new BlockLayoutIndex());
 		boolean preflight = !groupedScan && byteLimit != Long.MAX_VALUE &&
 			(maxCells > 65536 || byteLimit < 64L * 1024 * 1024);
+		// Grouped scans may contain millions of tiny records. Lease phase capacity
+		// in bounded chunks instead of contending on the shared monitor per record.
+		// Credits remain charged until consumed or returned at reader exit.
+		long localCredit = 0;
+		long localBytesRead = 0;
 
 		try(SequenceFile.Reader reader = openReader(job, path, groupedScan);
 			FSDataInputStream headers = !reader.isCompressed() && preflight ?
@@ -582,6 +590,7 @@ final class SourceStore {
 				MatrixIndexes key = new MatrixIndexes();
 				MatrixBlock value = new MatrixBlock();
 				long recordStart = reader.getPosition();
+				long preflightBytes = 0;
 				if(headers != null) {
 					headers.seek(recordStart);
 					int recordLength;
@@ -600,20 +609,24 @@ final class SourceStore {
 						throw new IOException("Invalid SequenceFile record at " + recordStart + " in " + path);
 					long valueSize = recordLength - keyLength;
 					synchronized(budgetLock) {
-						long currentBytes = bytesRead.get();
-						if(stop.get())
-							break;
+						long currentBytes = bytesAdmitted.get();
+					if(stop.get())
+						break;
 						if(currentBytes > 0 && valueSize > byteLimit - currentBytes) {
 							stop.set(true);
 							budgetHit.set(true);
 							break;
 						}
-						bytesRead.addAndGet(valueSize);
+						bytesAdmitted.addAndGet(valueSize);
+						preflightBytes = valueSize;
 					}
 				}
 				long readStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
-				if(!reader.next(key, value))
+				if(!reader.next(key, value)) {
+					if(preflightBytes > 0)
+						bytesAdmitted.addAndGet(-preflightBytes);
 					break;
+				}
 				long recordEnd = reader.getPosition();
 				if(DMLScript.OOC_STATISTICS) {
 					scanNanos += System.nanoTime() - readStart;
@@ -621,33 +634,63 @@ final class SourceStore {
 					scanBytes += recordEnd - recordStart;
 				}
 				long blockSize = value.getExactSerializedSize();
+				MatrixIndexes outIdx = new MatrixIndexes(key);
+				IndexedMatrixValue imv = new IndexedMatrixValue(outIdx, value);
+				long valueBytes = memoryBudget ? OOCUtils.memoryCharge(imv) : blockSize;
+				boolean flushGroup = groupLimit > 0 && groupCount > 0 &&
+					Math.addExact(Math.addExact(groupValueBytes, valueBytes),
+						PackedBlock.memoryOverhead(groupCount + 1)) > groupLimit;
+				int nextGroupCount = flushGroup ? 1 : groupCount + 1;
+				long packOverhead = groupLimit > 0 ? PackedBlock.memoryOverhead(nextGroupCount) -
+					(flushGroup || groupCount == 0 ? 0 : PackedBlock.memoryOverhead(groupCount)) : 0;
+				long charge = Math.addExact(valueBytes, packOverhead);
 				boolean shouldBreak = false;
-
-				if(headers == null) {
-					synchronized(budgetLock) {
-						long currentBytes = bytesRead.get();
-						if(stop.get())
-							shouldBreak = true;
-						else if(currentBytes > 0 && blockSize > byteLimit - currentBytes) {
-							stop.set(true);
-							budgetHit.set(true);
-							shouldBreak = true;
+				if(groupedScan) {
+					if(localCredit < charge) {
+						synchronized(budgetLock) {
+							long current = bytesAdmitted.get();
+							long needed = charge - localCredit;
+							if(stop.get() || (current > 0 && needed > byteLimit - current)) {
+								stop.set(true);
+								budgetHit.set(true);
+								shouldBreak = true;
+							}
+							else {
+								long grant = Math.max(needed, Math.min(64L * 1024, byteLimit - current));
+								bytesAdmitted.addAndGet(grant);
+								localCredit += grant;
+							}
 						}
-						else
-							bytesRead.addAndGet(blockSize);
+					}
+					if(!shouldBreak) {
+						localCredit -= charge;
+						localBytesRead += blockSize;
+					}
+				}
+				else synchronized(budgetLock) {
+					long currentBytes = bytesAdmitted.get();
+					long correction = charge - preflightBytes;
+					if(stop.get() && (preflightBytes == 0 || memoryBudget) &&
+						(bytesRead.get() > 0 || !budgetHit.get()))
+						shouldBreak = true;
+					else if(bytesRead.get() > 0 && currentBytes > preflightBytes &&
+						correction > byteLimit - currentBytes) {
+						stop.set(true);
+						budgetHit.set(true);
+						shouldBreak = true;
+					}
+					if(shouldBreak)
+						bytesAdmitted.addAndGet(-preflightBytes);
+					else {
+						bytesAdmitted.addAndGet(correction);
+						bytesRead.addAndGet(blockSize);
 					}
 				}
 				if(shouldBreak)
 					break;
 
-				MatrixIndexes outIdx = new MatrixIndexes(key);
-				IndexedMatrixValue imv = new IndexedMatrixValue(outIdx, value);
-
 				if(groupLimit > 0) {
-					long valueBytes = OOCUtils.memoryCharge(imv);
-					long nextGroupBytes = Math.addExact(Math.addExact(groupValueBytes, valueBytes),
-						PackedBlock.memoryOverhead(groupCount + 1));
-					if(groupCount > 0 && nextGroupBytes > groupLimit) {
+					if(flushGroup) {
 						descriptors.add(emitSourceGroup(request, groupValues, sourcePath, request.format,
 							groupIndexes, groupOffset, groupEnd, groupSerialized, groupCount));
 						groupValues.clear();
@@ -699,6 +742,12 @@ final class SourceStore {
 
 			if(!stop.get())
 				completed.set(fileIdx, 1);
+		}
+		finally {
+			if(groupedScan) {
+				bytesRead.addAndGet(localBytesRead);
+				bytesAdmitted.addAndGet(-localCredit);
+			}
 		}
 	}
 

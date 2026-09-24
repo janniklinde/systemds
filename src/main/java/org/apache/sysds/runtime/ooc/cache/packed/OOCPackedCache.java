@@ -146,6 +146,18 @@ public final class OOCPackedCache implements OOCCache {
 	}
 
 	@Override
+	public long getPinCharge(long sId, long tId) {
+		PackedCacheLocation location = getLocation(sId, tId);
+		if(location instanceof PendingPackLocation pending)
+			location = forceSeal(pending);
+		if(location instanceof SealedPackLocation packed) {
+			BlockKey key = packed.state().physicalEntry.getKey();
+			return _physical.getPinCharge(key.getStreamId(), key.getSequenceNumber());
+		}
+		return _physical.getPinCharge(sId, tId);
+	}
+
+	@Override
 	public BlockEntry putUnpackedPinned(long sId, long tId, Object data, long size, MemoryAllowance allowance) {
 		return _physical.putPinned(sId, tId, data, size, allowance);
 	}

@@ -132,14 +132,15 @@ public class WDivMMOOCInstruction extends QuaternaryOOCInstruction {
 			OOCStream<IndexedMatrixValue> out = createWritableStream();
 			ec.getMatrixObject(output).setStreamHandle(out);
 			OOCInstructionUtils.multiIndexedBroadcastMap(x.getStreamable(), factors, out, lookupRows, lookupCols,
-				bandWidths, liveness, blockOperation(qop, scalar, basic, left), getContext());
+				bandWidths, liveness, blockOperation(qop, scalar, basic, left), 0, getContext());
 			return;
 		}
 
 		OOCStream<IndexedMatrixValue> partials = createWritableStream(left ? x.getNumColumns() : x.getNumRows(),
 			left ? x.getNumRows() : x.getNumColumns(), blocksize);
 		OOCInstructionUtils.multiIndexedBroadcastMap(x.getStreamable(), factors, partials, lookupRows, lookupCols,
-			bandWidths, liveness, blockOperation(qop, scalar, basic, left), getContext());
+			bandWidths, liveness, blockOperation(qop, scalar, basic, left),
+			OOCUtils.estimateMatrixBlockBytes(blocksize, rank), getContext());
 
 		BinaryOperator plus = InstructionUtils.parseBinaryOperator(Opcodes.PLUS.toString());
 		OOCStream<IndexedMatrixValue> out = createWritableStream();

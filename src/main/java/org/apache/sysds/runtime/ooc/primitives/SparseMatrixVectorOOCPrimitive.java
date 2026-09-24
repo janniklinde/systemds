@@ -487,13 +487,17 @@ public final class SparseMatrixVectorOOCPrimitive extends OOCPrimitive {
 			finishRow();
 			return;
 		}
-		_allowance.reserveTaskAsync(_rowBudget).whenComplete((ignored, error) -> {
+		long maxTileCharge = 0;
+		for(int col = 0; col < _colBlocks; col++)
+			maxTileCharge = Math.max(maxTileCharge, _matrixReader.getPinCharge(row + 1L, col + 1L));
+		long rowReservation = _rowBudget + maxTileCharge;
+		_allowance.reserveTaskAsync(rowReservation).whenComplete((ignored, error) -> {
 			if(error != null) {
 				fail(error);
 				finishRow();
 				return;
 			}
-			ReservationBudget budget = new ReservationBudget(_allowance, _rowBudget).enableReuse().enableGrowth();
+			ReservationBudget budget = new ReservationBudget(_allowance, rowReservation).enableReuse().enableGrowth();
 			try {
 				int rows = (int) Math.min(_blocksize,
 					getInput(0).getDataCharacteristics().getRows() - (long) row * _blocksize);

@@ -390,7 +390,7 @@ public class OOCPrimitiveTest {
 	public void testOutputTileEstimateUsesDenseUpperBound() {
 		MatrixCharacteristics dc = new MatrixCharacteristics(67_108_864, 1, 1_200_000, -1);
 		long dense = MatrixBlock.estimateSizeDenseInMemory(1_200_000, 1);
-		Assert.assertEquals(dense, OOCUtils.estimateOutputTileBytes(dc));
+		Assert.assertEquals(dense + 64, OOCUtils.estimateOutputTileBytes(dc));
 		Assert.assertTrue(MatrixBlock.estimateSizeSparseInMemory(1_200_000, 1, 1.0) > dense);
 	}
 

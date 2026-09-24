@@ -67,9 +67,10 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 					_available -= bytes;
 					return true;
 				}
-				warnInsufficient(bytes, _available);
-				if(!_growable)
+				if(!_growable) {
+					warnInsufficient(bytes, _available);
 					return false;
+				}
 				growth = bytes - _available;
 			}
 			if(!_parent.tryReserveTask(growth))
@@ -89,40 +90,20 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 		}
 	}
 
-	/**
-	 * Reserves from the budget, temporarily topping it up from the parent allowance when primitive admission
-	 * underestimated the required memory. The warning identifies a primitive whose up-front reservation must be fixed.
-	 */
+	/** Reserves only memory already admitted to this task. */
 	@Override
 	public void reserveBlocking(long bytes) {
 		checkNonNegative(bytes);
 		if(bytes == 0)
 			return;
-		while(true) {
-			long shortfall;
-			synchronized(this) {
-				if(_closed)
-					throw insufficientBudget(bytes);
-				if(_available >= bytes) {
-					_available -= bytes;
-					return;
-				}
+		synchronized(this) {
+			if(_closed)
+				throw insufficientBudget(bytes);
+			if(_available < bytes) {
 				warnInsufficient(bytes, _available);
-				shortfall = bytes - _available;
-			}
-			_parent.reserveBlocking(shortfall);
-			boolean revoked;
-			synchronized(this) {
-				revoked = _closed;
-				if(!revoked) {
-					_outstanding += shortfall;
-					_available += shortfall;
-				}
-			}
-			if(revoked) {
-				_parent.release(shortfall);
 				throw insufficientBudget(bytes);
 			}
+			_available -= bytes;
 		}
 	}
 
@@ -131,45 +112,16 @@ public final class ReservationBudget implements MemoryAllowance, AutoCloseable {
 		checkNonNegative(bytes);
 		if(bytes == 0)
 			return OOCFuture.completed(null);
-		long shortfall;
 		synchronized(this) {
 			if(_closed)
 				return OOCFuture.failed(insufficientBudget(bytes));
-			if(_available >= bytes) {
-				_available -= bytes;
-				return OOCFuture.completed(null);
+			if(_available < bytes) {
+				warnInsufficient(bytes, _available);
+				return OOCFuture.failed(insufficientBudget(bytes));
 			}
-			warnInsufficient(bytes, _available);
-			shortfall = bytes - _available;
+			_available -= bytes;
+			return OOCFuture.completed(null);
 		}
-
-		OOCFuture<Void> result = new OOCFuture<>();
-		_parent.reserveAsync(shortfall).whenComplete((ignored, error) -> {
-			if(error != null) {
-				result.completeExceptionally(error);
-				return;
-			}
-			boolean revoked;
-			synchronized(this) {
-				revoked = _closed;
-				if(!revoked) {
-					_outstanding += shortfall;
-					_available += shortfall;
-				}
-			}
-			if(revoked) {
-				_parent.release(shortfall);
-				result.completeExceptionally(insufficientBudget(bytes));
-				return;
-			}
-			reserveAsync(bytes).whenComplete((retried, retryError) -> {
-				if(retryError != null)
-					result.completeExceptionally(retryError);
-				else
-					result.complete(null);
-			});
-		});
-		return result;
 	}
 
 	private void warnInsufficient(long requested, long available) {
