@@ -121,6 +121,13 @@ public final class MaterializedStoreStreamable implements OOCStreamable<IndexedM
 		});
 	}
 
+	public void annotate(String annotation) {
+		_primitive.store().whenComplete((store, error) -> {
+			if(error == null)
+				store.annotate(annotation);
+		});
+	}
+
 	@Override
 	public OOCStream<IndexedMatrixValue> getReadStream() {
 		return createReader(false, OOCAccessPattern.ANY, false, false);

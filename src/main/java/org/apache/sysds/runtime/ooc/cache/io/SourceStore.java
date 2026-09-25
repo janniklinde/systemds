@@ -139,6 +139,8 @@ final class SourceStore {
 		StreamTrace.sourceRead(block.getKey().getStreamId(), block.getSize());
 		long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 		Object data = src.grouped ? readGroup(src) : readSingle(src, readAheadBudget, cache);
+		if(cache != null)
+			cache.recordStreamRead(block.getKey().getStreamId(), src.recordLength);
 		if(DMLScript.OOC_STATISTICS) {
 			Statistics.incrementOOCLoadFromDisk();
 			Statistics.accumulateOOCLoadFromDiskTime(System.nanoTime() - ioStart);
@@ -391,6 +393,7 @@ final class SourceStore {
 			if(!reader.next(indexes, matrix))
 				return;
 			bytes += index.endAt(next) - start;
+			cache.recordStreamRead(BlockLayoutIndex.unpackKey(packedKey).getStreamId(), index.endAt(next) - start);
 			if(DMLScript.OOC_STATISTICS)
 				Statistics.incrementOOCSourceScan(1, System.nanoTime() - ioStart, index.endAt(next) - start);
 			if(DMLScript.OOC_LOG_EVENTS)

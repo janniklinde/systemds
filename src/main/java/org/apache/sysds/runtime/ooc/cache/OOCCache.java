@@ -22,9 +22,37 @@ package org.apache.sysds.runtime.ooc.cache;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
+import java.util.Map;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.LongUnaryOperator;
 
 public interface OOCCache {
+	/** Serialized bytes read and written on behalf of a stream; cache hits are excluded. */
+	record StreamIOStats(long readBytes, long writeBytes, String annotation) {
+	}
+
+	final class StreamIOCounter {
+		private final LongAdder readBytes = new LongAdder();
+		private final LongAdder writeBytes = new LongAdder();
+		private volatile String annotation;
+
+		void recordRead(long bytes) {
+			readBytes.add(bytes);
+		}
+
+		void recordWrite(long bytes) {
+			writeBytes.add(bytes);
+		}
+
+		void annotate(String value) {
+			annotation = value;
+		}
+
+		StreamIOStats snapshot() {
+			return new StreamIOStats(readBytes.sum(), writeBytes.sum(), annotation);
+		}
+	}
+
 	/**
 	 * Maximum bytes charged given the logical bytes of the requested entry. Use this method for reservation budget
 	 * planning as logical byte size and pinned entry bytes may differ.
@@ -188,6 +216,18 @@ public interface OOCCache {
 	 * {@link Long#MAX_VALUE} remains reserved as "no policy score".
 	 */
 	void addEvictionPolicy(long streamId, LongUnaryOperator scoreFn);
+
+	/** Attach or replace an optional label without resetting the stream's I/O counters. */
+	void annotateStream(long streamId, String annotation);
+
+	/** Account for a successful serialized disk read. */
+	void recordStreamRead(long streamId, long bytes);
+
+	/** Account for a successful serialized spill write. */
+	void recordStreamWrite(long streamId, long bytes);
+
+	/** Return a detached snapshot; concurrent updates may appear across different points in time. */
+	Map<Long, StreamIOStats> getStreamIOStats();
 
 	/**
 	 * Returns the current cache-owned size in bytes.

@@ -76,7 +76,8 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 		long totalBytes = numBlocks > Long.MAX_VALUE / tileBytes ? Long.MAX_VALUE : numBlocks * tileBytes;
 		long productionLimit = Math.min(bulkLimit, totalBytes);
 		long bulkBytes = productionLimit;
-		OOCStreamable<IndexedMatrixValue> materialized = OOCInstructionUtils.sourceRead(source, min, min.getFileName(),
+		OOCStreamable<IndexedMatrixValue> materialized = OOCInstructionUtils.sourceRead(source, min,
+			input1.getName(), min.getFileName(),
 			mc.getRows(), mc.getCols(), mc.getBlocksize(), mc.getNonZeros(), bulkBytes, productionLimit, getContext());
 
 		if(!knownGeometry || blen <= 0 || mc.getBlocksize() == blen) {

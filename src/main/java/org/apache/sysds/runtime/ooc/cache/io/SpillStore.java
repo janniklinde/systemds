@@ -87,6 +87,11 @@ final class SpillStore {
 	private final ConcurrentHashMap<Integer, ConcurrentLinkedDeque<DirectRangeReader>> _directReaderPool = new ConcurrentHashMap<>();
 	private final AtomicInteger _pooledDirectReaders = new AtomicInteger();
 	private volatile boolean _shutdown;
+	private volatile OOCCache _cache;
+
+	void setCache(OOCCache cache) {
+		_cache = cache;
+	}
 
 	@SuppressWarnings("unchecked")
 	SpillStore() {
@@ -141,7 +146,7 @@ final class SpillStore {
 		int slot = partition.index.slotOf(offset);
 		int size = (int) (partition.index.endAt(slot) - offset);
 		if(_direct && readAheadBudget <= 0)
-			return readDirect(partitionId, offset, size, block);
+			return readDirect(partitionId, offset, size, block, cache);
 
 		try(InputStream stream = openInput(partitionId, offset, size)) {
 			int bufferSize = _direct ? (size + 7) / 8 * 8 : _readBufferBytes;
@@ -149,6 +154,8 @@ final class SpillStore {
 			StreamTrace.spillRead(block.getKey().getStreamId(), block.getSize());
 			long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 			SpillableObject obj = SpillableObjectRegistry.read(in);
+			if(cache != null)
+				cache.recordStreamRead(block.getKey().getStreamId(), size);
 			if(DMLScript.OOC_STATISTICS) {
 				Statistics.incrementOOCLoadFromDisk();
 				Statistics.accumulateOOCLoadFromDiskTime(System.nanoTime() - ioStart);
@@ -166,7 +173,7 @@ final class SpillStore {
 		}
 	}
 
-	private Object readDirect(int partitionId, long offset, int size, BlockEntry block) {
+	private Object readDirect(int partitionId, long offset, int size, BlockEntry block, OOCCache cache) {
 		DirectRangeReader reader = borrowDirectReader(partitionId);
 		boolean reusable = false;
 		try {
@@ -174,6 +181,8 @@ final class SpillStore {
 			long ioStart = DMLScript.OOC_STATISTICS ? System.nanoTime() : 0;
 			SpillableObject obj = SpillableObjectRegistry.read(new org.apache.sysds.runtime.util.ByteBufferDataInput(
 				size < _readBufferBytes / 2 ? reader.readHeap(offset, size) : reader.read(offset, size)));
+			if(cache != null)
+				cache.recordStreamRead(block.getKey().getStreamId(), size);
 			if(DMLScript.OOC_STATISTICS) {
 				Statistics.incrementOOCLoadFromDisk();
 				Statistics.accumulateOOCLoadFromDiskTime(System.nanoTime() - ioStart);
@@ -261,6 +270,7 @@ final class SpillStore {
 				return;
 			}
 			bytes += index.endAt(next) - start;
+			cache.recordStreamRead(BlockLayoutIndex.unpackKey(packedKey).getStreamId(), index.endAt(next) - start);
 			if(DMLScript.OOC_LOG_EVENTS)
 				OOCEventLog.onDiskReadEvent(_evictCallerId, ioStart, System.nanoTime(), index.endAt(next) - start);
 			if(cache.activate(BlockLayoutIndex.unpackKey(packedKey), obj))
@@ -361,8 +371,12 @@ final class SpillStore {
 					long ioStart = DMLScript.OOC_STATISTICS || DMLScript.OOC_LOG_EVENTS ? System.nanoTime() : 0;
 					long wrote = writeOut(partition, partitionId, tpl._1(), tpl._2(), dos, waitingForFlush);
 
-					if(wrote > 0)
+					if(wrote > 0) {
 						StreamTrace.evictWrite(tpl._1().getKey().getStreamId(), wrote);
+						OOCCache cache = _cache;
+						if(cache != null)
+							cache.recordStreamWrite(tpl._1().getKey().getStreamId(), wrote);
+					}
 					if(DMLScript.OOC_STATISTICS && wrote > 0) {
 						Statistics.incrementOOCEvictionWrite();
 						Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);
@@ -386,8 +400,12 @@ final class SpillStore {
 						long wrote = writeOut(partition, partitionId, tpl._1(), tpl._2(), dos, waitingForFlush);
 						byteCtr += wrote;
 
-						if(wrote > 0)
+						if(wrote > 0) {
 							StreamTrace.evictWrite(tpl._1().getKey().getStreamId(), wrote);
+							OOCCache cache = _cache;
+							if(cache != null)
+								cache.recordStreamWrite(tpl._1().getKey().getStreamId(), wrote);
+						}
 						if(DMLScript.OOC_STATISTICS && wrote > 0) {
 							Statistics.incrementOOCEvictionWrite();
 							Statistics.accumulateOOCEvictionWriteTime(System.nanoTime() - ioStart);

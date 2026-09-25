@@ -67,6 +67,7 @@ public final class StateTable<T extends SpillableObject> implements AutoCloseabl
 		int capacity = Math.max(1, numSlots);
 		_cache = cache;
 		_streamId = streamId;
+		_cache.annotateStream(streamId, "StateTable#" + streamId);
 		_generationSlots = new AtomicIntegerArray(capacity);
 		_slots = new Slot[capacity];
 	}

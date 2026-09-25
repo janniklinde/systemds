@@ -43,6 +43,7 @@ import java.nio.file.Files;
 public class TransposeSelfMMTest extends AutomatedTestBase {
 	private static final String TEST_NAME_LEFT = "TSMM";
 	private static final String TEST_NAME_RIGHT = "TSMMRight";
+	private static final String TEST_NAME_SHARED = "TSMMShared";
 	private final static String TEST_DIR = "functions/ooc/";
 	private final static String TEST_CLASS_DIR = TEST_DIR + TransposeSelfMMTest.class.getSimpleName() + "/";
 	private final static double eps = 1e-8;
@@ -64,6 +65,7 @@ public class TransposeSelfMMTest extends AutomatedTestBase {
 		TestUtils.clearAssertionInformation();
 		addTestConfiguration(TEST_NAME_LEFT, new TestConfiguration(TEST_CLASS_DIR, TEST_NAME_LEFT));
 		addTestConfiguration(TEST_NAME_RIGHT, new TestConfiguration(TEST_CLASS_DIR, TEST_NAME_RIGHT));
+		addTestConfiguration(TEST_NAME_SHARED, new TestConfiguration(TEST_CLASS_DIR, TEST_NAME_SHARED));
 	}
 
 	@Test
@@ -99,6 +101,56 @@ public class TransposeSelfMMTest extends AutomatedTestBase {
 	@Test
 	public void testTsmmRightSparseMultiTile() {
 		runTSMMTest(MMTSJType.RIGHT, MULTI_TILE_ROWS, MULTI_TILE_COLS, MULTI_TILE_BLOCK_SIZE, true);
+	}
+
+	@Test
+	public void testTsmmSharedWithCrossProduct() {
+		Types.ExecMode platformOld = setExecMode(Types.ExecMode.SINGLE_NODE);
+		try {
+			getAndLoadTestConfiguration(TEST_NAME_SHARED);
+			setDefaultBlockSizeInConfig(SINGLE_TILE_BLOCK_SIZE);
+			fullDMLScriptName = SCRIPT_DIR + TEST_DIR + TEST_NAME_SHARED + ".dml";
+
+			int rows = SINGLE_TILE_ROWS;
+			int cols = SINGLE_TILE_COLS;
+			int otherCols = 241;
+			MatrixBlock w = DataConverter.convertToMatrixBlock(getRandomMatrix(rows, cols, 0, 1, 1.0, 10));
+			MatrixBlock x = DataConverter.convertToMatrixBlock(getRandomMatrix(rows, otherCols, 0, 1, 1.0, 11));
+			MatrixWriter writer = MatrixWriterFactory.createMatrixWriter(Types.FileFormat.BINARY);
+			writer.writeMatrixToHDFS(w, input("W"), rows, cols, SINGLE_TILE_BLOCK_SIZE, w.getNonZeros());
+			writer.writeMatrixToHDFS(x, input("X"), rows, otherCols, SINGLE_TILE_BLOCK_SIZE, x.getNonZeros());
+			HDFSTool.writeMetaDataFile(input("W.mtd"), Types.ValueType.FP64,
+				new MatrixCharacteristics(rows, cols, SINGLE_TILE_BLOCK_SIZE, w.getNonZeros()), Types.FileFormat.BINARY);
+			HDFSTool.writeMetaDataFile(input("X.mtd"), Types.ValueType.FP64,
+				new MatrixCharacteristics(rows, otherCols, SINGLE_TILE_BLOCK_SIZE, x.getNonZeros()),
+				Types.FileFormat.BINARY);
+
+			programArgs = new String[] {"-stats", "-args", input("W"), input("X"), output("G_cp"),
+				output("C_cp")};
+			runTest(true, false, null, -1);
+			programArgs = new String[] {"-stats", "-ooc", "-args", input("W"), input("X"), output("G_ooc"),
+				output("C_ooc")};
+			runTest(true, false, null, -1);
+
+			Assert.assertTrue("Shared transpose-self multiplication did not use OOC TSMM",
+				heavyHittersContainsString(Instruction.OOC_INST_PREFIX + Opcodes.TSMM));
+			MatrixBlock gramCp = DataConverter.readMatrixFromHDFS(output("G_cp"), Types.FileFormat.BINARY,
+				cols, cols, SINGLE_TILE_BLOCK_SIZE);
+			MatrixBlock gramOoc = DataConverter.readMatrixFromHDFS(output("G_ooc"), Types.FileFormat.BINARY,
+				cols, cols, SINGLE_TILE_BLOCK_SIZE);
+			MatrixBlock crossCp = DataConverter.readMatrixFromHDFS(output("C_cp"), Types.FileFormat.BINARY,
+				cols, otherCols, SINGLE_TILE_BLOCK_SIZE);
+			MatrixBlock crossOoc = DataConverter.readMatrixFromHDFS(output("C_ooc"), Types.FileFormat.BINARY,
+				cols, otherCols, SINGLE_TILE_BLOCK_SIZE);
+			TestUtils.compareMatrices(gramCp, gramOoc, eps);
+			TestUtils.compareMatrices(crossCp, crossOoc, eps);
+		}
+		catch(IOException e) {
+			throw new RuntimeException(e);
+		}
+		finally {
+			resetExecMode(platformOld);
+		}
 	}
 
 	private void runTSMMTest(MMTSJType type, int rows, int cols, int blockSize, boolean sparse) {

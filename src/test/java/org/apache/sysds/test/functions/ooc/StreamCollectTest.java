@@ -139,6 +139,10 @@ public class StreamCollectTest extends AutomatedTestBase {
 		Assert.assertEquals(2, blocks);
 		actual.recomputeNonZeros();
 		TestUtils.compareMatrices(expected, actual, eps);
+		Assert.assertTrue(OOCCacheManager.getGlobalCache().getStreamIOStats().values().stream()
+			.anyMatch(io -> ("source pREADX from " + input(INPUT_NAME)).equals(io.annotation())));
+		String stats = Statistics.displayOOCEvictionStats();
+		Assert.assertTrue(stats.indexOf("reader executor:") < stats.indexOf("top OOC read streams"));
 	}
 
 	@Test
@@ -197,6 +201,9 @@ public class StreamCollectTest extends AutomatedTestBase {
 				}
 			replayed.recomputeNonZeros();
 			TestUtils.compareMatrices(expected, replayed, eps);
+			Assert.assertTrue(OOCCacheManager.getGlobalCache().getStreamIOStats().values().stream()
+				.anyMatch(io -> ("source X from " + input("packed_source")).equals(io.annotation()) &&
+					io.readBytes() > 0 && io.writeBytes() == 0));
 			Assert.assertEquals("Source-backed cache entries must not be written to spill.", 0,
 				Statistics.getOOCEvictionWriteCount());
 			TeeOOCInstruction.incrRef(ec.getMatrixObject("Y").getStreamable(), -1);

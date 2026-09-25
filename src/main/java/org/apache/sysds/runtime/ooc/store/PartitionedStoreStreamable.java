@@ -56,6 +56,7 @@ public final class PartitionedStoreStreamable implements OOCStreamable<IndexedMa
 	private boolean _partitionsRequested;
 	private boolean _partitioned;
 	private MaterializedStoreStreamable _unpartitioned;
+	private String _annotation;
 	private int _openPartitionReaders;
 	private boolean _partitionReadersSealed;
 	private volatile Consumer<StoreLease<PackedBlock>> _liveConsumer;
@@ -70,6 +71,20 @@ public final class PartitionedStoreStreamable implements OOCStreamable<IndexedMa
 		_primitive = new Materializer(source);
 		_partitionStore.whenComplete((store, error) -> tryFinalize());
 		_tileStore.whenComplete((store, error) -> tryFinalize());
+	}
+
+	public synchronized void annotate(String annotation) {
+		_annotation = annotation;
+		_partitionStore.whenComplete((store, error) -> {
+			if(error == null)
+				store.annotate(annotation);
+		});
+		_tileStore.whenComplete((store, error) -> {
+			if(error == null)
+				store.annotate(annotation);
+		});
+		if(_unpartitioned != null)
+			_unpartitioned.annotate(annotation + " [unpartitioned]");
 	}
 
 	/**
@@ -102,6 +117,8 @@ public final class PartitionedStoreStreamable implements OOCStreamable<IndexedMa
 		if(_unpartitioned == null) {
 			_unpartitioned = MaterializedStoreStreamable.unpartitioned(getReadStream(), _data,
 				OOCStoreLayout.ROW_MAJOR);
+			if(_annotation != null)
+				_unpartitioned.annotate(_annotation + " [unpartitioned]");
 			//The conversion owns the read handle above. Once existing partition consumers release their handles, the
 			//source store can forget each partition as the conversion advances.
 			scheduleMaterializedStoreDeletion();

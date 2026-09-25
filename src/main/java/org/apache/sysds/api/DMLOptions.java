@@ -73,7 +73,7 @@ public class DMLOptions {
 	public boolean              oocLogEvents  = false;            // Whether to record I/O and task compute events (fine grained, may impact performance on many small tasks)
 	public String               oocLogPath    = "./";             // The directory where to save the recorded event logs (csv)
 	public boolean              oocStats      = false;            // Wether to record and print coarse grained ooc statistics
-	public int                  oocStatsCount = 10;               // Default ooc statistics count
+	public int                  oocStatsCount = 5;                // Default ooc statistics count
 	public boolean              debug         = false;            // to go into debug mode to be able to step through a program
 	public String               filePath      = null;             // path to script
 	public String               script        = null;             // the script itself

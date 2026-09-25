@@ -36,6 +36,7 @@ import org.apache.sysds.runtime.io.MatrixWriterFactory;
 import org.apache.sysds.runtime.ooc.cache.BlockEntry;
 import org.apache.sysds.runtime.ooc.cache.BlockKey;
 import org.apache.sysds.runtime.ooc.cache.BlockState;
+import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerImpl;
@@ -251,10 +252,19 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 			config.setTextValue(DMLConfig.LOCAL_TMP_DIR, "../data_dir");
 		ConfigurationManager.setLocalConfig(config);
 		handler = new OOCIOHandlerImpl();
-		testSourceBackedScheduleRead(false);
-		testSourceBackedScheduleRead(true);
-		testDenseSpillRead();
-		testUltraSparseSpillReadUsesCSR();
+		OOCCacheImpl cache = new OOCCacheImpl(handler, 16 * 1024 * 1024, 12 * 1024 * 1024);
+		try {
+			testSourceBackedScheduleRead(false);
+			testSourceBackedScheduleRead(true);
+			OOCCache.StreamIOStats sourceIO = cache.getStreamIOStats().get(7L);
+			Assert.assertNotNull(sourceIO);
+			Assert.assertTrue("source reloads should be attributed to stream 7", sourceIO.readBytes() > 0);
+			testDenseSpillRead();
+			testUltraSparseSpillReadUsesCSR();
+		}
+		finally {
+			cache.shutdown();
+		}
 	}
 
 	@Test
@@ -304,6 +314,10 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 					TestUtils.compareMatrices(block, (MatrixBlock) read.getValue(), 0);
 				}
 			}
+			OOCCache.StreamIOStats io = cache.getStreamIOStats().get(9L);
+			Assert.assertNotNull(io);
+			Assert.assertTrue("spill reads should be attributed to stream 9", io.readBytes() > 0);
+			Assert.assertTrue("spill writes should be attributed to stream 9", io.writeBytes() > 0);
 		}
 		finally {
 			cache.shutdown();

@@ -31,10 +31,13 @@ import org.apache.sysds.utils.Statistics;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -54,6 +57,7 @@ public class OOCCacheImpl implements OOCCache {
 	private final SegmentedStreamTableList<BlockEntry> _blocks;
 	private final SegmentedStreamTableList<ColdEntry> _coldBlocks;
 	private final SegmentedStreamTableList<EvictController> _evictControllers;
+	private final CopyOnWriteArrayList<StreamIOCounter> _streamIO;
 	private final EvictController _defaultEvictController;
 	private final ConcurrentLinkedQueue<BlockKey> _deferredUnpins;
 	private final LongAdder _evPasses = new LongAdder();
@@ -84,6 +88,7 @@ public class OOCCacheImpl implements OOCCache {
 		_blocks = new SegmentedStreamTableList<>();
 		_coldBlocks = new SegmentedStreamTableList<>();
 		_evictControllers = new SegmentedStreamTableList<>();
+		_streamIO = new CopyOnWriteArrayList<>();
 		_defaultEvictController = new EvictController();
 		_deferredUnpins = new ConcurrentLinkedQueue<>();
 		_collectorExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -294,6 +299,56 @@ public class OOCCacheImpl implements OOCCache {
 	public synchronized void addEvictionPolicy(long streamId, LongUnaryOperator scoreFn) {
 		getOrCreateEvictController(streamId).addEvictionPolicy(scoreFn);
 		scheduleEvictionIfNeeded();
+	}
+
+	@Override
+	public void annotateStream(long streamId, String annotation) {
+		if(annotation != null && !annotation.isEmpty())
+			streamIOCounter(streamId).annotate(annotation);
+	}
+
+	@Override
+	public void recordStreamRead(long streamId, long bytes) {
+		if(bytes > 0)
+			streamIOCounter(streamId).recordRead(bytes);
+	}
+
+	@Override
+	public void recordStreamWrite(long streamId, long bytes) {
+		if(bytes > 0)
+			streamIOCounter(streamId).recordWrite(bytes);
+	}
+
+	@Override
+	public Map<Long, StreamIOStats> getStreamIOStats() {
+		Map<Long, StreamIOStats> stats = new HashMap<>();
+		int streamId = 0;
+		for(StreamIOCounter counter : _streamIO) {
+			StreamIOStats snapshot = counter.snapshot();
+			if(snapshot.readBytes() > 0 || snapshot.writeBytes() > 0 || snapshot.annotation() != null)
+				stats.put((long) streamId, snapshot);
+			streamId++;
+		}
+		return stats;
+	}
+
+	private StreamIOCounter streamIOCounter(long streamId) {
+		int index = Math.toIntExact(streamId);
+		if(index >= _streamIO.size()) {
+			synchronized(_streamIO) {
+				int size = _streamIO.size();
+				if(index >= size) {
+					int capacity = Math.max(16, size);
+					while(index >= capacity)
+						capacity *= 2;
+					List<StreamIOCounter> added = new ArrayList<>(capacity - size);
+					for(int i = size; i < capacity; i++)
+						added.add(new StreamIOCounter());
+					_streamIO.addAll(added);
+				}
+			}
+		}
+		return _streamIO.get(index);
 	}
 
 	public synchronized String describeCacheState() {

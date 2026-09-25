@@ -33,6 +33,7 @@ import org.apache.sysds.runtime.ooc.memory.MemoryAllowance;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentHashMap;
@@ -207,6 +208,26 @@ public final class OOCPackedCache implements OOCCache {
 
 	public void disablePacking(long streamId) {
 		_packingStreams.remove(streamId);
+	}
+
+	@Override
+	public void annotateStream(long streamId, String annotation) {
+		_physical.annotateStream(streamId, annotation);
+	}
+
+	@Override
+	public void recordStreamRead(long streamId, long bytes) {
+		_physical.recordStreamRead(streamId, bytes);
+	}
+
+	@Override
+	public void recordStreamWrite(long streamId, long bytes) {
+		_physical.recordStreamWrite(streamId, bytes);
+	}
+
+	@Override
+	public Map<Long, StreamIOStats> getStreamIOStats() {
+		return _physical.getStreamIOStats();
 	}
 
 	public static boolean isPackedLogical(BlockEntry entry) {

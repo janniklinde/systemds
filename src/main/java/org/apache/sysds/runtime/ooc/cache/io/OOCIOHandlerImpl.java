@@ -59,6 +59,7 @@ public class OOCIOHandlerImpl implements OOCIOHandler {
 	@Override
 	public void setCache(OOCCache cache) {
 		_cache = cache;
+		_spill.setCache(cache);
 	}
 
 	@Override

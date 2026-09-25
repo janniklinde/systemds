@@ -26,6 +26,7 @@ import org.apache.sysds.common.Types.Direction;
 import org.apache.sysds.common.Types.ExecMode;
 import org.apache.sysds.common.Types.ExecType;
 import org.apache.sysds.common.Types.OpOp2;
+import org.apache.sysds.common.Types.OpOpData;
 import org.apache.sysds.common.Types.ReOrgOp;
 import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.conf.ConfigurationManager;
@@ -432,20 +433,26 @@ public class AggBinaryOp extends MultiThreadedHop {
 	public MMTSJType checkTransposeSelf() {
 		MMTSJType ret = MMTSJType.NONE;
 
-		Hop in1 = getInput().get(0);
-		Hop in2 = getInput().get(1);
+		Hop in1 = unwrapTee(getInput().get(0));
+		Hop in2 = unwrapTee(getInput().get(1));
 
 		if (HopRewriteUtils.isTransposeOperation(in1)
-				&& in1.getInput().get(0) == in2) {
+				&& unwrapTee(in1.getInput().get(0)) == in2) {
 			ret = MMTSJType.LEFT;
 		}
 
 		if (HopRewriteUtils.isTransposeOperation(in2)
-				&& in2.getInput().get(0) == in1) {
+				&& unwrapTee(in2.getInput().get(0)) == in1) {
 			ret = MMTSJType.RIGHT;
 		}
 
 		return ret;
+	}
+
+	private static Hop unwrapTee(Hop hop) {
+		while(HopRewriteUtils.isData(hop, OpOpData.TEE))
+			hop = hop.getInput().get(0);
+		return hop;
 	}
 
 	/**

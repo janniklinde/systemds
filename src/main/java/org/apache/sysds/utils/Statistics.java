@@ -36,6 +36,7 @@ import org.apache.sysds.runtime.instructions.cp.FunctionCallCPInstruction;
 import org.apache.sysds.runtime.instructions.spark.SPInstruction;
 import org.apache.sysds.runtime.lineage.LineageCacheConfig.ReuseCacheType;
 import org.apache.sysds.runtime.meta.DataCharacteristics;
+import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheImpl;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
 import org.apache.sysds.runtime.lineage.LineageCacheStatistics;
@@ -628,8 +629,9 @@ public class Statistics
 			(oocLoadFromDiskBytesSize.longValue() + oocSourceScanBytesSize.longValue()) / 1e9));
 		sb.append(String.format(Locale.US, "  evict writes:\t\t%d (time %.3f sec, %.3f GB)\n",
 			oocEvictionWriteCalls.longValue(), oocEvictionWriteTimeNanos.longValue() / 1e9, oocEvictionWriteBytesSize.longValue() / 1e9));
-		if(OOCCacheManager.getGlobalCacheIfInitialized() instanceof OOCCacheImpl cache)
-			sb.append(cache.displayEvictionSelectionStats());
+		OOCCache cache = OOCCacheManager.getGlobalCacheIfInitialized();
+		if(cache instanceof OOCCacheImpl physical)
+			sb.append(physical.displayEvictionSelectionStats());
 		sb.append(String.format(Locale.US, "  reclaim runs:\t\t%d (time %.3f sec, %.3f GB)\n",
 			oocMemoryReclaimRuns.longValue(), oocMemoryReclaimTime.longValue() / 1e9,
 			oocMemoryReclaimBytes.longValue() / 1e9));
@@ -661,6 +663,35 @@ public class Statistics
 			oocReaderThreads.get(), oocReaderThreads.get() == 0 ? 0 :
 				100d * oocReaderServiceTime.longValue() / elapsedNanos / oocReaderThreads.get(),
 			oocReaderQueueMax.get(), oocReaderServiceTime.longValue() / 1e9));
+		if(cache != null)
+			sb.append(displayOOCStreamIOStats(cache.getStreamIOStats(), DMLScript.OOC_STATISTICS_COUNT));
+		return sb.toString();
+	}
+
+	static String displayOOCStreamIOStats(Map<Long, OOCCache.StreamIOStats> stats, int count) {
+		StringBuilder sb = new StringBuilder();
+		for(boolean reads : new boolean[] {true, false}) {
+			sb.append(reads ? "  top OOC read streams (serialized bytes):\n" :
+				"  top OOC write streams (serialized bytes):\n");
+			List<Map.Entry<Long, OOCCache.StreamIOStats>> top = stats.entrySet().stream()
+				.filter(e -> reads ? e.getValue().readBytes() > 0 : e.getValue().writeBytes() > 0)
+				.sorted(Comparator.comparingLong((Map.Entry<Long, OOCCache.StreamIOStats> e) ->
+					reads ? e.getValue().readBytes() : e.getValue().writeBytes()).reversed()
+					.thenComparingLong(Map.Entry::getKey))
+				.limit(Math.max(0, count)).toList();
+			if(top.isEmpty())
+				sb.append("    -\n");
+			else {
+				for(Map.Entry<Long, OOCCache.StreamIOStats> entry : top) {
+					OOCCache.StreamIOStats io = entry.getValue();
+					sb.append(String.format(Locale.US, "    stream %d: read=%d B, write=%d B",
+						entry.getKey(), io.readBytes(), io.writeBytes()));
+					if(io.annotation() != null && !io.annotation().isEmpty())
+						sb.append(" (").append(io.annotation()).append(')');
+					sb.append('\n');
+				}
+			}
+		}
 		return sb.toString();
 	}
 	

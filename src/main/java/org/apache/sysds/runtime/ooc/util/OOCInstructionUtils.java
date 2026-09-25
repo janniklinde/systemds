@@ -167,15 +167,21 @@ public final class OOCInstructionUtils {
 	}
 
 	public static OOCStreamable<IndexedMatrixValue> sourceRead(OOCStream<IndexedMatrixValue> output,
-		CacheableData<?> data, String path, long rows, long cols, int blocksize, long nonZeros, long bulkBytes,
-		long productionLimit, StreamContext context) {
+		CacheableData<?> data, String sourceName, String path, long rows, long cols, int blocksize, long nonZeros,
+		long bulkBytes, long productionLimit, StreamContext context) {
 		output.assignPrimitive(new SourceReadOOCPrimitive(output, path, rows, cols, blocksize, nonZeros, bulkBytes,
 			productionLimit, context));
 		long partitionBytes = ConfigurationManager.getDMLConfig()
 			.getLongValue(DMLConfig.OOC_MATERIALIZED_PARTITION_BYTES);
-		if(partitionBytes > 0 && rows > 1 && cols > 1)
-			return new PartitionedStoreStreamable(output, data, partitionBytes);
-		return new MaterializedStoreStreamable(output, data);
+		String annotation = "source " + sourceName + " from " + path;
+		if(partitionBytes > 0 && rows > 1 && cols > 1) {
+			PartitionedStoreStreamable store = new PartitionedStoreStreamable(output, data, partitionBytes);
+			store.annotate(annotation);
+			return store;
+		}
+		MaterializedStoreStreamable store = new MaterializedStoreStreamable(output, data);
+		store.annotate(annotation);
+		return store;
 	}
 
 	public static void ctable(List<OOCStreamable<IndexedMatrixValue>> inputs, OOCStream<IndexedMatrixValue> output,

@@ -84,6 +84,7 @@ public final class MaterializedStore<T extends SpillableObject> {
 			throw new IllegalArgumentException("Materialized store requires at least one consumer.");
 		_cache = cache;
 		_streamId = streamId;
+		_cache.annotateStream(streamId, "MaterializedStore#" + streamId);
 		if(cache instanceof OOCPackedCache packed)
 			packed.enablePacking(streamId);
 		_registeredReaders = new ArrayList<>();
@@ -237,6 +238,10 @@ public final class MaterializedStore<T extends SpillableObject> {
 			MatrixIndexes indexes = _layout.delinearize((int) slot, _characteristics);
 			return policy.applyAsLong(indexes.getRowIndex(), indexes.getColumnIndex());
 		});
+	}
+
+	public void annotate(String annotation) {
+		_cache.annotateStream(_streamId, annotation);
 	}
 
 	public OrderedMaterializedStoreReader<T> openReader(AccessPattern pattern, MemoryAllowance allowance,
