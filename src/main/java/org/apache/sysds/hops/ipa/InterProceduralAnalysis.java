@@ -142,10 +142,8 @@ public class InterProceduralAnalysis {
 		//would require an update of the function call graph
 		_passes.add(new IPAPassForwardFunctionCalls());
 		_passes.add(new IPAPassApplyStaticAndDynamicHopRewrites());
-		if (DMLScript.USE_OOC) {
+		if (DMLScript.USE_OOC)
 			_passes.add(new IPAPassPruneUnreachableHops());
-			_passes.add(new IPAPassInjectOOCTee());
-		}
 	}
 	
 	public InterProceduralAnalysis(StatementBlock sb) {

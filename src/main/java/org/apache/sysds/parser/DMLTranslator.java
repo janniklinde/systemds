@@ -80,6 +80,7 @@ import org.apache.sysds.lops.Lop;
 import org.apache.sysds.lops.LopsException;
 import org.apache.sysds.lops.compile.Dag;
 import org.apache.sysds.lops.rewrite.LopRewriter;
+import org.apache.sysds.lops.rewrite.RewriteInjectOOCTeeLop;
 import org.apache.sysds.parser.PrintStatement.PRINTTYPE;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.BasicProgramBlock;
@@ -316,6 +317,8 @@ public class DMLTranslator
 	}
 
 	public void rewriteLopDAG(DMLProgram dmlp) {
+		if(DMLScript.USE_OOC)
+			RewriteInjectOOCTeeLop.rewriteProgram(dmlp);
 		LopRewriter rewriter = new LopRewriter();
 		rewriter.rewriteProgramLopDAGs(dmlp);
 	}

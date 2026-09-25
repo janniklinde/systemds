@@ -61,10 +61,11 @@ import org.apache.sysds.hops.UnaryOp;
 import org.apache.sysds.hops.codegen.SpoofCompiler;
 import org.apache.sysds.hops.rewrite.HopRewriteUtils;
 import org.apache.sysds.hops.rewrite.ProgramRewriter;
-import org.apache.sysds.hops.rewrite.RewriteInjectOOCTee;
 import org.apache.sysds.lops.Lop;
 import org.apache.sysds.lops.compile.Dag;
 import org.apache.sysds.lops.rewrite.LopRewriter;
+import org.apache.sysds.lops.rewrite.RewriteFixIDs;
+import org.apache.sysds.lops.rewrite.RewriteInjectOOCTeeLop;
 import org.apache.sysds.parser.DMLProgram;
 import org.apache.sysds.parser.DataExpression;
 import org.apache.sysds.parser.DataIdentifier;
@@ -369,9 +370,6 @@ public class Recompiler {
 			if( !inplace ) {
 				_rewriter.get().rewriteHopDAG( hops, null );
 				
-				if(DMLScript.USE_OOC)
-					RewriteInjectOOCTee.injectTeesForRecompiledDag( hops );
-				
 				//update stats after rewrites
 				Hop.resetVisitStatus(hops);
 				for( Hop hopRoot : hops )
@@ -411,10 +409,14 @@ public class Recompiler {
 		for( Hop hopRoot : hops ){
 			lops.add(hopRoot.constructLops());
 		}
+		if(DMLScript.USE_OOC)
+			RewriteInjectOOCTeeLop.rewriteRecompiled(sb, lops);
 
 		// dynamic lop rewrites for the updated hop DAGs
 		if (rewrittenHops && sb != null)
-			_lopRewriter.get().rewriteLopDAG(sb, lops);
+			lops = _lopRewriter.get().rewriteLopDAG(sb, lops);
+		if(DMLScript.USE_OOC)
+			RewriteFixIDs.assignNewIDs(lops);
 
 		Dag<Lop> dag = new Dag<>();
 		for (Lop l : lops)

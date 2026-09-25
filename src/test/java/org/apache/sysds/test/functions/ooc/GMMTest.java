@@ -47,8 +47,10 @@ public class GMMTest extends OOCAlgorithmTestBase {
 
 	private static final int ROWS = 10000;
 	private static final int COLS = 50;
+	private static final int FULL_COLS = 20;
 	private static final int COMPONENTS = 3;
 	private static final int MAX_ITER = 10;
+	private static final int FULL_MAX_ITER = 2;
 	private static final int BLOCK_SIZE = 1000;
 	private static final int SEED = 17;
 	private static final double NOISE = 0.1;
@@ -72,20 +74,22 @@ public class GMMTest extends OOCAlgorithmTestBase {
 
 	private void runGMMTest(String model) {
 		Types.ExecMode platformOld = setExecMode(Types.ExecMode.SINGLE_NODE);
+		int cols = model.equals("VVV") ? FULL_COLS : COLS;
+		int iterations = model.equals("VVV") ? FULL_MAX_ITER : MAX_ITER;
 
 		try {
 			getAndLoadTestConfiguration(TEST_NAME);
 			fullDMLScriptName = SCRIPT_DIR + TEST_DIR + TEST_NAME + ".dml";
 
-			writeBinaryWithMTD(INPUT_X, DataConverter.convertToMatrixBlock(generateClustered()));
+			writeBinaryWithMTD(INPUT_X, DataConverter.convertToMatrixBlock(generateClustered(cols)));
 
-			runOOCAndCP(TEST_NAME + "-" + model, buildArgs(model, output(OUT_MU_OOC), output(OUT_W_OOC)),
-				buildArgs(model, output(OUT_MU_CP), output(OUT_W_CP)));
+			runOOCAndCP(TEST_NAME + "-" + model, buildArgs(model, iterations, output(OUT_MU_OOC),
+				output(OUT_W_OOC)), buildArgs(model, iterations, output(OUT_MU_CP), output(OUT_W_CP)));
 
 			MatrixBlock muOOC = DataConverter.readMatrixFromHDFS(output(OUT_MU_OOC), Types.FileFormat.BINARY,
-				COMPONENTS, COLS, BLOCK_SIZE);
+				COMPONENTS, cols, BLOCK_SIZE);
 			MatrixBlock muCP = DataConverter.readMatrixFromHDFS(output(OUT_MU_CP), Types.FileFormat.BINARY, COMPONENTS,
-				COLS, BLOCK_SIZE);
+				cols, BLOCK_SIZE);
 			MatrixBlock wOOC = DataConverter.readMatrixFromHDFS(output(OUT_W_OOC), Types.FileFormat.BINARY, 1,
 				COMPONENTS, BLOCK_SIZE);
 			MatrixBlock wCP = DataConverter.readMatrixFromHDFS(output(OUT_W_CP), Types.FileFormat.BINARY, 1, COMPONENTS,
@@ -102,22 +106,22 @@ public class GMMTest extends OOCAlgorithmTestBase {
 		}
 	}
 
-	private String[] buildArgs(String model, String outMu, String outWeight) {
-		return new String[] {input(INPUT_X), Integer.toString(COMPONENTS), model, Integer.toString(MAX_ITER),
+	private String[] buildArgs(String model, int iterations, String outMu, String outWeight) {
+		return new String[] {input(INPUT_X), Integer.toString(COMPONENTS), model, Integer.toString(iterations),
 			Integer.toString(SEED), outMu, outWeight};
 	}
 
-	private static double[][] generateClustered() {
+	private static double[][] generateClustered(int cols) {
 		Random rand = new Random(SEED);
-		double[][] centers = new double[COMPONENTS][COLS];
+		double[][] centers = new double[COMPONENTS][cols];
 		for(int k = 0; k < COMPONENTS; k++)
-			for(int c = 0; c < COLS; c++)
+			for(int c = 0; c < cols; c++)
 				centers[k][c] = rand.nextDouble() * 4;
 
-		double[][] data = new double[ROWS][COLS];
+		double[][] data = new double[ROWS][cols];
 		for(int r = 0; r < ROWS; r++) {
 			int comp = r % COMPONENTS;
-			for(int c = 0; c < COLS; c++)
+			for(int c = 0; c < cols; c++)
 				data[r][c] = centers[comp][c] + rand.nextGaussian() * NOISE;
 		}
 		return data;

@@ -19,7 +19,6 @@
 
 package org.apache.sysds.runtime.instructions.ooc;
 
-import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.instructions.InstructionUtils;
@@ -148,17 +147,11 @@ public class TeeOOCInstruction extends ComputationOOCInstruction {
 
 	public static TeeOOCInstruction parseInstruction(String str) {
 		String[] parts = InstructionUtils.getInstructionPartsWithValueType(str);
-		InstructionUtils.checkNumFields(parts, parts.length == 4 ? 3 : 2);
+		InstructionUtils.checkNumFields(parts, 2);
 		String opcode = parts[0];
 		CPOperand in1 = new CPOperand(parts[1]);
 		CPOperand out = new CPOperand(parts[2]);
-		TeeOOCInstruction instruction = new TeeOOCInstruction(OOCType.Tee, in1, out, opcode, str);
-		if(parts.length == 4) {
-			String[] fanout = parts[3].split(":");
-			if(!fanout[0].equals("fanout=Row") && !fanout[0].equals("fanout=Col"))
-				throw new DMLRuntimeException("Invalid OOC fanout direction: " + parts[3]);
-		}
-		return instruction;
+		return new TeeOOCInstruction(OOCType.Tee, in1, out, opcode, str);
 	}
 
 	public void processInstruction(ExecutionContext ec) {

@@ -19,7 +19,6 @@
 
 package org.apache.sysds.test.component.ooc;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -28,20 +27,17 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
 
 import org.apache.sysds.common.Types.FileFormat;
 import org.apache.sysds.common.Types.AggOp;
 import org.apache.sysds.common.Types.DataType;
 import org.apache.sysds.common.Types.Direction;
 import org.apache.sysds.common.Types.OpOpData;
-import org.apache.sysds.common.Types.OpOp2;
 import org.apache.sysds.common.Types.OpOp1;
 import org.apache.sysds.common.Types.ValueType;
 import org.apache.sysds.hops.DataOp;
 import org.apache.sysds.hops.Hop;
 import org.apache.sysds.hops.rewrite.HopRewriteUtils;
-import org.apache.sysds.hops.rewrite.RewriteInjectOOCTee;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.LocalVariableMap;
 import org.apache.sysds.runtime.controlprogram.caching.MatrixObject;
@@ -67,7 +63,6 @@ import org.apache.sysds.runtime.ooc.primitives.BroadcastOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.BroadcastStreamingOOCPrimitive;
 import org.apache.sysds.runtime.ooc.primitives.GeneralMMultOOCPrimitive;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
-import org.apache.sysds.runtime.ooc.primitives.FanoutOOCPrimitive;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.memory.InMemoryQueueCallback;
@@ -79,7 +74,6 @@ import org.apache.sysds.runtime.ooc.util.OOCInstructionUtils;
 import org.apache.sysds.runtime.ooc.util.StateTableUtils;
 import org.junit.Assert;
 import org.junit.Test;
-import org.mockito.Mockito;
 
 public class OOCInstructionUtilsTest {
 	@Test
@@ -152,52 +146,15 @@ public class OOCInstructionUtilsTest {
 	}
 
 	@Test
-	public void testBandFanoutForRowLocalCentroidUpdate() {
+	public void testBandStreamingThroughSkinnyMatmulAndSquare() {
 		Hop x = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
 			40000, 200, -1, 100);
-		Hop tee = HopRewriteUtils.createDataOp("tee", x, OpOpData.TEE);
 		Hop c = new DataOp("Ct", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
 			200, 10, -1, 100);
-		Hop d = HopRewriteUtils.createMatrixMultiply(tee, c);
-		Hop mins = HopRewriteUtils.createAggUnaryOp(d, AggOp.MIN, Direction.Row);
-		Hop p = HopRewriteUtils.createBinary(d, mins, OpOp2.LESSEQUAL);
-		Hop normalized = HopRewriteUtils.createBinary(p,
-			HopRewriteUtils.createAggUnaryOp(p, AggOp.SUM, Direction.Row), OpOp2.DIV);
-		Hop assignments = HopRewriteUtils.createDataOp("P", normalized, OpOpData.TEE);
-		Hop transposed = HopRewriteUtils.createTranspose(assignments);
-		HopRewriteUtils.createAggUnaryOp(assignments, AggOp.SUM, Direction.Col);
-		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandFanoutDirection(assignments));
-		Hop update = HopRewriteUtils.createMatrixMultiply(transposed, tee);
-		Assert.assertEquals(List.of(d, update), HopRewriteUtils.getBandFanoutConsumers(tee, Direction.Row));
-		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandFanoutDirection(tee));
-		Hop global = HopRewriteUtils.createAggUnaryOp(d, AggOp.SUM, Direction.Col);
-		Hop invalid = HopRewriteUtils.createBinary(d, global, OpOp2.MULT);
-		HopRewriteUtils.createMatrixMultiply(HopRewriteUtils.createTranspose(invalid), tee);
-		Assert.assertEquals(List.of(d, update), HopRewriteUtils.getBandFanoutConsumers(tee, Direction.Row));
-	}
-
-	@Test
-	public void testBandFanoutThroughSkinnyMatmulAndSquare() {
-		Hop x = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
-			40000, 200, -1, 100);
-		Hop tee = HopRewriteUtils.createDataOp("tee", x, OpOpData.TEE);
-		Hop c = new DataOp("Ct", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
-			200, 10, -1, 100);
-		Hop product = HopRewriteUtils.createMatrixMultiply(tee, c);
+		Hop product = HopRewriteUtils.createMatrixMultiply(x, c);
 		Hop squared = HopRewriteUtils.createUnary(product, OpOp1.POW2);
 		Hop sums = HopRewriteUtils.createAggUnaryOp(squared, AggOp.SUM, Direction.Row);
-		Hop result = HopRewriteUtils.createBinary(tee, sums, OpOp2.MULT);
-		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandStreamingDirection(tee, sums));
-		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandStreamingDirection(tee,
-			HopRewriteUtils.createAggUnaryOp(product, AggOp.SUM_SQ, Direction.Row)));
-		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandFanoutDirection(tee));
-		Assert.assertEquals(List.of(result, product), HopRewriteUtils.getBandFanoutConsumers(tee, Direction.Row));
-		Hop store = HopRewriteUtils.createDataOp("X", tee, OpOpData.TRANSIENTWRITE);
-		RewriteInjectOOCTee.injectBandFanouts(new ArrayList<>(List.of(result, store)));
-		Hop group = result.getInput(0);
-		Assert.assertSame(group, product.getInput(0));
-		Assert.assertSame(tee, store.getInput(0));
-		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandFanoutDirection(group));
+		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandStreamingDirection(x, sums));
 	}
 
 	@Test
@@ -212,198 +169,6 @@ public class OOCInstructionUtilsTest {
 		Assert.assertNull(HopRewriteUtils.getBandStreamingDirection(x,
 			HopRewriteUtils.createAggUnaryOp(product, AggOp.SUM, Direction.Col)));
 	}
-	@Test(timeout = 20000)
-	public void testFanoutFallsBackForInactiveConsumer() {
-		checkLateFanoutReader(true);
-	}
-
-	@Test(timeout = 20000)
-	public void testFanoutFallsBackForReaderOpenedLater() {
-		checkLateFanoutReader(false);
-	}
-
-	@SuppressWarnings("unchecked")
-	private void checkLateFanoutReader(boolean registerSecond) {
-		OOCStreamable<IndexedMatrixValue> input = Mockito.mock(OOCStreamable.class);
-		SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
-		SubscribableTaskQueue<IndexedMatrixValue> replay = new SubscribableTaskQueue<>();
-		Mockito.doReturn(matrixObject(2, 2, 2)).when(input).getData();
-		Mockito.when(input.getReservedReadStream()).thenReturn(source, replay);
-		FanoutOOCPrimitive fanout = new FanoutOOCPrimitive(input, true, 2, new StreamContext());
-		OOCStream<IndexedMatrixValue> first = fanout.getReadStream();
-		OOCStream<IndexedMatrixValue> second = registerSecond ? fanout.getReadStream() : null;
-		if(!registerSecond)
-			fanout.reserveLazyHandle();
-		AtomicInteger received = new AtomicInteger();
-		AtomicInteger terminals = new AtomicInteger();
-		AtomicInteger releases = new AtomicInteger();
-		Consumer<OOCStream.QueueCallback<IndexedMatrixValue>> consumer = callback -> {
-			try(callback) {
-				if(callback.isEos())
-					terminals.incrementAndGet();
-				else {
-					Assert.assertEquals(7, callback.get().getValue().get(0, 0), 0);
-					received.incrementAndGet();
-				}
-			}
-		};
-		first.setSubscriber(consumer);
-		first.start();
-		fanout.scheduleMaterializedStoreDeletion();
-		IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(2, 2, 7d));
-		source.enqueue(new MaterializedCallback<>(StoreLease.create(value, releases::incrementAndGet)));
-		source.closeInput();
-		Assert.assertEquals(1, received.get());
-		Assert.assertEquals(1, terminals.get());
-		Assert.assertEquals(1, releases.get());
-		Assert.assertFalse(fanout.isProcessed());
-		Mockito.verify(input, Mockito.never()).discardHandle();
-		replay.enqueue(new MaterializedCallback<>(StoreLease.create(value, releases::incrementAndGet)));
-		replay.closeInput();
-		if(!registerSecond)
-			second = fanout.getReservedReadStream();
-		second.setSubscriber(consumer);
-		Assert.assertEquals(2, received.get());
-		Assert.assertEquals(2, terminals.get());
-		Assert.assertEquals(2, releases.get());
-		Assert.assertTrue(fanout.isProcessed());
-		Mockito.verify(input, Mockito.times(2)).reserveLazyHandle();
-		Mockito.verify(input, Mockito.times(2)).getReservedReadStream();
-	}
-
-	@Test
-	@SuppressWarnings("unchecked")
-	public void testUnusedFanoutReleasesReaderClaims() {
-		OOCStreamable<IndexedMatrixValue> input = Mockito.mock(OOCStreamable.class);
-		FanoutOOCPrimitive fanout = new FanoutOOCPrimitive(input, true, 2, new StreamContext());
-		fanout.scheduleMaterializedStoreDeletion();
-		Mockito.verify(input, Mockito.times(2)).reserveLazyHandle();
-		Mockito.verify(input, Mockito.times(2)).discardHandle();
-		Assert.assertTrue(fanout.isProcessed());
-	}
-
-	@Test
-	public void testBandFanoutGroupsMatchingConsumersAndPreservesOtherEdges() {
-		Hop x = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
-			40000, 200, -1, 100);
-		Hop tee = HopRewriteUtils.createDataOp("tee", x, OpOpData.TEE);
-		Hop sums = HopRewriteUtils.createAggUnaryOp(tee, AggOp.SUM, Direction.Row);
-		Hop first = HopRewriteUtils.createBinary(tee, sums, OpOp2.MULT);
-		Hop second = HopRewriteUtils.createBinary(tee, sums, OpOp2.DIV);
-		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandFanoutDirection(tee));
-		Hop store = HopRewriteUtils.createDataOp("X", tee, OpOpData.TRANSIENTWRITE);
-		Assert.assertNull(HopRewriteUtils.getBandFanoutDirection(tee));
-		Assert.assertNull(HopRewriteUtils.getBandFanoutDirection(x));
-		RewriteInjectOOCTee.injectBandFanouts(new ArrayList<>(List.of(first, second, store)));
-		Hop group = first.getInput(0);
-		Assert.assertNotSame(tee, group);
-		Assert.assertSame(group, second.getInput(0));
-		Assert.assertSame(group, sums.getInput(0));
-		Assert.assertSame(tee, store.getInput(0));
-		Assert.assertSame(tee, group.getInput(0));
-		Assert.assertEquals(3, group.getParent().size());
-		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandFanoutDirection(group));
-		RewriteInjectOOCTee.injectBandFanouts(new ArrayList<>(List.of(first, second, store)));
-		Assert.assertSame(group, first.getInput(0));
-		Assert.assertSame(tee, group.getInput(0));
-	}
-
-	@Test
-	public void testCachedFanoutSharesLeaseAfterPlanStartup() {
-		MatrixObject matrix = matrixObject(2, 2, 2);
-		SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
-		input.setData(matrix);
-		FanoutOOCPrimitive fanout = new FanoutOOCPrimitive(input, true, 2, new StreamContext());
-		OOCStream<IndexedMatrixValue> first = fanout.getReadStream();
-		AtomicReference<OOCStream.QueueCallback<IndexedMatrixValue>> held = new AtomicReference<>();
-		AtomicInteger terminals = new AtomicInteger();
-		first.setSubscriber(callback -> {
-			try(callback) {
-				if(callback.isEos())
-					terminals.incrementAndGet();
-				else
-					held.set(callback.keepOpen());
-			}
-		});
-		fanout.tryStartExecution();
-		IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(2, 2, 7d));
-		AtomicInteger releases = new AtomicInteger();
-		input.enqueue(new MaterializedCallback<>(StoreLease.create(value, releases::incrementAndGet)));
-		Assert.assertNull(held.get());
-		OOCStream<IndexedMatrixValue> second = fanout.getReadStream();
-		AtomicInteger received = new AtomicInteger();
-		second.setSubscriber(callback -> {
-			try(callback) {
-				if(callback.isEos())
-					terminals.incrementAndGet();
-				else {
-					Assert.assertSame(value, callback.get());
-					received.incrementAndGet();
-				}
-			}
-		});
-		Assert.assertNull(held.get());
-		fanout.onPlanStarted();
-		Assert.assertSame(value, held.get().get());
-		Assert.assertEquals(1, received.get());
-		Assert.assertEquals(0, releases.get());
-		held.get().close();
-		Assert.assertEquals(1, releases.get());
-		input.closeInput();
-		Assert.assertEquals(2, terminals.get());
-		Assert.assertTrue(fanout.isProcessed());
-	}
-
-	@Test
-	public void testLiveFanoutSupportsThreeConsumers() {
-		MatrixObject matrix = matrixObject(2, 2, 2);
-		SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
-		input.setData(matrix);
-		FanoutOOCPrimitive fanout = new FanoutOOCPrimitive(input, true, 3, new StreamContext());
-		IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(2, 2, 7d));
-		AtomicInteger received = new AtomicInteger();
-		AtomicInteger terminals = new AtomicInteger();
-		AtomicInteger releases = new AtomicInteger();
-		for(int i = 0; i < 3; i++) {
-			OOCStream<IndexedMatrixValue> output = fanout.getReadStream();
-			output.setSubscriber(callback -> {
-				try(callback) {
-					if(callback.isEos())
-						terminals.incrementAndGet();
-					else {
-						Assert.assertSame(value, callback.get());
-						received.incrementAndGet();
-					}
-				}
-			});
-			if(i == 0)
-				output.start();
-			if(i < 2)
-				Assert.assertEquals(0, received.get());
-		}
-		input.enqueue(new MaterializedCallback<>(StoreLease.create(value, releases::incrementAndGet)));
-		Assert.assertEquals(3, received.get());
-		Assert.assertEquals(1, releases.get());
-		input.closeInput();
-		Assert.assertEquals(3, terminals.get());
-	}
-
-	@Test(timeout = 20000)
-	public void testFanoutRejectsNonMaterializedCallbacks() {
-		SubscribableTaskQueue<IndexedMatrixValue> input = new SubscribableTaskQueue<>();
-		input.setData(matrixObject(2, 2, 2));
-		FanoutOOCPrimitive fanout = new FanoutOOCPrimitive(input, true, 2, new StreamContext());
-		OOCStream<IndexedMatrixValue> first = fanout.getReadStream();
-		OOCStream<IndexedMatrixValue> second = fanout.getReadStream();
-		first.setSubscriber(OOCStream.QueueCallback::close);
-		second.setSubscriber(OOCStream.QueueCallback::close);
-		first.start();
-		input.enqueue(new IndexedMatrixValue(new MatrixIndexes(1, 1), new MatrixBlock(2, 2, 7d)));
-		Assert.assertNotNull(fanout.getFailure());
-		Assert.assertTrue(fanout.getFailure().getMessage().contains("requires materialized callbacks"));
-		Assert.assertTrue(fanout.isProcessed());
-	}
-
 	@Test(timeout = 20000)
 	public void testStateInsertionTransfersManagedPayloadWithoutReservation() throws Exception {
 		OOCCacheManager.reset();
@@ -648,16 +413,12 @@ public class OOCInstructionUtilsTest {
 	}
 
 	@Test
-	public void testBandStreamingRecognitionThroughTees() {
+	public void testBandStreamingRecognition() {
 		Hop x = new DataOp("X", DataType.MATRIX, ValueType.FP64, OpOpData.TRANSIENTREAD, null,
 			40000, 200, -1, 100);
-		Hop tee = HopRewriteUtils.createDataOp("tee", x, OpOpData.TEE);
-		Hop nested = HopRewriteUtils.createDataOp("nested", tee, OpOpData.TEE);
-		Hop sums = HopRewriteUtils.createAggUnaryOp(nested, AggOp.SUM, Direction.Row);
-		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandStreamingDirection(tee, sums));
-		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandStreamingDirection(x,
-			HopRewriteUtils.createDataOp("summaryTee", sums, OpOpData.TEE)));
-		Assert.assertEquals(Direction.Col, HopRewriteUtils.getBandStreamingDirection(nested,
+		Hop sums = HopRewriteUtils.createAggUnaryOp(x, AggOp.SUM, Direction.Row);
+		Assert.assertEquals(Direction.Row, HopRewriteUtils.getBandStreamingDirection(x, sums));
+		Assert.assertEquals(Direction.Col, HopRewriteUtils.getBandStreamingDirection(x,
 			HopRewriteUtils.createAggUnaryOp(x, AggOp.SUM, Direction.Col)));
 		Assert.assertNull(HopRewriteUtils.getBandStreamingDirection(x,
 			HopRewriteUtils.createAggUnaryOp(x, AggOp.SUM, Direction.RowCol)));

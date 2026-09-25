@@ -20,7 +20,6 @@
 package org.apache.sysds.test.functions.ooc;
 
 import org.apache.sysds.common.Types;
-import org.apache.sysds.hops.rewrite.RewriteInjectOOCTee;
 import org.apache.sysds.runtime.io.MatrixWriter;
 import org.apache.sysds.runtime.io.MatrixWriterFactory;
 import org.apache.sysds.runtime.matrix.data.LibCommonsMath;
@@ -38,10 +37,10 @@ import org.junit.Test;
 
 import java.io.IOException;
 
-public class lmDSTest extends AutomatedTestBase {
+public class LmDSTest extends AutomatedTestBase {
 	private final static String TEST_NAME1 = "lmDS";
 	private final static String TEST_DIR = "functions/ooc/";
-	private final static String TEST_CLASS_DIR = TEST_DIR + lmDSTest.class.getSimpleName() + "/";
+	private final static String TEST_CLASS_DIR = TEST_DIR + LmDSTest.class.getSimpleName() + "/";
 	private final static double eps = 1e-10;
 	private static final String INPUT_NAME = "X";
 	private static final String INPUT_NAME2 = "y";
@@ -71,12 +70,8 @@ public class lmDSTest extends AutomatedTestBase {
 	private void runMatrixVectorMultiplicationTest(int cols)
 	{
 		Types.ExecMode platformOld = setExecMode(Types.ExecMode.SINGLE_NODE);
-		boolean oldFlag = RewriteInjectOOCTee.APPLY_ONLY_XtX_PATTERN;
-		
 		try
 		{
-			RewriteInjectOOCTee.APPLY_ONLY_XtX_PATTERN = true;
-			
 			getAndLoadTestConfiguration(TEST_NAME1);
 			String HOME = SCRIPT_DIR + TEST_DIR;
 			fullDMLScriptName = HOME + TEST_NAME1 + ".dml";
@@ -121,7 +116,6 @@ public class lmDSTest extends AutomatedTestBase {
 		}
 		finally {
 			resetExecMode(platformOld);
-			RewriteInjectOOCTee.APPLY_ONLY_XtX_PATTERN = oldFlag;
 		}
 	}
 }

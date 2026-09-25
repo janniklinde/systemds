@@ -59,11 +59,15 @@ public class RewriteFixIDs extends LopRewriteRule
 
 	private void assignNewIDStatementBlock(StatementBlock sb) {
 		// Reset the IDs in a depth-first manner
-		if (sb.getLops() != null && !sb.getLops().isEmpty()) {
-			for (Lop root : sb.getLops())
-				assignNewIDLop(root);
-			sb.getLops().forEach(Lop::resetVisitStatus);
-		}
+		if (sb.getLops() != null && !sb.getLops().isEmpty())
+			assignNewIDs(sb.getLops());
+	}
+
+	public static void assignNewIDs(List<Lop> roots) {
+		RewriteFixIDs rewrite = new RewriteFixIDs();
+		for(Lop root : roots)
+			rewrite.assignNewIDLop(root);
+		roots.forEach(Lop::resetVisitStatus);
 	}
 
 	private void assignNewIDLop(Lop lop) {
