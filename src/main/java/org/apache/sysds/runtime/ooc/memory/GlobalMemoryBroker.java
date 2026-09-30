@@ -35,13 +35,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class GlobalMemoryBroker implements MemoryBroker {
 	private static final long RECLAIM_RETRY_DELAY_MS = 2;
-	/**
-	 * Fraction of the broker budget above which buffered callbacks are force-parked into the cache. Matches the onset
-	 * of {@link BrokerMode#STRICT} (see {@link #updateMode()}): strict mode is the engine's own definition of "memory
-	 * is tight", and it is where admission starts refusing, so the valve has to be armed by then.
-	 */
-	private static final double PURGE_PRESSURE = Double
-		.parseDouble(System.getProperty("sysds.ooc.purge.pressure", "0.80"));
 	private static final ScheduledThreadPoolExecutor RECLAIM_EXECUTOR = createReclaimExecutor();
 
 	private enum BrokerMode {
@@ -115,6 +108,8 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	}
 
 	private final long _allowedBytes;
+	private final long _purgeFreeBytes;
+	private final long _strictFreeBytes;
 	private final CopyOnWriteArrayList<MemoryAllowance> _allowances;
 	private final AtomicBoolean _reclaimRunning;
 	private final AtomicBoolean _purgeRunning;
@@ -132,7 +127,12 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	}
 
 	public GlobalMemoryBroker(long allowedBytes) {
+		DMLConfig conf = ConfigurationManager.getDMLConfig();
 		_allowedBytes = allowedBytes;
+		// TODO Review the absolute free-memory thresholds for unusually small broker budgets.
+		_purgeFreeBytes = conf.getLongValue(DMLConfig.OOC_MEM_BROKER_PURGE_FREE);
+		_strictFreeBytes = Math.max(conf.getLongValue(DMLConfig.OOC_MEM_BROKER_STRICT_FREE),
+			(long) (allowedBytes * (1 - conf.getDoubleValue(DMLConfig.OOC_MEM_BROKER_STRICT_FRACTION))));
 		_usedBytes = 0;
 		_allowances = new CopyOnWriteArrayList<>();
 		_reclaimRunning = new AtomicBoolean(false);
@@ -212,7 +212,16 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	}
 
 	private synchronized boolean hasPurgePressure() {
-		return _usedBytes >= (long) (_allowedBytes * PURGE_PRESSURE);
+		return _allowedBytes - _usedBytes <= _purgeFreeBytes;
+	}
+
+	private boolean hasStarvedReservation() {
+		// TODO Review first-task starvation separately from ordinary producer backpressure.
+		long free = _allowedBytes - getUsedMemory();
+		for(MemoryAllowance allowance : _allowances)
+			if(allowance instanceof SyncMemoryAllowance sync && sync.getUnallocatedReservationBytes() > free)
+				return true;
+		return false;
 	}
 
 	/**
@@ -223,12 +232,14 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		boolean storeBacked = this == SOURCE_BROKER;
 		if((this != BROKER && !storeBacked) || !_purgeRunning.compareAndSet(false, true))
 			return;
-		if(storeBacked)
-			Statistics.incrementOOCSourceBrokerPurge();
-		else
-			Statistics.incrementOOCGlobalBrokerPurge();
 		RECLAIM_EXECUTOR.execute(() -> {
 			try {
+				if(!hasPurgePressure() && !hasStarvedReservation())
+					return;
+				if(storeBacked)
+					Statistics.incrementOOCSourceBrokerPurge();
+				else
+					Statistics.incrementOOCGlobalBrokerPurge();
 				if(storeBacked)
 					SubscribableTaskQueue.purgeBufferedStore();
 				else
@@ -260,7 +271,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 		}
 		finally {
 			Statistics.accumulateOOCMemoryReclaimTime(System.nanoTime() - nanos);
-			if(shouldRetryReclaim())
+			if(hasPurgePressure() || hasStarvedReservation())
 				schedulePurge();
 			if(shouldRetryReclaim())
 				RECLAIM_EXECUTOR.schedule(this::runReclaim, RECLAIM_RETRY_DELAY_MS, TimeUnit.MILLISECONDS);
@@ -273,8 +284,17 @@ public class GlobalMemoryBroker implements MemoryBroker {
 	}
 
 	private boolean shouldRetryReclaim() {
-		if(!hasReclaimPressure())
-			return false;
+		if(!hasReclaimPressure() && !hasStarvedReservation()) {
+			boolean reclaimable = false;
+			for(MemoryAllowance allowance : _allowances) {
+				if(allowance.getGrantedMemory() > allowance.getUsedMemory()) {
+					reclaimable = true;
+					break;
+				}
+			}
+			if(!reclaimable)
+				return false;
+		}
 		for(MemoryAllowance allowance : _allowances) {
 			if(allowance instanceof SyncMemoryAllowance sync && sync.hasReservationWaiters())
 				return true;
@@ -288,7 +308,7 @@ public class GlobalMemoryBroker implements MemoryBroker {
 
 	private boolean updateMode() {
 		long free = _allowedBytes - _usedBytes;
-		BrokerMode newMode = free > _allowedBytes / 5 ? BrokerMode.RELAXED : BrokerMode.STRICT;
+		BrokerMode newMode = free > _strictFreeBytes ? BrokerMode.RELAXED : BrokerMode.STRICT;
 		if(newMode == _brokerMode)
 			return false;
 		if(DMLScript.OOC_STATISTICS && newMode == BrokerMode.STRICT)

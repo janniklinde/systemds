@@ -196,7 +196,7 @@ public final class CartesianOOCPrimitive extends OOCPrimitive {
 	private void startStreaming() {
 		OOCStream<IndexedMatrixValue> streamed = getInputReadStream(0);
 		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(streamed, _allowance,
-			value -> taskBytes(OOCUtils.memoryCharge(value)), true);
+			this::taskBytes, true);
 		getContext().addInStream(streamed, admitted);
 		admitted.setSubscriber(this::accept);
 	}

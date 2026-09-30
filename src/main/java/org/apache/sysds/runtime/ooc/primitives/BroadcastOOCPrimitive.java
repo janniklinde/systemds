@@ -219,8 +219,8 @@ public final class BroadcastOOCPrimitive extends OOCPrimitive {
 		long outputCharge = Math.max(_maxOutputBytes,
 			OOCUtils.estimateFullTileBytes(_output.getDataCharacteristics()));
 		OOCStream<IndexedMatrixValue> streamed = getInputReadStream(0);
-		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(streamed, _allowance, value ->
-			pinCharge * 2 + OOCUtils.memoryCharge(value) * 2 + outputCharge, true);
+		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(streamed, _allowance,
+			inputBytes -> pinCharge * 2 + inputBytes * 2 + outputCharge, true);
 		getContext().addInStream(streamed, admitted);
 		admitted.setSubscriber(this::accept);
 	}

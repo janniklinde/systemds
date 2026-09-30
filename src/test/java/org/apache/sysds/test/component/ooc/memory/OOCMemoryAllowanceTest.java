@@ -19,6 +19,8 @@
 
 package org.apache.sysds.test.component.ooc.memory;
 
+import org.apache.sysds.conf.ConfigurationManager;
+import org.apache.sysds.conf.DMLConfig;
 import org.apache.sysds.runtime.DMLRuntimeException;
 import org.apache.sysds.runtime.controlprogram.context.ExecutionContext;
 import org.apache.sysds.runtime.functionobjects.Plus;
@@ -31,6 +33,7 @@ import org.apache.sysds.runtime.matrix.data.MatrixIndexes;
 import org.apache.sysds.runtime.matrix.operators.BinaryOperator;
 import org.apache.sysds.runtime.matrix.operators.RightScalarOperator;
 import org.apache.sysds.runtime.ooc.cache.OOCCacheManager;
+import org.apache.sysds.runtime.ooc.cache.OOCCache;
 import org.apache.sysds.runtime.ooc.cache.OOCFuture;
 import org.apache.sysds.runtime.ooc.memory.CachedAllowance;
 import org.apache.sysds.runtime.ooc.memory.GlobalMemoryBroker;
@@ -40,28 +43,266 @@ import org.apache.sysds.runtime.ooc.memory.MemoryBroker;
 import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
+import org.apache.sysds.runtime.ooc.stream.OwnedGroupQueueCallback;
+import org.apache.sysds.test.component.ooc.cache.OOCCacheTestUtils;
 import org.apache.sysds.utils.stats.InfrastructureAnalyzer;
 import org.junit.Assert;
+import org.junit.Before;
+import org.junit.After;
 import org.junit.Test;
 import scala.Tuple3;
 
 import java.util.ArrayList;
+import java.lang.reflect.Field;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
 public class OOCMemoryAllowanceTest {
+	private DMLConfig _previousConfig;
+
+	@Before
+	public void configureSmallBrokers() {
+		_previousConfig = ConfigurationManager.getDMLConfig();
+		DMLConfig config = new DMLConfig();
+		config.setTextValue(DMLConfig.OOC_MEM_BROKER_STRICT_FREE, "0");
+		config.setTextValue(DMLConfig.OOC_MEM_BROKER_STRICT_FRACTION, "0.8");
+		config.setTextValue(DMLConfig.OOC_MEM_BROKER_PURGE_FREE, "0");
+		ConfigurationManager.setLocalConfig(config);
+	}
+
+	@After
+	public void restoreConfig() {
+		ConfigurationManager.setLocalConfig(_previousConfig);
+	}
+
+	@Test
+	public void testConfiguredStrictThresholds() {
+		long mb = 1L << 20;
+		DMLConfig config = ConfigurationManager.getDMLConfig();
+		config.setTextValue(DMLConfig.OOC_MEM_BROKER_STRICT_FREE, String.valueOf(100 * mb));
+		config.setTextValue(DMLConfig.OOC_MEM_BROKER_STRICT_FRACTION, "0.85");
+		for(long capacity : new long[] {1000 * mb, 256 * mb}) {
+			GlobalMemoryBroker broker = new GlobalMemoryBroker(capacity);
+			SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);
+			long threshold = capacity == 1000 * mb ? 850 * mb : 156 * mb;
+			try {
+				allowance.setTargetMemory(threshold - mb);
+				allowance.reserveBlocking(threshold - mb);
+				Assert.assertFalse(broker.isStrictMode());
+				allowance.setTargetMemory(threshold);
+				allowance.reserveBlocking(mb);
+				Assert.assertTrue(broker.isStrictMode());
+				allowance.release(threshold);
+				Assert.assertFalse(broker.isStrictMode());
+			}
+			finally {
+				allowance.destroy();
+			}
+		}
+	}
+
+	@Test(timeout = 10000)
+	public void testFirstTaskPurgeRetriesBelowPressure() throws Exception {
+		long mb = 1L << 20;
+		DMLConfig config = ConfigurationManager.getDMLConfig();
+		config.setTextValue(DMLConfig.OOC_MEM_BROKER_STRICT_FREE, String.valueOf(8 * mb));
+		config.setTextValue(DMLConfig.OOC_MEM_BROKER_STRICT_FRACTION, "0.85");
+		config.setTextValue(DMLConfig.OOC_MEM_BROKER_PURGE_FREE, String.valueOf(8 * mb));
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(128 * mb);
+		Field global = GlobalMemoryBroker.class.getDeclaredField("BROKER");
+		global.setAccessible(true);
+		Object previous = global.get(null);
+		Field revive = InMemoryQueueCallback.class.getDeclaredField("REVIVE_ALLOWANCE");
+		revive.setAccessible(true);
+		Object previousRevive = revive.get(null);
+		revive.set(null, null);
+		global.set(null, broker);
+		SyncMemoryAllowance producer = new SyncMemoryAllowance(broker);
+		SyncMemoryAllowance consumer = new SyncMemoryAllowance(broker);
+		CountDownLatch firstPurge = new CountDownLatch(1);
+		SubscribableTaskQueue<IndexedMatrixValue> queue = new SubscribableTaskQueue<>();
+		InMemoryQueueCallback<IndexedMatrixValue> callback = null;
+		try {
+			IndexedMatrixValue value = new IndexedMatrixValue(new MatrixIndexes(1, 1),
+				new MatrixBlock(2048, 2048, 1.0));
+			long bytes = value.size();
+			producer.setTargetMemory(bytes);
+			producer.reserveBlocking(bytes);
+			callback = new InMemoryQueueCallback<>(value, null, producer, bytes) {
+				@Override
+				public long tryPark(OOCCache cache) {
+					long freed = super.tryPark(cache);
+					firstPurge.countDown();
+					return freed;
+				}
+			};
+			queue.enqueue(callback);
+			callback = callback.keepOpen();
+			consumer.setTargetMemory(112 * mb);
+			Assert.assertTrue(broker.getAllowedMemory() - broker.getUsedMemory() > 8 * mb);
+			Assert.assertFalse(broker.isStrictMode());
+			OOCFuture<Void> reservation = consumer.reserveTaskAsync(112 * mb);
+			Assert.assertTrue(firstPurge.await(5, TimeUnit.SECONDS));
+			Assert.assertFalse(reservation.isDone());
+			Assert.assertFalse(callback.isParked());
+			callback.close();
+			callback = null;
+			reservation.get(5, TimeUnit.SECONDS);
+			consumer.release(112 * mb);
+			try(OOCStream.QueueCallback<IndexedMatrixValue> parked = queue.dequeueCB()) {
+				Assert.assertTrue(((InMemoryQueueCallback<?>) parked).isParked());
+				Assert.assertEquals(1.0, parked.get().getValue().get(0, 0), 0);
+			}
+			Assert.assertEquals(0, producer.getUsedMemory());
+			Assert.assertEquals(0, producer.getPassiveMemory());
+		}
+		finally {
+			if(callback != null)
+				callback.close();
+			queue.closeInput();
+			OOCStream.QueueCallback<IndexedMatrixValue> queued;
+			while((queued = queue.pollCB()) != null)
+				queued.close();
+			consumer.destroy();
+			producer.destroy();
+			MemoryAllowance revived = (MemoryAllowance) revive.get(null);
+			if(revived != null)
+				revived.destroy();
+			OOCCacheTestUtils.await(() -> broker.describeAllowances().contains("reclaimerArmed=false"), 5);
+			revive.set(null, previousRevive);
+			global.set(null, previous);
+		}
+	}
+
+	@Test(timeout = 10000)
+	public void largeTaskReclaimsIdleGrantsEvenBelowStrictPressure() throws Exception {
+		long mb = 1L << 20;
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(128 * mb);
+		SyncMemoryAllowance first = new SyncMemoryAllowance(broker, 30 * mb);
+		SyncMemoryAllowance second = new SyncMemoryAllowance(broker, 30 * mb);
+		SyncMemoryAllowance busy = new SyncMemoryAllowance(broker, 30 * mb);
+		SyncMemoryAllowance consumer = new SyncMemoryAllowance(broker, 70 * mb);
+		try {
+			first.reserveBlocking(30 * mb);
+			second.reserveBlocking(30 * mb);
+			busy.reserveBlocking(30 * mb);
+			OOCFuture<Void> task = consumer.reserveTaskAsync(70 * mb);
+			Assert.assertFalse(task.isDone());
+			Assert.assertEquals(0, consumer.getGrantedMemory());
+			first.release(30 * mb);
+			second.release(30 * mb);
+			task.get(5, TimeUnit.SECONDS);
+			Assert.assertEquals(30 * mb, busy.getUsedMemory());
+			consumer.release(70 * mb);
+			busy.release(30 * mb);
+		}
+		finally {
+			first.destroy();
+			second.destroy();
+			busy.destroy();
+			consumer.destroy();
+		}
+	}
+
 	private static final int TILES = 20000;
 
 	@Test
-	public void testAllocatedStreamInstallsConsumerBeforeStartingInput() {
+	public void testAllocatedStreamSizesResidentAndParkedCallbacks() {
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
+		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);
+		AtomicInteger reads = new AtomicInteger();
+		AtomicInteger delivered = new AtomicInteger();
+		SubscribableTaskQueue<Integer> source = new SubscribableTaskQueue<>();
+		source.enqueue(new OOCStream.SimpleQueueCallback<Integer>(2, null) {
+			@Override
+			public long getBytes() {
+				return 2;
+			}
+		});
+		source.enqueue(new OOCStream.QueueCallback<Integer>() {
+			@Override
+			public long getBytes() {
+				return 6;
+			}
+
+			@Override
+			public Integer get() {
+				reads.incrementAndGet();
+				return 1;
+			}
+
+			@Override
+			public OOCStream.QueueCallback<Integer> keepOpen() {
+				return this;
+			}
+
+			@Override
+			public void close() {}
+
+			@Override
+			public void fail(DMLRuntimeException failure) {}
+
+			@Override
+			public boolean isEos() {
+				return false;
+			}
+
+			@Override
+			public boolean isFailure() {
+				return false;
+			}
+		});
+		source.enqueue(new OwnedGroupQueueCallback<>(List.of(
+			new OOCStream.SimpleQueueCallback<Integer>(1, null) {
+				@Override
+				public long getBytes() {
+					return 1;
+				}
+			},
+			new OOCStream.SimpleQueueCallback<Integer>(3, null) {
+				@Override
+				public long getBytes() {
+					return 3;
+				}
+			})));
+		source.closeInput();
+		try {
+			AllocatedOOCStream<Integer> allocated = new AllocatedOOCStream<>(source, allowance,
+				bytes -> bytes * 10L, true);
+			allocated.setSubscriber(callback -> {
+				try(callback) {
+					if(!callback.isEos()) {
+						int index = delivered.getAndIncrement();
+						Assert.assertEquals(index == 0 ? 20 : index == 1 ? 60 : 30, allowance.getUsedMemory());
+						Assert.assertEquals(0, reads.get());
+						if(index < 2)
+							AllocatedOOCStream.detachBudget(callback).close();
+					}
+				}
+			});
+			Assert.assertEquals(3, delivered.get());
+			Assert.assertEquals(0, reads.get());
+			Assert.assertEquals(0, allowance.getUsedMemory());
+		}
+		finally {
+			allowance.destroy();
+		}
+	}
+
+	@Test
+	public void testAllocatedStreamInstallsConsumerBeforeStartingInput() throws Exception {
 		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
 		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);
 		AtomicInteger delivered = new AtomicInteger();
@@ -76,7 +317,7 @@ public class OOCMemoryAllowanceTest {
 			}
 		};
 		try {
-			AllocatedOOCStream<Integer> allocated = new AllocatedOOCStream<>(source, allowance, value -> 60);
+			AllocatedOOCStream<Integer> allocated = new AllocatedOOCStream<>(source, allowance, 60, false);
 			Assert.assertEquals(0, delivered.get());
 			allocated.setSubscriber(callback -> {
 				try(callback) {
@@ -88,8 +329,168 @@ public class OOCMemoryAllowanceTest {
 			});
 			Assert.assertEquals(2, delivered.get());
 			Assert.assertEquals(0, allowance.getUsedMemory());
+			Field waiting = AllocatedOOCStream.class.getDeclaredField("_waiting");
+			waiting.setAccessible(true);
+			Assert.assertNull(waiting.get(allocated));
 		}
 		finally {
+			allowance.destroy();
+		}
+	}
+
+	@Test(timeout = 10000)
+	public void testAllocatedStreamQueuesOnlyOneReservation() throws Exception {
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
+		AtomicInteger requests = new AtomicInteger();
+		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker) {
+			@Override
+			public OOCFuture<Void> reserveAsync(long bytes) {
+				requests.incrementAndGet();
+				return super.reserveAsync(bytes);
+			}
+		};
+		AtomicInteger delivered = new AtomicInteger();
+		CountDownLatch complete = new CountDownLatch(1);
+		SubscribableTaskQueue<Integer> source = new SubscribableTaskQueue<>();
+		AllocatedOOCStream<Integer> allocated = new AllocatedOOCStream<>(source, allowance, 1, false);
+		try {
+			allowance.reserveBlocking(100);
+			requests.set(0);
+			allocated.setSubscriber(callback -> {
+				try(callback) {
+					if(callback.isEos())
+						complete.countDown();
+					else {
+						Assert.assertEquals(delivered.getAndIncrement(), callback.get().intValue());
+						AllocatedOOCStream.detachBudget(callback).close();
+					}
+				}
+			});
+			for(int i = 0; i < 10000; i++)
+				source.enqueue(i);
+			source.closeInput();
+			Assert.assertEquals(0, delivered.get());
+			Assert.assertEquals(1, requests.get());
+			allowance.release(100);
+			Assert.assertTrue(complete.await(5, TimeUnit.SECONDS));
+			Assert.assertEquals(10000, delivered.get());
+			Assert.assertEquals(10000, requests.get());
+			Assert.assertEquals(0, allowance.getUsedMemory());
+		}
+		finally {
+			allowance.destroy();
+		}
+	}
+
+	@Test(timeout = 10000)
+	public void testAllocatedStreamClosesWaitingPayloadsOnFailure() {
+		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
+		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);
+		SyncMemoryAllowance producer = new SyncMemoryAllowance(new GlobalMemoryBroker(100));
+		SubscribableTaskQueue<Integer> source = new SubscribableTaskQueue<>();
+		AllocatedOOCStream<Integer> allocated = new AllocatedOOCStream<>(source, allowance, 60, false);
+		allocated.setSubscriber(callback -> {
+			try(callback) {
+				ReservationBudget budget = AllocatedOOCStream.detachBudget(callback);
+				if(budget != null)
+					budget.close();
+			}
+		});
+		try {
+			allowance.reserveBlocking(100);
+			for(int i = 0; i < 2; i++) {
+				producer.reserveBlocking(10);
+				source.enqueue(new InMemoryQueueCallback<>(i, null, producer, 10));
+			}
+			Assert.assertEquals(20, producer.getUsedMemory());
+			allocated.propagateFailure(new DMLRuntimeException("injected failure"));
+			Assert.assertEquals(0, producer.getUsedMemory());
+			allowance.release(100);
+			Assert.assertEquals(0, allowance.getUsedMemory());
+		}
+		finally {
+			producer.destroy();
+			allowance.destroy();
+		}
+	}
+
+	@Test(timeout = 10000)
+	public void testAllocatedStreamConcurrentWaiters() throws Exception {
+		SyncMemoryAllowance allowance = new SyncMemoryAllowance(new GlobalMemoryBroker(100));
+		SubscribableTaskQueue<Integer> source = new SubscribableTaskQueue<>();
+		AllocatedOOCStream<Integer> allocated = new AllocatedOOCStream<>(source, allowance, 60, false);
+		AtomicIntegerArray seen = new AtomicIntegerArray(4000);
+		CountDownLatch complete = new CountDownLatch(1);
+		CountDownLatch queued = new CountDownLatch(4);
+		CountDownLatch resume = new CountDownLatch(1);
+		ExecutorService pool = Executors.newFixedThreadPool(4);
+		try {
+			allowance.reserveBlocking(100);
+			allocated.setSubscriber(callback -> {
+				try(callback) {
+					if(callback.isEos())
+						complete.countDown();
+					else {
+						Assert.assertEquals(0, seen.getAndIncrement(callback.get()));
+						AllocatedOOCStream.detachBudget(callback).close();
+					}
+				}
+			});
+			List<Future<?>> producers = new ArrayList<>();
+			for(int p = 0; p < 4; p++) {
+				int start = p * 1000;
+				producers.add(pool.submit(() -> {
+					source.enqueue(start);
+					queued.countDown();
+					Assert.assertTrue(resume.await(5, TimeUnit.SECONDS));
+					for(int i = start + 1; i < start + 1000; i++)
+						source.enqueue(i);
+					return null;
+				}));
+			}
+			Assert.assertTrue(queued.await(5, TimeUnit.SECONDS));
+			CompletableFuture<Void> release = CompletableFuture.runAsync(() -> allowance.release(100));
+			resume.countDown();
+			for(Future<?> producer : producers)
+				producer.get(5, TimeUnit.SECONDS);
+			release.get(5, TimeUnit.SECONDS);
+			source.closeInput();
+			Assert.assertTrue(complete.await(5, TimeUnit.SECONDS));
+			for(int i = 0; i < seen.length(); i++)
+				Assert.assertEquals(1, seen.get(i));
+			Assert.assertEquals(0, allowance.getUsedMemory());
+		}
+		finally {
+			pool.shutdownNow();
+			allowance.destroy();
+		}
+	}
+
+	@Test
+	public void testAllocatedStreamAdmitsWhilePreviousTasksAreRunning() {
+		SyncMemoryAllowance allowance = new SyncMemoryAllowance(new GlobalMemoryBroker(100));
+		SubscribableTaskQueue<Integer> source = new SubscribableTaskQueue<>();
+		AllocatedOOCStream<Integer> allocated = new AllocatedOOCStream<>(source, allowance, 40, false);
+		List<ReservationBudget> tasks = new ArrayList<>();
+		allocated.setSubscriber(callback -> {
+			try(callback) {
+				if(!callback.isEos())
+					tasks.add(AllocatedOOCStream.detachBudget(callback));
+			}
+		});
+		try {
+			for(int i = 0; i < 3; i++)
+				source.enqueue(i);
+			source.closeInput();
+			Assert.assertEquals(2, tasks.size());
+			Assert.assertEquals(80, allowance.getUsedMemory());
+			tasks.get(0).close();
+			Assert.assertEquals(3, tasks.size());
+			Assert.assertEquals(80, allowance.getUsedMemory());
+		}
+		finally {
+			for(ReservationBudget task : tasks)
+				task.close();
 			allowance.destroy();
 		}
 	}
@@ -305,7 +706,7 @@ public class OOCMemoryAllowanceTest {
 		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
 		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);
 		SubscribableTaskQueue<Integer> source = new SubscribableTaskQueue<>();
-		AllocatedOOCStream<Integer> allocated = new AllocatedOOCStream<>(source, allowance, value -> 60);
+		AllocatedOOCStream<Integer> allocated = new AllocatedOOCStream<>(source, allowance, 60, false);
 		try {
 			allowance.reserveBlocking(100);
 			source.enqueue(1);
@@ -406,7 +807,7 @@ public class OOCMemoryAllowanceTest {
 		GlobalMemoryBroker broker = new GlobalMemoryBroker(100);
 		SyncMemoryAllowance allowance = new SyncMemoryAllowance(broker);
 		SubscribableTaskQueue<Integer> source = new SubscribableTaskQueue<>();
-		AllocatedOOCStream<Integer> allocated = new AllocatedOOCStream<>(source, allowance, value -> 60);
+		AllocatedOOCStream<Integer> allocated = new AllocatedOOCStream<>(source, allowance, 60, false);
 		allocated.setSubscriber(callback -> {
 			try(callback) {
 				ReservationBudget budget = AllocatedOOCStream.detachBudget(callback);

@@ -389,6 +389,16 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 		return !_reservationWaiters.isEmpty() || !_taskWaiters.isEmpty();
 	}
 
+	long getUnallocatedReservationBytes() {
+		if(_grantedBytes != 0 || _shutdown || _destroyed)
+			return 0;
+		ReservationWaiter waiter = _reservationWaiters.peek();
+		if(waiter != null)
+			return waiter.bytes;
+		waiter = _taskWaiters.peek();
+		return waiter != null && canAdmitTask(waiter.bytes) ? waiter.bytes : 0;
+	}
+
 	private void requestReservationDrain() {
 		synchronized(this) {
 			_reservationDrainRequested = true;
@@ -460,8 +470,10 @@ public class SyncMemoryAllowance implements MemoryAllowance {
 				waiter.future.completeExceptionally(t);
 				continue;
 			}
-			if(!admitted)
+			if(!admitted) {
+				_broker.reservationBlocked(this, waiter.bytes);
 				return;
+			}
 			if(_taskWaiters.remove(waiter))
 				waiter.future.complete(null);
 			else

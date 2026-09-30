@@ -518,6 +518,11 @@ public final class PartitionedStoreStreamable implements OOCStreamable<IndexedMa
 		}
 
 		@Override
+		public IndexedMatrixValue getIfResident() {
+			return _value;
+		}
+
+		@Override
 		public OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
 			return new TileCallback(_value, _owner.keepOpen());
 		}

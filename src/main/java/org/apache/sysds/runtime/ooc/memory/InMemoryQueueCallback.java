@@ -96,6 +96,18 @@ public class InMemoryQueueCallback<T> implements OOCStream.QueueCallback<T> {
 	}
 
 	@Override
+	public T getIfResident() {
+		return _handle.getIfResident();
+	}
+
+	@Override
+	public long getBytes() {
+		synchronized(_handle) {
+			return _handle.isParked() ? _handle._parkBytes : OOCStream.QueueCallback.super.getBytes();
+		}
+	}
+
+	@Override
 	public synchronized InMemoryQueueCallback<T> keepOpen() {
 		if(_closed)
 			throw new IllegalStateException("Cannot keep open a closed callback");
@@ -225,6 +237,10 @@ public class InMemoryQueueCallback<T> implements OOCStream.QueueCallback<T> {
 			if(result == null && _parkKey != null)
 				return revive();
 			return result;
+		}
+
+		private T getIfResident() {
+			return _failure == null ? _result : null;
 		}
 
 		private boolean isParked() {

@@ -89,7 +89,7 @@ public final class ReduceOOCPrimitive<I, O> extends OOCPrimitive {
 		long outputBytes = Math.max(_maxIntermediateBytes,
 			OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics()));
 		long taskBytes = OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes) + 2 * outputBytes;
-		AllocatedOOCStream<I> admitted = new AllocatedOOCStream<>(input, _allowance, ignored -> taskBytes);
+		AllocatedOOCStream<I> admitted = new AllocatedOOCStream<>(input, _allowance, taskBytes, false);
 		getContext().addOutStream(output);
 		OOCInstructionUtils.submitOOCTasks(admitted, callback -> {
 			ReservationBudget budget = null;

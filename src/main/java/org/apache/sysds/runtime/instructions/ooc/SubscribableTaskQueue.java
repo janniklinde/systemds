@@ -199,6 +199,20 @@ public class SubscribableTaskQueue<T> extends LocalTaskQueue<OOCStream.QueueCall
 		return dequeueCB();
 	}
 
+	public synchronized QueueCallback<T> peekCB() {
+		return _data.peekFirst();
+	}
+
+	public QueueCallback<T> pollCB() {
+		QueueCallback<T> callback;
+		synchronized(this) {
+			callback = _data.pollFirst();
+		}
+		if(callback != null)
+			onDeliveryFinished();
+		return callback;
+	}
+
 	@Override
 	public void closeInput() {
 		if(_closed.compareAndSet(false, true)) {

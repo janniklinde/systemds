@@ -154,6 +154,9 @@ public class DMLConfig
 	public static final String OOC_MEM_BROKER_FRACTION = "sysds.ooc.memory.broker.fraction";
 	public static final String OOC_MEM_BROKER_MIN = "sysds.ooc.memory.broker.min";        // in bytes
 	public static final String OOC_MEM_BROKER_MAX = "sysds.ooc.memory.broker.max";        // in bytes, -1 disables the cap
+	public static final String OOC_MEM_BROKER_PURGE_FREE = "sysds.ooc.memory.broker.purge.free";
+	public static final String OOC_MEM_BROKER_STRICT_FREE = "sysds.ooc.memory.broker.strict.free";
+	public static final String OOC_MEM_BROKER_STRICT_FRACTION = "sysds.ooc.memory.broker.strict.fraction";
 	public static final String OOC_MEM_PREFETCH_FRACTION = "sysds.ooc.memory.prefetch.fraction";
 	public static final String OOC_MEM_PREFETCH_MIN = "sysds.ooc.memory.prefetch.min";      // in bytes
 	public static final String OOC_MEM_PREFETCH_MAX = "sysds.ooc.memory.prefetch.max";      // in bytes, -1 disables the cap
@@ -200,6 +203,9 @@ public class DMLConfig
 		_defaultVals.put(OOC_MEM_BROKER_FRACTION, "0.3333");
 		_defaultVals.put(OOC_MEM_BROKER_MIN, String.valueOf(64L * 1024 * 1024)); // 64MB
 		_defaultVals.put(OOC_MEM_BROKER_MAX, String.valueOf(3L * 1024 * 1024 * 1024)); // 3GB
+		_defaultVals.put(OOC_MEM_BROKER_PURGE_FREE, String.valueOf(50L * 1024 * 1024));
+		_defaultVals.put(OOC_MEM_BROKER_STRICT_FREE, String.valueOf(100L * 1024 * 1024));
+		_defaultVals.put(OOC_MEM_BROKER_STRICT_FRACTION, "0.85");
 		_defaultVals.put(OOC_MEM_PREFETCH_FRACTION, "0.1");
 		_defaultVals.put(OOC_MEM_PREFETCH_MIN, String.valueOf(64L * 1024 * 1024));
 		_defaultVals.put(OOC_MEM_PREFETCH_MAX, String.valueOf(1000L * 1024 * 1024)); // 1GB

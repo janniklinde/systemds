@@ -41,6 +41,11 @@ public final class OwnedGroupQueueCallback<T> implements OOCStream.GroupQueueCal
 	}
 
 	@Override
+	public synchronized long getBytes(int index) {
+		return _items.get(index).getBytes();
+	}
+
+	@Override
 	public synchronized OOCStream.QueueCallback<T> getCallback(int index) {
 		if(_closed)
 			throw new IllegalStateException("Cannot open an item from a closed group callback");

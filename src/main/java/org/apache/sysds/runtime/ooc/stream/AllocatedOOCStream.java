@@ -19,7 +19,7 @@
 
 package org.apache.sysds.runtime.ooc.stream;
 
-import java.util.function.ToLongFunction;
+import java.util.function.LongUnaryOperator;
 import java.util.function.Consumer;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -32,25 +32,40 @@ import org.apache.sysds.runtime.ooc.memory.ReservationBudget;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
 
 public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
+	// TODO Review
 	private final OOCStream<T> _source;
 	private final MemoryAllowance _allowance;
-	private final ToLongFunction<T> _reservationSize;
+	private final LongUnaryOperator _reservationFromBytes;
+	private final long _fixedReservationSize;
 	private final boolean _limitPassiveOutput;
 	private final AtomicBoolean _started = new AtomicBoolean();
 	private volatile DMLRuntimeException _failure;
-	private int _pendingReservations;
+	private volatile int _pendingReservations;
+	private SubscribableTaskQueue<T> _waiting;
+	private boolean _reserving;
+	private boolean _drainingReservations;
+	private boolean _reservationDrainRequested;
 	private boolean _sourceComplete;
 	private boolean _outputClosed;
 
-	public AllocatedOOCStream(OOCStream<T> source, MemoryAllowance allowance, ToLongFunction<T> reservationSize) {
-		this(source, allowance, reservationSize, false);
+	public AllocatedOOCStream(OOCStream<T> source, MemoryAllowance allowance, long reservationSize,
+		boolean limitPassiveOutput) {
+		if(reservationSize < 0)
+			throw new IllegalArgumentException("Cannot reserve negative bytes: " + reservationSize);
+		_source = source;
+		_allowance = allowance;
+		_reservationFromBytes = null;
+		_fixedReservationSize = reservationSize;
+		_limitPassiveOutput = limitPassiveOutput;
+		setData(source.getData());
 	}
 
-	public AllocatedOOCStream(OOCStream<T> source, MemoryAllowance allowance, ToLongFunction<T> reservationSize,
+	public AllocatedOOCStream(OOCStream<T> source, MemoryAllowance allowance, LongUnaryOperator reservationFromBytes,
 		boolean limitPassiveOutput) {
 		_source = source;
 		_allowance = allowance;
-		_reservationSize = reservationSize;
+		_reservationFromBytes = reservationFromBytes;
+		_fixedReservationSize = 0;
 		_limitPassiveOutput = limitPassiveOutput;
 		setData(source.getData());
 	}
@@ -108,48 +123,66 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 			return;
 		}
 		try(callback) {
-			long[] groupBytes = null;
-			long bytes;
-			if(callback instanceof OOCStream.GroupQueueCallback<?>) {
-				@SuppressWarnings("unchecked")
-				OOCStream.GroupQueueCallback<T> group = (OOCStream.GroupQueueCallback<T>) callback;
-				groupBytes = new long[group.size()];
-				bytes = 0;
-				for(int i = 0; i < group.size(); i++) {
-					try(OOCStream.QueueCallback<T> item = group.getCallback(i)) {
-						groupBytes[i] = _reservationSize.applyAsLong(item.get());
-						bytes = Math.max(bytes, groupBytes[i]);
-					}
-				}
-			}
-			else
-				bytes = _reservationSize.applyAsLong(callback.get());
-			if(bytes < 0)
-				throw new IllegalArgumentException("Cannot reserve negative bytes: " + bytes);
+			long[] groupBytes = callback instanceof OOCStream.GroupQueueCallback<?> group ? new long[group.size()] : null;
+			long bytes = reservationSize(callback, groupBytes);
 			if(bytes == 0) {
 				enqueueOwned(callback.keepOpen(), null);
 				return;
 			}
-			boolean reserved = _limitPassiveOutput ? _allowance.tryReserveTask(bytes) : _allowance.tryReserve(bytes);
+			boolean reserved = _pendingReservations == 0 &&
+				(_limitPassiveOutput ? _allowance.tryReserveTask(bytes) : _allowance.tryReserve(bytes));
 			if(reserved) {
 				enqueueOwned(callback.keepOpen(), new ReservationBudget(_allowance, bytes), groupBytes);
 				return;
 			}
-			retainUntilAllocated(callback, bytes, groupBytes);
+			retainUntilAllocated(callback);
 		}
 		catch(RuntimeException error) {
 			fail(DMLRuntimeException.of(error));
 		}
 	}
 
-	private void retainUntilAllocated(OOCStream.QueueCallback<T> callback, long bytes, long[] groupBytes) {
+	private long reservationSize(OOCStream.QueueCallback<T> callback, long[] groupBytes) {
+		long bytes = 0;
+		if(groupBytes != null) {
+			OOCStream.GroupQueueCallback<T> group = (OOCStream.GroupQueueCallback<T>) callback;
+			for(int i = 0; i < groupBytes.length; i++) {
+				groupBytes[i] = _reservationFromBytes == null ? _fixedReservationSize : reservationSize(group.getBytes(i));
+				bytes = Math.max(bytes, groupBytes[i]);
+			}
+		}
+		else
+			bytes = _reservationFromBytes == null ? _fixedReservationSize : reservationSize(callback.getBytes());
+		if(bytes < 0)
+			throw new IllegalArgumentException("Cannot reserve negative bytes: " + bytes);
+		return bytes;
+	}
+
+	private long reservationSize(long inputBytes) {
+		if(inputBytes < 0)
+			throw new IllegalStateException("Callback does not report its byte size");
+		return _reservationFromBytes.applyAsLong(inputBytes);
+	}
+
+	private void retainUntilAllocated(OOCStream.QueueCallback<T> callback) {
 		OOCStream.QueueCallback<T> retained = callback.keepOpen();
-		OOCFuture<Void> reservation;
+		SubscribableTaskQueue<T> waiting;
 		synchronized(this) {
-			_pendingReservations++;
+			if(_failure != null)
+				waiting = null;
+			else {
+				if(_waiting == null)
+					_waiting = new SubscribableTaskQueue<>();
+				waiting = _waiting;
+				_pendingReservations++;
+			}
+		}
+		if(waiting == null) {
+			retained.close();
+			return;
 		}
 		try {
-			reservation = _limitPassiveOutput ? _allowance.reserveTaskAsync(bytes) : _allowance.reserveAsync(bytes);
+			waiting.enqueue(retained);
 		}
 		catch(RuntimeException error) {
 			try {
@@ -160,26 +193,126 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 			}
 			throw error;
 		}
-		reservation.whenComplete((ignored, error) -> {
-			try {
-				if(error != null) {
-					fail(DMLRuntimeException.of(error));
-					retained.close();
-				}
-				else if(_failure != null) {
-					_allowance.release(bytes);
-					retained.close();
-				}
-				else
-					enqueueOwned(retained, new ReservationBudget(_allowance, bytes), groupBytes);
+		drainWaiting();
+	}
+
+	private void drainWaiting() {
+		// TODO Review is this excessive synchronization really necessary?
+		synchronized(this) {
+			_reservationDrainRequested = true;
+			if(_drainingReservations)
+				return;
+			_drainingReservations = true;
+		}
+		while(true) {
+			synchronized(this) {
+				_reservationDrainRequested = false;
 			}
-			catch(RuntimeException completionError) {
-				fail(DMLRuntimeException.of(completionError));
+			reserveWaitingHead();
+			synchronized(this) {
+				if(!_reservationDrainRequested) {
+					_drainingReservations = false;
+					return;
+				}
+			}
+		}
+	}
+
+	private void reserveWaitingHead() {
+		// TODO Review is this excessive synchronization really necessary?
+		SubscribableTaskQueue<T> waiting;
+		boolean failed;
+		synchronized(this) {
+			waiting = _waiting;
+			failed = _failure != null;
+			if(waiting == null || !failed && _reserving)
+				return;
+			if(!failed)
+				_reserving = true;
+		}
+		if(failed) {
+			clearWaiting();
+			return;
+		}
+		try {
+			OOCStream.QueueCallback<T> head;
+			long[] groupBytes;
+			long bytes;
+			synchronized(waiting) {
+				head = waiting.peekCB();
+				groupBytes = head instanceof OOCStream.GroupQueueCallback<?> group ? new long[group.size()] : null;
+				bytes = head == null ? 0 : reservationSize(head, groupBytes);
+			}
+			if(head == null) {
+				synchronized(this) {
+					_reserving = false;
+				}
+				return;
+			}
+			OOCFuture<Void> reservation = _limitPassiveOutput ? _allowance.reserveTaskAsync(bytes) : _allowance.reserveAsync(bytes);
+			reservation.whenComplete((ignored, error) -> completeReservation(waiting, head, bytes, groupBytes, error));
+		}
+		catch(RuntimeException error) {
+			synchronized(this) {
+				_reserving = false;
+			}
+			fail(DMLRuntimeException.of(error));
+		}
+	}
+
+	private void completeReservation(SubscribableTaskQueue<T> waiting, OOCStream.QueueCallback<T> head,
+		long bytes, long[] groupBytes, Throwable error) {
+		OOCStream.QueueCallback<T> retained;
+		synchronized(waiting) {
+			retained = waiting.peekCB() == head ? waiting.pollCB() : null;
+		}
+		boolean removed = retained != null;
+		try {
+			if(error != null)
+				fail(DMLRuntimeException.of(error));
+			else if(retained == null || _failure != null)
+				_allowance.release(bytes);
+			else {
+				OOCStream.QueueCallback<T> admitted = retained;
+				retained = null;
+				enqueueOwned(admitted, new ReservationBudget(_allowance, bytes), groupBytes);
+			}
+		}
+		catch(RuntimeException completionError) {
+			fail(DMLRuntimeException.of(completionError));
+		}
+		finally {
+			try {
+				if(retained != null)
+					retained.close();
+			}
+			finally {
+				if(removed)
+					releasePendingReservation();
+				synchronized(this) {
+					_reserving = false;
+				}
+				drainWaiting();
+			}
+		}
+	}
+
+	private void clearWaiting() {
+		SubscribableTaskQueue<T> waiting;
+		synchronized(this) {
+			waiting = _waiting;
+		}
+		if(waiting == null)
+			return;
+		OOCStream.QueueCallback<T> callback;
+		while((callback = waiting.pollCB()) != null) {
+			try {
+				callback.close();
 			}
 			finally {
 				releasePendingReservation();
 			}
-		});
+		}
 	}
 
 	private void enqueueOwned(OOCStream.QueueCallback<T> callback, ReservationBudget budget) {
@@ -223,6 +356,11 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 		}
 
 		@Override
+		public long getBytes(int index) {
+			return _callback.getBytes(index);
+		}
+
+		@Override
 		public OOCStream.QueueCallback<T> getCallback(int index) {
 			if(_closed)
 				throw new IllegalStateException("Cannot open an item from a closed group callback");
@@ -235,6 +373,16 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 		@Override
 		public T get() {
 			return _callback.get();
+		}
+
+		@Override
+		public T getIfResident() {
+			return _callback.getIfResident();
+		}
+
+		@Override
+		public long getBytes() {
+			return _callback.getBytes();
 		}
 
 		@Override
@@ -302,7 +450,12 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 				return false;
 			_failure = failure;
 		}
-		super.propagateFailure(failure);
+		try {
+			super.propagateFailure(failure);
+		}
+		finally {
+			clearWaiting();
+		}
 		return true;
 	}
 
@@ -322,14 +475,18 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 
 	private void finishSource() {
 		boolean close;
+		SubscribableTaskQueue<T> waiting;
 		synchronized(this) {
 			if(_sourceComplete)
 				return;
 			_sourceComplete = true;
+			waiting = _waiting;
 			close = _pendingReservations == 0 && !_outputClosed;
 			if(close)
 				_outputClosed = true;
 		}
+		if(waiting != null)
+			waiting.closeInput();
 		if(close)
 			closeInput();
 	}
@@ -374,6 +531,16 @@ public final class AllocatedOOCStream<T> extends SubscribableTaskQueue<T> {
 		@Override
 		public T get() {
 			return _callback.get();
+		}
+
+		@Override
+		public T getIfResident() {
+			return _callback.getIfResident();
+		}
+
+		@Override
+		public long getBytes() {
+			return _callback.getBytes();
 		}
 
 		@Override

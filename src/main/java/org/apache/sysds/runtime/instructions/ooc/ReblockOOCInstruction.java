@@ -71,7 +71,9 @@ public class ReblockOOCInstruction extends ComputationOOCInstruction {
 		long allowedMemory = GlobalMemoryBroker.get().getAllowedMemory();
 		long configuredBulkBytes = ConfigurationManager.getDMLConfig().getLongValue(DMLConfig.OOC_SOURCE_BULK_BYTES);
 		long tileBytes = knownGeometry ? OOCUtils.estimateFullTileBytes(mc) : configuredBulkBytes;
-		long bulkLimit = Math.min(Math.max(configuredBulkBytes, tileBytes), allowedMemory);
+		// TODO Review source-phase headroom for retained accumulators and downstream task admission.
+		long bulkLimit = Math.min(allowedMemory,
+			Math.max(tileBytes, Math.min(configuredBulkBytes, allowedMemory / 3)));
 		long numBlocks = knownGeometry ? OOCUtils.getNumBlocks(mc) : Long.MAX_VALUE;
 		long totalBytes = numBlocks > Long.MAX_VALUE / tileBytes ? Long.MAX_VALUE : numBlocks * tileBytes;
 		long productionLimit = Math.min(bulkLimit, totalBytes);

@@ -188,8 +188,7 @@ public final class GeneralMMultOOCPrimitive extends OOCPrimitive {
 			_leftUses = new AtomicIntegerArray(_rowBlocks * _innerBlocks);
 			_rightUses = new AtomicIntegerArray(_innerBlocks * _colBlocks);
 			_matches = new SubscribableTaskQueue<>();
-			AllocatedOOCStream<Integer> admitted = new AllocatedOOCStream<>(_matches, _allowance,
-				index -> _taskBytes, true);
+			AllocatedOOCStream<Integer> admitted = new AllocatedOOCStream<>(_matches, _allowance, _taskBytes, true);
 			getContext().addInStream(_matches, admitted);
 			admitted.setSubscriber(this::admitMatch);
 			for(int input = 0; input < 2; input++) {

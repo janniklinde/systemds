@@ -174,12 +174,10 @@ public final class GroupedReduceOOCPrimitive extends OOCPrimitive {
 		for(int i = 0; i < _inputs.size(); i++) {
 			OOCStream<IndexedMatrixValue> input = getInputReadStream(i);
 			getContext().addInStream(input);
+			// TODO Review why should we not limit passive output? What would be the issue other than preventing spamming the output queue?
 			AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(input, _allowance,
-				value -> {
-					long inputBytes = OOCUtils.memoryCharge(value);
-					return OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes)
-						+ 3 * Math.max(inputBytes, outputBytes);
-				});
+				inputBytes -> OOCCacheManager.getGlobalCache().maxPhysicalPinBytes(inputBytes)
+					+ 3 * Math.max(inputBytes, outputBytes), false);
 			getContext().addInStream(admitted);
 			final int source = i;
 			admitted.setSubscriber(callback -> accept(source, callback));

@@ -170,8 +170,7 @@ public class JoinStreamingOOCPrimitive<L extends SpillableObject, R extends Spil
 					onComplete();
 				}
 			});
-		AllocatedOOCStream<Integer> admitted = new AllocatedOOCStream<>(_matches, _allowance,
-			key -> taskBytes, true);
+		AllocatedOOCStream<Integer> admitted = new AllocatedOOCStream<>(_matches, _allowance, taskBytes, true);
 		getContext().addInStream(_matches, admitted);
 		admitted.setSubscriber(this::match);
 		startInput(0, _left, _leftKey);

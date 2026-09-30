@@ -79,8 +79,7 @@ public class MappingOOCPrimitive extends OOCPrimitive {
 		OOCStream<IndexedMatrixValue> input = getInputReadStream(0);
 		OOCStream<IndexedMatrixValue> output = _output.getWriteStream();
 		long outputBytes = OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics());
-		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(input, _allowance,
-			ignored -> outputBytes, true);
+		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(input, _allowance, outputBytes, true);
 		getContext().addOutStream(output);
 		OOCInstructionUtils.submitOOCTasks(admitted, callback -> {
 			ReservationBudget budget = AllocatedOOCStream.detachBudget(callback);

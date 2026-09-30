@@ -447,8 +447,7 @@ public final class OOCInstructionUtils {
 		MemoryAllowance allowance, StreamContext context) {
 		context.addOutStream(out);
 		long outputBytes = OOCUtils.estimateOutputTileBytes(out.getDataCharacteristics());
-		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(in, allowance,
-			ignored -> outputBytes, true);
+		AllocatedOOCStream<IndexedMatrixValue> admitted = new AllocatedOOCStream<>(in, allowance, outputBytes, true);
 		return submitOOCTasks(admitted, callback -> {
 			ReservationBudget budget = AllocatedOOCStream.detachBudget(callback);
 			try {

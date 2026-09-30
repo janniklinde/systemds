@@ -787,7 +787,12 @@ public class OOCCacheImpl implements OOCCache {
 	private long evictionTarget() {
 		long margin = (long) (_evictionLimit * EVICT_OVERSHOOT_MARGIN);
 		long meanBlock = _ownedEntries > 0 ? _ownedBytes / _ownedEntries : 0;
-		return margin >= 8 * meanBlock ? _evictionLimit - margin : _evictionLimit;
+		long target = margin >= 8 * meanBlock ? _evictionLimit - margin : _evictionLimit;
+		BlockKey pending = _deferredUnpins.peek();
+		BlockEntry entry = pending == null ? null : findEntry(pending);
+		if(entry != null)
+			target = Math.min(target, Math.max(0, _hardLimit - entry.getSize()));
+		return target;
 	}
 
 	private void scheduleEvictionIfNeeded() {

@@ -130,6 +130,11 @@ public class SourceOOCStream extends SubscribableTaskQueue<IndexedMatrixValue> {
 		}
 
 		@Override
+		public long getBytes(int idx) {
+			return _sizes[idx];
+		}
+
+		@Override
 		public OOCStream.QueueCallback<IndexedMatrixValue> getCallback(int idx) {
 			return new OOCStream.SimpleQueueCallback<>(_data.get(idx), _failure);
 		}

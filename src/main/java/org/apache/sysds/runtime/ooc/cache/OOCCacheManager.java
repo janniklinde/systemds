@@ -29,6 +29,7 @@ import org.apache.sysds.runtime.instructions.ooc.TeeOOCInstruction;
 import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandler;
 import org.apache.sysds.runtime.ooc.cache.io.OOCIOHandlerImpl;
+import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 import org.apache.sysds.runtime.ooc.cache.packed.OOCPackedCache;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCCacheScheduler;
 import org.apache.sysds.runtime.ooc.cache.legacy.OOCLRUCacheScheduler;
@@ -367,6 +368,16 @@ public class OOCCacheManager {
 		}
 
 		@Override
+		public T getIfResident() {
+			return _failure == null && _pinned.get() ? _data : null;
+		}
+
+		@Override
+		public long getBytes() {
+			return _result.getSize();
+		}
+
+		@Override
 		public OOCStream.QueueCallback<T> keepOpen() {
 			if(!_pinned.get())
 				throw new IllegalStateException("Cannot keep open an already closed callback");
@@ -423,6 +434,11 @@ public class OOCCacheManager {
 			if(_parent.isFailure())
 				throw _parent._failure;
 			return _data;
+		}
+
+		@Override
+		public T getIfResident() {
+			return !_parent.isFailure() && _pinned.get() ? _data : null;
 		}
 
 		@Override
@@ -497,6 +513,14 @@ public class OOCCacheManager {
 		@Override
 		public int size() {
 			return _data.size();
+		}
+
+		@Override
+		public long getBytes(int index) {
+			T value = _data.get(index);
+			if(value instanceof IndexedMatrixValue matrix)
+				return OOCUtils.memoryCharge(matrix);
+			return value instanceof SpillableObject spillable ? spillable.size() : -1;
 		}
 
 		public T get(int idx) {

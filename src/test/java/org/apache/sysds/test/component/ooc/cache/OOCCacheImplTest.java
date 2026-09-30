@@ -75,6 +75,22 @@ public class OOCCacheImplTest {
 	}
 
 	@Test
+	public void testDeferredHandoffEvictsBelowNormalThreshold() throws Exception {
+		_producer.reserveBlocking(1500);
+		BlockEntry first = _cache.putPinned(STREAM_ID, 0, "first", 1500, _producer);
+		await(_cache.unpin(first, _producer), WAIT_TIMEOUT_SEC);
+		Assert.assertEquals(0, _io.evictionCount());
+		_producer.reserveBlocking(2500);
+		BlockEntry second = _cache.putPinned(STREAM_ID, 1, "second", 2500, _producer);
+		await(_cache.unpin(second, _producer), WAIT_TIMEOUT_SEC);
+		Assert.assertTrue(_io.evictionCount() > 0);
+		Assert.assertEquals(0, _producer.getUsedMemory());
+		BlockEntry reloaded = _cache.pin(STREAM_ID, 0, _reader).get(WAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
+		Assert.assertEquals("first", reloaded.getData());
+		await(_cache.unpin(reloaded, _reader), WAIT_TIMEOUT_SEC);
+	}
+
+	@Test
 	public void testResidentPinCannotClearAnUnfinishedBackingRead() throws Exception {
 		_cache.shutdown();
 		_io = new RecordingOOCIOHandler() {

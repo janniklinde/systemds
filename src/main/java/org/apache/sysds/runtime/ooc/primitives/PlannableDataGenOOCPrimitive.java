@@ -70,8 +70,7 @@ public class PlannableDataGenOOCPrimitive extends OOCPrimitive {
 		OOCStream<MatrixIndexes> work = new SubscribableTaskQueue<>();
 		OOCStream<IndexedMatrixValue> output = _output.getWriteStream();
 		long outputBytes = OOCUtils.estimateOutputTileBytes(_output.getDataCharacteristics());
-		AllocatedOOCStream<MatrixIndexes> admitted = new AllocatedOOCStream<>(work, _allowance, ignored -> outputBytes,
-			true);
+		AllocatedOOCStream<MatrixIndexes> admitted = new AllocatedOOCStream<>(work, _allowance, outputBytes, true);
 		getContext().addOutStream(output);
 		OOCInstructionUtils.submitOOCTasks(admitted, callback -> {
 			ReservationBudget budget = AllocatedOOCStream.detachBudget(callback);

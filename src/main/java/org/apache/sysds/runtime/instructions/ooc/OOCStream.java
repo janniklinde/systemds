@@ -20,7 +20,10 @@
 package org.apache.sysds.runtime.instructions.ooc;
 
 import org.apache.sysds.runtime.DMLRuntimeException;
+import org.apache.sysds.runtime.instructions.spark.data.IndexedMatrixValue;
+import org.apache.sysds.runtime.ooc.cache.io.SpillableObject;
 import org.apache.sysds.runtime.ooc.primitives.OOCPrimitive;
+import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 import java.util.function.Consumer;
 
@@ -58,6 +61,17 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 	interface QueueCallback<T> extends AutoCloseable {
 		T get();
 
+		default T getIfResident() {
+			return null;
+		}
+
+		default long getBytes() {
+			T value = getIfResident();
+			if(value instanceof IndexedMatrixValue matrix)
+				return OOCUtils.memoryCharge(matrix);
+			return value instanceof SpillableObject spillable ? spillable.size() : -1;
+		}
+
 		/**
 		 * Keeps the callback item pinned in memory until the returned callback is also closed.
 		 */
@@ -76,6 +90,10 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 		int size();
 
 		QueueCallback<T> getCallback(int idx);
+
+		default long getBytes(int idx) {
+			return -1;
+		}
 	}
 
 	class SimpleQueueCallback<T> implements QueueCallback<T> {
@@ -92,6 +110,11 @@ public interface OOCStream<T> extends OOCStreamable<T> {
 			if (_failure != null)
 				throw _failure;
 			return _result;
+		}
+
+		@Override
+		public T getIfResident() {
+			return _failure == null ? _result : null;
 		}
 
 		@Override

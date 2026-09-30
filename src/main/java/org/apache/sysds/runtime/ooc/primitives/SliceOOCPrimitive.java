@@ -274,6 +274,11 @@ public final class SliceOOCPrimitive extends OOCPrimitive {
 		}
 
 		@Override
+		public long getBytes() {
+			return _delegate.getBytes();
+		}
+
+		@Override
 		public OOCStream.QueueCallback<IndexedMatrixValue> keepOpen() {
 			return new ReindexedCallback(_delegate.keepOpen(), _indexes);
 		}

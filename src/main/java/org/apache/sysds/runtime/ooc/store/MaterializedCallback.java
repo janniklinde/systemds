@@ -30,6 +30,7 @@ import org.apache.sysds.runtime.ooc.memory.SyncMemoryAllowance;
 import org.apache.sysds.runtime.ooc.util.OOCUtils;
 
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class MaterializedCallback<T extends SpillableObject> implements OOCStream.QueueCallback<T> {
@@ -41,6 +42,8 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 	private final MaterializedStore<T> _store;
 	private boolean _closed;
 	private boolean _parked;
+	private AtomicInteger _parkReferences;
+	private long _parkBytes;
 
 	public MaterializedCallback(StoreLease<T> lease) {
 		this(lease, new AtomicReference<>(), -1, null);
@@ -68,7 +71,9 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 			return allowance;
 		synchronized(MaterializedCallback.class) {
 			if(REVIVE_ALLOWANCE == null) {
-				REVIVE_ALLOWANCE = new SyncMemoryAllowance(GlobalMemoryBroker.getSource()) {
+				// TODO Review: Is this case necessary or just unnecessary handling of non-present scenarios? Then rather fail if this should not happen in the first place. And is revives in the main broker? Is that intended behavior if we established that this case is still needed?
+				// Demand revivals must not compete with replay prefetch for the source broker's entire budget.
+				REVIVE_ALLOWANCE = new SyncMemoryAllowance(GlobalMemoryBroker.get()) {
 					@Override
 					public boolean isAdmissionExempt() {
 						return true;
@@ -91,6 +96,8 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 			return 0;
 		_store.cache().reference(entry);
 		_parked = true;
+		_parkReferences = new AtomicInteger(1);
+		_parkBytes = bytes;
 		StoreLease<T> lease = _lease;
 		_lease = null;
 		lease.close();
@@ -115,7 +122,9 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 			throw new DMLRuntimeException("Parked block " + _index + " vanished before it was revived.");
 		_lease = StoreLease.createAsync(entry,
 			() -> _store.cache().unpin(entry, reviveAllowance()).getCompletionFuture());
-		_store.cache().dereference(new BlockKey(_store.streamId(), _index));
+		if(_parkReferences.decrementAndGet() == 0)
+			_store.cache().dereference(new BlockKey(_store.streamId(), _index));
+		_parkReferences = null;
 		_parked = false;
 	}
 
@@ -137,10 +146,30 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 	}
 
 	@Override
+	public synchronized T getIfResident() {
+		return _failure.get() == null && _lease != null ? _lease.value() : null;
+	}
+
+	@Override
+	public synchronized long getBytes() {
+		if(_parked)
+			return _parkBytes;
+		BlockEntry entry = _lease == null ? null : _lease.entry();
+		return entry != null ? entry.getSize() : OOCStream.QueueCallback.super.getBytes();
+	}
+
+	@Override
 	public synchronized OOCStream.QueueCallback<T> keepOpen() {
 		if(_closed)
 			throw new IllegalStateException("Cannot keep open a closed callback");
-		revive();
+		if(_parked) {
+			_parkReferences.incrementAndGet();
+			MaterializedCallback<T> retained = new MaterializedCallback<>(null, _failure, _index, _store);
+			retained._parked = true;
+			retained._parkReferences = _parkReferences;
+			retained._parkBytes = _parkBytes;
+			return retained;
+		}
 		return new MaterializedCallback<>(_lease.retain(), _failure, _index, _store);
 	}
 
@@ -151,7 +180,7 @@ public final class MaterializedCallback<T extends SpillableObject> implements OO
 		_closed = true;
 		if(_lease != null)
 			_lease.close();
-		else if(_parked)
+		else if(_parked && _parkReferences.decrementAndGet() == 0)
 			_store.cache().dereference(new BlockKey(_store.streamId(), _index));
 	}
 

@@ -56,6 +56,7 @@ import org.apache.sysds.runtime.ooc.store.OrderedMaterializedStoreReader;
 import org.apache.sysds.runtime.ooc.store.SequentialAccessPattern;
 import org.apache.sysds.runtime.ooc.store.StoreBackedStream;
 import org.apache.sysds.runtime.ooc.store.StoreLease;
+import org.apache.sysds.runtime.ooc.stream.AllocatedOOCStream;
 import org.apache.sysds.test.component.ooc.cache.OOCCacheTestUtils;
 import org.junit.After;
 import org.junit.Assert;
@@ -528,9 +529,82 @@ public class MaterializedStoreTest {
 		Assert.assertEquals(replayBytes, callback.tryPark());
 		Assert.assertNull(callback.pinnedEntry());
 		retained.close();
+		Assert.assertEquals(replayBytes, callback.getBytes());
+		MaterializedCallback<IndexedMatrixValue> parkedAlias =
+			(MaterializedCallback<IndexedMatrixValue>) callback.keepOpen();
+		Assert.assertNull(parkedAlias.pinnedEntry());
+		Assert.assertEquals(0, _readerAllowance.getUsedMemory());
+		OOCCacheTestUtils.RecordingOOCIOHandler io =
+			(OOCCacheTestUtils.RecordingOOCIOHandler) _cache.getIOHandler();
+		int writes = io.evictionCount();
+		_cache.updateLimits(1, 0);
+		OOCCacheTestUtils.await(() -> io.evictionCount() > writes, WAIT_SECONDS);
+		int reads = io.readCount();
+		Assert.assertEquals(replayBytes, parkedAlias.getBytes());
+		Assert.assertEquals(reads, io.readCount());
 		callback.close();
+		_cache.updateLimits(MEMORY_LIMIT, MEMORY_LIMIT);
+		Assert.assertEquals(1.0, parkedAlias.get().getValue().get(0, 0), 0);
+		Assert.assertTrue(io.readCount() > reads);
+		parkedAlias.close();
 		stream.dequeueCB();
 		Assert.assertEquals(0, _readerAllowance.getUsedMemory());
+	}
+
+	@Test(timeout = 10000)
+	public void testAdmissionWaitersRemainPurgeableUntilReserved() throws Exception {
+		OOCStreamMaterializer materializer = new OOCStreamMaterializer(_store,
+			indexes -> (int) indexes.getRowIndex() - 1, _materializerAllowance);
+		for(int i = 0; i < 2; i++)
+			materializer.accept(new OOCStream.SimpleQueueCallback<>(tile(i, i + 1.0), null));
+		materializer.accept(OOCStream.eos(null));
+		materializer.completion().get(WAIT_SECONDS, TimeUnit.SECONDS);
+		SyncMemoryAllowance tasks = new SyncMemoryAllowance(new GlobalMemoryBroker(100));
+		SubscribableTaskQueue<IndexedMatrixValue> source = new SubscribableTaskQueue<>();
+		AllocatedOOCStream<IndexedMatrixValue> allocated = new AllocatedOOCStream<>(source, tasks, 60, false);
+		AtomicInteger delivered = new AtomicInteger();
+		CountDownLatch complete = new CountDownLatch(1);
+		try {
+			tasks.reserveBlocking(100);
+			allocated.setSubscriber(callback -> {
+				try(callback) {
+					if(callback.isEos())
+						complete.countDown();
+					else {
+						Assert.assertEquals(delivered.incrementAndGet(), callback.get().getValue().get(0, 0), 0);
+						AllocatedOOCStream.detachBudget(callback).close();
+					}
+				}
+			});
+			long bytes = 0;
+			for(int i = 0; i < 2; i++) {
+				MaterializedCallback<IndexedMatrixValue> callback = new MaterializedCallback<>(
+					_store.requestPublished(i, _readerAllowance).get(WAIT_SECONDS, TimeUnit.SECONDS), i, _store);
+				bytes += callback.getBytes();
+				source.enqueue(callback);
+			}
+			source.closeInput();
+			Assert.assertEquals(bytes, _readerAllowance.getUsedMemory());
+			Assert.assertEquals(0, delivered.get());
+			OOCCacheTestUtils.RecordingOOCIOHandler io =
+				(OOCCacheTestUtils.RecordingOOCIOHandler) _cache.getIOHandler();
+			int writes = io.evictionCount();
+			int reads = io.readCount();
+			Assert.assertTrue(SubscribableTaskQueue.purgeBufferedStore() >= bytes);
+			_cache.updateLimits(1, 0);
+			OOCCacheTestUtils.await(() -> _readerAllowance.getUsedMemory() == 0 && io.evictionCount() >= writes + 2,
+				WAIT_SECONDS);
+			Assert.assertEquals(reads, io.readCount());
+			_cache.updateLimits(MEMORY_LIMIT, MEMORY_LIMIT);
+			tasks.release(100);
+			Assert.assertTrue(complete.await(WAIT_SECONDS, TimeUnit.SECONDS));
+			Assert.assertEquals(2, delivered.get());
+			Assert.assertEquals(reads + 2, io.readCount());
+			Assert.assertEquals(0, tasks.getUsedMemory());
+		}
+		finally {
+			tasks.destroy();
+		}
 	}
 
 	@Test

@@ -140,7 +140,7 @@ public final class BroadcastStreamingOOCPrimitive extends OOCPrimitive {
 				}
 			});
 		AllocatedOOCStream<Integer> admitted = new AllocatedOOCStream<>(_matches, _allowance,
-			index -> getMaxTaskReservationBytes(), true);
+			getMaxTaskReservationBytes(), true);
 		getContext().addInStream(_matches, admitted);
 		admitted.setSubscriber(this::match);
 		matrix.setSubscriber(callback -> accept(callback, false));

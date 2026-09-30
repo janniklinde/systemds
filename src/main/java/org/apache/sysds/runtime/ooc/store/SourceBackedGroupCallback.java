@@ -59,6 +59,11 @@ final class SourceBackedGroupCallback implements OOCStream.GroupQueueCallback<In
 	}
 
 	@Override
+	public long getBytes(int index) {
+		return _sizes[index];
+	}
+
+	@Override
 	public OOCStream.QueueCallback<IndexedMatrixValue> getCallback(int index) {
 		throw new UnsupportedOperationException("Source-backed groups can only be consumed by materialization.");
 	}
