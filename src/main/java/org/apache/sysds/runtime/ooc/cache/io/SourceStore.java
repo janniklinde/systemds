@@ -674,7 +674,7 @@ final class SourceStore {
 				else synchronized(budgetLock) {
 					long currentBytes = bytesAdmitted.get();
 					long correction = charge - preflightBytes;
-					if(stop.get() && (preflightBytes == 0 || memoryBudget) &&
+					if(stop.get() && preflightBytes == 0 &&
 						(bytesRead.get() > 0 || !budgetHit.get()))
 						shouldBreak = true;
 					else if(bytesRead.get() > 0 && currentBytes > preflightBytes &&

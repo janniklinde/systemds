@@ -47,11 +47,18 @@ import org.apache.sysds.test.AutomatedTestBase;
 import org.apache.sysds.test.TestConfiguration;
 import org.apache.sysds.test.TestUtils;
 import org.apache.sysds.utils.Statistics;
+import org.apache.sysds.runtime.util.HDFSTool;
+import org.apache.hadoop.io.SequenceFile;
+import org.apache.hadoop.mapred.JobConf;
+import org.apache.hadoop.fs.Path;
+import java.nio.file.Files;
 import java.util.HashSet;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -212,6 +219,67 @@ public class SourceBackedReadOOCIOHandlerTest extends AutomatedTestBase {
 		finally {
 			DMLScript.OOC_STATISTICS = previousStats;
 			Statistics.resetOOCEvictionStats();
+		}
+	}
+
+	@Test
+	public void testParallelAdmittedSourceRecordsAreNotReread() throws Exception {
+		File directory = Files.createTempDirectory("ooc-admitted-source-").toFile();
+		boolean previousStats = DMLScript.OOC_STATISTICS;
+		DMLScript.OOC_STATISTICS = true;
+		try {
+			MatrixBlock block = new MatrixBlock(256, 256, 1.0);
+			for(int file = 0; file < 16; file++) {
+				try(SequenceFile.Writer writer = SequenceFile.createWriter(new JobConf(),
+					SequenceFile.Writer.file(new Path(new File(directory, "part-" + file).toString())),
+					SequenceFile.Writer.keyClass(MatrixIndexes.class), SequenceFile.Writer.valueClass(MatrixBlock.class),
+					SequenceFile.Writer.compression(SequenceFile.CompressionType.NONE))) {
+					for(int tile = 0; tile < 8; tile++)
+						writer.append(new MatrixIndexes(file * 8 + tile + 1, 1), block);
+				}
+			}
+			for(boolean useDirect : new boolean[] {false, true}) {
+				handler.shutdown();
+				DMLConfig config = new DMLConfig();
+				config.setTextValue(DMLConfig.OOC_IO_DIRECT, Boolean.toString(useDirect));
+				config.setTextValue(DMLConfig.OOC_IO_READER_THREADS, "16");
+				config.setTextValue(DMLConfig.LOCAL_TMP_DIR, directory.toString());
+				ConfigurationManager.setLocalConfig(config);
+				handler = new OOCIOHandlerImpl();
+				Statistics.resetOOCEvictionStats();
+				Set<Long> indexes = Collections.synchronizedSet(new HashSet<>());
+				AtomicLong charged = new AtomicLong();
+				SourceOOCStream target = new SourceOOCStream(false);
+				target.setSubscriber(callback -> {
+					try(callback) {
+						if(callback.isEos())
+							return;
+						IndexedMatrixValue value = callback.get();
+						Assert.assertTrue(indexes.add(value.getIndexes().getRowIndex()));
+						TestUtils.compareMatrices(block, (MatrixBlock) value.getValue(), 0);
+						charged.addAndGet(OOCUtils.memoryCharge(value));
+					}
+				});
+				long limit = 5 * OOCUtils.memoryCharge(new IndexedMatrixValue(new MatrixIndexes(1, 1), block)) + 4096;
+				OOCIOHandler.SourceReadRequest request = new OOCIOHandler.SourceReadRequest(directory.toString(),
+					Types.FileFormat.BINARY, 32768, 256, 256, 8388608, limit, true, target);
+				OOCIOHandler.SourceReadResult result = handler.scheduleSourceRead(request).get(10, TimeUnit.SECONDS);
+				int phases = 0;
+				while(true) {
+					Assert.assertTrue("Phase exceeded its admitted memory", charged.getAndSet(0) <= limit);
+					Assert.assertTrue("Source scan did not progress", ++phases <= 27);
+					if(result.eof)
+						break;
+					result = handler.continueSourceRead(result.continuation, limit).get(10, TimeUnit.SECONDS);
+				}
+				Assert.assertEquals(128, indexes.size());
+				Assert.assertTrue(Statistics.displayOOCEvictionStats().matches("(?s).*source scans:\\s+128 \\(.*"));
+			}
+		}
+		finally {
+			DMLScript.OOC_STATISTICS = previousStats;
+			Statistics.resetOOCEvictionStats();
+			HDFSTool.deleteFileIfExistOnHDFS(directory.toString());
 		}
 	}
 
