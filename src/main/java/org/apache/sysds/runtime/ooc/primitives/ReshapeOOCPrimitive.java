@@ -420,9 +420,8 @@ public class ReshapeOOCPrimitive extends OOCPrimitive {
 						break;
 
 					// new block row
-					offset = br == _numRowBlocksOut - 1 ? 0 :
-						(int) (Math.min((long) (br + 1) * _blen, _rows) * _cols % _clen % _blen);
 					br++;
+					offset = (int) (Math.min((long) br * _blen, _rows) * _cols % _clen % _blen);
 					budget = OOCUtils.reserveBudget(_allowance, outputBytes);
 
 					if(offset != 0) {
@@ -593,10 +592,9 @@ public class ReshapeOOCPrimitive extends OOCPrimitive {
 					if(bc == _numColBlocksOut - 1)
 						break;
 
-					// new block row
-					offset = bc == _numColBlocksOut - 1 ? 0 :
-						(int) (Math.min((long) (bc + 1) * _blen, _cols) * _rows % _rlen % _blen);
+					// new block col
 					bc++;
+					offset = (int) (Math.min((long) bc * _blen, _cols) * _rows % _rlen % _blen);
 					budget = OOCUtils.reserveBudget(_allowance, outputBytes);
 
 					if(offset != 0) {
